@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .. import control, findings, paths, run, status, store
 from ..errors import PplError
-from . import routes, session
+from . import api_static, routes, session
 from .router import Raw
 
 PAGE = Path(__file__).with_name("index.html")
@@ -303,6 +303,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if not parts:
+                shell = api_static.file("index.html")
+                return self._send(200, shell.body, shell.content_type)
+            if parts == ["runs"]:
                 return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
             if parts == ["api", "runs"]:
                 return self._send(200, list_runs())
