@@ -374,7 +374,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._dispatch("PUT", parsed, body)
 
 
-def serve(port=8787, open_browser=False):
+def serve(port=8787, open_browser=False, fragment=""):
     if isinstance(port, bool) or not isinstance(port, int) or not (0 < port < 65536):
         raise PplError("SCHEMA_INVALID",
                        "port must be an integer between 1 and 65535, got: %r" % (port,))
@@ -382,5 +382,5 @@ def serve(port=8787, open_browser=False):
     session.start(port)
     print("antline studio on %s  (loopback only, ctrl-c to stop)" % session.url())
     if open_browser:
-        webbrowser.open(session.url())
+        webbrowser.open(session.url() + fragment)
     httpd.serve_forever()

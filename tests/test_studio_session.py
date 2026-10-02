@@ -63,6 +63,14 @@ class TestStudioSession(panel_client.StudioTestCase):
         self.assertIn("HttpOnly", headers["Set-Cookie"])
         self.assertIn("SameSite=Strict", headers["Set-Cookie"])
 
+    def test_the_exchange_redirect_has_no_fragment_of_its_own(self):
+        # The browser keeps the fragment it opened with (`/?t=..#/setup`) across a
+        # redirect only when the Location carries none.
+        status, _, headers = panel_client.call("GET", "/?t=" + session.token(),
+                                               base={"Host": panel_client.HOST})
+        self.assertEqual(status, 302)
+        self.assertNotIn("#", headers["Location"])
+
     def test_the_url_token_is_not_exchanged_under_a_foreign_host(self):
         # rule: R-STUDIO-HOST-CHECK
         base = {"Host": "studio.attacker.example:%d" % panel_client.PORT}

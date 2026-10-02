@@ -1,9 +1,11 @@
+import io
 import itertools
 import json
 import os
 import subprocess
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -427,6 +429,34 @@ class TestPanelApi(unittest.TestCase):
     def test_serve_rejects_a_non_integer_port(self):
         with self.assertRaises(PplError):
             server.serve(port="8787")
+
+    def serve_with_a_stub_socket(self, **kwargs):
+        """serve() with its listener and the browser stubbed, so it returns.
+        Returns the browser stub, the printed line and the session URL."""
+        with mock.patch.dict(session._state), \
+                mock.patch.object(server, "ThreadingHTTPServer") as listener, \
+                mock.patch.object(server.webbrowser, "open") as browser, \
+                redirect_stdout(io.StringIO()) as printed:
+            server.serve(8799, **kwargs)
+            url = session.url()
+        listener.assert_called_once_with(("127.0.0.1", 8799), server.Handler)
+        listener.return_value.serve_forever.assert_called_once_with()
+        return browser, printed.getvalue(), url
+
+    def test_serve_opens_the_browser_on_the_session_url_and_the_fragment(self):
+        browser, printed, url = self.serve_with_a_stub_socket(open_browser=True,
+                                                              fragment="#/setup")
+        browser.assert_called_once_with(url + "#/setup")
+        self.assertIn(url, printed)
+        self.assertNotIn("#", printed)
+
+    def test_serve_opens_the_bare_session_url_without_a_fragment(self):
+        browser, _, url = self.serve_with_a_stub_socket(open_browser=True)
+        browser.assert_called_once_with(url)
+
+    def test_serve_opens_no_browser_unless_asked(self):
+        browser, _, _ = self.serve_with_a_stub_socket(fragment="#/setup")
+        browser.assert_not_called()
 
     def test_handler_over_a_real_loopback_socket_serves_api_runs(self):
         # This builds the same ThreadingHTTPServer(("127.0.0.1", ...), Handler)

@@ -726,7 +726,26 @@ def _key_values(items, flag):
     return pairs
 
 
+def _offer_browser(args):
+    """An interactive first setup in a terminal offers the browser wizard once.
+    Steps named on the command line, answers, --non-interactive or any step
+    done already keep the terminal wizard as it was."""
+    if args.non_interactive or args.step or args.answer or not sys.stdin.isatty():
+        return False
+    if config.steps_state()["done"]:
+        return False
+    try:
+        reply = input("Open the setup wizard in your browser? [Y/n] ").strip().lower()
+    except EOFError:
+        return False
+    return reply in ("", "y", "yes")
+
+
 def cmd_setup(args):
+    if args.web or _offer_browser(args):
+        from .panel import server
+        server.serve(args.port, open_browser=True, fragment="#/setup")
+        return 0
     answers = {}
     for key, value in _key_values(args.answer, "--answer"):
         if key not in setup.ANSWER_KEYS and not key.startswith(setup.TIER_PREFIX):
@@ -1032,6 +1051,8 @@ def build_parser():
     p.add_argument("--tier", action="append", help="tier=model")
     p.add_argument("--no-verify", action="store_true")
     p.add_argument("--skip", action="append", choices=list(setup.STEPS))
+    p.add_argument("--web", action="store_true", help="run the wizard in the browser (ppl serve)")
+    p.add_argument("--port", type=int, default=8787, help="the studio port for --web")
 
     p = sub.add_parser("dispatch")
     p.add_argument("--role", required=True)

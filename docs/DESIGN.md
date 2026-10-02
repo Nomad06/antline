@@ -94,6 +94,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     trackers/                    jira.py: tracker read and write tool names per MCP prefix
     panel/server.py              stdlib HTTP server, `ppl serve`
     panel/index.html             single-page dashboard
+    studio/                      setup wizard, stack presets, md extraction, harness drafts
     (no adapters/ package)       out of scope for v1 (section 2): a non-subagent role has no
                                   code path at all, `routing.dispatch` raises `SCHEMA_INVALID`
   hooks/ppl_guard.py             PreToolUse cage
@@ -1716,6 +1717,55 @@ not `127.0.0.1` or `localhost` on the serving port is refused, so a DNS-rebindin
 reach the panel through a hostname it controls [R-STUDIO-HOST-CHECK]. A POST or PUT is refused
 unless it carries `X-PPL: 1`, a loopback Origin when it has one, and a JSON content type, so a
 cross-site form cannot submit to it [R-STUDIO-JSON-ONLY].
+
+### 9.6 Studio
+
+`ppl serve` also serves the studio, a browser front end for setup and for editing agents and
+harnesses. The run list of 9.1 moved to `/runs`, and `/` is the studio shell.
+
+**One implementation.** Every studio route calls the Python function the CLI calls: a setup
+step runs through `setup.run` non-interactively, a preset through `routing.apply_preset`
+(`ppl routing preset`), a harness draft through the setup harness step with
+`harness_from=<draft directory>`, and the last wizard screen shows `doctor.report()`, which
+`ppl doctor` prints. A draft is refused by the same `harness.validate` and role-tool
+composition the CLI runs [R-STUDIO-SAME-VALIDATION].
+
+**Slow actions are jobs.** A model probe, the extraction, an apply or a clone runs in a worker
+thread: the route returns a job id and the page polls `/api/jobs/<id>`. One job of a kind runs
+at a time, and jobs live in memory only.
+
+**Drafting a harness.** The wizard inspects the checkout with git: its top level, the default
+branch from `origin/HEAD` or the current branch, the forge from the `origin` host. It finds
+`CLAUDE.md` and `AGENTS.md` files up to three directories deep, outside build, dependency and
+hidden directories (`.claude/` excepted), and follows their `@` imports inside the repository
+and outside those directories, at most 20 regular files and 200 KB. An absolute, `~/` or
+escaping import is skipped and listed. The extraction is one `claude -p` on the lightest tier with `--tools ""`,
+`--strict-mcp-config`, `--setting-sources ""` and `--json-schema`. The files go on stdin as
+numbered data, from an empty temporary working directory, and the call writes no file
+[R-STUDIO-EXTRACT-LEAN]. `claude -p` attaches any file a whitespace-led `@path` in its prompt
+names, tools or not, so every `@` in the file text is sent behind a zero-width space and the
+answer has those stripped. Every value Claude returns is checked before it reaches the form:
+one line with no control character, a plain program name (never a shell or interpreter, an
+absolute path or a `..` path), plain-word goals [R-STUDIO-EXTRACT-LEAN]. Claude is not asked for
+a regex: a test-worker shape comes back as a program, its goals and an example, and its free
+arguments get the fixed token class `SAFE_FREE_ARGS` (`SAFE_GRADLE_ARGS` for Gradle, which
+reads `sub:task` as one more task): a bare flag, `--`, or a relative path or qualified name,
+never a plain word [R-STUDIO-EXTRACT-LEAN], so `go doc ... test` or `npm run x test` cannot ride
+beside the `test` goal of a shape that does not look at token order [R-STUDIO-EXTRACT-LEAN]. A bare flag the tool
+reads as a write or exec target (`go test -o x.bin`) still passes: the shapes stay lexical.
+With no md file, or when the call
+fails, the draft comes from the preset of the stack the build files name. The review form
+marks three kinds of shape: free arguments that take any token, an interpreter with no pinned
+flag, and a shape with neither a goal nor a flag. The marks are advice: the user's tick
+installs the shape as written. Install validates and installs a private copy of the request's
+draft, so a check running beside it cannot change what lands, and a name ending in `.git`,
+`.replacing` or `.replaced` is refused [R-STUDIO-SAME-VALIDATION].
+
+**Frontend.** Plain ES modules under `ppl/panel/static/`, with no build step. The only
+third-party file is `vendor/htm-preact.mjs`, the htm 3.1.1 standalone bundle with Preact
+(htm Apache-2.0, Preact MIT, both licenses beside it). To update it, download
+`https://unpkg.com/htm@<version>/preact/standalone.module.js`, put its sha256 into
+`tests/test_studio_static.py` and run the suite.
 
 ## 10. Role adapters and model substitution
 

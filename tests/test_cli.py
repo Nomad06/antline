@@ -1,3 +1,4 @@
+import argparse
 import io
 import json
 import os
@@ -2487,6 +2488,44 @@ class TestInitRequiresSetup(unittest.TestCase):
         self.addCleanup(mark_all_verified)
         code, out, err = self.init("DEMO-809", "--harness", "example-maven")
         self.assertEqual(json.loads(err)["error_code"], "SETUP_INCOMPLETE")
+
+
+
+class TestSetupInTheBrowser(unittest.TestCase):
+    """A first `ppl setup` can run in the browser: --web, or the offer a terminal
+    gets when no step is done yet. serve is patched, a real one never returns."""
+
+    def setUp(self):
+        self._real_ppl_home = os.environ["PPL_HOME"]
+        os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+
+    def tearDown(self):
+        os.environ["PPL_HOME"] = self._real_ppl_home
+
+    def test_setup_web_opens_the_studio_on_the_wizard(self):
+        with mock.patch("ppl.panel.server.serve") as serve:
+            self.assertEqual(cli.main(["setup", "--web", "--port", "8799"]), 0)
+        serve.assert_called_once_with(8799, open_browser=True, fragment="#/setup")
+
+    def test_an_interactive_first_setup_offers_the_browser(self):
+        with mock.patch("ppl.panel.server.serve") as serve, \
+                mock.patch("ppl.setup.run", side_effect=AssertionError("terminal wizard ran")), \
+                mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch("builtins.input", return_value="y"):
+            self.assertEqual(cli.main(["setup"]), 0)
+        serve.assert_called_once_with(8787, open_browser=True, fragment="#/setup")
+
+    def test_declining_the_browser_keeps_the_terminal_wizard(self):
+        args = argparse.Namespace(non_interactive=False, step=[], answer=None)
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch("builtins.input", return_value="n"):
+            self.assertFalse(cli._offer_browser(args))
+        with mock.patch("sys.stdin.isatty", return_value=False):
+            self.assertFalse(cli._offer_browser(args))
+        named = argparse.Namespace(non_interactive=False, step=["models"], answer=None)
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch("builtins.input", return_value="y"):
+            self.assertFalse(cli._offer_browser(named))
 
 
 if __name__ == "__main__":

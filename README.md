@@ -39,6 +39,26 @@ forge check, and the agent files and skill. `ppl init` refuses a run until
 `--skip-model-check` waives models, and a harness only added and applied by hand
 gets `SETUP_INCOMPLETE` naming the `ppl setup` step to run.
 
+## Studio
+
+`ppl serve --open` starts the studio on `http://127.0.0.1:8787` and opens it in your browser,
+`ppl setup --web` opens it straight on the setup wizard, and a first `ppl setup` in a terminal
+offers it. The wizard runs the same six steps as `ppl setup`, records them in the same
+`config.toml` and writes the same files, so you can start in one and finish in the other.
+
+On the Project and harness screen the studio looks at your checkout. When it has a
+`CLAUDE.md` or `AGENTS.md`, one short Claude call on your lightest model tier reads them and
+drafts the gates, the commands the test writer may run and the build environment (a few
+cents). Otherwise, or when that call fails, the draft starts from a preset for the stack your
+build files name: npm, Python, Maven, Gradle, Go, Cargo or Make. You review every field in a
+form before anything is installed, with the source of each field shown beside it.
+
+The Models screen offers three presets, a tier and an effort per role: Economy, Balanced
+and Max quality. The same presets are `ppl routing preset economy|balanced|max`.
+
+The studio listens on loopback only, and every request needs the session token in the link
+`ppl serve` prints [R-STUDIO-SESSION-TOKEN].
+
 ## Hooks
 
 `ppl setup claude` writes these into the workspace's `.claude/settings.local.json`
@@ -125,7 +145,7 @@ with a code and a question, see the skill's `references/escalation.md`.
 
 ```bash
 ppl status
-ppl serve            # http://127.0.0.1:8787
+ppl serve --open     # the studio on http://127.0.0.1:8787, the run list at /runs
 ppl recover          # always safe, always first after a restart
 ppl doctor           # hooks, setup, models, harness, forge
 ppl control set pause|resume|stop
