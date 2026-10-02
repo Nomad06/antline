@@ -1,8 +1,9 @@
 import { html, render, useEffect, useState } from "./vendor/htm-preact.mjs";
 import { HomePage } from "./pages/home.js";
+import { SetupPage } from "./pages/setup.js";
 
-const PAGES = { "": HomePage };
-const NAV = [{ route: "", label: "Home" }];
+const PAGES = { "": HomePage, setup: SetupPage };
+const NAV = [{ route: "", label: "Home" }, { route: "setup", label: "Setup" }];
 
 function currentRoute() {
   return window.location.hash.replace(/^#\/?/, "").split("?")[0];
