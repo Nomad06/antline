@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
+from ppl import paths, run
 from ppl.panel import session
 
 
@@ -37,6 +38,21 @@ class TestStudioSession(panel_client.StudioTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload, [])
 
+    def test_a_malformed_foreign_cookie_does_not_hide_the_session(self):
+        valid = "%s=%s" % (session.COOKIE, session.token())
+        for cookie in (valid + "; a=b c",
+                       "a=b c; " + valid,
+                       "foo; " + valid,
+                       "foo=; " + valid,
+                       'j={"x":1}; ' + valid,
+                       "%s=stale; %s" % (session.COOKIE, valid),
+                       "%s; %s=stale" % (valid, session.COOKIE)):
+            with self.subTest(cookie=cookie):
+                status, payload, _ = panel_client.call(
+                    "GET", "/api/runs", base={"Host": panel_client.HOST, "Cookie": cookie})
+                self.assertEqual(status, 200)
+                self.assertEqual(payload, [])
+
     def test_the_url_token_is_exchanged_for_a_cookie(self):
         token = session.token()
         status, _, headers = panel_client.call("GET", "/?t=" + token,
@@ -47,9 +63,33 @@ class TestStudioSession(panel_client.StudioTestCase):
         self.assertIn("HttpOnly", headers["Set-Cookie"])
         self.assertIn("SameSite=Strict", headers["Set-Cookie"])
 
+    def test_the_url_token_is_not_exchanged_under_a_foreign_host(self):
+        # rule: R-STUDIO-HOST-CHECK
+        base = {"Host": "studio.attacker.example:%d" % panel_client.PORT}
+        status, payload, headers = panel_client.call("GET", "/?t=" + session.token(), base=base)
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error_code"], "BOUNDARY_VIOLATION")
+        self.assertNotIn("Set-Cookie", headers)
+
     def test_a_wrong_url_token_is_refused(self):
         # rule: R-STUDIO-SESSION-TOKEN
         status, payload, _ = panel_client.call("GET", "/?t=wrong", base={"Host": panel_client.HOST})
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error_code"], "SESSION_REQUIRED")
+
+    def test_a_non_ascii_url_token_is_refused(self):
+        # rule: R-STUDIO-SESSION-TOKEN
+        for query in ("%C3%A9", "%FF"):
+            with self.subTest(query=query):
+                status, payload, _ = panel_client.call("GET", "/?t=" + query,
+                                                       base={"Host": panel_client.HOST})
+                self.assertEqual(status, 403)
+                self.assertEqual(payload["error_code"], "SESSION_REQUIRED")
+
+    def test_a_quoted_non_ascii_cookie_is_refused(self):
+        # rule: R-STUDIO-SESSION-TOKEN
+        base = {"Host": panel_client.HOST, "Cookie": '%s="\xe9"' % session.COOKIE}
+        status, payload, _ = panel_client.call("GET", "/api/runs", base=base)
         self.assertEqual(status, 403)
         self.assertEqual(payload["error_code"], "SESSION_REQUIRED")
 
@@ -88,6 +128,44 @@ class TestStudioSession(panel_client.StudioTestCase):
         headers["Host"] = "localhost:%d" % panel_client.PORT
         status, _, _ = panel_client.call("GET", "/api/runs", base=headers)
         self.assertEqual(status, 200)
+
+    def test_header_names_are_matched_without_regard_to_case(self):
+        base = {"host": panel_client.HOST,
+                "cookie": "%s=%s" % (session.COOKIE, session.token())}
+        status, payload, _ = panel_client.call("GET", "/api/runs", base=base)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, [])
+
+    def _post_control(self, base):
+        task = "DEMO-1"
+        run.init(task, "https://j/x", "/tmp/repo")
+        status, payload, _ = panel_client.call("POST", "/api/runs/%s/control" % task,
+                                               body={"command": "pause"}, base=base)
+        return status, payload, paths.run_dir(task) / "control.json"
+
+    def test_a_post_without_the_session_cookie_is_refused(self):
+        # rule: R-STUDIO-SESSION-TOKEN
+        headers = panel_client.write_headers()
+        del headers["Cookie"]
+        status, payload, control_file = self._post_control(headers)
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error_code"], "SESSION_REQUIRED")
+        self.assertFalse(control_file.exists())
+
+    def test_a_post_with_a_foreign_host_is_refused(self):
+        # rule: R-STUDIO-HOST-CHECK
+        headers = panel_client.write_headers()
+        headers["Host"] = "studio.attacker.example:%d" % panel_client.PORT
+        status, payload, control_file = self._post_control(headers)
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error_code"], "BOUNDARY_VIOLATION")
+        self.assertFalse(control_file.exists())
+
+    def test_a_post_with_the_session_writes_the_control_file(self):
+        status, payload, control_file = self._post_control(panel_client.write_headers())
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["command"], "pause")
+        self.assertTrue(control_file.exists())
 
     def test_a_post_without_a_json_content_type_is_refused(self):
         # rule: R-STUDIO-JSON-ONLY

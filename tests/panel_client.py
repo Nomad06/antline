@@ -1,6 +1,7 @@
 """Drive the panel's Handler in-process, the way tests/test_panel_api.py
 always has, with the session cookie, Host and JSON headers a browser on the
 studio sends. No socket is bound and no server is left running."""
+import http.client
 import io
 import json
 import os
@@ -36,9 +37,20 @@ def write_headers():
     return headers
 
 
+def _message(*layers):
+    """The headers as the http.client.HTTPMessage serve() hands the Handler,
+    so a lookup ignores case the way it does in production. A later layer
+    replaces a header an earlier one set, whatever its case."""
+    message = http.client.HTTPMessage()
+    for layer in layers:
+        for name, value in layer.items():
+            del message[name]
+            message[name] = value
+    return message
+
+
 def make_handler(method, path, headers=None, body=b"", base=None):
-    merged = dict(session_headers() if base is None else base)
-    merged.update(headers or {})
+    merged = _message(session_headers() if base is None else base, headers or {})
     if body and "Content-Length" not in merged:
         merged["Content-Length"] = str(len(body))
     handler = server.Handler.__new__(server.Handler)
