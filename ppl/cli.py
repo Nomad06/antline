@@ -631,6 +631,12 @@ def cmd_control(args):
 
 
 def cmd_routing(args):
+    if args.action == "preset":
+        if not args.preset:
+            raise PplError("SCHEMA_INVALID", "name a preset: ppl routing preset economy|balanced|max")
+        routing.apply_preset(args.preset)
+        print(json.dumps({"preset": args.preset, "roles": routing.summary()}, sort_keys=True))
+        return 0
     if args.action == "apply":
         name = args.harness or config.active_harness()
         if not name:
@@ -991,7 +997,8 @@ def build_parser():
     p.add_argument("--task")
 
     p = sub.add_parser("routing")
-    p.add_argument("action", choices=["apply", "show"])
+    p.add_argument("action", choices=["apply", "show", "preset"])
+    p.add_argument("preset", nargs="?", help="preset name for `ppl routing preset`: economy, balanced, max")
     p.add_argument("--harness")
     p.add_argument("--role")
     p.add_argument("--risk", choices=list(run.RISK_TIERS))

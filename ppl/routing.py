@@ -21,6 +21,9 @@ from .errors import PplError
 REQUIRED_ROLES = ("ppl-briefer", "ppl-brief-challenger", "ppl-code-worker",
                   "ppl-test-worker", "ppl-verifier", "ppl-review-responder")
 
+# The effort values Claude Code accepts in a subagent's frontmatter.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
 # The tools every harness grants a role. What depends on the project - the
 # tracker's read tools, the knowledge server's tools, the forge's review tools -
 # is composed on top by role_tools().
@@ -194,6 +197,70 @@ def models_in_use(risk=None):
             if risk is None or level == risk:
                 found.add(_by_risk_tier(config, name, level, tier)["model"])
     return found
+
+
+def validate_config(config):
+    """Refuse a routing document ppl cannot route with: a missing role, an
+    unknown tier or provider, a by_risk tier that is not declared, params that
+    are not a table, or an effort Claude Code does not accept."""
+    missing = [r for r in REQUIRED_ROLES if r not in (config.get("roles") or {})]
+    if missing:
+        raise PplError("SCHEMA_INVALID", "routing.toml is missing roles: %s" % ", ".join(missing))
+    for name in REQUIRED_ROLES:
+        _entry_and_provider(config, name)
+        for level, tier in _by_risk(config, name).items():
+            _by_risk_tier(config, name, level, tier)
+        params = config["roles"][name].get("params") or {}
+        if not isinstance(params, dict):
+            raise PplError("SCHEMA_INVALID", "role %r params must be a table" % name)
+        effort = params.get("effort")
+        if effort is not None and effort not in EFFORT_LEVELS:
+            raise PplError("SCHEMA_INVALID", "role %r effort %r is not one of %s"
+                           % (name, effort, ", ".join(EFFORT_LEVELS)))
+
+
+def apply_preset(name):
+    """Rewrite every role's tier, effort and by_risk from a preset and save
+    routing.toml. The tiers, the providers and every other param stay."""
+    from . import presets, tomlout
+    if name not in presets.PRESETS:
+        raise PplError("SCHEMA_INVALID", "unknown preset %r (presets: %s)"
+                       % (name, ", ".join(presets.PRESETS)))
+    config = load()
+    table = tiers(config)
+    for role_name, spec in presets.PRESETS[name].items():
+        needed = [spec["tier"]] + list(spec.get("by_risk", {}).values())
+        unknown = [tier for tier in needed if tier not in table]
+        if unknown:
+            raise PplError("SCHEMA_INVALID", "preset %s needs tier %s, routing.toml declares: %s"
+                           % (name, ", ".join(unknown), ", ".join(sorted(table))))
+        entry = config["roles"].setdefault(role_name, {})
+        entry.pop("provider", None)
+        entry.pop("model", None)
+        entry["tier"] = spec["tier"]
+        entry["params"] = dict(entry.get("params") or {}, effort=spec["effort"])
+        if spec.get("by_risk"):
+            entry["by_risk"] = dict(spec["by_risk"])
+        else:
+            entry.pop("by_risk", None)
+    validate_config(config)
+    paths.routing_file().write_text(tomlout.dumps(config), encoding="utf-8")
+    return config
+
+
+def summary(config=None):
+    """One row per role: its tier, the model the tier resolves to, effort and
+    by_risk, for the wizard and the Agents page."""
+    config = config if config is not None else load()
+    rows = []
+    for name in REQUIRED_ROLES:
+        raw = config["roles"][name]
+        entry, _ = _entry_and_provider(config, name)
+        rows.append({"role": name, "description": BASE_TOOLS[name]["description"],
+                     "tier": raw.get("tier"), "model": entry["model"],
+                     "effort": (raw.get("params") or {}).get("effort"),
+                     "by_risk": dict(_by_risk(config, name))})
+    return rows
 
 
 def params_hash(entry):
