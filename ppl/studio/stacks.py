@@ -108,7 +108,10 @@ def gate_fragments(gates, build=None):
         fragments["templates/ppl-code-worker.part"] = (
             "- Build with `%s`, write the exit code to a file.\n" % build)
     if focused:
-        fragments["templates/ppl-test-worker.part"] = "- Run only `%s` for focused runs.\n" % focused
+        fragments["templates/ppl-test-worker.part"] = (
+            "- Run only `%s` for focused runs. Name the test with a path or a qualified name "
+            "(`app.FooTest`, `mod::my_test`, `tests/test_x.py::T::t`, `./pkg/...`): "
+            "a plain word is refused.\n" % focused)
     return fragments
 
 

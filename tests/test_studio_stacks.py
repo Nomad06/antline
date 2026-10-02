@@ -212,6 +212,33 @@ class TestShapesStayNarrow(unittest.TestCase):
                              [["test"]], stack)
 
 
+class TestGateFragments(unittest.TestCase):
+    NOTE = ("- Run only `%s` for focused runs. Name the test with a path or a qualified name "
+            "(`app.FooTest`, `mod::my_test`, `tests/test_x.py::T::t`, `./pkg/...`): "
+            "a plain word is refused.\n")
+
+    def test_the_test_worker_part_tells_how_to_name_the_test(self):
+        gates = [{"name": "focused-tests", "command": "go test ./... -run <test_class>"}]
+        part = stacks.gate_fragments(gates)["templates/ppl-test-worker.part"]
+        self.assertEqual(part, self.NOTE % "go test ./... -run <test_class>")
+        self.assertEqual(part.count("\n"), 1)
+        part.encode("ascii")
+
+    def test_every_stack_draft_carries_the_naming_note_for_its_focused_command(self):
+        for stack, spec in stacks.STACKS.items():
+            if "gates" not in spec:
+                continue
+            command = next(gate["command"] for gate in spec["gates"]
+                           if gate["name"] == harness.FOCUSED_TESTS_GATE)
+            draft = stacks.draft(stack, project(empty_dir("pplrepo-")))
+            self.assertEqual(draft["fragments"]["templates/ppl-test-worker.part"],
+                             self.NOTE % command, stack)
+
+    def test_no_focused_tests_gate_means_no_test_worker_part(self):
+        fragments = stacks.gate_fragments([{"name": "build", "command": "make build"}])
+        self.assertNotIn("templates/ppl-test-worker.part", fragments)
+
+
 class TestSafeFreeArgs(unittest.TestCase):
     ACCEPTED = ("-v", "-q", "-run", "--tests", "--no-fail-fast", "--", "./...", "./pkg/...",
                 "app.FooTest", "mod::my_test", "tests/test_x.py::T::t", "src/app.test.js",
