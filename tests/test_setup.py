@@ -14,7 +14,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 
-from ppl import cli, config, models, paths, setup
+from ppl import cli, config, harness, models, paths, setup
 from ppl.errors import PplError
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -135,6 +135,25 @@ class TestNonInteractive(SetupTestCase):
         third = setup.run(**kwargs)
         self.assertEqual(third["done"], list(setup.STEPS))
         self.assertEqual(harness_toml.read_text(encoding="utf-8"), edited)
+
+    def test_replace_harness_yes_replaces_a_differing_installed_harness(self):
+        setup.run(answers=self.answers, non_interactive=True, probe=ok_probe,
+                  forge_check=ok_forge, emit=self.lines.append)
+        changed = dict(self.answers, harness_from="example-maven", replace_harness="yes")
+        result = setup.run(steps=["harness"], answers=changed, non_interactive=True,
+                           probe=ok_probe, forge_check=ok_forge, emit=self.lines.append)
+        self.assertEqual(result["done"], ["harness"])
+        doc = harness.load("mine")
+        self.assertIn("mvn", [shape["argv0"] for shape in doc["guard"]["shape"]])
+
+    def test_replace_harness_no_keeps_the_installed_harness(self):
+        setup.run(answers=self.answers, non_interactive=True, probe=ok_probe,
+                  forge_check=ok_forge, emit=self.lines.append)
+        kept = dict(self.answers, harness_from="example-maven", replace_harness="no")
+        setup.run(steps=["harness"], answers=kept, non_interactive=True,
+                  probe=ok_probe, forge_check=ok_forge, emit=self.lines.append)
+        doc = harness.load("mine")
+        self.assertEqual([shape["argv0"] for shape in doc["guard"]["shape"]], ["make"])
 
     def test_a_hand_edited_fragment_also_counts_as_a_difference(self):
         kwargs = dict(steps=["paths", "harness"], answers=self.answers, non_interactive=True,

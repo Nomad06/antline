@@ -130,40 +130,16 @@ def cmd_init(args):
 
 
 def cmd_doctor(args):
-    inspected = doctor.inspect()
-    task_id = getattr(args, "task", None) or run.active()
-    isolated = None
-    if task_id:
-        try:
-            isolated = run.load(task_id).get("isolated")
-        except PplError:
-            task_id = None
-    result = dict(inspected)
-    result.update(doctor.inspect_setup())
-    result["task"] = task_id
-    result["isolated"] = isolated
-    result["mismatch"] = doctor.mismatch(isolated, inspected) if isolated is not None else None
-    runs = doctor.hook_runs(workspace=_doctor_workspace())
-    result["hook_runs"] = runs["ok"]
-    if runs["problem"]:
-        result["hook_runs_problem"] = runs["problem"]
+    result = doctor.report(getattr(args, "task", None))
     print(json.dumps(result, sort_keys=True))
     if result["mismatch"]:
         print(result["mismatch"])
-    problem = doctor.matcher_problem(inspected)
+    problem = doctor.matcher_problem(result)
     if problem:
         print(problem)
-    if runs["problem"]:
-        print(runs["problem"])
+    if result.get("hook_runs_problem"):
+        print(result["hook_runs_problem"])
     return 0
-
-
-def _doctor_workspace():
-    """The configured workspace, where Claude Code sessions start, else the cwd."""
-    try:
-        return config.section("claude").get("workspace") or os.getcwd()
-    except Exception:
-        return os.getcwd()
 
 
 def cmd_show(args):

@@ -16,8 +16,8 @@ from .errors import PplError
 
 STEPS = ("paths", "claude", "models", "harness", "forge", "apply")
 ANSWER_KEYS = ("claude_binary", "workspace", "hooks", "verify", "harness_from", "harness_name",
-               "repo", "default_branch", "task_url_template", "key_pattern", "forge",
-               "gitlab_mcp_server")
+               "replace_harness", "repo", "default_branch", "task_url_template", "key_pattern",
+               "forge", "gitlab_mcp_server")
 TIER_PREFIX = "tier."
 HOOK_MODES = ("local", "global", "manual")
 EXAMPLE_HARNESSES = ("example-generic", "example-maven")
@@ -316,12 +316,13 @@ def _load_installed(name):
 def _keep_installed(p, candidate, name, current, problem):
     """An installed harness stays when the candidate is identical to it.
     Otherwise rebuilding would drop every gate and shape added by hand, so a
-    non-interactive run refuses and an interactive one asks. An installed
-    harness that does not load counts as different."""
+    non-interactive run refuses unless it was given replace_harness, and an
+    interactive one asks. An installed harness that does not load counts as
+    different."""
     if current is not None and _same_harness(candidate, current):
         p.emit("harness %s is already installed and identical, kept" % name)
         return True
-    if p.non_interactive:
+    if p.non_interactive and "replace_harness" not in p.answers:
         if problem:
             raise PplError("SETUP_INCOMPLETE", "installed harness %s is not valid (%s) - pass "
                            "harness_from=%s after fixing it, or let the wizard replace it"

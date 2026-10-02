@@ -16,7 +16,7 @@ dependencies = []
 ppl = "ppl.cli:main"
 
 [tool.setuptools]
-packages = ["ppl", "ppl.panel", "ppl.forges", "ppl.trackers"]
+packages = ["ppl", "ppl.panel", "ppl.forges", "ppl.trackers", "ppl.studio"]
 include-package-data = true
 
 [tool.setuptools.package-data]

@@ -519,3 +519,36 @@ def setup_problem(report, skip_model_check):
         message += (" The models step was skipped: pass --skip-model-check to start this run "
                     "without verified models.")
     return message
+
+
+def workspace():
+    """The configured workspace, where Claude Code sessions start, else the cwd."""
+    from . import config
+    try:
+        return config.section("claude").get("workspace") or os.getcwd()
+    except Exception:
+        return os.getcwd()
+
+
+def report(task_id=None):
+    """What `ppl doctor` prints as JSON: the hook registration, the setup
+    report, the active run's isolation and whether the registered guard runs."""
+    from . import run
+    inspected = inspect()
+    task_id = task_id or run.active()
+    isolated = None
+    if task_id:
+        try:
+            isolated = run.load(task_id).get("isolated")
+        except PplError:
+            task_id = None
+    result = dict(inspected)
+    result.update(inspect_setup())
+    result["task"] = task_id
+    result["isolated"] = isolated
+    result["mismatch"] = mismatch(isolated, inspected) if isolated is not None else None
+    runs = hook_runs(workspace=workspace())
+    result["hook_runs"] = runs["ok"]
+    if runs["problem"]:
+        result["hook_runs_problem"] = runs["problem"]
+    return result
