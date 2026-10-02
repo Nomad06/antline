@@ -2,6 +2,7 @@
 apply) run in a worker thread, and the request returns at once with a job
 id. One job of a kind runs at a time. Jobs live in memory only: the effect
 of each is a file write that is safe to repeat after a restart."""
+import json
 import threading
 import traceback
 import uuid
@@ -9,6 +10,11 @@ import uuid
 from ..errors import PplError
 
 KEEP = 50
+
+
+def _unknown(job_id):
+    return PplError("SCHEMA_INVALID",
+                    "no job %r here, it was pruned or lost with a restart of ppl serve" % job_id)
 
 
 class Jobs:
@@ -25,43 +31,50 @@ class Jobs:
             job_id = uuid.uuid4().hex
             self._jobs[job_id] = {"id": job_id, "kind": kind, "state": "running",
                                   "result": None, "error": None, "log": []}
-            self._finished[job_id] = threading.Event()
+            finished = threading.Event()
+            self._finished[job_id] = finished
             self._running[kind] = job_id
             self._prune()
             job = self._jobs[job_id]
-        threading.Thread(target=self._run, args=(job, fn), daemon=True).start()
+        threading.Thread(target=self._run, args=(job, fn, finished), daemon=True).start()
         return job_id
 
-    def _run(self, job, fn):
+    def _run(self, job, fn, finished):
+        """The outcome and the freed kind land in one locked step, so a poll
+        that reads the job finished can start the next one of its kind."""
+        result = None
+        error = {"error_code": "INTERNAL_ERROR", "message": "the job stopped without an outcome"}
         try:
-            job["result"] = fn(job["log"].append)
-            job["state"] = "done"
+            result = fn(job["log"].append)
+            json.dumps(result)
+            error = None
         except PplError as exc:
-            job["error"] = exc.as_dict()
-            job["state"] = "failed"
+            error = exc.as_dict()
         except Exception as exc:
             traceback.print_exc()
-            job["error"] = {"error_code": "INTERNAL_ERROR",
-                            "message": "%s: %s" % (type(exc).__name__, exc)}
-            job["state"] = "failed"
+            error = {"error_code": "INTERNAL_ERROR",
+                     "message": "%s: %s" % (type(exc).__name__, exc)}
         finally:
             with self._lock:
+                job["result"] = None if error else result
+                job["error"] = error
+                job["state"] = "failed" if error else "done"
                 self._running.pop(job["kind"], None)
-            self._finished[job["id"]].set()
+            finished.set()
 
     def get(self, job_id):
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
-                raise PplError("SCHEMA_INVALID",
-                               "no job %r here, jobs do not survive a restart of ppl serve" % job_id)
+                raise _unknown(job_id)
             return {"id": job["id"], "kind": job["kind"], "state": job["state"],
                     "result": job["result"], "error": job["error"], "log": list(job["log"])}
 
     def wait(self, job_id, timeout=None):
-        event = self._finished.get(job_id)
+        with self._lock:
+            event = self._finished.get(job_id)
         if event is None:
-            raise PplError("SCHEMA_INVALID", "no job %r" % job_id)
+            raise _unknown(job_id)
         return event.wait(timeout)
 
     def _prune(self):

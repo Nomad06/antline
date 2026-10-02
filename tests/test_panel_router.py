@@ -1,14 +1,17 @@
+import io
 import os
 import sys
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
-from ppl.panel import jobs
-from ppl.panel.router import Router
+from ppl.panel import jobs, server
+from ppl.panel.router import Raw, Router
 
 
 def ok(params, body, query):
@@ -42,8 +45,32 @@ class TestRouter(unittest.TestCase):
     def test_another_method_on_a_known_path_is_reported(self):
         self.assertEqual(self.router.match("POST", "/api/things/a"), (False, None))
 
+    def test_a_raw_answer_must_be_bytes(self):
+        with self.assertRaises(TypeError):
+            Raw("<p>text</p>", "text/html")
+
 
 class TestCoreRoutes(panel_client.StudioTestCase):
+    def use_routes(self, *routes):
+        """Serve only these (method, pattern, fn) routes for this test."""
+        router = Router()
+        for method, pattern, fn in routes:
+            router.add(method, pattern, fn)
+        patcher = mock.patch.object(server, "ROUTES", router)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def recording_routes(self):
+        """POST and PUT /api/things/<name>, each call recorded in the returned list."""
+        calls = []
+
+        def record(params, body, query):
+            calls.append(body)
+            return {"stored": params["name"]}
+        self.use_routes(("POST", "/api/things/<name>", record),
+                        ("PUT", "/api/things/<name>", record))
+        return calls
+
     def test_a_job_is_read_back_through_the_api(self):
         job_id = jobs.JOBS.start("demo", lambda emit: {"answer": 42})
         state = self.wait({"job": job_id})
@@ -66,14 +93,78 @@ class TestCoreRoutes(panel_client.StudioTestCase):
         self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
 
     def test_put_passes_the_same_write_guard_as_post(self):
+        # rule: R-STUDIO-JSON-ONLY
         headers = panel_client.write_headers()
         del headers["X-PPL"]
         status, payload, _ = panel_client.call("PUT", "/api/jobs/x", body={}, base=headers)
         self.assertEqual(status, 403)
         self.assertEqual(payload["error_code"], "BOUNDARY_VIOLATION")
 
+    def test_a_put_without_the_session_cookie_is_refused(self):
+        # rule: R-STUDIO-SESSION-TOKEN
+        calls = self.recording_routes()
+        headers = panel_client.write_headers()
+        del headers["Cookie"]
+        status, payload, _ = panel_client.call("PUT", "/api/things/demo", body={"a": 1},
+                                               base=headers)
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error_code"], "SESSION_REQUIRED")
+        self.assertEqual(calls, [])
+
+    def test_a_put_with_the_session_hands_its_body_to_the_route(self):
+        calls = self.recording_routes()
+        status, payload, _ = panel_client.call("PUT", "/api/things/demo", body={"a": 1})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"stored": "demo"})
+        self.assertEqual(calls, [{"a": 1}])
+
+    def test_a_raw_answer_is_served_with_its_content_type(self):
+        self.use_routes(("GET", "/api/page",
+                         lambda params, body, query: Raw(b"<p>hi</p>", "text/html")))
+        status, payload, headers = panel_client.call("GET", "/api/page")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, b"<p>hi</p>")
+        self.assertEqual(headers["Content-Type"], "text/html")
+
+    def test_an_answer_json_cannot_encode_is_an_internal_error(self):
+        self.use_routes(*((method, "/api/bad", lambda params, body, query: Path("x"))
+                          for method in ("GET", "POST", "PUT")))
+        for method, body in (("GET", None), ("POST", {}), ("PUT", {})):
+            with self.subTest(method=method), redirect_stderr(io.StringIO()):
+                status, payload, _ = panel_client.call(method, "/api/bad", body=body)
+                self.assertEqual(status, 500)
+                self.assertEqual(payload["error_code"], "INTERNAL_ERROR")
+                self.assertTrue(payload["message"].startswith("TypeError: "), payload)
+
+    def test_a_job_whose_result_json_cannot_encode_still_reads_back(self):
+        with redirect_stderr(io.StringIO()):
+            state = self.wait({"job": jobs.JOBS.start("unencodable", lambda emit: Path("x"))})
+        self.assertEqual(state["state"], "failed")
+        self.assertIsNone(state["result"])
+        self.assertEqual(state["error"]["error_code"], "INTERNAL_ERROR")
+
+    def test_a_body_length_that_cannot_be_read_safely_is_refused(self):
+        calls = self.recording_routes()
+        lengths = ("-1", str(server.MAX_BODY + 1), "9" * 30, "twelve")
+        for method in ("POST", "PUT"):
+            for length in lengths:
+                with self.subTest(method=method, length=length):
+                    status, payload, _ = panel_client.call(
+                        method, "/api/things/demo", body={"a": 1},
+                        headers={"Content-Length": length})
+                    self.assertEqual(status, 400)
+                    self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+        self.assertEqual(calls, [])
+
+    def test_a_body_at_the_cap_is_read(self):
+        calls = self.recording_routes()
+        padding = server.MAX_BODY - len('{"a": ""}')
+        status, _, _ = panel_client.call("PUT", "/api/things/demo", body={"a": "x" * padding})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(calls), 1)
+
     def assert_malformed_path_refused(self, method, body=None):
-        status, payload, _ = panel_client.call(method, "//[", body=body)
+        status, payload, _ = panel_client.call(method, "http://[", body=body)
         self.assertEqual(status, 400)
         self.assertEqual(payload, {"error_code": "SCHEMA_INVALID",
                                    "message": "malformed request path"})

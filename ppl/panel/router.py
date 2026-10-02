@@ -11,6 +11,8 @@ class Raw:
     """A route's answer that is not JSON: the bytes and their content type."""
 
     def __init__(self, body, content_type):
+        if not isinstance(body, bytes):
+            raise TypeError("a Raw body is bytes, got %s" % type(body).__name__)
         self.body = body
         self.content_type = content_type
 

@@ -16,6 +16,8 @@ PAGE = Path(__file__).with_name("index.html")
 ROUTES = routes.build()
 # A route's PplError code that is not a plain bad request.
 STATUS_BY_CODE = {"SESSION_REQUIRED": 403, "NOT_FOUND": 404, "BUSY": 409, "CHANGED_ON_DISK": 409}
+# The largest request body the panel reads, in bytes.
+MAX_BODY = 4 * 1024 * 1024
 
 
 def _needs_you(state, command):
@@ -260,6 +262,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_body(self):
         length = int(self.headers.get("Content-Length") or 0)
+        if length < 0:
+            raise PplError("SCHEMA_INVALID", "Content-Length must not be negative")
+        if length > MAX_BODY:
+            raise PplError("SCHEMA_INVALID", "request body is over the %d byte cap" % MAX_BODY)
         body = json.loads(self.rfile.read(length) or b"{}")
         if not isinstance(body, dict):
             raise PplError("SCHEMA_INVALID", "request body must be a JSON object")
@@ -274,15 +280,17 @@ class Handler(BaseHTTPRequestHandler):
                                     "message": "this route does not take %s" % method})
         try:
             result = fn(params, body, parse_qs(parsed.query))
+            if isinstance(result, Raw):
+                answer, content_type = result.body, result.content_type
+            else:
+                answer, content_type = json.dumps(result).encode("utf-8"), "application/json"
         except PplError as err:
             return self._send(STATUS_BY_CODE.get(err.code, 400), err.as_dict())
         except Exception as exc:
             traceback.print_exc()
             return self._send(500, {"error_code": "INTERNAL_ERROR",
                                     "message": "%s: %s" % (type(exc).__name__, exc)})
-        if isinstance(result, Raw):
-            return self._send(200, result.body, result.content_type)
-        return self._send(200, result)
+        return self._send(200, answer, content_type)
 
     def do_GET(self):
         parsed = self._parse_path()
