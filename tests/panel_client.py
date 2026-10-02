@@ -23,9 +23,12 @@ HOST = "127.0.0.1:%d" % PORT
 
 def make_repo(files=None, branch="main", remote=None):
     """A committed git repository in a temporary directory. A str value is
-    written as text, a bytes value as raw bytes."""
+    written as text, a bytes value as raw bytes. Git runs without the host's
+    global and system config, so a signing key or a hooks path set there
+    cannot break the commit."""
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     repo = Path(tmphome.mkdtemp(prefix="pplrepo-"))
-    subprocess.run(["git", "init", "-q", "-b", branch, str(repo)], check=True)
+    subprocess.run(["git", "init", "-q", "-b", branch, str(repo)], check=True, env=env)
     for rel, content in (files or {"README.md": "demo\n"}).items():
         target = repo / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -33,11 +36,12 @@ def make_repo(files=None, branch="main", remote=None):
             target.write_bytes(content)
         else:
             target.write_text(content, encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, env=env)
     subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-q", "-m", "base"], check=True)
+                    "commit", "-q", "-m", "base"], check=True, env=env)
     if remote:
-        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", remote], check=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", remote],
+                       check=True, env=env)
     return repo
 
 

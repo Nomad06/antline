@@ -8,6 +8,8 @@ write or exec target (for example `go test -gcflags -m`, `go test -o x.bin`
 or `pytest --basetemp ./src`) still passes."""
 import copy
 import json
+import os
+import stat
 import tomllib
 from pathlib import Path
 
@@ -96,6 +98,7 @@ STACKS = {
 }
 ORDER = ("node", "python", "maven", "gradle", "go", "rust", "make")
 FRAGMENT_GLOBS = ("skill/*.md", "templates/*.part")
+PACKAGE_JSON_MAX_BYTES = 200_000
 
 
 def detect(root):
@@ -130,12 +133,30 @@ def gate_fragments(gates, build=None, stack=None):
     return fragments
 
 
+def _package_scripts(root):
+    """The scripts table of root/package.json, or None. The file is read only
+    when it is a regular file inside the repository once symlinks are
+    followed, and only up to PACKAGE_JSON_MAX_BYTES: a link to a file elsewhere,
+    a named pipe or a device is never opened."""
+    real_root = Path(os.path.realpath(root))
+    target = Path(os.path.realpath(real_root / "package.json"))
+    if real_root not in target.parents:
+        return None
+    try:
+        if not stat.S_ISREG(os.stat(target).st_mode):
+            return None
+        with open(target, "rb") as handle:
+            data = handle.read(PACKAGE_JSON_MAX_BYTES + 1)
+        if len(data) > PACKAGE_JSON_MAX_BYTES:
+            return None
+        return json.loads(data.decode("utf-8")).get("scripts")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def _node_gates(root, gates):
     """The lint and build scripts package.json declares become gates."""
-    try:
-        scripts = json.loads((root / "package.json").read_text(encoding="utf-8")).get("scripts")
-    except (OSError, ValueError, AttributeError):
-        return gates, {}
+    scripts = _package_scripts(root)
     if not isinstance(scripts, dict):
         return gates, {}
     added = [{"name": name, "command": "npm run %s" % name}

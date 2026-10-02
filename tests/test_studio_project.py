@@ -3,6 +3,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
@@ -67,6 +68,28 @@ class TestInspect(unittest.TestCase):
         self.assertEqual(info["path"], real(parent))
         self.assertTrue(harness._NAME_RE.match(info["name_hint"]))
 
+    def test_inspect_refuses_a_home_directory_it_cannot_expand(self):
+        with self.assertRaises(PplError) as caught:
+            project.inspect("~nosuchuser/x")
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("expand", caught.exception.message)
+
+    def test_inspect_strips_credentials_from_an_url_remote(self):
+        repo = panel_client.make_repo(remote="https://oauth2:glpat-x@gitlab.com/a/b.git")
+        info = project.inspect(str(repo))
+        self.assertEqual(info["remote_url"], "https://gitlab.com/a/b.git")
+        self.assertEqual(info["forge_hint"], "gitlab")
+
+    def test_inspect_strips_a_token_given_as_the_user_name(self):
+        repo = panel_client.make_repo(remote="https://ghp_secret@github.com/a/b.git")
+        self.assertEqual(project.inspect(str(repo))["remote_url"], "https://github.com/a/b.git")
+
+    def test_inspect_keeps_an_scp_style_remote_as_it_is(self):
+        repo = panel_client.make_repo(remote="git@github.com:a/b.git")
+        info = project.inspect(str(repo))
+        self.assertEqual(info["remote_url"], "git@github.com:a/b.git")
+        self.assertEqual(info["forge_hint"], "github")
+
     def test_forge_hint_reads_the_remote_host(self):
         cases = (("git@github.com:o/r.git", "github"), ("https://github.com/o/r", "github"),
                  ("ssh://git@gitlab.company.io/o/r.git", "gitlab"),
@@ -103,13 +126,23 @@ class TestMdFiles(unittest.TestCase):
         self.assertEqual([item["path"] for item in files], ["AGENTS.md"])
         self.assertEqual(skipped, [])
 
-    def test_collect_refuses_a_symlink_that_leaves_the_repository(self):
+    def test_collect_refuses_a_selected_symlink_that_leaves_the_repository(self):
         repo = panel_client.make_repo({"README.md": "demo\n"})
         outside = Path(tmphome.mkdtemp(prefix="pplout-")) / "notes.md"
         outside.write_text("private\n", encoding="utf-8")
         (repo / "CLAUDE.md").symlink_to(outside)
         files, skipped = project.collect(repo, ["CLAUDE.md"])
         self.assertEqual(files, [])
+        self.assertEqual([item["reason"] for item in skipped],
+                         ["not one of the files the project inspection found"])
+
+    def test_collect_refuses_an_imported_symlink_that_leaves_the_repository(self):
+        repo = panel_client.make_repo({"CLAUDE.md": "@notes.md\n"})
+        outside = Path(tmphome.mkdtemp(prefix="pplout-")) / "notes.md"
+        outside.write_text("private\n", encoding="utf-8")
+        (repo / "notes.md").symlink_to(outside)
+        files, skipped = project.collect(repo, ["CLAUDE.md"])
+        self.assertEqual([item["path"] for item in files], ["CLAUDE.md"])
         self.assertEqual([item["reason"] for item in skipped], ["outside the repository"])
 
     def test_collect_follows_imports_inside_the_repo_only(self):
@@ -138,6 +171,69 @@ class TestMdFiles(unittest.TestCase):
         self.assertEqual([item["path"] for item in files], ["CLAUDE.md"])
         self.assertEqual(sorted(item["reason"] for item in skipped), ["binary file", "not UTF-8 text"])
 
+    def test_collect_never_follows_an_import_into_a_skipped_directory(self):
+        repo = panel_client.make_repo({
+            "CLAUDE.md": "@.git/config @.env @node_modules/x/README.md @.worktrees/w/NOTES.md "
+                         "@.claude/rules.md @docs/link.md\n",
+            ".env": "TOKEN=secret\n", "node_modules/x/README.md": "readme\n",
+            ".worktrees/w/NOTES.md": "notes\n", ".claude/rules.md": "rules\n"})
+        (repo / "docs").mkdir()
+        (repo / "docs" / "link.md").symlink_to(repo / ".git" / "HEAD")
+        with mock.patch.object(project, "open", create=True, side_effect=open) as opener:
+            files, skipped = project.collect(repo, ["CLAUDE.md"])
+        self.assertEqual([item["path"] for item in files], ["CLAUDE.md", ".claude/rules.md"])
+        self.assertEqual(sorted((item["path"], item["reason"]) for item in skipped),
+                         sorted((path, "in a skipped directory") for path in (
+                             ".git/config", ".env", "node_modules/x/README.md",
+                             ".worktrees/w/NOTES.md", ".git/HEAD")))
+        self.assertEqual([Path(call.args[0]).name for call in opener.call_args_list],
+                         ["CLAUDE.md", "rules.md"])
+
+    def test_collect_skips_absolute_and_home_imports_without_reading_them(self):
+        outside = Path(tmphome.mkdtemp(prefix="pplout-")) / "secret.md"
+        outside.write_text("private\n", encoding="utf-8")
+        repo = panel_client.make_repo({"CLAUDE.md": "@%s and @~/.ssh/id_rsa and @%s\n" % (outside, outside)})
+        with mock.patch.object(project, "open", create=True, side_effect=open) as opener:
+            files, skipped = project.collect(repo, ["CLAUDE.md"])
+        self.assertEqual([item["path"] for item in files], ["CLAUDE.md"])
+        self.assertEqual(skipped, [{"path": str(outside), "reason": "outside the repository"},
+                                   {"path": "~/.ssh/id_rsa", "reason": "outside the repository"}])
+        self.assertEqual(len(opener.call_args_list), 1)
+
+    def test_collect_tells_a_missing_import_from_one_that_is_not_a_file(self):
+        repo = panel_client.make_repo({"CLAUDE.md": "@docs @gone.md\n", "docs/a.md": "a\n"})
+        files, skipped = project.collect(repo, ["CLAUDE.md"])
+        self.assertEqual([item["path"] for item in files], ["CLAUDE.md"])
+        self.assertEqual(skipped, [{"path": "docs", "reason": "not a regular file"},
+                                   {"path": "gone.md", "reason": "no such file"}])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs mkfifo")
+    def test_collect_does_not_open_an_imported_fifo(self):
+        repo = panel_client.make_repo({"CLAUDE.md": "@pipe\n"})
+        os.mkfifo(repo / "pipe")
+        with mock.patch.object(project, "open", create=True, side_effect=open) as opener:
+            files, skipped = project.collect(repo, ["CLAUDE.md"])
+        self.assertEqual(skipped, [{"path": "pipe", "reason": "not a regular file"}])
+        self.assertEqual(len(opener.call_args_list), 1)
+
+    def test_collect_caps_the_skipped_list(self):
+        imports = " ".join("@missing%d.md" % number for number in range(project.MAX_SKIPPED * 3))
+        repo = panel_client.make_repo({"CLAUDE.md": imports + "\n"})
+        files, skipped = project.collect(repo, ["CLAUDE.md"])
+        self.assertEqual([item["path"] for item in files], ["CLAUDE.md"])
+        self.assertEqual(len(skipped), project.MAX_SKIPPED)
+        self.assertEqual(skipped[0], {"path": "missing0.md", "reason": "no such file"})
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads any file")
+    def test_collect_skips_a_file_it_cannot_read(self):
+        repo = panel_client.make_repo({"CLAUDE.md": "@locked.md\n", "locked.md": "x\n"})
+        locked = repo / "locked.md"
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o644)
+        files, skipped = project.collect(repo, ["CLAUDE.md"])
+        self.assertEqual([item["path"] for item in files], ["CLAUDE.md"])
+        self.assertEqual(skipped, [{"path": "locked.md", "reason": "cannot be read"}])
+
     def test_collect_stops_at_the_size_cap(self):
         big = "x" * (project.MAX_BYTES - 10) + "\n"
         repo = panel_client.make_repo({"CLAUDE.md": "@big.md @small.md\n", "big.md": big,
@@ -147,6 +243,24 @@ class TestMdFiles(unittest.TestCase):
         self.assertEqual([item["path"] for item in files], ["CLAUDE.md", "small.md"])
         self.assertEqual([(item["path"], "byte budget" in item["reason"]) for item in skipped],
                          [("big.md", True)])
+
+
+class TestMakeRepo(unittest.TestCase):
+    def test_make_repo_ignores_the_hosts_global_git_config(self):
+        scratch = Path(tmphome.mkdtemp(prefix="pplgitcfg-"))
+        hooks = scratch / "hooks"
+        hooks.mkdir()
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+        config = scratch / "gitconfig"
+        config.write_text("[commit]\n    gpgsign = true\n[gpg]\n    program = false\n"
+                          "[core]\n    hooksPath = %s\n" % hooks, encoding="utf-8")
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)}):
+            repo = panel_client.make_repo()
+        count = subprocess.run(["git", "-C", str(repo), "rev-list", "--count", "HEAD"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(count, "1")
 
 
 class TestProjectRoutes(panel_client.StudioTestCase):

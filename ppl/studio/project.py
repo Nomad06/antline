@@ -4,7 +4,9 @@ describe it. Nothing here reads outside the repository: the md files are
 found by walking it, and an @import that resolves elsewhere is skipped."""
 import os
 import re
+import stat
 import subprocess
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -15,12 +17,14 @@ MD_NAMES = ("CLAUDE.md", "AGENTS.md")
 MAX_DEPTH = 3
 MAX_FILES = 20
 MAX_BYTES = 200_000
+MAX_SKIPPED = 50
 SKIP_DIRS = frozenset({".git", ".hg", ".svn", ".worktrees", "node_modules", "target", "build",
                        "dist", "vendor", ".venv", "venv", "__pycache__", ".tox", ".gradle", ".idea"})
 _GIT_TIMEOUT_SECONDS = 20
-# An @import in CLAUDE.md: @ and a relative path, not the tail of a word (an
-# e-mail address) or of a path.
-_IMPORT_RE = re.compile(r"(?<![\w@/`.])@([A-Za-z0-9_.][A-Za-z0-9_./-]*[A-Za-z0-9_])")
+# An @import in CLAUDE.md: @ and a path, not the tail of a word (an e-mail
+# address) or of a path. An absolute or ~/ path matches too, to be refused.
+_IMPORT_RE = re.compile(r"(?<![\w@/`.])@((?:~/|/)?[A-Za-z0-9_.][A-Za-z0-9_./-]*[A-Za-z0-9_])")
+_URL_USERINFO_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#]*@")
 
 
 def _git(path, *args):
@@ -30,6 +34,20 @@ def _git(path, *args):
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _skipped_name(name):
+    return name in SKIP_DIRS or (name.startswith(".") and name != ".claude")
+
+
+def _in_skipped_dir(parts):
+    return any(_skipped_name(part) for part in parts)
+
+
+def _public_remote(remote):
+    """The remote without the user[:password]@ part of a scheme:// URL, where
+    a token is often carried."""
+    return _URL_USERINFO_RE.sub(r"\1", remote) if remote else remote
 
 
 def safe_name(text):
@@ -60,7 +78,11 @@ def forge_hint(remote):
 def inspect(raw_path):
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise PplError("SCHEMA_INVALID", "give the path of your project's git checkout")
-    path = Path(os.path.abspath(Path(raw_path.strip()).expanduser()))
+    try:
+        expanded = Path(raw_path.strip()).expanduser()
+    except (RuntimeError, OSError):
+        raise PplError("SCHEMA_INVALID", "cannot expand ~ in %s" % raw_path.strip()) from None
+    path = Path(os.path.abspath(expanded))
     if not path.is_dir():
         raise PplError("SCHEMA_INVALID", "%s is not a directory" % path)
     top = _git(path, "rev-parse", "--show-toplevel")
@@ -73,28 +95,39 @@ def inspect(raw_path):
         branch = head.split("/", 1)[1]
     else:
         branch = _git(root, "branch", "--show-current") or "main"
-    remote = _git(root, "remote", "get-url", "origin")
+    remote = _public_remote(_git(root, "remote", "get-url", "origin"))
     return {"path": str(root), "default_branch": branch, "remote_url": remote,
             "forge_hint": forge_hint(remote), "name_hint": safe_name(root.name),
             "stack": stacks.detect(root), "md_files": find_md(root)}
 
 
+def _listed_size(real_root, directory, name):
+    """The size of a CLAUDE.md or AGENTS.md that is a regular file inside the
+    repository once its symlinks are followed, else None."""
+    target = Path(os.path.realpath(Path(directory) / name))
+    if real_root not in target.parents or _in_skipped_dir(target.relative_to(real_root).parts):
+        return None
+    try:
+        info = os.stat(target)
+    except OSError:
+        return None
+    return info.st_size if stat.S_ISREG(info.st_mode) else None
+
+
 def find_md(root):
     root = Path(root)
+    real_root = Path(os.path.realpath(root))
     found = []
     for directory, dirnames, filenames in os.walk(root):
         relative = Path(directory).relative_to(root)
         depth = len(relative.parts)
         dirnames[:] = sorted(name for name in dirnames
-                             if depth < MAX_DEPTH and name not in SKIP_DIRS
-                             and (name == ".claude" or not name.startswith(".")))
+                             if depth < MAX_DEPTH and not _skipped_name(name))
         for name in sorted(filenames):
             if name in MD_NAMES:
-                try:
-                    size = (Path(directory) / name).stat().st_size
-                except OSError:
-                    continue
-                found.append({"path": (relative / name).as_posix(), "bytes": size})
+                size = _listed_size(real_root, directory, name)
+                if size is not None:
+                    found.append({"path": (relative / name).as_posix(), "bytes": size})
     found.sort(key=lambda item: (item["path"].count("/"), item["path"]))
     return found[:MAX_FILES]
 
@@ -102,56 +135,74 @@ def find_md(root):
 def collect(root, selected):
     """The files the extraction reads: the `selected` md files (paths find_md
     listed) and what they @import inside the repository, each file once, at
-    most MAX_FILES files and MAX_BYTES bytes."""
+    most MAX_FILES files, MAX_BYTES bytes and MAX_SKIPPED skipped entries."""
     root = Path(os.path.realpath(root))
     listed = {item["path"] for item in find_md(root)}
-    queue = []
+    queue = deque()
     skipped = []
+
+    def skip(path, reason):
+        if len(skipped) < MAX_SKIPPED:
+            skipped.append({"path": path, "reason": reason})
+
     for rel in selected or []:
         if isinstance(rel, str) and rel in listed:
             queue.append(rel)
         else:
-            skipped.append({"path": str(rel),
-                            "reason": "not one of the files the project inspection found"})
+            skip(str(rel), "not one of the files the project inspection found")
     files = []
     seen = set()
+    refused = set()
     total = 0
     while queue:
-        rel = queue.pop(0)
+        rel = queue.popleft()
         target = Path(os.path.realpath(root / rel))
         if str(target) in seen:
             continue
         seen.add(str(target))
         if root not in target.parents:
-            skipped.append({"path": rel, "reason": "outside the repository"})
+            skip(rel, "outside the repository")
             continue
-        if not target.is_file():
-            skipped.append({"path": rel, "reason": "no such file"})
+        if _in_skipped_dir(target.relative_to(root).parts):
+            skip(rel, "in a skipped directory")
+            continue
+        try:
+            mode = os.stat(target).st_mode
+        except OSError:
+            skip(rel, "no such file")
+            continue
+        if not stat.S_ISREG(mode):
+            skip(rel, "not a regular file")
             continue
         if len(files) >= MAX_FILES:
-            skipped.append({"path": rel, "reason": "more than %d files, %d more not read"
-                            % (MAX_FILES, len(queue))})
+            skip(rel, "more than %d files, %d more not read" % (MAX_FILES, len(queue)))
             break
         try:
             with open(target, "rb") as handle:
                 data = handle.read(MAX_BYTES - total + 1)
         except OSError:
-            skipped.append({"path": rel, "reason": "cannot be read"})
+            skip(rel, "cannot be read")
             continue
         if total + len(data) > MAX_BYTES:
-            skipped.append({"path": rel, "reason": "over the %d byte budget" % MAX_BYTES})
+            skip(rel, "over the %d byte budget" % MAX_BYTES)
             continue
         if b"\x00" in data:
-            skipped.append({"path": rel, "reason": "binary file"})
+            skip(rel, "binary file")
             continue
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
-            skipped.append({"path": rel, "reason": "not UTF-8 text"})
+            skip(rel, "not UTF-8 text")
             continue
         total += len(data)
         files.append({"path": target.relative_to(root).as_posix(), "text": text})
         for match in _IMPORT_RE.finditer(text):
-            imported = os.path.relpath(os.path.realpath(target.parent / match.group(1)), root)
-            queue.append(Path(imported).as_posix())
+            imported = match.group(1)
+            if imported.startswith(("/", "~")):
+                if imported not in refused:
+                    refused.add(imported)
+                    skip(imported, "outside the repository")
+                continue
+            relative = os.path.relpath(os.path.realpath(target.parent / imported), root)
+            queue.append(Path(relative).as_posix())
     return files, skipped

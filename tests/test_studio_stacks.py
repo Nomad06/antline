@@ -3,6 +3,7 @@ import os
 import re
 import shlex
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -95,6 +96,55 @@ class TestDrafts(unittest.TestCase):
         draft = stacks.draft("node", project(root))
         self.assertEqual([gate["name"] for gate in draft["doc"]["gate"]],
                          ["install", "focused-tests", "integration-tests"])
+
+    def test_a_package_json_symlinked_outside_the_repo_adds_no_gates(self):
+        outside = empty_dir("pplout-") / "package.json"
+        outside.write_text(json.dumps({"scripts": {"lint": "x", "build": "y"}}), encoding="utf-8")
+        root = empty_dir("pplrepo-")
+        (root / "package.json").symlink_to(outside)
+        draft = stacks.draft("node", project(root))
+        self.assertEqual([gate["name"] for gate in draft["doc"]["gate"]],
+                         ["install", "focused-tests", "integration-tests"])
+
+    def test_a_package_json_symlinked_inside_the_repo_is_still_read(self):
+        root = empty_dir("pplrepo-")
+        (root / "app").mkdir()
+        (root / "app" / "package.json").write_text(json.dumps({"scripts": {"lint": "x"}}),
+                                                   encoding="utf-8")
+        (root / "package.json").symlink_to(root / "app" / "package.json")
+        draft = stacks.draft("node", project(root))
+        self.assertEqual([gate["name"] for gate in draft["doc"]["gate"]],
+                         ["install", "lint", "focused-tests", "integration-tests"])
+
+    def test_an_oversized_package_json_adds_no_gates(self):
+        root = empty_dir("pplrepo-")
+        (root / "package.json").write_text(json.dumps(
+            {"scripts": {"lint": "x"}, "padding": "a" * 300_000}), encoding="utf-8")
+        draft = stacks.draft("node", project(root))
+        self.assertEqual([gate["name"] for gate in draft["doc"]["gate"]],
+                         ["install", "focused-tests", "integration-tests"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs mkfifo")
+    def test_a_fifo_package_json_does_not_hang_the_draft(self):
+        root = empty_dir("pplrepo-")
+        fifo = root / "package.json"
+        os.mkfifo(fifo)
+        self.addCleanup(self._release, fifo)
+        result = {}
+        worker = threading.Thread(
+            target=lambda: result.update(draft=stacks.draft("node", project(root))), daemon=True)
+        worker.start()
+        worker.join(10)
+        self.assertFalse(worker.is_alive(), "the draft is blocked reading the fifo")
+        self.assertEqual([gate["name"] for gate in result["draft"]["doc"]["gate"]],
+                         ["install", "focused-tests", "integration-tests"])
+
+    @staticmethod
+    def _release(fifo):
+        try:
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
 
     def test_the_forge_follows_the_remote_hint(self):
         gitlab = stacks.draft("make", project(empty_dir("pplrepo-"), forge="gitlab"))
