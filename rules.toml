@@ -579,7 +579,7 @@ hook_or_check = "ppl/studio/extract.py:command, ppl/studio/extract.py:check, ppl
 deny_test = "tests/test_studio_extract.py::TestExtract::test_the_extraction_command_gives_claude_no_tool_mcp_or_settings_source, tests/test_studio_extract.py::TestExtract::test_a_draft_that_does_not_match_the_schema_is_refused, tests/test_studio_extract.py::TestExtractRoute::test_an_extraction_job_returns_a_merged_draft_and_writes_no_file"
 allow_test = "tests/test_studio_extract.py::TestExtract::test_a_good_answer_becomes_a_checked_draft"
 owner = "panel"
-residual = "the md files are untrusted text a model reads: a file that talks the model into a permissive command shape is caught by the item checks here and by the flags and validation of the review form, not by the model"
+residual = "the md files are untrusted text a model reads: the item checks drop an interpreter or absolute program, a goal that is not a plain word and any control character, and what remains is lexical - npx can run a dotted package name it is given, an env prefix carries any value once the files name a build variable, and gate commands are shell by design, reviewed in the form and not decided by the model"
 
 # ---------------------------------------------------------------------------
 # Done gate

@@ -28,6 +28,12 @@ SAFE_FREE_ARGS = (r"^(?:--?[A-Za-z][A-Za-z0-9-]*|--"
 SAFE_GRADLE_ARGS = (r"^(?:--?[A-Za-z][A-Za-z0-9-]*|--"
                     r"|(?!(?:.*/)?\.\.(?:/|$))[A-Za-z0-9_+,.][A-Za-z0-9_+,-]*[./][A-Za-z0-9_./+,-]*)$")
 
+# Programs that run whatever they are given: a test-worker shape for one of them
+# would let the worker run any script or command line.
+INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", "python", "python3",
+                          "node", "perl", "ruby", "php", "env", "sudo", "xargs", "eval",
+                          "exec"})
+
 NAMING_GENERIC = ("Name the test with a path or a qualified name "
                   "(`app.FooTest`, `mod::my_test`, `tests/test_x.py::T::t`, `./pkg/...`)")
 NAMING_GO = ("Name the test with a trailing slash (`-run TestFoo/`), "
@@ -107,6 +113,10 @@ def detect(root):
              if any((root / marker).is_file() for marker in STACKS[name]["markers"])]
     stack = found[0] if found else "generic"
     return {"stack": stack, "found": found, "label": STACKS[stack]["label"]}
+
+
+GATE_FRAGMENT_KEYS = ("skill/gates.md", "skill/baseline.md", "templates/ppl-code-worker.part",
+                      "templates/ppl-test-worker.part")
 
 
 def gate_fragments(gates, build=None, stack=None):

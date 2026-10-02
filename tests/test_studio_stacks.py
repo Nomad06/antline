@@ -331,9 +331,28 @@ class TestGateFragments(unittest.TestCase):
             self.assertEqual(draft["fragments"]["templates/ppl-test-worker.part"],
                              self.NOTES.get(stack, self.NOTE) % command, stack)
 
+    def test_gate_fragment_keys_name_every_part_the_gates_write(self):
+        gates = [{"name": "build", "command": "make build"},
+                 {"name": harness.FOCUSED_TESTS_GATE, "command": "make test T=<test_class>"}]
+        self.assertEqual(set(stacks.gate_fragments(gates)), set(stacks.GATE_FRAGMENT_KEYS))
+
     def test_no_focused_tests_gate_means_no_test_worker_part(self):
         fragments = stacks.gate_fragments([{"name": "build", "command": "make build"}])
         self.assertNotIn("templates/ppl-test-worker.part", fragments)
+
+
+class TestInterpreters(unittest.TestCase):
+    def test_the_set_holds_the_shells_and_script_runners(self):
+        self.assertIsInstance(stacks.INTERPRETERS, frozenset)
+        self.assertEqual(stacks.INTERPRETERS,
+                         frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", "python", "python3",
+                                    "node", "perl", "ruby", "php", "env", "sudo", "xargs", "eval",
+                                    "exec"}))
+
+    def test_no_preset_shape_runs_an_interpreter(self):
+        for stack, spec in stacks.STACKS.items():
+            for row in spec.get("shapes", []):
+                self.assertNotIn(os.path.basename(row["argv0"]), stacks.INTERPRETERS, stack)
 
 
 class TestSafeFreeArgs(unittest.TestCase):

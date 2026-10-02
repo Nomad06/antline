@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -42,6 +44,26 @@ def fake(stdout, returncode=0):
         calls.append((command, text))
         return returncode, stdout, ""
     return runner, calls
+
+
+FORBIDDEN = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
+UNCLEAN = ("\ud800", "\x00", "\x0b", "\x0c", "\x1b", "\x1c", "\x7f", "\x85", "\x9f",
+           "\u2028", "\u2029")
+
+
+def shape(argv0, goals=("test",)):
+    return {"argv0": argv0, "goals": list(goals), "example": "x", "source": "x"}
+
+
+def strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
 
 
 FILES = [{"path": "CLAUDE.md", "text": "# Build\n\nnpm ci\nnpx jest <test_class>\nnpm test\n"}]
@@ -143,6 +165,134 @@ class TestExtract(panel_client.StudioTestCase):
         self.assertEqual(sorted(item["kind"] for item in result["dropped"]),
                          ["env", "env", "shape", "shape"])
 
+    def shapes_result(self, shapes):
+        return self.run_with(answer(dict(GOOD_DRAFT, test_shapes=shapes)))[0]
+
+    def test_a_shell_or_interpreter_program_is_dropped_whatever_its_goals(self):
+        for argv0, goals in (("bash", ["test"]), ("bash", ["-c"]), ("sh", []), ("/bin/sh", []),
+                             ("./bash", ["test"]), ("tools/python3", ["test"]), ("env", ["test"]),
+                             ("python", ["test"]), ("node", ["test"]), ("perl", ["test"]),
+                             ("ruby", ["test"]), ("php", ["test"]), ("zsh", ["test"]),
+                             ("sudo", ["test"]), ("xargs", ["test"]), ("eval", ["test"]),
+                             ("exec", ["test"]), ("dash", []), ("fish", []), ("ksh", [])):
+            with self.subTest(argv0=argv0, goals=goals):
+                result = self.shapes_result([shape(argv0, goals)])
+                self.assertEqual(result["extracted"]["test_shapes"], [])
+                self.assertEqual([item["reason"] for item in result["dropped"]],
+                                 ["a shell or interpreter runs whatever it is given"])
+
+    def test_an_absolute_or_escaping_program_path_is_dropped(self):
+        for argv0 in ("/usr/bin/make", "/x", "../../bin/x", "..", "a/../b", "./../x"):
+            with self.subTest(argv0=argv0):
+                result = self.shapes_result([shape(argv0)])
+                self.assertEqual(result["extracted"]["test_shapes"], [])
+                self.assertEqual([item["reason"] for item in result["dropped"]],
+                                 ["argv0 is an absolute path or leaves the repository"])
+
+    def test_the_ordinary_test_programs_stay(self):
+        for argv0 in ("./gradlew", "npx", "pytest", "npm", "go", "cargo", "mvn", "./mvnw",
+                      "tools/run-tests", "make"):
+            with self.subTest(argv0=argv0):
+                result = self.shapes_result([shape(argv0)])
+                self.assertEqual([item["argv0"] for item in result["extracted"]["test_shapes"]],
+                                 [argv0])
+                self.assertEqual(result["dropped"], [])
+
+    def test_a_goal_that_does_not_start_with_a_letter_or_digit_is_dropped(self):
+        for goal in ("-c", "--x", ".x", ":x", "_x", "-"):
+            with self.subTest(goal=goal):
+                result = self.shapes_result([shape("npx", [goal])])
+                self.assertEqual(result["extracted"]["test_shapes"], [])
+                self.assertEqual([item["reason"] for item in result["dropped"]],
+                                 ["a goal is not a plain word"])
+        result = self.shapes_result([shape("npx", ["test", "unit-tests", "2e2", "a.b"])])
+        self.assertEqual(len(result["extracted"]["test_shapes"]), 1)
+
+    def test_no_string_item_keeps_a_control_character_surrogate_or_line_break(self):
+        slots = {
+            "gate name": lambda c: {"gates": [{"name": "a" + c + "b", "command": "make",
+                                               "source": "x"}]},
+            "gate command": lambda c: {"gates": [{"name": "a", "command": "ma" + c + "ke",
+                                                  "source": "x"}]},
+            "gate source": lambda c: {"gates": [{"name": "a", "command": "make",
+                                                 "source": "x" + c + "y"}]},
+            "shape argv0": lambda c: {"test_shapes": [shape("np" + c + "x")]},
+            "shape goal": lambda c: {"test_shapes": [shape("npx", ["te" + c + "st"])]},
+            "shape example": lambda c: {"test_shapes": [dict(shape("npx"), example="a" + c + "b")]},
+            "shape source": lambda c: {"test_shapes": [dict(shape("npx"), source="a" + c + "b")]},
+            "env name": lambda c: {"env": [{"name": "A" + c + "B", "value": "1", "source": "x"}]},
+            "env value": lambda c: {"env": [{"name": "A", "value": "1" + c + "2", "source": "x"}]},
+            "env source": lambda c: {"env": [{"name": "A", "value": "1", "source": "x" + c + "y"}]},
+            "task key pattern": lambda c: {"task_key_pattern": "^A" + c + "B$"},
+            "default branch": lambda c: {"default_branch": "ma" + c + "in"},
+        }
+        for char in UNCLEAN:
+            for slot, build in slots.items():
+                with self.subTest(slot=slot, char=char):
+                    result, _ = self.run_with(answer(dict(GOOD_DRAFT, **build(char))))
+                    self.assertEqual(len(result["dropped"]), 1, result["dropped"])
+                    self.assertEqual([text for text in strings(result["extracted"])
+                                      if FORBIDDEN.search(text)], [])
+            with self.subTest(slot="note", char=char):
+                result, _ = self.run_with(answer(dict(GOOD_DRAFT, notes=["a" + char + "b"])))
+                self.assertEqual([text for text in strings(result["extracted"])
+                                  if FORBIDDEN.search(text)], [])
+
+    def test_a_result_that_is_not_text_fails_with_a_reason(self):
+        for value in (5, [1], {"a": 1}, True):
+            with self.subTest(value=value):
+                with self.assertRaises(PplError) as caught:
+                    self.run_with(answer(structured=False, result=value))
+                self.assertEqual(caught.exception.code, "EXTRACTION_FAILED")
+
+    def test_a_cost_that_is_not_finite_counts_as_zero(self):
+        for cost in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(cost=cost):
+                result, _ = self.run_with(answer(total_cost_usd=cost))
+                self.assertEqual(result["cost_usd"], 0.0)
+        self.assertEqual(json.loads(json.dumps(result))["cost_usd"], 0.0)
+
+    def test_the_task_key_pattern_is_stripped_and_still_has_to_compile(self):
+        result, _ = self.run_with(answer(dict(GOOD_DRAFT, task_key_pattern="^APP-[0-9]+$\n")))
+        self.assertEqual(result["extracted"]["task_key_pattern"], "^APP-[0-9]+$")
+        self.assertEqual(result["dropped"], [])
+        result, _ = self.run_with(answer(dict(GOOD_DRAFT, task_key_pattern="  \n")))
+        self.assertIsNone(result["extracted"]["task_key_pattern"])
+        self.assertEqual(result["dropped"], [])
+        result, _ = self.run_with(answer(dict(GOOD_DRAFT, task_key_pattern="(unclosed\n")))
+        self.assertIsNone(result["extracted"]["task_key_pattern"])
+        self.assertEqual([item["kind"] for item in result["dropped"]], ["task_key_pattern"])
+
+    def test_claude_runs_in_an_empty_scratch_directory_and_reads_utf8(self):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            cwd = kwargs["cwd"]
+            seen.update(cwd=cwd, listing=os.listdir(cwd), kwargs=kwargs, cmd=cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout=answer(), stderr="")
+
+        with mock.patch.object(extract.subprocess, "run", fake_run):
+            result = extract.extract(FILES, lambda line: None)
+        self.assertEqual(len(result["extracted"]["gates"]), 3)
+        self.assertEqual(seen["listing"], [])
+        self.assertNotEqual(os.path.realpath(seen["cwd"]), os.path.realpath(os.getcwd()))
+        self.assertFalse(os.path.exists(seen["cwd"]))
+        self.assertEqual(seen["kwargs"]["encoding"], "utf-8")
+        self.assertEqual(seen["kwargs"]["errors"], "replace")
+        self.assertIn("3: npm ci", seen["kwargs"]["input"])
+
+    def test_a_relative_claude_binary_still_resolves_from_the_server_directory(self):
+        config.update("claude", {"binary": "bin/claude"})
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["binary"] = cmd[0]
+            return subprocess.CompletedProcess(cmd, 0, stdout=answer(), stderr="")
+
+        with mock.patch.object(extract.subprocess, "run", fake_run):
+            extract.extract(FILES, lambda line: None)
+        self.assertEqual(seen["binary"], os.path.abspath("bin/claude"))
+
     def test_a_missing_claude_binary_fails_with_a_reason(self):
         config.update("claude", {"binary": "no-such-claude-binary-here"})
         with self.assertRaises(PplError) as caught:
@@ -195,6 +345,21 @@ class TestMerge(unittest.TestCase):
                    "source": "CLAUDE.md:3"}]
         merged = extract.merge(self.preset(), self.checked(dict(GOOD_DRAFT, test_shapes=shapes)))
         self.assertEqual(merged["doc"]["guard"]["shape"][0]["free_args"], stacks.SAFE_GRADLE_ARGS)
+
+    def test_the_fragments_of_a_replaced_gate_list_do_not_outlive_it(self):
+        preset = self.preset()
+        self.assertIn("templates/ppl-test-worker.part", preset["fragments"])
+        gates = [{"name": "build", "command": "make", "source": "x"}]
+        merged = extract.merge(preset, self.checked(dict(GOOD_DRAFT, gates=gates)))
+        self.assertNotIn("templates/ppl-test-worker.part", merged["fragments"])
+        self.assertIn("`make`", merged["fragments"]["skill/gates.md"])
+        self.assertNotIn("npm test", " ".join(merged["fragments"].values()))
+
+    def test_the_preset_fragments_stay_when_no_gate_is_extracted(self):
+        preset = self.preset()
+        merged = extract.merge(preset, self.checked(dict(GOOD_DRAFT, gates=[])))
+        self.assertEqual(merged["fragments"], preset["fragments"])
+        self.assertEqual(merged["doc"]["gate"], preset["doc"]["gate"])
 
     def test_duplicate_gate_names_get_a_suffix(self):
         gates = [{"name": "Test", "command": "a", "source": "x"},

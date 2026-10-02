@@ -5,9 +5,11 @@ JSON schema, then checked again here item by item. The result only ever
 fills the review form: nothing here writes a file."""
 import copy
 import json
+import math
 import os
 import re
 import subprocess
+import tempfile
 
 from .. import config, harness, models, routing
 from ..errors import PplError
@@ -54,11 +56,15 @@ SCHEMA = {
     "required": ["gates", "test_shapes", "env", "default_branch", "task_key_pattern", "notes"],
 }
 
-# Always used with fullmatch: a trailing newline must not slip past a closing $.
-_ONE_LINE_RE = re.compile(r"[^\r\n\x00]{1,400}")
-_VALUE_RE = re.compile(r"[^\r\n\x00]{0,400}")
+# No C0 or C1 control, no DEL, no Unicode line or paragraph separator and no
+# surrogate: a line break splits a value, a lone surrogate cannot be written out
+# as TOML. Always used with fullmatch, so a trailing newline cannot slip past a $.
+_CLEAN = r"[^\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]"
+_TEXT_RE = re.compile(_CLEAN + "*")
+_ONE_LINE_RE = re.compile(_CLEAN + "{1,400}")
+_VALUE_RE = re.compile(_CLEAN + "{0,400}")
 _ARGV0_RE = re.compile(r"[A-Za-z0-9_./-]{1,64}")
-_GOAL_RE = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
+_GOAL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}")
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 _BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]{1,100}")
 
@@ -91,12 +97,19 @@ def bundle(files):
 
 
 def _run_claude(cmd, text):
+    """Claude runs in an empty scratch directory, so it finds no .claude/, no
+    .mcp.json and no CLAUDE.md of the server's working directory, and an @import
+    in the text resolves to nothing."""
     environment = dict(os.environ)
     for marker in models.SESSION_MARKERS:
         environment.pop(marker, None)
+    if os.sep in cmd[0]:
+        cmd = [os.path.abspath(cmd[0])] + cmd[1:]
     try:
-        result = subprocess.run(cmd, input=text, capture_output=True, text=True,
-                                env=environment, timeout=TIMEOUT_SECONDS)
+        with tempfile.TemporaryDirectory(prefix="ppl-extract-") as scratch:
+            result = subprocess.run(cmd, input=text, capture_output=True, encoding="utf-8",
+                                    errors="replace", env=environment, cwd=scratch,
+                                    timeout=TIMEOUT_SECONDS)
     except FileNotFoundError:
         raise PplError("EXTRACTION_FAILED", "%s not found on PATH" % cmd[0])
     except subprocess.TimeoutExpired:
@@ -122,17 +135,31 @@ def parse(returncode, stdout, stderr=""):
     if draft is None:
         try:
             draft = json.loads(doc.get("result") or "")
-        except ValueError:
+        except (TypeError, ValueError):
             raise PplError("EXTRACTION_FAILED", "Claude's answer holds no structured output")
     try:
         cost = float(doc.get("total_cost_usd") or 0.0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        cost = 0.0
+    if not math.isfinite(cost):
         cost = 0.0
     return draft, cost
 
 
 def _strings(item, keys):
     return isinstance(item, dict) and all(isinstance(item.get(key), str) for key in keys)
+
+
+def _unclean(item, keys):
+    return any(not _TEXT_RE.fullmatch(item[key].strip()) for key in keys)
+
+
+def _program_problem(argv0):
+    if os.path.basename(argv0) in stacks.INTERPRETERS:
+        return "a shell or interpreter runs whatever it is given"
+    if argv0.startswith("/") or ".." in argv0.split("/"):
+        return "argv0 is an absolute path or leaves the repository"
+    return None
 
 
 def check(draft):
@@ -161,7 +188,10 @@ def check(draft):
         elif not item["name"].strip():
             drop("gate", item, "the gate has no name")
         elif not _ONE_LINE_RE.fullmatch(item["command"].strip()):
-            drop("gate", item, "the command is empty, longer than 400 characters or spans lines")
+            drop("gate", item, "the command is empty, longer than 400 characters, spans lines "
+                 "or holds a control character")
+        elif _unclean(item, ("name", "source")):
+            drop("gate", item, "the name or the source holds a control character or a line break")
         else:
             clean["gates"].append({"name": item["name"].strip()[:60],
                                    "command": item["command"].strip(),
@@ -175,10 +205,15 @@ def check(draft):
             drop("shape", item, "not an {argv0, goals, example, source} object")
         elif not _ARGV0_RE.fullmatch(item["argv0"]):
             drop("shape", item, "argv0 is not one program name (letters, digits, _ . / - only)")
+        elif problem := _program_problem(item["argv0"]):
+            drop("shape", item, problem)
         elif any(not _GOAL_RE.fullmatch(goal) for goal in goals):
             drop("shape", item, "a goal is not a plain word")
         elif not _ONE_LINE_RE.fullmatch(item["example"].strip()):
-            drop("shape", item, "the example is empty, longer than 400 characters or spans lines")
+            drop("shape", item, "the example is empty, longer than 400 characters, spans lines "
+                 "or holds a control character")
+        elif _unclean(item, ("source",)):
+            drop("shape", item, "the source holds a control character or a line break")
         else:
             clean["test_shapes"].append({"argv0": item["argv0"], "goals": list(dict.fromkeys(goals)),
                                          "example": item["example"].strip(),
@@ -191,7 +226,10 @@ def check(draft):
         elif not _ENV_KEY_RE.fullmatch(item["name"]):
             drop("env", item, "the name is not a shell variable name")
         elif not _VALUE_RE.fullmatch(item["value"]):
-            drop("env", item, "the value is longer than 400 characters or spans lines")
+            drop("env", item, "the value is longer than 400 characters, spans lines "
+                 "or holds a control character")
+        elif _unclean(item, ("source",)):
+            drop("env", item, "the source holds a control character or a line break")
         else:
             clean["env"].append({"name": item["name"], "value": item["value"],
                                  "source": item["source"].strip()[:200]})
@@ -201,18 +239,24 @@ def check(draft):
             clean["default_branch"] = branch.strip()
         else:
             drop("default_branch", branch, "not a branch name")
-    pattern = draft.get("task_key_pattern")
+    pattern = (draft.get("task_key_pattern") or "").strip()
     if pattern:
-        try:
-            if len(pattern) > 200:
-                raise re.error("longer than 200 characters")
-            re.compile(pattern)
-            clean["task_key_pattern"] = pattern
-        except (re.error, OverflowError, RecursionError) as exc:
-            drop("task_key_pattern", pattern, "not a usable regex: %s" % exc)
+        if not _TEXT_RE.fullmatch(pattern):
+            drop("task_key_pattern", pattern, "the pattern holds a control character or a line break")
+        else:
+            try:
+                if len(pattern) > 200:
+                    raise re.error("longer than 200 characters")
+                re.compile(pattern)
+                clean["task_key_pattern"] = pattern
+            except (re.error, OverflowError, RecursionError) as exc:
+                drop("task_key_pattern", pattern, "not a usable regex: %s" % exc)
     for note in draft["notes"][:MAX_NOTES]:
-        if isinstance(note, str) and note.strip():
-            clean["notes"].append(" ".join(note.split())[:200])
+        text = " ".join(note.split())[:200] if isinstance(note, str) else ""
+        if text and _TEXT_RE.fullmatch(text):
+            clean["notes"].append(text)
+        elif text:
+            drop("note", note, "the note holds a control character")
     return clean, dropped
 
 
@@ -278,6 +322,8 @@ def merge(preset, extracted):
         doc["gate"] = [{"name": gate["name"], "command": gate["command"]} for gate in gates]
         sources = {key: value for key, value in sources.items() if not key.startswith("gate:")}
         sources.update({"gate:%s" % gate["name"]: gate["source"] for gate in gates})
+        for key in stacks.GATE_FRAGMENT_KEYS:
+            fragments.pop(key, None)
         fragments.update(stacks.gate_fragments(doc["gate"], stack=preset["stack"]))
         if not any(gate["name"] == harness.FOCUSED_TESTS_GATE for gate in gates):
             notes.append("the files name no command for one test: add a gate named %s, "
