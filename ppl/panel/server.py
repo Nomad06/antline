@@ -380,7 +380,13 @@ def serve(port=8787, open_browser=False, fragment=""):
                        "port must be an integer between 1 and 65535, got: %r" % (port,))
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     session.start(port)
-    print("antline studio on %s  (loopback only, ctrl-c to stop)" % session.url())
+    link = session.url() + fragment
+    print("antline studio on %s  (loopback only, ctrl-c to stop)" % link)
     if open_browser:
-        webbrowser.open(session.url() + fragment)
-    httpd.serve_forever()
+        webbrowser.open(link)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("studio stopped")
+    finally:
+        httpd.server_close()

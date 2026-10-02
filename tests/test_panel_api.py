@@ -447,12 +447,32 @@ class TestPanelApi(unittest.TestCase):
         browser, printed, url = self.serve_with_a_stub_socket(open_browser=True,
                                                               fragment="#/setup")
         browser.assert_called_once_with(url + "#/setup")
-        self.assertIn(url, printed)
+
+    def test_serve_prints_the_link_with_the_fragment_so_a_copied_link_opens_the_wizard(self):
+        browser, printed, url = self.serve_with_a_stub_socket(open_browser=True,
+                                                              fragment="#/setup")
+        link = printed.split()[3]
+        self.assertEqual(link, url + "#/setup")
+        browser.assert_called_once_with(link)
+
+    def test_serve_prints_the_bare_link_without_a_fragment(self):
+        _, printed, url = self.serve_with_a_stub_socket()
+        self.assertEqual(printed.split()[3], url)
         self.assertNotIn("#", printed)
 
     def test_serve_opens_the_bare_session_url_without_a_fragment(self):
         browser, _, url = self.serve_with_a_stub_socket(open_browser=True)
         browser.assert_called_once_with(url)
+
+    def test_ctrl_c_ends_serve_with_one_line_and_closes_the_server(self):
+        with mock.patch.dict(session._state), \
+                mock.patch.object(server, "ThreadingHTTPServer") as listener, \
+                mock.patch.object(server.webbrowser, "open"), \
+                redirect_stdout(io.StringIO()) as printed:
+            listener.return_value.serve_forever.side_effect = KeyboardInterrupt
+            server.serve(8799)
+        listener.return_value.server_close.assert_called_once_with()
+        self.assertEqual(printed.getvalue().splitlines()[-1], "studio stopped")
 
     def test_serve_opens_no_browser_unless_asked(self):
         browser, _, _ = self.serve_with_a_stub_socket(fragment="#/setup")
@@ -462,9 +482,7 @@ class TestPanelApi(unittest.TestCase):
         # This builds the same ThreadingHTTPServer(("127.0.0.1", ...), Handler)
         # that serve() builds, on an OS-assigned ephemeral port, to prove the
         # Handler works end to end over a real socket without leaving one
-        # listening. It does not call serve() itself (serve() blocks forever
-        # and binds a fixed port), so serve()'s own "127.0.0.1" literal is
-        # verified by reading the source, not by executing serve().
+        # listening.
         import socket
         import threading
         import time

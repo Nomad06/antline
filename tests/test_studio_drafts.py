@@ -157,6 +157,7 @@ class TestCheck(DraftTestCase):
         self.assertTrue(drafts.check("demo", draft["doc"], draft["fragments"])["ok"])
 
     def test_the_names_setup_keeps_for_its_own_directories_are_refused(self):
+        # rule: R-STUDIO-SAME-VALIDATION
         for suffix in (".git", ".replacing", ".replaced"):
             with self.subTest(suffix=suffix):
                 with self.assertRaises(PplError) as caught:
@@ -165,6 +166,7 @@ class TestCheck(DraftTestCase):
                 self.assertIn(suffix, caught.exception.message)
 
     def test_the_reserved_endings_are_refused_in_any_letter_case(self):
+        # rule: R-STUDIO-SAME-VALIDATION
         for name in ("Demo.Replacing", "DEMO.REPLACED", "x.GIT"):
             with self.subTest(name=name):
                 with self.assertRaises(PplError) as caught:
@@ -310,6 +312,7 @@ class TestInstall(DraftTestCase):
         self.assertEqual(sorted(path.name for path in drafts.drafts_dir().iterdir()), [])
 
     def test_install_refuses_a_reserved_name_before_it_writes_anything(self):
+        # rule: R-STUDIO-SAME-VALIDATION
         draft = self.preset()
         with self.assertRaises(PplError) as caught:
             drafts.install("demo.replacing", draft["doc"], draft["fragments"], False,
@@ -368,6 +371,7 @@ class TestDraftRoutes(DraftTestCase):
         self.assertEqual(harness.load("demo")["gate"][0]["command"], "make all")
 
     def test_the_install_route_refuses_a_reserved_name_at_once(self):
+        # rule: R-STUDIO-SAME-VALIDATION
         status, payload, _ = panel_client.call("POST", "/api/harness/draft/install",
                                                body={"name": "demo.replacing", "doc": {}, "fragments": {}})
         self.assertEqual(status, 400)

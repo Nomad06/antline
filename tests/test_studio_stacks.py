@@ -233,7 +233,7 @@ class TestShapesStayNarrow(unittest.TestCase):
         "rust": ("cargo test", "cargo test mod::my_test", "cargo test --no-fail-fast"),
     }
     DENIED = {
-        "node": ("npm ci", "npm run evil test", "npm install left-pad test", "npm test evil",
+        "node": ("npm ci", "npm run evil test", "npm run x test", "npm install left-pad test", "npm test evil",
                  "npm test -- -o=x", "npm test -- /etc/passwd", "npm test -- ../x.js",
                  "NODE_OPTIONS=--require=/tmp/x.js npm test", "CI=1 npm test"),
         "python": ("python3 foo.py -m pytest", "python3 -c pass -m pytest", "pytest /etc/passwd -q",
@@ -245,7 +245,7 @@ class TestShapesStayNarrow(unittest.TestCase):
                    "./gradlew test :publish", "./gradlew app:publish test --tests app.FooTest",
                    "./gradlew test app:run", "./gradlew test --tests app:FooTest",
                    "JAVA_TOOL_OPTIONS=-javaagent:/tmp/x.jar ./gradlew test"),
-        "go": ("go doc -src fmt.Println test", "go run x.go test", "go test run", "go build ./...",
+        "go": ("go doc -src fmt.Println test", "go doc fmt test", "go run x.go test", "go test run", "go build ./...",
                "go test -coverprofile=c.out ./...", "go test ../x",
                "GOFLAGS=-toolexec=/tmp/x go test ./..."),
         "rust": ("cargo run test", "cargo install foo test", "cargo build", "cargo test evil",
@@ -265,6 +265,7 @@ class TestShapesStayNarrow(unittest.TestCase):
                 self.assertTrue(matcher.allows(shlex.split(command)), (stack, command))
 
     def test_other_subcommands_and_stray_targets_are_denied(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         for stack, commands in self.DENIED.items():
             matcher = self.matcher(stack)
             for command in commands:
@@ -389,8 +390,9 @@ class TestSafeFreeArgs(unittest.TestCase):
             self.assertIsNotNone(re.fullmatch(stacks.SAFE_FREE_ARGS, token), token)
 
     def test_refuses_plain_words_metacharacters_and_escapes(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         for token in self.REFUSED:
-            self.assertIsNone(re.fullmatch(stacks.SAFE_FREE_ARGS, token), repr(token))
+            self.assertFalse(re.fullmatch(stacks.SAFE_FREE_ARGS, token), repr(token))
 
 
 class TestSafeGradleArgs(unittest.TestCase):
@@ -405,8 +407,9 @@ class TestSafeGradleArgs(unittest.TestCase):
             self.assertIsNotNone(re.fullmatch(stacks.SAFE_GRADLE_ARGS, token), token)
 
     def test_refuses_a_task_path_besides_the_other_escapes(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         for token in self.REFUSED:
-            self.assertIsNone(re.fullmatch(stacks.SAFE_GRADLE_ARGS, token), repr(token))
+            self.assertFalse(re.fullmatch(stacks.SAFE_GRADLE_ARGS, token), repr(token))
 
     def test_the_gradle_note_examples_pass_the_gradle_class(self):
         for token in ("--tests", "app.FooTest", "app.FooTest.bar"):

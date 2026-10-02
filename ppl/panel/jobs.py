@@ -1,7 +1,7 @@
-"""Slow studio actions (a model probe, a Claude extraction, a git clone, an
-apply) run in a worker thread, and the request returns at once with a job
-id. One job of a kind runs at a time. Jobs live in memory only: the effect
-of each is a file write that is safe to repeat after a restart."""
+"""Slow studio actions (a model probe, a Claude extraction, an apply) run in
+a worker thread, and the request returns at once with a job id. One job of
+a kind runs at a time. Jobs live in memory only: the effect of each is a
+file write that is safe to repeat after a restart."""
 import json
 import threading
 import traceback

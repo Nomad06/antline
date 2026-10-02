@@ -56,7 +56,7 @@ form before anything is installed, with the source of each field shown beside it
 The Models screen offers three presets, a tier and an effort per role: Economy, Balanced
 and Max quality. The same presets are `ppl routing preset economy|balanced|max`.
 
-The studio listens on loopback only, and every request needs the session token in the link
+The studio listens on loopback only. Every request needs the session token in the link
 `ppl serve` prints [R-STUDIO-SESSION-TOKEN].
 
 ## Hooks

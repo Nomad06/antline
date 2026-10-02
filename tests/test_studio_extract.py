@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import unittest
@@ -11,6 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "hooks"))
+import ppl_guard
 from ppl import config, harness, paths, routing
 from ppl.errors import PplError
 from ppl.studio import extract, project, stacks
@@ -93,6 +97,7 @@ class TestExtract(panel_client.StudioTestCase):
             self.assertNotIn(flag, command)
 
     def test_the_md_files_go_on_stdin_with_line_numbers_and_file_markers(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         _, calls = self.run_with(answer())
         command, text = calls[0]
         self.assertNotIn("npm ci", " ".join(command))
@@ -137,6 +142,7 @@ class TestExtract(panel_client.StudioTestCase):
         self.assertIn("gates", caught.exception.message)
 
     def test_items_with_newlines_or_bad_names_are_dropped_with_a_reason(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         hostile = dict(GOOD_DRAFT,
                        gates=[{"name": "test", "command": "npm test\nrm -rf ~", "source": "x"},
                               {"name": "ok", "command": "npm test", "source": "x"}],
@@ -146,13 +152,14 @@ class TestExtract(panel_client.StudioTestCase):
                        task_key_pattern="(unclosed")
         result, _ = self.run_with(answer(hostile))
         self.assertEqual([gate["command"] for gate in result["extracted"]["gates"]], ["npm test"])
-        self.assertEqual(result["extracted"]["test_shapes"], [])
-        self.assertEqual(result["extracted"]["env"], [])
+        self.assertFalse(result["extracted"]["test_shapes"])
+        self.assertFalse(result["extracted"]["env"])
         self.assertIsNone(result["extracted"]["task_key_pattern"])
         self.assertEqual(sorted(item["kind"] for item in result["dropped"]),
                          ["env", "gate", "shape", "task_key_pattern"])
 
     def test_a_trailing_newline_does_not_pass_a_program_a_goal_a_variable_or_a_value(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         draft = dict(GOOD_DRAFT,
                      test_shapes=[{"argv0": "npx\n", "goals": ["jest"], "example": "npx jest",
                                    "source": "x"},
@@ -161,8 +168,8 @@ class TestExtract(panel_client.StudioTestCase):
                      env=[{"name": "NODE_ENV\n", "value": "test", "source": "x"},
                           {"name": "NODE_ENV", "value": "test\n", "source": "x"}])
         result, _ = self.run_with(answer(draft))
-        self.assertEqual(result["extracted"]["test_shapes"], [])
-        self.assertEqual(result["extracted"]["env"], [])
+        self.assertFalse(result["extracted"]["test_shapes"])
+        self.assertFalse(result["extracted"]["env"])
         self.assertEqual(sorted(item["kind"] for item in result["dropped"]),
                          ["env", "env", "shape", "shape"])
 
@@ -170,6 +177,7 @@ class TestExtract(panel_client.StudioTestCase):
         return self.run_with(answer(dict(GOOD_DRAFT, test_shapes=shapes)))[0]
 
     def test_a_shell_or_interpreter_program_is_dropped_whatever_its_goals(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         for argv0, goals in (("bash", ["test"]), ("bash", ["-c"]), ("sh", []), ("/bin/sh", []),
                              ("./bash", ["test"]), ("tools/python3", ["test"]), ("env", ["test"]),
                              ("python", ["test"]), ("node", ["test"]), ("perl", ["test"]),
@@ -194,15 +202,16 @@ class TestExtract(panel_client.StudioTestCase):
                              ("expect", ["test"]), ("./Python3.11", ["test"])):
             with self.subTest(argv0=argv0, goals=goals):
                 result = self.shapes_result([shape(argv0, goals)])
-                self.assertEqual(result["extracted"]["test_shapes"], [])
+                self.assertFalse(result["extracted"]["test_shapes"])
                 self.assertEqual([item["reason"] for item in result["dropped"]],
                                  ["a shell or interpreter runs whatever it is given"])
 
     def test_an_absolute_or_escaping_program_path_is_dropped(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         for argv0 in ("/usr/bin/make", "/x", "../../bin/x", "..", "a/../b", "./../x"):
             with self.subTest(argv0=argv0):
                 result = self.shapes_result([shape(argv0)])
-                self.assertEqual(result["extracted"]["test_shapes"], [])
+                self.assertFalse(result["extracted"]["test_shapes"])
                 self.assertEqual([item["reason"] for item in result["dropped"]],
                                  ["argv0 is an absolute path or leaves the repository"])
 
@@ -216,16 +225,18 @@ class TestExtract(panel_client.StudioTestCase):
                 self.assertEqual(result["dropped"], [])
 
     def test_a_goal_that_does_not_start_with_a_letter_or_digit_is_dropped(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         for goal in ("-c", "--x", ".x", ":x", "_x", "-"):
             with self.subTest(goal=goal):
                 result = self.shapes_result([shape("npx", [goal])])
-                self.assertEqual(result["extracted"]["test_shapes"], [])
+                self.assertFalse(result["extracted"]["test_shapes"])
                 self.assertEqual([item["reason"] for item in result["dropped"]],
                                  ["a goal is not a plain word"])
         result = self.shapes_result([shape("npx", ["test", "unit-tests", "2e2", "a.b"])])
         self.assertEqual(len(result["extracted"]["test_shapes"]), 1)
 
     def test_no_string_item_keeps_a_control_character_surrogate_or_line_break(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         slots = {
             "gate name": lambda c: {"gates": [{"name": "a" + c + "b", "command": "make",
                                                "source": "x"}]},
@@ -248,12 +259,12 @@ class TestExtract(panel_client.StudioTestCase):
                 with self.subTest(slot=slot, char=char):
                     result, _ = self.run_with(answer(dict(GOOD_DRAFT, **build(char))))
                     self.assertEqual(len(result["dropped"]), 1, result["dropped"])
-                    self.assertEqual([text for text in strings(result["extracted"])
-                                      if FORBIDDEN.search(text)], [])
+                    self.assertFalse([text for text in strings(result["extracted"])
+                                      if FORBIDDEN.search(text)])
             with self.subTest(slot="note", char=char):
                 result, _ = self.run_with(answer(dict(GOOD_DRAFT, notes=["a" + char + "b"])))
-                self.assertEqual([text for text in strings(result["extracted"])
-                                  if FORBIDDEN.search(text)], [])
+                self.assertFalse([text for text in strings(result["extracted"])
+                                  if FORBIDDEN.search(text)])
 
     def test_every_at_sign_in_the_extraction_text_is_defused(self):
         # rule: R-STUDIO-EXTRACT-LEAN
@@ -272,6 +283,7 @@ class TestExtract(panel_client.StudioTestCase):
         self.assertNotIn("\n@", text)
 
     def test_the_runner_receives_no_text_that_can_attach_a_file(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         files = [{"path": "CLAUDE.md", "text": "Docs: @~/.ssh/id_rsa\n@../secret.txt\nnpm ci\n"}]
         runner, calls = fake(answer())
         with mock.patch.object(extract, "RUNNER", runner):
@@ -346,6 +358,7 @@ class TestExtract(panel_client.StudioTestCase):
         self.assertEqual([item["kind"] for item in result["dropped"]], ["task_key_pattern"])
 
     def test_claude_runs_in_an_empty_scratch_directory_and_reads_utf8(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         seen = {}
 
         def fake_run(cmd, **kwargs):
@@ -427,6 +440,20 @@ class TestMerge(unittest.TestCase):
                    "source": "CLAUDE.md:3"}]
         merged = extract.merge(self.preset(), self.checked(dict(GOOD_DRAFT, test_shapes=shapes)))
         self.assertEqual(merged["doc"]["guard"]["shape"][0]["free_args"], stacks.SAFE_GRADLE_ARGS)
+
+    def test_a_merged_extracted_shape_refuses_a_plain_word_subcommand_beside_the_goal(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
+        shapes = [{"argv0": "npx", "goals": ["jest"], "example": "npx jest a.test.js",
+                   "source": "CLAUDE.md:4"},
+                  {"argv0": "npm", "goals": ["test"], "example": "npm test", "source": "x"},
+                  {"argv0": "go", "goals": ["test"], "example": "go test ./...", "source": "x"}]
+        merged = extract.merge(self.preset(), self.checked(dict(GOOD_DRAFT, test_shapes=shapes)))
+        matcher = ppl_guard.ShapeMatcher.from_rows(harness.shape_rows(merged["doc"]))
+        self.assertTrue(matcher.allows(shlex.split("npx jest a.test.js")))
+        self.assertTrue(matcher.allows(shlex.split("npm test -- a.test.js")))
+        for command in ("npm run x test", "go doc fmt test", "npx jest evil"):
+            with self.subTest(command=command):
+                self.assertFalse(matcher.allows(shlex.split(command)))
 
     def test_the_fragments_of_a_replaced_gate_list_do_not_outlive_it(self):
         preset = self.preset()

@@ -2490,10 +2490,26 @@ class TestInitRequiresSetup(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SETUP_INCOMPLETE")
 
 
-
 class TestSetupInTheBrowser(unittest.TestCase):
     """A first `ppl setup` can run in the browser: --web, or the offer a terminal
     gets when no step is done yet. serve is patched, a real one never returns."""
+
+    TERMINAL_ONLY = {
+        "step names": {"step": ["models"]},
+        "--answer": {"answer": ["workspace=x"]},
+        "--non-interactive": {"non_interactive": True},
+        "--tier": {"tier": ["fast=x"]},
+        "--skip": {"skip": ["forge"]},
+        "--no-verify": {"no_verify": True},
+    }
+    TERMINAL_ONLY_ARGV = {
+        "step names": ["models"],
+        "--answer": ["--answer", "workspace=x"],
+        "--non-interactive": ["--non-interactive"],
+        "--tier": ["--tier", "fast=x"],
+        "--skip": ["--skip", "forge"],
+        "--no-verify": ["--no-verify"],
+    }
 
     def setUp(self):
         self._real_ppl_home = os.environ["PPL_HOME"]
@@ -2502,10 +2518,22 @@ class TestSetupInTheBrowser(unittest.TestCase):
     def tearDown(self):
         os.environ["PPL_HOME"] = self._real_ppl_home
 
+    @staticmethod
+    def setup_args(**given):
+        args = dict(step=[], answer=None, non_interactive=False, tier=None, skip=None,
+                    no_verify=False)
+        args.update(given)
+        return argparse.Namespace(**args)
+
     def test_setup_web_opens_the_studio_on_the_wizard(self):
         with mock.patch("ppl.panel.server.serve") as serve:
             self.assertEqual(cli.main(["setup", "--web", "--port", "8799"]), 0)
         serve.assert_called_once_with(8799, open_browser=True, fragment="#/setup")
+
+    def test_setup_web_without_a_port_serves_the_default_port(self):
+        with mock.patch("ppl.panel.server.serve") as serve:
+            self.assertEqual(cli.main(["setup", "--web"]), 0)
+        serve.assert_called_once_with(8787, open_browser=True, fragment="#/setup")
 
     def test_an_interactive_first_setup_offers_the_browser(self):
         with mock.patch("ppl.panel.server.serve") as serve, \
@@ -2516,16 +2544,46 @@ class TestSetupInTheBrowser(unittest.TestCase):
         serve.assert_called_once_with(8787, open_browser=True, fragment="#/setup")
 
     def test_declining_the_browser_keeps_the_terminal_wizard(self):
-        args = argparse.Namespace(non_interactive=False, step=[], answer=None)
+        args = self.setup_args()
         with mock.patch("sys.stdin.isatty", return_value=True), \
                 mock.patch("builtins.input", return_value="n"):
             self.assertFalse(cli._offer_browser(args))
         with mock.patch("sys.stdin.isatty", return_value=False):
             self.assertFalse(cli._offer_browser(args))
-        named = argparse.Namespace(non_interactive=False, step=["models"], answer=None)
+        named = self.setup_args(step=["models"])
         with mock.patch("sys.stdin.isatty", return_value=True), \
                 mock.patch("builtins.input", return_value="y"):
             self.assertFalse(cli._offer_browser(named))
+
+    def test_an_option_the_browser_wizard_ignores_keeps_the_terminal_wizard_without_asking(self):
+        for name, given in self.TERMINAL_ONLY.items():
+            with self.subTest(option=name), \
+                    mock.patch("sys.stdin.isatty", return_value=True), \
+                    mock.patch("builtins.input", return_value="y") as asked:
+                self.assertFalse(cli._offer_browser(self.setup_args(**given)))
+                asked.assert_not_called()
+
+    def test_setup_web_refuses_an_option_the_browser_wizard_ignores(self):
+        for name, argv in self.TERMINAL_ONLY_ARGV.items():
+            with self.subTest(option=name), mock.patch("ppl.panel.server.serve") as serve:
+                code, _, err = call("setup", "--web", *argv)
+                self.assertEqual(code, 2, err)
+                error = json.loads(err)
+                self.assertEqual(error["error_code"], "SCHEMA_INVALID")
+                self.assertIn("takes only --port", error["message"])
+                self.assertIn(name, error["message"])
+                serve.assert_not_called()
+
+    def test_port_without_web_is_refused(self):
+        with mock.patch("ppl.panel.server.serve") as serve, \
+                mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch("builtins.input", side_effect=AssertionError("asked")):
+            code, _, err = call("setup", "--port", "8799")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "SCHEMA_INVALID")
+        self.assertIn("--port is for --web", error["message"])
+        serve.assert_not_called()
 
 
 if __name__ == "__main__":

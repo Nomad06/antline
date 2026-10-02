@@ -726,11 +726,24 @@ def _key_values(items, flag):
     return pairs
 
 
+def _terminal_only(args):
+    """The setup options the browser wizard has no use for, by the name the user typed."""
+    given = []
+    if args.step:
+        given.append("step names")
+    for flag, value in (("--answer", args.answer), ("--non-interactive", args.non_interactive),
+                        ("--tier", args.tier), ("--skip", args.skip),
+                        ("--no-verify", args.no_verify)):
+        if value:
+            given.append(flag)
+    return given
+
+
 def _offer_browser(args):
-    """An interactive first setup in a terminal offers the browser wizard once.
-    Steps named on the command line, answers, --non-interactive or any step
-    done already keep the terminal wizard as it was."""
-    if args.non_interactive or args.step or args.answer or not sys.stdin.isatty():
+    """An interactive setup in a terminal offers the browser wizard while no step is
+    done, so the offer repeats until one is. Any option the browser wizard would
+    drop, or a step done already, keeps the terminal wizard as it was."""
+    if _terminal_only(args) or not sys.stdin.isatty():
         return False
     if config.steps_state()["done"]:
         return False
@@ -742,9 +755,17 @@ def _offer_browser(args):
 
 
 def cmd_setup(args):
+    if args.web:
+        ignored = _terminal_only(args)
+        if ignored:
+            raise PplError("SCHEMA_INVALID", "--web runs the wizard in the browser: it takes only "
+                           "--port, not %s" % ", ".join(ignored))
+    elif args.port is not None:
+        raise PplError("SCHEMA_INVALID", "--port is for --web")
     if args.web or _offer_browser(args):
         from .panel import server
-        server.serve(args.port, open_browser=True, fragment="#/setup")
+        server.serve(8787 if args.port is None else args.port, open_browser=True,
+                     fragment="#/setup")
         return 0
     answers = {}
     for key, value in _key_values(args.answer, "--answer"):
@@ -1052,7 +1073,7 @@ def build_parser():
     p.add_argument("--no-verify", action="store_true")
     p.add_argument("--skip", action="append", choices=list(setup.STEPS))
     p.add_argument("--web", action="store_true", help="run the wizard in the browser (ppl serve)")
-    p.add_argument("--port", type=int, default=8787, help="the studio port for --web")
+    p.add_argument("--port", type=int, help="the studio port for --web (default 8787)")
 
     p = sub.add_parser("dispatch")
     p.add_argument("--role", required=True)

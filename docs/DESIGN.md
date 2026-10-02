@@ -1723,14 +1723,14 @@ cross-site form cannot submit to it [R-STUDIO-JSON-ONLY].
 `ppl serve` also serves the studio, a browser front end for setup and for editing agents and
 harnesses. The run list of 9.1 moved to `/runs`, and `/` is the studio shell.
 
-**One implementation.** Every studio route calls the Python function the CLI calls: a setup
-step runs through `setup.run` non-interactively, a preset through `routing.apply_preset`
-(`ppl routing preset`), a harness draft through the setup harness step with
-`harness_from=<draft directory>`, and the last wizard screen shows `doctor.report()`, which
+**One implementation.** Every studio change to the installation goes through the function the
+CLI calls: a setup step runs through `setup.run` non-interactively, a preset through
+`routing.apply_preset` (`ppl routing preset`), a harness draft through the setup harness step
+with `harness_from=<draft directory>`, and the last wizard screen shows `doctor.report()`, which
 `ppl doctor` prints. A draft is refused by the same `harness.validate` and role-tool
 composition the CLI runs [R-STUDIO-SAME-VALIDATION].
 
-**Slow actions are jobs.** A model probe, the extraction, an apply or a clone runs in a worker
+**Slow actions are jobs.** A model probe, the extraction or an apply runs in a worker
 thread: the route returns a job id and the page polls `/api/jobs/<id>`. One job of a kind runs
 at a time, and jobs live in memory only.
 
@@ -1747,7 +1747,7 @@ names, tools or not, so every `@` in the file text is sent behind a zero-width s
 answer has those stripped. Every value Claude returns is checked before it reaches the form:
 one line with no control character, a plain program name (never a shell or interpreter, an
 absolute path or a `..` path), plain-word goals [R-STUDIO-EXTRACT-LEAN]. Claude is not asked for
-a regex: a test-worker shape comes back as a program, its goals and an example, and its free
+a command-shape regex: a test-worker shape comes back as a program, its goals and an example, and its free
 arguments get the fixed token class `SAFE_FREE_ARGS` (`SAFE_GRADLE_ARGS` for Gradle, which
 reads `sub:task` as one more task): a bare flag, `--`, or a relative path or qualified name,
 never a plain word [R-STUDIO-EXTRACT-LEAN], so `go doc ... test` or `npm run x test` cannot ride
@@ -1765,7 +1765,8 @@ draft, so a check running beside it cannot change what lands, and a name ending 
 third-party file is `vendor/htm-preact.mjs`, the htm 3.1.1 standalone bundle with Preact
 (htm Apache-2.0, Preact MIT, both licenses beside it). To update it, download
 `https://unpkg.com/htm@<version>/preact/standalone.module.js`, put its sha256 into
-`tests/test_studio_static.py` and run the suite.
+`tests/test_studio_static.py`, bump the version in this paragraph, refresh both LICENSE files
+beside it and run the suite.
 
 ## 10. Role adapters and model substitution
 
