@@ -1,6 +1,6 @@
 """Every /api route the studio adds, in one table. The run routes the panel
 had before the studio stay in server.Handler as they were."""
-from . import api_core, api_routing, api_setup
+from . import api_core, api_project, api_routing, api_setup
 from .router import Router
 
 
@@ -9,4 +9,5 @@ def build():
     api_core.register(router)
     api_setup.register(router)
     api_routing.register(router)
+    api_project.register(router)
     return router

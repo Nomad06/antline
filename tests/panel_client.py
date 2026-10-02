@@ -5,6 +5,7 @@ import http.client
 import io
 import json
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -18,6 +19,26 @@ from ppl.panel import jobs, server, session
 
 PORT = 8787
 HOST = "127.0.0.1:%d" % PORT
+
+
+def make_repo(files=None, branch="main", remote=None):
+    """A committed git repository in a temporary directory. A str value is
+    written as text, a bytes value as raw bytes."""
+    repo = Path(tmphome.mkdtemp(prefix="pplrepo-"))
+    subprocess.run(["git", "init", "-q", "-b", branch, str(repo)], check=True)
+    for rel, content in (files or {"README.md": "demo\n"}).items():
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            target.write_bytes(content)
+        else:
+            target.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "base"], check=True)
+    if remote:
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", remote], check=True)
+    return repo
 
 
 def ensure_session():
