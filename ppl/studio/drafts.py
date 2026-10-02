@@ -3,6 +3,7 @@ form's document and fragments into ~/.ppl/studio/drafts/<name>/, so
 harness.load, validate, render_skill and the setup harness step read a draft
 exactly the way they read an installed harness."""
 import re
+import shlex
 import shutil
 import tempfile
 import threading
@@ -145,23 +146,40 @@ def _require_absolute_repo(loaded):
                        "of ppl serve" % path)
 
 
-def _program(command):
-    for token in command.split():
-        if not _ASSIGNMENT_RE.match(token):
-            return token
-    return ""
+def _assignments_and_program(command):
+    """(count of leading NAME=value words, program) of a command split as the
+    guard splits one. A command shlex cannot split gives (None, its first word)."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = None
+    if words is None:
+        raw = command.split()
+        return None, raw[0] if raw else ""
+    count = 0
+    while count < len(words) and _ASSIGNMENT_RE.match(words[count]):
+        count += 1
+    return count, words[count] if count < len(words) else ""
 
 
 def _unrunnable_focused_tests(loaded):
-    """A warning when the focused-tests gate starts a program no command shape
-    names: the test writer's shell would refuse the command it is told to run."""
-    shapes = {row["argv0"] for row in harness.shape_rows(loaded, "draft")}
+    """A warning when the test writer's shell would refuse the focused-tests
+    command: the guard takes leading NAME=value words only for a shape with
+    env_prefix on, and the program must be the argv0 of a shape."""
+    rows = harness.shape_rows(loaded, "draft")
     for gate in loaded.get("gate") or []:
         if gate["name"] == harness.FOCUSED_TESTS_GATE:
-            program = _program(gate["command"])
-            if program and program not in shapes:
-                return ["the test writer cannot run the focused-tests command: no command "
-                        "shape starts with %s" % program]
+            count, program = _assignments_and_program(gate["command"])
+            if not program:
+                return []
+            named = [row for row in rows if row["argv0"] == program]
+            if count is not None and any(row["env_prefix"] or not count for row in named):
+                return []
+            text = ("the test writer cannot run the focused-tests command: no command shape "
+                    "starts with %s" % program)
+            if count and named:
+                text += " that takes an environment prefix"
+            return [text]
     return []
 
 

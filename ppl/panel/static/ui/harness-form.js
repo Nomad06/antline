@@ -1,4 +1,4 @@
-import { html, useEffect, useState } from "../vendor/htm-preact.mjs";
+import { html, useEffect, useRef, useState } from "../vendor/htm-preact.mjs";
 import { post } from "../api.js";
 import { Badge, Button, Field, Notice } from "./controls.js";
 
@@ -48,6 +48,8 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [replaceable, setReplaceable] = useState(false);
+  const live = useRef(null);
+  live.current = { name, doc, envRows, fragments };
   const sources = draft.sources || {};
   const notes = (extras && extras.notes) || [];
   const dropped = (extras && extras.dropped) || [];
@@ -98,14 +100,18 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave }) {
     if (!canSave) {
       return;
     }
+    const started = live.current;
     setBusy(true);
     setError(null);
     try {
       await onSave({ name, doc: withEnv(doc, envRows), fragments, replace });
       setReplaceable(false);
     } catch (e) {
+      const now = live.current;
+      const unchanged = now.name === started.name && now.doc === started.doc
+        && now.envRows === started.envRows && now.fragments === started.fragments;
       setError(e.message);
-      setReplaceable(/already installed/.test(e.message));
+      setReplaceable(unchanged && /already installed/.test(e.message));
     }
     setBusy(false);
   };

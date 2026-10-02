@@ -64,10 +64,40 @@ class TestCheck(DraftTestCase):
         draft["doc"]["guard"]["shape"].append(dict(draft["doc"]["guard"]["shape"][0], argv0="npx"))
         self.assertEqual(drafts.check("demo", draft["doc"], draft["fragments"])["warnings"], [])
 
-    def test_an_env_assignment_ahead_of_the_focused_tests_program_is_not_the_program(self):
+    def focused_warnings(self, command, env_prefix=None):
         draft = self.preset("node")
-        self.set_focused_command(draft, "CI=1 npm test -- <test_class>")
-        self.assertEqual(drafts.check("demo", draft["doc"], draft["fragments"])["warnings"], [])
+        self.set_focused_command(draft, command)
+        if env_prefix is not None:
+            draft["doc"]["guard"]["shape"][0]["env_prefix"] = env_prefix
+        result = drafts.check("demo", draft["doc"], draft["fragments"])
+        self.assertTrue(result["ok"], result)
+        return result["warnings"]
+
+    def test_an_env_prefix_on_a_shape_that_takes_none_is_warned_about(self):
+        self.assertEqual(self.focused_warnings("CI=1 npm test -- <test_class>"), [
+            "the test writer cannot run the focused-tests command: no command shape starts "
+            "with npm that takes an environment prefix"])
+
+    def test_an_env_prefix_on_a_shape_that_takes_one_is_not_warned_about(self):
+        self.assertEqual(self.focused_warnings("CI=1 npm test -- <test_class>", env_prefix=True), [])
+        self.assertEqual(self.focused_warnings("npm test -- <test_class>", env_prefix=True), [])
+
+    def test_an_env_prefix_ahead_of_a_program_no_shape_names_gets_the_plain_warning(self):
+        self.assertEqual(self.focused_warnings("CI=1 npx jest <test_class>", env_prefix=True), [
+            "the test writer cannot run the focused-tests command: no command shape starts "
+            "with npx"])
+
+    def test_a_quoted_env_value_with_a_space_does_not_name_a_half_word_as_the_program(self):
+        command = 'FOO="a b" npm test -- <test_class>'
+        self.assertEqual(self.focused_warnings(command, env_prefix=True), [])
+        self.assertEqual(self.focused_warnings(command), [
+            "the test writer cannot run the focused-tests command: no command shape starts "
+            "with npm that takes an environment prefix"])
+
+    def test_a_focused_tests_command_shlex_cannot_split_warns_with_its_first_word(self):
+        self.assertEqual(self.focused_warnings('npm test "<test_class>'), [
+            "the test writer cannot run the focused-tests command: no command shape starts "
+            "with npm"])
 
     def test_a_draft_granting_a_tracker_write_tool_is_refused(self):
         # rule: R-STUDIO-SAME-VALIDATION
