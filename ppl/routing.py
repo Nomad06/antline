@@ -159,8 +159,8 @@ def _by_risk_tier(config, role_name, level, tier):
     return table[tier]
 
 
-def role(name):
-    config = load()
+def role(name, config=None):
+    config = config if config is not None else load()
     entry, provider = _entry_and_provider(config, name)
     entry["provider_config"] = provider
     return entry
@@ -324,8 +324,8 @@ def _overlay(name, harness_doc):
     return "\n\n## Project notes\n\n" + "\n".join(lines) + "\n"
 
 
-def render(name, harness_doc):
-    entry = role(name)
+def render(name, harness_doc, config=None):
+    entry = role(name, config)
     meta = BASE_TOOLS[name]
     body = (paths.root() / "templates" / ("%s.md.body" % name)).read_text(encoding="utf-8")
     lines = ["---", GENERATED_NOTICE,
