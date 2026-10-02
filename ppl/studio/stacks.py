@@ -3,9 +3,9 @@ or when the extraction fails: the build files in the repo root name the
 stack, and the stack names its gates and the command shapes the test worker
 may run. Every preset is built on one of the two example harnesses, so the
 tracker lists and the skill fragments come from one place. The shapes are
-lexical, like the shipped examples: a bare flag the tool reads as a write or
-exec target (for example `go test -o x.bin ./...` or `-exec ./script`) still
-passes."""
+lexical, like the shipped examples: a bare flag the tool reads as a read,
+write or exec target (for example `go test -gcflags -m`, `go test -o x.bin`
+or `pytest --basetemp ./src`) still passes."""
 import copy
 import json
 import tomllib
@@ -18,9 +18,19 @@ from ..errors import PplError
 # them anywhere in the line, so a plain word (a subcommand such as `run`, `doc`
 # or `publish`) is refused: only a bare dash flag with no attached value, `--`,
 # or a relative path or qualified name carrying a `.`, `/` or `:` passes.
-# Never an absolute path, a `..` segment, a space or a shell metacharacter.
+# Never an absolute path, a `..` segment, an `@` argument file, a space or a
+# shell metacharacter.
 SAFE_FREE_ARGS = (r"^(?:--?[A-Za-z][A-Za-z0-9-]*|--"
-                  r"|(?!(?:.*/)?\.\.(?:/|$))[A-Za-z0-9_@+,.][A-Za-z0-9_@+,-]*[./:][A-Za-z0-9_./:@+,-]*)$")
+                  r"|(?!(?:.*[/:])?\.\.(?:[/:]|$))[A-Za-z0-9_+,.][A-Za-z0-9_+,-]*[./:][A-Za-z0-9_./:+,-]*)$")
+# Gradle reads `sub:task` as another task to run, so its class has no `:` at all.
+SAFE_GRADLE_ARGS = (r"^(?:--?[A-Za-z][A-Za-z0-9-]*|--"
+                    r"|(?!(?:.*/)?\.\.(?:/|$))[A-Za-z0-9_+,.][A-Za-z0-9_+,-]*[./][A-Za-z0-9_./+,-]*)$")
+
+NAMING_GENERIC = ("Name the test with a path or a qualified name "
+                  "(`app.FooTest`, `mod::my_test`, `tests/test_x.py::T::t`, `./pkg/...`)")
+NAMING_GO = ("Name the test with a trailing slash (`-run TestFoo/`) "
+             "or name a package path (`./pkg/...`)")
+NAMING_RUST = "Name the test by its module path (`mod::my_test`)"
 
 INSTALL_EDITABLE = "python3 -m pip install -e ."
 INSTALL_REQUIREMENTS = "python3 -m pip install -r requirements.txt"
@@ -54,10 +64,11 @@ STACKS = {
                   {"name": "focused-tests", "command": "./gradlew test --tests <test_class>"},
                   {"name": "integration-tests", "command": "./gradlew check"}],
         "shapes": [{"argv0": "./gradlew", "env_prefix": True, "required_flags": [],
-                    "one_goal_of": ["test"], "free_args": SAFE_FREE_ARGS}],
+                    "one_goal_of": ["test"], "free_args": SAFE_GRADLE_ARGS}],
     },
     "go": {
         "label": "Go", "markers": ("go.mod",), "base": "example-generic", "build": "go build ./...",
+        "naming": NAMING_GO,
         "gates": [{"name": "build", "command": "go build ./..."},
                   {"name": "lint", "command": "go vet ./..."},
                   {"name": "focused-tests", "command": "go test ./... -run <test_class>"},
@@ -67,7 +78,7 @@ STACKS = {
     },
     "rust": {
         "label": "Rust (cargo)", "markers": ("Cargo.toml",), "base": "example-generic",
-        "build": "cargo build",
+        "build": "cargo build", "naming": NAMING_RUST,
         "gates": [{"name": "build", "command": "cargo build"},
                   {"name": "lint", "command": "cargo clippy"},
                   {"name": "focused-tests", "command": "cargo test <test_class>"},
@@ -91,10 +102,11 @@ def detect(root):
     return {"stack": stack, "found": found, "label": STACKS[stack]["label"]}
 
 
-def gate_fragments(gates, build=None):
+def gate_fragments(gates, build=None, stack=None):
     """The skill and worker fragments that describe a gate list: gates.md and
     baseline.md for the orchestrator, the build and focused-test notes for the
-    two writing roles. `gates` is a list of {"name", "command"}."""
+    two writing roles. `gates` is a list of {"name", "command"}, `stack` picks
+    the example the test writer is told to name a test by."""
     commands = ", ".join("`%s`" % gate["command"] for gate in gates)
     names = ", ".join(gate["name"].replace("-", " ") for gate in gates)
     focused = {gate["name"]: gate["command"] for gate in gates}.get(harness.FOCUSED_TESTS_GATE)
@@ -108,10 +120,9 @@ def gate_fragments(gates, build=None):
         fragments["templates/ppl-code-worker.part"] = (
             "- Build with `%s`, write the exit code to a file.\n" % build)
     if focused:
+        naming = STACKS.get(stack, {}).get("naming", NAMING_GENERIC)
         fragments["templates/ppl-test-worker.part"] = (
-            "- Run only `%s` for focused runs. Name the test with a path or a qualified name "
-            "(`app.FooTest`, `mod::my_test`, `tests/test_x.py::T::t`, `./pkg/...`): "
-            "a plain word is refused.\n" % focused)
+            "- Run only `%s` for focused runs. %s: a plain word is refused.\n" % (focused, naming))
     return fragments
 
 
@@ -180,7 +191,7 @@ def draft(stack, project):
             gates[0]["command"] = build
         doc["gate"] = gates
         doc["guard"] = {"shape": copy.deepcopy(spec["shapes"])}
-        fragments.update(gate_fragments(gates, build))
+        fragments.update(gate_fragments(gates, build, stack))
     for gate in doc.get("gate") or []:
         sources.setdefault("gate:%s" % gate["name"], label)
     for index, _ in enumerate((doc.get("guard") or {}).get("shape") or []):

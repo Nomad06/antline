@@ -171,7 +171,8 @@ class TestShapesStayNarrow(unittest.TestCase):
         "python": ("pytest -q", "pytest -q app.FooTest", "pytest -q tests/test_x.py::T::t",
                    "pytest -q --no-header tests/test_x.py"),
         "gradle": ("./gradlew test --tests app.FooTest", "./gradlew test", "./gradlew test --info"),
-        "go": ("go test ./...", "go test ./... -run app.FooTest", "go test -v ./pkg/..."),
+        "go": ("go test ./...", "go test ./... -run app.FooTest", "go test ./... -run TestFoo/",
+               "go test -v ./pkg/..."),
         "rust": ("cargo test", "cargo test mod::my_test", "cargo test --no-fail-fast"),
     }
     DENIED = {
@@ -179,13 +180,15 @@ class TestShapesStayNarrow(unittest.TestCase):
                  "npm test -- -o=x", "npm test -- /etc/passwd", "npm test -- ../x.js"),
         "python": ("python3 foo.py -m pytest", "python3 -c pass -m pytest", "pytest /etc/passwd -q",
                    "pytest -q /etc/passwd", "pytest -q ../tests/test_x.py", "pytest -q evil",
-                   "pytest"),
+                   "pytest", "pytest -q @src/app/main.py", "pytest -q @notes.txt"),
         "gradle": ("./gradlew publish test", "./gradlew test publish", "./gradlew assemble",
-                   "./gradlew test --tests evil"),
+                   "./gradlew test --tests evil", "./gradlew test app:publish",
+                   "./gradlew test :publish", "./gradlew app:publish test --tests app.FooTest",
+                   "./gradlew test app:run", "./gradlew test --tests app:FooTest"),
         "go": ("go doc -src fmt.Println test", "go run x.go test", "go test run", "go build ./...",
                "go test -coverprofile=c.out ./...", "go test ../x"),
         "rust": ("cargo run test", "cargo install foo test", "cargo build", "cargo test evil",
-                 "cargo test --target-dir=/tmp"),
+                 "cargo test --target-dir=/tmp", "cargo test x:../y", "cargo test ..::sibling"),
     }
 
     @staticmethod
@@ -216,13 +219,28 @@ class TestGateFragments(unittest.TestCase):
     NOTE = ("- Run only `%s` for focused runs. Name the test with a path or a qualified name "
             "(`app.FooTest`, `mod::my_test`, `tests/test_x.py::T::t`, `./pkg/...`): "
             "a plain word is refused.\n")
+    GO_NOTE = ("- Run only `%s` for focused runs. Name the test with a trailing slash "
+               "(`-run TestFoo/`) or name a package path (`./pkg/...`): a plain word is refused.\n")
+    RUST_NOTE = ("- Run only `%s` for focused runs. Name the test by its module path "
+                 "(`mod::my_test`): a plain word is refused.\n")
+    NOTES = {"go": GO_NOTE, "rust": RUST_NOTE}
 
     def test_the_test_worker_part_tells_how_to_name_the_test(self):
-        gates = [{"name": "focused-tests", "command": "go test ./... -run <test_class>"}]
+        gates = [{"name": "focused-tests", "command": "make test TEST=<test_class>"}]
         part = stacks.gate_fragments(gates)["templates/ppl-test-worker.part"]
-        self.assertEqual(part, self.NOTE % "go test ./... -run <test_class>")
+        self.assertEqual(part, self.NOTE % "make test TEST=<test_class>")
         self.assertEqual(part.count("\n"), 1)
         part.encode("ascii")
+
+    def test_the_naming_example_follows_the_stack(self):
+        gates = [{"name": "focused-tests", "command": "go test ./... -run <test_class>"}]
+        go = stacks.gate_fragments(gates, stack="go")["templates/ppl-test-worker.part"]
+        self.assertEqual(go, self.GO_NOTE % "go test ./... -run <test_class>")
+        rust = stacks.gate_fragments(gates, stack="rust")["templates/ppl-test-worker.part"]
+        self.assertEqual(rust, self.RUST_NOTE % "go test ./... -run <test_class>")
+        for stack in ("node", "python", "gradle", "make", "generic", "no-such-stack", None):
+            part = stacks.gate_fragments(gates, stack=stack)["templates/ppl-test-worker.part"]
+            self.assertEqual(part, self.NOTE % "go test ./... -run <test_class>", stack)
 
     def test_every_stack_draft_carries_the_naming_note_for_its_focused_command(self):
         for stack, spec in stacks.STACKS.items():
@@ -232,7 +250,7 @@ class TestGateFragments(unittest.TestCase):
                            if gate["name"] == harness.FOCUSED_TESTS_GATE)
             draft = stacks.draft(stack, project(empty_dir("pplrepo-")))
             self.assertEqual(draft["fragments"]["templates/ppl-test-worker.part"],
-                             self.NOTE % command, stack)
+                             self.NOTES.get(stack, self.NOTE) % command, stack)
 
     def test_no_focused_tests_gate_means_no_test_worker_part(self):
         fragments = stacks.gate_fragments([{"name": "build", "command": "make build"}])
@@ -242,11 +260,12 @@ class TestGateFragments(unittest.TestCase):
 class TestSafeFreeArgs(unittest.TestCase):
     ACCEPTED = ("-v", "-q", "-run", "--tests", "--no-fail-fast", "--", "./...", "./pkg/...",
                 "app.FooTest", "mod::my_test", "tests/test_x.py::T::t", "src/app.test.js",
-                "a-b.c", "@scope/pkg.js")
+                "a-b.c", "TestFoo/", "TestFoo/sub")
     REFUSED = ("doc", "run", "publish", "install", "test", "FooTest", "", " ", "a b.c", "a;b.c",
                "a.b;c", "$x.y", "a.$b", "*.js", "./*", "a.b\nc", "-v\n", "/etc/passwd", "/x.y",
                "~/x.y", "..", "../x.y", "a/../b.c", "a/..", ".", "-o=x", "--target-dir=/tmp",
-               "-coverprofile=c.out", "-", "---x", "-1", "--1")
+               "-coverprofile=c.out", "-", "---x", "-1", "--1", "@src/app/main.py", "@scope/pkg.js",
+               "@notes.txt", "x:../y", "..::sibling", "a/..::x", "a::..", "a:..:b")
 
     def test_accepts_flags_and_dotted_or_pathlike_targets(self):
         for token in self.ACCEPTED:
@@ -255,6 +274,36 @@ class TestSafeFreeArgs(unittest.TestCase):
     def test_refuses_plain_words_metacharacters_and_escapes(self):
         for token in self.REFUSED:
             self.assertIsNone(re.fullmatch(stacks.SAFE_FREE_ARGS, token), repr(token))
+
+
+class TestSafeGradleArgs(unittest.TestCase):
+    ACCEPTED = ("-v", "--tests", "--info", "--", "./...", "app.FooTest", "src/app.test.java",
+                "TestFoo/")
+    REFUSED = ("publish", "FooTest", "", "app:publish", ":publish", "app:run", "mod::my_test",
+               "a.b:c", "tests/x.py::T", "a b.c", "a;b.c", "$x.y", "*.js", "/etc/passwd",
+               "../x.y", "a/../b.c", "a/..", "@src/app/main.py", "-o=x", "--tests=app.FooTest")
+
+    def test_accepts_flags_and_dotted_or_pathlike_targets(self):
+        for token in self.ACCEPTED:
+            self.assertIsNotNone(re.fullmatch(stacks.SAFE_GRADLE_ARGS, token), token)
+
+    def test_refuses_a_task_path_besides_the_other_escapes(self):
+        for token in self.REFUSED:
+            self.assertIsNone(re.fullmatch(stacks.SAFE_GRADLE_ARGS, token), repr(token))
+
+    def test_only_the_gradle_shape_uses_the_class_without_a_colon(self):
+        for stack, spec in stacks.STACKS.items():
+            for row in spec.get("shapes", []):
+                want = stacks.SAFE_GRADLE_ARGS if stack == "gradle" else stacks.SAFE_FREE_ARGS
+                self.assertEqual(row["free_args"], want, stack)
+
+
+class TestModuleNotes(unittest.TestCase):
+    def test_the_residual_lexical_limit_covers_reads_writes_and_execs(self):
+        doc = " ".join(stacks.__doc__.split())
+        self.assertIn("read, write or exec target", doc)
+        for example in ("go test -gcflags -m", "go test -o x.bin", "pytest --basetemp ./src"):
+            self.assertIn(example, doc)
 
 
 if __name__ == "__main__":
