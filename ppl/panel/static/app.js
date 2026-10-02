@@ -10,7 +10,7 @@ function currentRoute() {
 
 function readMode() {
   try {
-    return window.localStorage.getItem("ppl-mode") || "simple";
+    return window.localStorage.getItem("ppl-mode") === "expert" ? "expert" : "simple";
   } catch (e) {
     return "simple";
   }
@@ -44,7 +44,7 @@ function App() {
       <p>Run <code>ppl serve --open</code> again and use the link it prints.</p>
     </main>`;
   }
-  const Page = PAGES[route] || PAGES[""];
+  const Page = Object.hasOwn(PAGES, route) ? PAGES[route] : PAGES[""];
   const toggle = () => {
     const next = mode === "simple" ? "expert" : "simple";
     writeMode(next);

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -70,6 +71,49 @@ class TestStaticFiles(unittest.TestCase):
             result = subprocess.run(["node", "--check", str(copy)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, (rel, result.stderr))
 
+    def test_the_shell_declares_an_empty_icon_so_the_browser_asks_for_no_favicon(self):
+        text = (STATIC / "index.html").read_text(encoding="ascii")
+        self.assertIn('<link rel="icon" href="data:,">', text)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, the client check needs it")
+    def test_the_client_turns_a_stopped_server_into_a_lost_session(self):
+        scratch = Path(tmphome.mkdtemp(prefix="pplnode-"))
+        copy = scratch / "api.mjs"
+        copy.write_bytes((STATIC / "api.js").read_bytes())
+        script = """
+import { get, ApiError } from "%s";
+const events = [];
+globalThis.window = { dispatchEvent: (event) => events.push(event.type) };
+globalThis.CustomEvent = class { constructor(type) { this.type = type; } };
+const outcome = async (fetchImpl) => {
+  events.length = 0;
+  globalThis.fetch = fetchImpl;
+  try {
+    await get("/api/setup");
+    return { thrown: false, events: [...events] };
+  } catch (e) {
+    return { thrown: e instanceof ApiError, status: e.status, code: e.code, events: [...events] };
+  }
+};
+const reply = (status, payload) => async () => ({ status, ok: status < 400, json: async () => payload });
+console.log(JSON.stringify({
+  offline: await outcome(async () => { throw new TypeError("Failed to fetch"); }),
+  session: await outcome(reply(403, { error_code: "SESSION_REQUIRED", message: "no session" })),
+  refused: await outcome(reply(400, { error_code: "SCHEMA_INVALID", message: "bad" })),
+}));
+""" % copy.as_uri()
+        result = subprocess.run(["node", "--input-type=module", "-e", script],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outcomes = json.loads(result.stdout)
+        self.assertEqual(outcomes["offline"], {"thrown": True, "status": 0, "code": "OFFLINE",
+                                               "events": ["ppl-session-lost"]})
+        self.assertEqual(outcomes["session"], {"thrown": True, "status": 403,
+                                               "code": "SESSION_REQUIRED",
+                                               "events": ["ppl-session-lost"]})
+        self.assertEqual(outcomes["refused"], {"thrown": True, "status": 400,
+                                               "code": "SCHEMA_INVALID", "events": []})
+
 
 class TestStaticRoutes(panel_client.StudioTestCase):
     def test_the_shell_is_served_at_the_root(self):
@@ -95,6 +139,7 @@ class TestStaticRoutes(panel_client.StudioTestCase):
             self.assertEqual(status, 404, path)
 
     def test_static_files_need_the_session_too(self):
+        # rule: R-STUDIO-SESSION-TOKEN
         status, payload, _ = panel_client.call("GET", "/static/app.js", base={"Host": panel_client.HOST})
         self.assertEqual(status, 403)
         self.assertEqual(payload["error_code"], "SESSION_REQUIRED")
@@ -106,6 +151,7 @@ class TestStaticRoutes(panel_client.StudioTestCase):
         self.assertIn("message", payload)
 
     def test_the_shell_and_the_run_list_need_the_session(self):
+        # rule: R-STUDIO-SESSION-TOKEN
         for path in ("/", "/runs"):
             with self.subTest(path=path):
                 status, payload, _ = panel_client.call("GET", path, base={"Host": panel_client.HOST})
@@ -113,6 +159,7 @@ class TestStaticRoutes(panel_client.StudioTestCase):
                 self.assertEqual(payload["error_code"], "SESSION_REQUIRED")
 
     def test_a_foreign_host_is_refused_on_the_shell_the_run_list_and_static_files(self):
+        # rule: R-STUDIO-HOST-CHECK
         headers = panel_client.session_headers()
         headers["Host"] = "studio.attacker.example:%d" % panel_client.PORT
         for path in ("/", "/runs", "/static/app.js"):
@@ -120,6 +167,24 @@ class TestStaticRoutes(panel_client.StudioTestCase):
                 status, payload, _ = panel_client.call("GET", path, base=headers)
                 self.assertEqual(status, 403)
                 self.assertEqual(payload["error_code"], "BOUNDARY_VIOLATION")
+
+    def test_the_shell_the_run_list_and_every_static_file_are_revalidated(self):
+        paths = ["/", "/runs"] + ["/static/" + rel for rel in api_static.MANIFEST]
+        for path in paths:
+            with self.subTest(path=path):
+                status, _, headers = panel_client.call("GET", path)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Cache-Control"], "no-cache")
+
+    def test_a_wrong_case_or_percent_encoded_name_is_not_served(self):
+        status, payload, _ = panel_client.call("GET", "/static/App.js")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error_code"], "NOT_FOUND")
+        for path in ("/static/pages/%2e%2e%2fserver.py", "/static/ui%2fcontrols.js"):
+            with self.subTest(path=path):
+                status, payload, _ = panel_client.call("GET", path)
+                self.assertEqual(status, 404)
+                self.assertIn("error_code", payload)
 
     def test_a_static_file_takes_no_write(self):
         status, payload, _ = panel_client.call("POST", "/static/app.js", body={})

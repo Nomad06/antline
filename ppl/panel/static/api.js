@@ -13,7 +13,13 @@ async function request(method, path, body) {
   if (body !== undefined) {
     options.body = JSON.stringify(body);
   }
-  const res = await fetch(path, options);
+  let res;
+  try {
+    res = await fetch(path, options);
+  } catch (e) {
+    window.dispatchEvent(new CustomEvent("ppl-session-lost"));
+    throw new ApiError(0, { error_code: "OFFLINE", message: "the studio did not answer" });
+  }
   let payload = null;
   try {
     payload = await res.json();

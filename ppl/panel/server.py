@@ -208,11 +208,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def _send(self, code, payload, content_type="application/json"):
+    def _send(self, code, payload, content_type="application/json", headers=None):
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -281,16 +283,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = fn(params, body, parse_qs(parsed.query))
             if isinstance(result, Raw):
-                answer, content_type = result.body, result.content_type
+                answer, content_type, headers = result.body, result.content_type, result.headers
             else:
                 answer, content_type = json.dumps(result).encode("utf-8"), "application/json"
+                headers = None
         except PplError as err:
             return self._send(STATUS_BY_CODE.get(err.code, 400), err.as_dict())
         except Exception as exc:
             traceback.print_exc()
             return self._send(500, {"error_code": "INTERNAL_ERROR",
                                     "message": "%s: %s" % (type(exc).__name__, exc)})
-        return self._send(200, answer, content_type)
+        return self._send(200, answer, content_type, headers)
 
     def do_GET(self):
         parsed = self._parse_path()
@@ -304,9 +307,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not parts:
                 shell = api_static.file("index.html")
-                return self._send(200, shell.body, shell.content_type)
+                return self._send(200, shell.body, shell.content_type, shell.headers)
             if parts == ["runs"]:
-                return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
+                return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8",
+                                  api_static.NO_CACHE)
             if parts == ["api", "runs"]:
                 return self._send(200, list_runs())
             if len(parts) == 3 and parts[0] == "api" and parts[1] == "runs":

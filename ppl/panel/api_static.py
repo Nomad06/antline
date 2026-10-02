@@ -8,6 +8,8 @@ from .router import Raw
 STATIC = Path(__file__).with_name("static")
 JS = "text/javascript; charset=utf-8"
 TEXT = "text/plain; charset=utf-8"
+# A module must never outlive a ppl upgrade in the browser cache.
+NO_CACHE = {"Cache-Control": "no-cache"}
 MANIFEST = {
     "index.html": "text/html; charset=utf-8",
     "app.js": JS,
@@ -24,7 +26,7 @@ MANIFEST = {
 def file(rel):
     if rel not in MANIFEST:
         raise PplError("NOT_FOUND", "%s is not a studio file" % rel)
-    return Raw((STATIC / rel).read_bytes(), MANIFEST[rel])
+    return Raw((STATIC / rel).read_bytes(), MANIFEST[rel], NO_CACHE)
 
 
 def register(router):

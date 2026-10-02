@@ -1,5 +1,6 @@
-"""Every /api route the studio adds, in one table. The run routes the panel
-had before the studio stay in server.Handler as they were."""
+"""Every route the studio registers, in one table: the /api routes it adds and
+the /static files. The run routes the panel had before the studio stay in
+server.Handler as they were."""
 from . import api_core, api_project, api_routing, api_setup, api_static
 from .router import Router
 
