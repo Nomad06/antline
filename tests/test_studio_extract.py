@@ -174,7 +174,16 @@ class TestExtract(panel_client.StudioTestCase):
                              ("python", ["test"]), ("node", ["test"]), ("perl", ["test"]),
                              ("ruby", ["test"]), ("php", ["test"]), ("zsh", ["test"]),
                              ("sudo", ["test"]), ("xargs", ["test"]), ("eval", ["test"]),
-                             ("exec", ["test"]), ("dash", []), ("fish", []), ("ksh", [])):
+                             ("exec", ["test"]), ("dash", []), ("fish", []), ("ksh", []),
+                             ("csh", []), ("tcsh", []), ("lua", ["test"]), ("tclsh", ["test"]),
+                             ("pwsh", ["test"]), ("osascript", ["test"]), ("awk", ["test"]),
+                             ("gawk", ["test"]), ("mawk", ["test"]), ("busybox", ["test"]),
+                             ("doas", ["test"]), ("source", ["test"]), (".", ["test"]),
+                             ("command", ["test"]), ("nohup", ["test"]), ("time", ["test"]),
+                             ("timeout", ["test"]), ("nice", ["test"]),
+                             ("python3.12", ["test"]), ("python3", ["test"]), ("node18", ["test"]),
+                             ("perl5.36", ["test"]), ("./python3.11", ["test"]),
+                             ("/usr/bin/env", ["test"]), ("tools/ruby3.3", ["test"])):
             with self.subTest(argv0=argv0, goals=goals):
                 result = self.shapes_result([shape(argv0, goals)])
                 self.assertEqual(result["extracted"]["test_shapes"], [])
@@ -191,7 +200,7 @@ class TestExtract(panel_client.StudioTestCase):
 
     def test_the_ordinary_test_programs_stay(self):
         for argv0 in ("./gradlew", "npx", "pytest", "npm", "go", "cargo", "mvn", "./mvnw",
-                      "tools/run-tests", "make"):
+                      "tools/run-tests", "make", "go1.22", "mvn3", "ctest", "bazel"):
             with self.subTest(argv0=argv0):
                 result = self.shapes_result([shape(argv0)])
                 self.assertEqual([item["argv0"] for item in result["extracted"]["test_shapes"]],

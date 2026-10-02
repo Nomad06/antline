@@ -155,7 +155,7 @@ def _unclean(item, keys):
 
 
 def _program_problem(argv0):
-    if os.path.basename(argv0) in stacks.INTERPRETERS:
+    if stacks.is_interpreter(argv0):
         return "a shell or interpreter runs whatever it is given"
     if argv0.startswith("/") or ".." in argv0.split("/"):
         return "argv0 is an absolute path or leaves the repository"

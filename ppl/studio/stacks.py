@@ -9,6 +9,7 @@ or `pytest --basetemp ./src`) still passes."""
 import copy
 import json
 import os
+import re
 import stat
 import tomllib
 from pathlib import Path
@@ -29,10 +30,13 @@ SAFE_GRADLE_ARGS = (r"^(?:--?[A-Za-z][A-Za-z0-9-]*|--"
                     r"|(?!(?:.*/)?\.\.(?:/|$))[A-Za-z0-9_+,.][A-Za-z0-9_+,-]*[./][A-Za-z0-9_./+,-]*)$")
 
 # Programs that run whatever they are given: a test-worker shape for one of them
-# would let the worker run any script or command line.
-INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", "python", "python3",
-                          "node", "perl", "ruby", "php", "env", "sudo", "xargs", "eval",
-                          "exec"})
+# would let the worker run any script or command line. Matched by is_interpreter,
+# so a version suffix and a directory do not hide one.
+INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", "csh", "tcsh", "python",
+                          "node", "perl", "ruby", "php", "lua", "tclsh", "pwsh", "osascript",
+                          "awk", "gawk", "mawk", "busybox", "env", "sudo", "doas", "xargs", "eval",
+                          "exec", "source", ".", "command", "nohup", "time", "timeout", "nice"})
+_VERSION_SUFFIX_RE = re.compile(r"[0-9][0-9.]*$")
 
 NAMING_GENERIC = ("Name the test with a path or a qualified name "
                   "(`app.FooTest`, `mod::my_test`, `tests/test_x.py::T::t`, `./pkg/...`)")
@@ -105,6 +109,13 @@ STACKS = {
 ORDER = ("node", "python", "maven", "gradle", "go", "rust", "make")
 FRAGMENT_GLOBS = ("skill/*.md", "templates/*.part")
 PACKAGE_JSON_MAX_BYTES = 200_000
+
+
+def is_interpreter(argv0):
+    """True when the program's basename, less one trailing version (`python3.12`,
+    `node18`, `perl5.36`), is in INTERPRETERS."""
+    name = _VERSION_SUFFIX_RE.sub("", os.path.basename(argv0))
+    return name in INTERPRETERS
 
 
 def detect(root):

@@ -342,17 +342,32 @@ class TestGateFragments(unittest.TestCase):
 
 
 class TestInterpreters(unittest.TestCase):
-    def test_the_set_holds_the_shells_and_script_runners(self):
+    def test_the_set_holds_the_shells_script_runners_and_wrappers(self):
         self.assertIsInstance(stacks.INTERPRETERS, frozenset)
         self.assertEqual(stacks.INTERPRETERS,
-                         frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", "python", "python3",
-                                    "node", "perl", "ruby", "php", "env", "sudo", "xargs", "eval",
-                                    "exec"}))
+                         frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", "csh", "tcsh",
+                                    "python", "node", "perl", "ruby", "php", "lua", "tclsh",
+                                    "pwsh", "osascript", "awk", "gawk", "mawk", "busybox", "env",
+                                    "sudo", "doas", "xargs", "eval", "exec", "source", ".",
+                                    "command", "nohup", "time", "timeout", "nice"}))
+
+    def test_a_version_suffix_and_a_directory_do_not_hide_an_interpreter(self):
+        for argv0 in ("python3.12", "python3", "python", "node18", "perl5.36", "ruby3.3",
+                      "bash5.2", "./python3.11", "/usr/bin/env", "tools/bash", "awk", "gawk",
+                      "busybox", ".", "source", "./.", "command", "timeout", "sh"):
+            with self.subTest(argv0=argv0):
+                self.assertTrue(stacks.is_interpreter(argv0))
+
+    def test_the_ordinary_build_and_test_programs_are_not_interpreters(self):
+        for argv0 in ("pytest", "npx", "npm", "./gradlew", "gradle", "cargo", "go", "go1.22",
+                      "make", "mvn", "mvn3", "./mvnw", "tools/run-tests", "ctest", "bazel"):
+            with self.subTest(argv0=argv0):
+                self.assertFalse(stacks.is_interpreter(argv0))
 
     def test_no_preset_shape_runs_an_interpreter(self):
         for stack, spec in stacks.STACKS.items():
             for row in spec.get("shapes", []):
-                self.assertNotIn(os.path.basename(row["argv0"]), stacks.INTERPRETERS, stack)
+                self.assertFalse(stacks.is_interpreter(row["argv0"]), stack)
 
 
 class TestSafeFreeArgs(unittest.TestCase):
