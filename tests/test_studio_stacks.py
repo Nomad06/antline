@@ -167,7 +167,7 @@ class TestDrafts(unittest.TestCase):
 class TestShapesStayNarrow(unittest.TestCase):
     ALLOWED = {
         "node": ("npm test", "npm test -- app.FooTest", "npm test -- --verbose",
-                 "CI=1 npm test -- tests/app.test.js"),
+                 "npm test -- tests/app.test.js"),
         "python": ("pytest -q", "pytest -q app.FooTest", "pytest -q tests/test_x.py::T::t",
                    "pytest -q --no-header tests/test_x.py"),
         "gradle": ("./gradlew test --tests app.FooTest", "./gradlew test", "./gradlew test --info"),
@@ -177,18 +177,23 @@ class TestShapesStayNarrow(unittest.TestCase):
     }
     DENIED = {
         "node": ("npm ci", "npm run evil test", "npm install left-pad test", "npm test evil",
-                 "npm test -- -o=x", "npm test -- /etc/passwd", "npm test -- ../x.js"),
+                 "npm test -- -o=x", "npm test -- /etc/passwd", "npm test -- ../x.js",
+                 "NODE_OPTIONS=--require=/tmp/x.js npm test", "CI=1 npm test"),
         "python": ("python3 foo.py -m pytest", "python3 -c pass -m pytest", "pytest /etc/passwd -q",
                    "pytest -q /etc/passwd", "pytest -q ../tests/test_x.py", "pytest -q evil",
-                   "pytest", "pytest -q @src/app/main.py", "pytest -q @notes.txt"),
+                   "pytest", "pytest -q @src/app/main.py", "pytest -q @notes.txt",
+                   "PYTEST_ADDOPTS=@notes.txt pytest -q", "CI=1 pytest -q"),
         "gradle": ("./gradlew publish test", "./gradlew test publish", "./gradlew assemble",
                    "./gradlew test --tests evil", "./gradlew test app:publish",
                    "./gradlew test :publish", "./gradlew app:publish test --tests app.FooTest",
-                   "./gradlew test app:run", "./gradlew test --tests app:FooTest"),
+                   "./gradlew test app:run", "./gradlew test --tests app:FooTest",
+                   "JAVA_TOOL_OPTIONS=-javaagent:/tmp/x.jar ./gradlew test"),
         "go": ("go doc -src fmt.Println test", "go run x.go test", "go test run", "go build ./...",
-               "go test -coverprofile=c.out ./...", "go test ../x"),
+               "go test -coverprofile=c.out ./...", "go test ../x",
+               "GOFLAGS=-toolexec=/tmp/x go test ./..."),
         "rust": ("cargo run test", "cargo install foo test", "cargo build", "cargo test evil",
-                 "cargo test --target-dir=/tmp", "cargo test x:../y", "cargo test ..::sibling"),
+                 "cargo test --target-dir=/tmp", "cargo test x:../y", "cargo test ..::sibling",
+                 "RUSTC_WRAPPER=/tmp/x cargo test"),
     }
 
     @staticmethod
@@ -208,6 +213,18 @@ class TestShapesStayNarrow(unittest.TestCase):
             for command in commands:
                 self.assertFalse(matcher.allows(shlex.split(command)), (stack, command))
 
+    def test_an_env_assignment_before_the_command_is_denied(self):
+        for stack in ("node", "python", "gradle", "go", "rust"):
+            draft = stacks.draft(stack, project(empty_dir("pplrepo-")))
+            self.assertEqual([row["env_prefix"] for row in draft["doc"]["guard"]["shape"]],
+                             [False], stack)
+
+    def test_the_example_harness_shapes_keep_their_env_prefix(self):
+        for stack in ("maven", "make", "generic"):
+            draft = stacks.draft(stack, project(empty_dir("pplrepo-")))
+            self.assertEqual([row["env_prefix"] for row in draft["doc"]["guard"]["shape"]],
+                             [True], stack)
+
     def test_each_free_arg_shape_keeps_only_the_test_goal(self):
         for stack in ("node", "gradle", "go", "rust"):
             draft = stacks.draft(stack, project(empty_dir("pplrepo-")))
@@ -220,7 +237,8 @@ class TestGateFragments(unittest.TestCase):
             "(`app.FooTest`, `mod::my_test`, `tests/test_x.py::T::t`, `./pkg/...`): "
             "a plain word is refused.\n")
     GO_NOTE = ("- Run only `%s` for focused runs. Name the test with a trailing slash "
-               "(`-run TestFoo/`) or name a package path (`./pkg/...`): a plain word is refused.\n")
+               "(`-run TestFoo/`), or run `go test ./pkg/...` for one package: "
+               "a plain word is refused.\n")
     RUST_NOTE = ("- Run only `%s` for focused runs. Name the test by its module path "
                  "(`mod::my_test`): a plain word is refused.\n")
     GRADLE_NOTE = ("- Run only `%s` for focused runs. Name the test by its class or method "

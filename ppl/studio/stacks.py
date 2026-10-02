@@ -28,8 +28,8 @@ SAFE_GRADLE_ARGS = (r"^(?:--?[A-Za-z][A-Za-z0-9-]*|--"
 
 NAMING_GENERIC = ("Name the test with a path or a qualified name "
                   "(`app.FooTest`, `mod::my_test`, `tests/test_x.py::T::t`, `./pkg/...`)")
-NAMING_GO = ("Name the test with a trailing slash (`-run TestFoo/`) "
-             "or name a package path (`./pkg/...`)")
+NAMING_GO = ("Name the test with a trailing slash (`-run TestFoo/`), "
+             "or run `go test ./pkg/...` for one package")
 NAMING_RUST = "Name the test by its module path (`mod::my_test`)"
 NAMING_GRADLE = ("Name the test by its class or method "
                  "(`--tests app.FooTest`, `--tests app.FooTest.bar`)")
@@ -37,6 +37,8 @@ NAMING_GRADLE = ("Name the test by its class or method "
 INSTALL_EDITABLE = "python3 -m pip install -e ."
 INSTALL_REQUIREMENTS = "python3 -m pip install -r requirements.txt"
 
+# The presets leave the shapes' env_prefix off: the cage takes any value in an
+# env assignment, so one token ahead of argv0 would carry what the classes above refuse.
 STACKS = {
     "node": {
         "label": "Node.js (npm)", "markers": ("package.json",), "base": "example-generic",
@@ -44,7 +46,7 @@ STACKS = {
         "gates": [{"name": "install", "command": "npm ci"},
                   {"name": "focused-tests", "command": "npm test -- <test_class>"},
                   {"name": "integration-tests", "command": "npm test"}],
-        "shapes": [{"argv0": "npm", "env_prefix": True, "required_flags": [],
+        "shapes": [{"argv0": "npm", "env_prefix": False, "required_flags": [],
                     "one_goal_of": ["test"], "free_args": SAFE_FREE_ARGS}],
     },
     "python": {
@@ -54,7 +56,7 @@ STACKS = {
         "gates": [{"name": "install", "command": INSTALL_EDITABLE},
                   {"name": "focused-tests", "command": "pytest -q <test_class>"},
                   {"name": "integration-tests", "command": "pytest -q"}],
-        "shapes": [{"argv0": "pytest", "env_prefix": True, "required_flags": [["-q", ""]],
+        "shapes": [{"argv0": "pytest", "env_prefix": False, "required_flags": [["-q", ""]],
                     "one_goal_of": [], "free_args": SAFE_FREE_ARGS}],
     },
     "maven": {"label": "Java (Maven)", "markers": ("pom.xml",), "base": "example-maven"},
@@ -65,7 +67,7 @@ STACKS = {
         "gates": [{"name": "build", "command": "./gradlew assemble"},
                   {"name": "focused-tests", "command": "./gradlew test --tests <test_class>"},
                   {"name": "integration-tests", "command": "./gradlew check"}],
-        "shapes": [{"argv0": "./gradlew", "env_prefix": True, "required_flags": [],
+        "shapes": [{"argv0": "./gradlew", "env_prefix": False, "required_flags": [],
                     "one_goal_of": ["test"], "free_args": SAFE_GRADLE_ARGS}],
     },
     "go": {
@@ -75,7 +77,7 @@ STACKS = {
                   {"name": "lint", "command": "go vet ./..."},
                   {"name": "focused-tests", "command": "go test ./... -run <test_class>"},
                   {"name": "integration-tests", "command": "go test ./..."}],
-        "shapes": [{"argv0": "go", "env_prefix": True, "required_flags": [],
+        "shapes": [{"argv0": "go", "env_prefix": False, "required_flags": [],
                     "one_goal_of": ["test"], "free_args": SAFE_FREE_ARGS}],
     },
     "rust": {
@@ -85,7 +87,7 @@ STACKS = {
                   {"name": "lint", "command": "cargo clippy"},
                   {"name": "focused-tests", "command": "cargo test <test_class>"},
                   {"name": "integration-tests", "command": "cargo test"}],
-        "shapes": [{"argv0": "cargo", "env_prefix": True, "required_flags": [],
+        "shapes": [{"argv0": "cargo", "env_prefix": False, "required_flags": [],
                     "one_goal_of": ["test"], "free_args": SAFE_FREE_ARGS}],
     },
     "make": {"label": "Make", "markers": ("Makefile", "GNUmakefile"), "base": "example-generic"},
