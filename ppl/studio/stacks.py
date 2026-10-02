@@ -2,7 +2,10 @@
 or when the extraction fails: the build files in the repo root name the
 stack, and the stack names its gates and the command shapes the test worker
 may run. Every preset is built on one of the two example harnesses, so the
-tracker lists and the skill fragments come from one place."""
+tracker lists and the skill fragments come from one place. The shapes are
+lexical, like the shipped examples: a bare flag the tool reads as a write or
+exec target (for example `go test -o x.bin ./...` or `-exec ./script`) still
+passes."""
 import copy
 import json
 import tomllib
@@ -11,9 +14,16 @@ from pathlib import Path
 from .. import harness, paths
 from ..errors import PplError
 
-# The tokens a test-worker command may carry besides its goal: words, paths,
-# test names, key=value. No shell metacharacter, no space, never empty.
-SAFE_FREE_ARGS = r"^[A-Za-z0-9_./:@=,+-]+$"
+# The tokens a test-worker command may carry besides its goal. The cage matches
+# them anywhere in the line, so a plain word (a subcommand such as `run`, `doc`
+# or `publish`) is refused: only a bare dash flag with no attached value, `--`,
+# or a relative path or qualified name carrying a `.`, `/` or `:` passes.
+# Never an absolute path, a `..` segment, a space or a shell metacharacter.
+SAFE_FREE_ARGS = (r"^(?:--?[A-Za-z][A-Za-z0-9-]*|--"
+                  r"|(?!(?:.*/)?\.\.(?:/|$))[A-Za-z0-9_@+,.][A-Za-z0-9_@+,-]*[./:][A-Za-z0-9_./:@+,-]*)$")
+
+INSTALL_EDITABLE = "python3 -m pip install -e ."
+INSTALL_REQUIREMENTS = "python3 -m pip install -r requirements.txt"
 
 STACKS = {
     "node": {
@@ -23,16 +33,16 @@ STACKS = {
                   {"name": "focused-tests", "command": "npm test -- <test_class>"},
                   {"name": "integration-tests", "command": "npm test"}],
         "shapes": [{"argv0": "npm", "env_prefix": True, "required_flags": [],
-                    "one_goal_of": ["ci", "test"], "free_args": SAFE_FREE_ARGS}],
+                    "one_goal_of": ["test"], "free_args": SAFE_FREE_ARGS}],
     },
     "python": {
         "label": "Python (pytest)",
         "markers": ("pyproject.toml", "setup.cfg", "setup.py", "requirements.txt"),
-        "base": "example-generic", "build": "python3 -m pip install -e .",
-        "gates": [{"name": "install", "command": "python3 -m pip install -e ."},
-                  {"name": "focused-tests", "command": "python3 -m pytest -q <test_class>"},
-                  {"name": "integration-tests", "command": "python3 -m pytest -q"}],
-        "shapes": [{"argv0": "python3", "env_prefix": True, "required_flags": [["-m", "^pytest$"]],
+        "base": "example-generic", "build": INSTALL_EDITABLE,
+        "gates": [{"name": "install", "command": INSTALL_EDITABLE},
+                  {"name": "focused-tests", "command": "pytest -q <test_class>"},
+                  {"name": "integration-tests", "command": "pytest -q"}],
+        "shapes": [{"argv0": "pytest", "env_prefix": True, "required_flags": [["-q", ""]],
                     "one_goal_of": [], "free_args": SAFE_FREE_ARGS}],
     },
     "maven": {"label": "Java (Maven)", "markers": ("pom.xml",), "base": "example-maven"},
@@ -44,7 +54,7 @@ STACKS = {
                   {"name": "focused-tests", "command": "./gradlew test --tests <test_class>"},
                   {"name": "integration-tests", "command": "./gradlew check"}],
         "shapes": [{"argv0": "./gradlew", "env_prefix": True, "required_flags": [],
-                    "one_goal_of": ["assemble", "test", "check"], "free_args": SAFE_FREE_ARGS}],
+                    "one_goal_of": ["test"], "free_args": SAFE_FREE_ARGS}],
     },
     "go": {
         "label": "Go", "markers": ("go.mod",), "base": "example-generic", "build": "go build ./...",
@@ -53,7 +63,7 @@ STACKS = {
                   {"name": "focused-tests", "command": "go test ./... -run <test_class>"},
                   {"name": "integration-tests", "command": "go test ./..."}],
         "shapes": [{"argv0": "go", "env_prefix": True, "required_flags": [],
-                    "one_goal_of": ["build", "test", "vet"], "free_args": SAFE_FREE_ARGS}],
+                    "one_goal_of": ["test"], "free_args": SAFE_FREE_ARGS}],
     },
     "rust": {
         "label": "Rust (cargo)", "markers": ("Cargo.toml",), "base": "example-generic",
@@ -63,7 +73,7 @@ STACKS = {
                   {"name": "focused-tests", "command": "cargo test <test_class>"},
                   {"name": "integration-tests", "command": "cargo test"}],
         "shapes": [{"argv0": "cargo", "env_prefix": True, "required_flags": [],
-                    "one_goal_of": ["build", "test", "clippy", "check"], "free_args": SAFE_FREE_ARGS}],
+                    "one_goal_of": ["test"], "free_args": SAFE_FREE_ARGS}],
     },
     "make": {"label": "Make", "markers": ("Makefile", "GNUmakefile"), "base": "example-generic"},
     "generic": {"label": "Anything else (make targets to adjust)", "markers": (),
@@ -116,6 +126,15 @@ def _node_gates(root, gates):
     return gates[:1] + added + gates[1:], sources
 
 
+def _python_install(root):
+    """Install from requirements.txt only when no project file names the package."""
+    names_package = any((root / marker).is_file()
+                        for marker in ("pyproject.toml", "setup.cfg", "setup.py"))
+    if (root / "requirements.txt").is_file() and not names_package:
+        return INSTALL_REQUIREMENTS
+    return INSTALL_EDITABLE
+
+
 def draft(stack, project):
     """A draft harness for `project` from the stack's preset."""
     if stack not in STACKS:
@@ -138,20 +157,27 @@ def draft(stack, project):
     doc["env"] = {}
     kind = project.get("forge_hint")
     if kind in harness.FORGES:
-        doc["forge"] = {"kind": kind}
-        if kind == "gitlab":
-            doc["forge"]["mcp_server"] = "GitLab-MCP"
         sources["forge.kind"] = "git remote"
     else:
+        kind = "github"
         sources["forge.kind"] = label
+    doc["forge"] = {"kind": kind}
+    if kind == "gitlab":
+        doc["forge"]["mcp_server"] = "GitLab-MCP"
     if "gates" in spec:
         gates = [dict(gate) for gate in spec["gates"]]
+        build = spec["build"]
         if stack == "node":
             gates, extra = _node_gates(Path(repo_path), gates)
             sources.update(extra)
+            if "gate:build" in extra:
+                build = "npm run build"
+        elif stack == "python":
+            build = _python_install(Path(repo_path))
+            gates[0]["command"] = build
         doc["gate"] = gates
         doc["guard"] = {"shape": copy.deepcopy(spec["shapes"])}
-        fragments.update(gate_fragments(gates, spec["build"]))
+        fragments.update(gate_fragments(gates, build))
     for gate in doc.get("gate") or []:
         sources.setdefault("gate:%s" % gate["name"], label)
     for index, _ in enumerate((doc.get("guard") or {}).get("shape") or []):
