@@ -530,11 +530,13 @@ def workspace():
         return os.getcwd()
 
 
-def report(task_id=None):
+def report(task_id=None, cwd=None):
     """What `ppl doctor` prints as JSON: the hook registration, the setup
-    report, the active run's isolation and whether the registered guard runs."""
+    report, the active run's isolation and whether the registered guard runs.
+    `cwd` is the directory whose .claude/settings.local.json is read, the
+    process cwd by default."""
     from . import run
-    inspected = inspect()
+    inspected = inspect(cwd)
     task_id = task_id or run.active()
     isolated = None
     if task_id:
@@ -547,7 +549,7 @@ def report(task_id=None):
     result["task"] = task_id
     result["isolated"] = isolated
     result["mismatch"] = mismatch(isolated, inspected) if isolated is not None else None
-    runs = hook_runs(workspace=workspace())
+    runs = hook_runs(cwd=cwd, workspace=workspace())
     result["hook_runs"] = runs["ok"]
     if runs["problem"]:
         result["hook_runs_problem"] = runs["problem"]

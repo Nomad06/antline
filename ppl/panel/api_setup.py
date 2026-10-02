@@ -8,7 +8,7 @@ from .jobs import JOBS
 def _run(params, body, query):
     step = params["step"]
     wizard.check_step(step)
-    answers = wizard.check_answers((body or {}).get("answers") or {})
+    answers = wizard.check_answers((body or {}).get("answers", {}))
     return {"job": JOBS.start("setup", lambda emit: wizard.run_step(step, answers, emit))}
 
 
@@ -17,4 +17,5 @@ def register(router):
     router.add("POST", "/api/setup/<step>", _run)
     router.add("POST", "/api/setup/<step>/skip",
                lambda params, body, query: wizard.skip_step(params["step"]))
-    router.add("GET", "/api/doctor", lambda params, body, query: doctor.report())
+    router.add("GET", "/api/doctor",
+               lambda params, body, query: doctor.report(cwd=doctor.workspace()))

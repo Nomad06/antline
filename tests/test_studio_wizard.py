@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import unittest
 from pathlib import Path
@@ -102,6 +103,35 @@ class TestWizardApi(WizardTestCase):
         self.assertEqual(job["state"], "failed")
         self.assertEqual(job["error"]["error_code"], "SETUP_INCOMPLETE")
 
+    def go_elsewhere(self):
+        """Make the server process cwd an empty directory, as `ppl serve` started anywhere else has."""
+        elsewhere = Path(tmphome.mkdtemp(prefix="pplcwd-"))
+        previous = os.getcwd()
+        os.chdir(elsewhere)
+        self.addCleanup(os.chdir, previous)
+        return elsewhere
+
+    def test_an_answer_that_is_not_a_string_is_refused_and_starts_no_job(self):
+        elsewhere = self.go_elsewhere()
+        for answers in ({"workspace": None}, {"verify": False}, {"hooks": ["local"]}):
+            with self.subTest(answers=answers):
+                status, payload, _ = panel_client.call("POST", "/api/setup/claude",
+                                                       body={"answers": answers})
+                self.assertEqual(status, 400, payload)
+                self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+                self.assertIn(next(iter(answers)), payload["message"])
+                self.assertNotIn("job", payload)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_answers_that_are_not_an_object_are_refused(self):
+        for answers in ([], False, 0, "claude"):
+            with self.subTest(answers=answers):
+                status, payload, _ = panel_client.call("POST", "/api/setup/paths",
+                                                       body={"answers": answers})
+                self.assertEqual(status, 400, payload)
+                self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+                self.assertNotIn("job", payload)
+
     def test_the_doctor_route_returns_the_doctor_report(self):
         status, report, _ = panel_client.call("GET", "/api/doctor")
         self.assertEqual(status, 200)
@@ -109,10 +139,24 @@ class TestWizardApi(WizardTestCase):
             self.assertIn(key, report)
 
 
+    def test_the_doctor_route_reports_the_configured_workspace_not_the_server_cwd(self):
+        job = self.run_step("claude", self.answers)
+        self.assertEqual(job["result"]["done"], ["claude"])
+        self.go_elsewhere()
+        status, report, _ = panel_client.call("GET", "/api/doctor")
+        self.assertEqual(status, 200)
+        self.assertEqual(report["registration"], "local")
+        self.assertEqual(report["local"]["path"],
+                         str(self.workspace / ".claude" / "settings.local.json"))
+        self.assertIs(report["hook_runs"], True)
+
+
 class TestSameResultAsTheTerminal(WizardTestCase):
     def snapshot(self):
         agents = self.workspace / ".claude" / "agents"
-        files = {"config": paths.config_file().read_text(encoding="utf-8"),
+        files = {"settings": (self.workspace / ".claude" / "settings.local.json")
+                 .read_text(encoding="utf-8"),
+                 "config": paths.config_file().read_text(encoding="utf-8"),
                  "routing": paths.routing_file().read_text(encoding="utf-8"),
                  "harness": (paths.harness_dir("mine") / "harness.toml").read_text(encoding="utf-8"),
                  "skill": (self.workspace / ".claude" / "skills" / "pipeline" / "SKILL.md")
@@ -126,6 +170,8 @@ class TestSameResultAsTheTerminal(WizardTestCase):
             job = self.run_step(step, self.answers)
             self.assertEqual(job["result"]["done"], [step], job)
         browser = self.snapshot()
+        # the terminal run has to write every file itself, none may be left over from the browser's
+        shutil.rmtree(self.workspace / ".claude")
         os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
         result = setup.run(answers=self.answers, non_interactive=True, probe=ok_probe,
                            forge_check=ok_forge, emit=lambda line: None)

@@ -9,6 +9,9 @@ from ..errors import PplError
 PROBE = None
 FORGE_CHECK = None
 
+_JSON_TYPES = {type(None): "null", bool: "a boolean", int: "a number", float: "a number",
+               list: "a list", dict: "an object"}
+
 
 def check_step(step):
     if step not in setup.STEPS:
@@ -24,7 +27,11 @@ def check_answers(answers):
     if unknown:
         raise PplError("SCHEMA_INVALID", "unknown answer key %s (keys: %s, %s<name>)"
                        % (", ".join(unknown), ", ".join(setup.ANSWER_KEYS), setup.TIER_PREFIX))
-    return {str(key): str(value) for key, value in answers.items()}
+    wrong = ["%s (%s)" % (key, _JSON_TYPES.get(type(value), type(value).__name__))
+             for key, value in answers.items() if not isinstance(value, str)]
+    if wrong:
+        raise PplError("SCHEMA_INVALID", "answer values must be strings: %s" % ", ".join(wrong))
+    return {str(key): value for key, value in answers.items()}
 
 
 def _next(steps):
