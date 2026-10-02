@@ -5,6 +5,7 @@ exactly the way they read an installed harness."""
 import re
 import shutil
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 
@@ -17,8 +18,14 @@ FRAGMENTS = (("skill/gates.md", "skill/baseline.md", "skill/extra-gates.md",
              + tuple("templates/%s.part" % role for role in routing.REQUIRED_ROLES))
 INTERPRETERS = stacks.INTERPRETERS
 # Endings that git and setup keep for their own directories: a source ending in
-# .git is cloned, and setup removes <name>.replacing and <name>.replaced.
+# .git is cloned, and setup removes <name>.replacing and <name>.replaced. Compared
+# in lower case because a case-insensitive filesystem makes Demo.Replacing the
+# same directory as demo.replacing.
 _RESERVED_SUFFIXES = (".git", ".replacing", ".replaced")
+# One check at a time: every check of a name rewrites the same draft directory,
+# so two overlapping ones would trip over each other and a check could read back
+# another request's document. Install works on a private copy and never takes it.
+_CHECK_LOCK = threading.Lock()
 # A free_args class that matches every probe takes any token. The probes stay
 # short and the plain word comes first: a catastrophic regex a user typed stalls
 # the whole server (re holds the GIL), and all() stops at the first refusal.
@@ -33,7 +40,7 @@ def check_name(name):
     if not isinstance(name, str) or not harness._NAME_RE.fullmatch(name):
         raise PplError("SCHEMA_INVALID", "harness name %r must be letters, digits, '.', '_' or "
                        "'-', starting with a letter or digit" % (name,))
-    if name.endswith(_RESERVED_SUFFIXES):
+    if name.lower().endswith(_RESERVED_SUFFIXES):
         raise PplError("SCHEMA_INVALID", "harness name %r must not end in %s: git and setup use "
                        "those endings for their own directories"
                        % (name, ", ".join(_RESERVED_SUFFIXES)))
@@ -165,7 +172,8 @@ def check(name, doc, fragments):
     then loaded back, validated, its skill rendered and every role's tools
     composed. A draft problem comes back as ok False with the message, never a
     raise."""
-    return _checked(name, doc, fragments, drafts_dir())[1]
+    with _CHECK_LOCK:
+        return _checked(name, doc, fragments, drafts_dir())[1]
 
 
 def install(name, doc, fragments, replace, emit):

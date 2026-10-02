@@ -1,6 +1,7 @@
 import copy
 import os
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -102,6 +103,38 @@ class TestCheck(DraftTestCase):
                     drafts.check_name("demo" + suffix)
                 self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
                 self.assertIn(suffix, caught.exception.message)
+
+    def test_the_reserved_endings_are_refused_in_any_letter_case(self):
+        for name in ("Demo.Replacing", "DEMO.REPLACED", "x.GIT"):
+            with self.subTest(name=name):
+                with self.assertRaises(PplError) as caught:
+                    drafts.check_name(name)
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+
+    def test_overlapping_checks_of_one_name_each_answer_for_their_own_document(self):
+        valid = self.preset()
+        invalid = copy.deepcopy(valid)
+        invalid["doc"]["knowledge"]["extra_tools"] = ["mcp__atlassian__editJiraIssue"]
+        threads, rounds = 8, 12
+        start = threading.Barrier(threads)
+        outcomes = []
+
+        def work(index):
+            draft = invalid if index % 2 else valid
+            start.wait()
+            for _ in range(rounds):
+                try:
+                    result = drafts.check("demo", draft["doc"], draft["fragments"])
+                    outcomes.append((index % 2 == 0, result["ok"]))
+                except Exception as exc:
+                    outcomes.append((index % 2 == 0, exc))
+        workers = [threading.Thread(target=work, args=(index,)) for index in range(threads)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        self.assertEqual(len(outcomes), threads * rounds)
+        self.assertEqual([outcome for outcome in outcomes if outcome[0] != outcome[1]], [])
 
     def test_a_name_with_a_trailing_newline_is_refused_and_leaves_no_directory(self):
         draft = self.preset()
