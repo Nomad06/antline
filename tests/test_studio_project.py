@@ -126,6 +126,16 @@ class TestMdFiles(unittest.TestCase):
         self.assertEqual([item["path"] for item in files], ["AGENTS.md"])
         self.assertEqual(skipped, [])
 
+    def test_find_md_lists_only_regular_files_inside_the_repository(self):
+        repo = panel_client.make_repo({"b/CLAUDE.md": "# b\n", "a/README.md": "x\n"})
+        outside = Path(tmphome.mkdtemp(prefix="pplout-")) / "notes.md"
+        outside.write_text("private\n", encoding="utf-8")
+        (repo / "AGENTS.md").symlink_to(outside)
+        (repo / "a" / "CLAUDE.md").symlink_to(repo / ".git" / "config")
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(repo / "CLAUDE.md")
+        self.assertEqual([item["path"] for item in project.find_md(repo)], ["b/CLAUDE.md"])
+
     def test_collect_refuses_a_selected_symlink_that_leaves_the_repository(self):
         repo = panel_client.make_repo({"README.md": "demo\n"})
         outside = Path(tmphome.mkdtemp(prefix="pplout-")) / "notes.md"

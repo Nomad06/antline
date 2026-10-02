@@ -124,6 +124,13 @@ class TestDrafts(unittest.TestCase):
         self.assertEqual([gate["name"] for gate in draft["doc"]["gate"]],
                          ["install", "focused-tests", "integration-tests"])
 
+    def test_a_deeply_nested_package_json_adds_no_gates(self):
+        root = empty_dir("pplrepo-")
+        (root / "package.json").write_text("[" * 150_000, encoding="utf-8")
+        draft = stacks.draft("node", project(root))
+        self.assertEqual([gate["name"] for gate in draft["doc"]["gate"]],
+                         ["install", "focused-tests", "integration-tests"])
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs mkfifo")
     def test_a_fifo_package_json_does_not_hang_the_draft(self):
         root = empty_dir("pplrepo-")

@@ -150,7 +150,7 @@ def _package_scripts(root):
         if len(data) > PACKAGE_JSON_MAX_BYTES:
             return None
         return json.loads(data.decode("utf-8")).get("scripts")
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         return None
 
 
