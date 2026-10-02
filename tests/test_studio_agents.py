@@ -1,4 +1,5 @@
 import copy
+import importlib
 import os
 import sys
 import tomllib
@@ -10,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
-from ppl import config, harness, models, paths, routing
+from ppl import boundary, config, harness, models, paths, routing, rules, tomlout
 from ppl.errors import PplError
 from ppl.studio import drafts, enforced, files
 
@@ -52,6 +53,32 @@ class TestEnforced(unittest.TestCase):
     def test_an_unknown_role_is_refused(self):
         with self.assertRaises(PplError):
             enforced.for_role("ppl-intern")
+
+    def test_the_guard_rule_on_the_ppl_cli_and_the_operator_halt_are_on_every_role_page(self):
+        for role in routing.REQUIRED_ROLES:
+            self.assertTrue({"R-GUARD-PPL-CLI-DENIED", "R-OPERATOR-HALT-HOOK"} <= self.ids(role), role)
+
+    def test_the_read_only_tool_rule_is_on_read_only_role_pages_only(self):
+        for role, rule in boundary.ROLE_RULES.items():
+            if rule["may_write"]:
+                self.assertNotIn("R-ROLE-TOOLS-READONLY", self.ids(role), role)
+            else:
+                self.assertIn("R-ROLE-TOOLS-READONLY", self.ids(role), role)
+
+    def test_the_writing_roles_come_from_the_guards_role_table(self):
+        self.addCleanup(importlib.reload, enforced)
+        changed = {"ppl-verifier": {"may_write": True, "tests": "deny"}}
+        with mock.patch.dict(boundary.ROLE_RULES, changed):
+            importlib.reload(enforced)
+            self.assertIn("R-ROLE-FORBIDDEN-PATHS", self.ids("ppl-verifier"))
+        importlib.reload(enforced)
+        self.assertNotIn("R-ROLE-FORBIDDEN-PATHS", self.ids("ppl-verifier"))
+
+    def test_the_rule_table_is_read_through_the_matrix_loader(self):
+        with mock.patch.object(rules, "default_path", return_value=paths.home() / "no-rules.toml"):
+            with self.assertRaises(PplError) as caught:
+                enforced.for_role("ppl-verifier")
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
 
     def test_a_rule_carries_what_the_page_shows(self):
         rows = enforced.for_role("ppl-verifier")
@@ -133,6 +160,54 @@ class TestAgentsApi(AgentsTestCase):
         self.assertIn("name: ppl-test-worker", data["rendered"])
         self.assertTrue(data["enforced"])
 
+    def test_a_missing_rule_table_is_an_error_answer_not_a_crash(self):
+        with mock.patch.object(rules, "default_path", return_value=paths.home() / "no-rules.toml"):
+            status, payload, _ = panel_client.call("GET", "/api/agents/ppl-verifier")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+
+    def break_the_harness(self):
+        (paths.harness_dir("demo") / "harness.toml").write_text("this is [not toml\n", encoding="utf-8")
+
+    def test_the_overview_reports_no_harness_error_when_the_harness_loads(self):
+        status, data, _ = panel_client.call("GET", "/api/agents")
+        self.assertIsNone(data["harness_error"])
+
+    def test_an_invalid_active_harness_does_not_block_the_routing_editor(self):
+        self.break_the_harness()
+        status, data, _ = panel_client.call("GET", "/api/agents")
+        self.assertEqual(status, 200)
+        self.assertIsNone(data["harness"])
+        self.assertIn("not valid TOML", data["harness_error"])
+        self.assertEqual([row["role"] for row in data["roles"]], list(routing.REQUIRED_ROLES))
+        worker = next(row for row in data["roles"] if row["role"] == "ppl-code-worker")
+        self.assertEqual(worker["tools"], list(routing.BASE_TOOLS["ppl-code-worker"]["tools"]))
+        self.assertEqual(data["routing_hash"], files.read("routing")["hash"])
+
+    def test_a_role_and_its_preview_still_refuse_an_invalid_active_harness(self):
+        self.break_the_harness()
+        status, payload, _ = panel_client.call("GET", "/api/agents/ppl-verifier")
+        self.assertEqual((status, payload["error_code"]), (400, "HARNESS_INVALID"))
+        status, payload, _ = panel_client.call("POST", "/api/agents/ppl-verifier/preview", body={})
+        self.assertEqual((status, payload["error_code"]), (400, "HARNESS_INVALID"))
+
+    def test_the_overview_hashes_the_bytes_it_parsed(self):
+        read = files.read
+
+        def edit_then_read(key):
+            if key == "routing":
+                current = read(key)["text"]
+                paths.routing_file().write_text(current.replace('effort = "high"', 'effort = "low"'),
+                                                encoding="utf-8")
+            return read(key)
+
+        with mock.patch.object(files, "read", edit_then_read), \
+                mock.patch.object(models, "status", return_value=[]):
+            status, data, _ = panel_client.call("GET", "/api/agents")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["routing_hash"], files.read("routing")["hash"])
+        self.assertEqual(data["routing"]["roles"]["ppl-briefer"]["params"]["effort"], "low")
+
     def test_a_role_names_the_file_its_project_notes_live_in(self):
         key = "harness:demo:templates/ppl-test-worker.part"
         status, data, _ = panel_client.call("GET", "/api/agents/ppl-test-worker")
@@ -195,6 +270,25 @@ class TestAgentsApi(AgentsTestCase):
         self.assertEqual((kept / "skill" / "gates.md").read_text(encoding="utf-8"), "kept\n")
         self.assertEqual([item.name for item in drafts.drafts_dir().iterdir()], ["demo"])
 
+    def test_previews_write_no_agent_file(self):
+        doc = routing.load()
+        doc["roles"]["ppl-code-worker"]["params"]["effort"] = "max"
+        for body in ({"overlay": "- Use pnpm, never npm.\n"}, {"routing": doc}, {}):
+            status, _, _ = panel_client.call("POST", "/api/agents/ppl-code-worker/preview", body=body)
+            self.assertEqual(status, 200)
+        self.assertEqual(list(self.agents_dir.iterdir()), [])
+
+    def test_notes_with_a_nul_are_refused_by_the_preview_and_the_save(self):
+        key = "harness:demo:templates/ppl-verifier.part"
+        before = files.read(key)
+        status, payload, _ = panel_client.call("POST", "/api/agents/ppl-verifier/preview",
+                                               body={"overlay": "- a\u0000b\n"})
+        self.assertEqual((status, payload["error_code"]), (400, "SCHEMA_INVALID"))
+        status, payload, _ = panel_client.call("PUT", "/api/agents/ppl-verifier/overlay",
+                                               body={"text": "- a\u0000b\n", "hash": before["hash"]})
+        self.assertEqual((status, payload["error_code"]), (400, "SCHEMA_INVALID"))
+        self.assertEqual(files.read(key), before)
+
     def test_preview_refuses_notes_that_are_not_text(self):
         status, payload, _ = panel_client.call("POST", "/api/agents/ppl-verifier/preview",
                                                body={"overlay": ["- one"]})
@@ -242,6 +336,33 @@ class TestAgentsApi(AgentsTestCase):
         self.assertEqual(status, 400)
         self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
         self.assertEqual(files.read("routing"), before)
+
+    def test_saving_routing_with_both_a_document_and_text_is_refused(self):
+        before = files.read("routing")
+        status, payload, _ = panel_client.call("PUT", "/api/routing",
+                                               body={"config": routing.load(), "text": before["text"],
+                                                     "hash": before["hash"]})
+        self.assertEqual((status, payload["error_code"]), (400, "SCHEMA_INVALID"))
+        self.assertEqual(files.read("routing"), before)
+
+    def test_saving_a_model_that_would_add_frontmatter_lines_is_refused(self):
+        before = files.read("routing")
+        injected = "haiku\ntools: [Read, Edit, Write, Bash]"
+        doc = routing.load()
+        doc["tiers"]["light"]["model"] = injected
+        for body in ({"config": doc}, {"text": tomlout.dumps(doc)}):
+            status, payload, _ = panel_client.call("PUT", "/api/routing",
+                                                   body=dict(body, hash=before["hash"]))
+            self.assertEqual((status, payload["error_code"]), (400, "SCHEMA_INVALID"))
+        self.assertEqual(files.read("routing"), before)
+
+    def test_saving_a_model_id_with_brackets_works(self):
+        doc = routing.load()
+        doc["tiers"]["good"]["model"] = "opus[1m]"
+        status, _, _ = panel_client.call("PUT", "/api/routing",
+                                         body={"config": doc, "hash": files.read("routing")["hash"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(routing.load()["tiers"]["good"]["model"], "opus[1m]")
 
     def test_saving_routing_without_a_document_is_refused(self):
         status, payload, _ = panel_client.call("PUT", "/api/routing",

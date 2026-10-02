@@ -289,17 +289,23 @@ def check_harness(name, changes=()):
     return verdict
 
 
+def check_routing(doc):
+    """Refuse a routing document ppl cannot route with, whatever shape it has."""
+    if not isinstance(doc, dict):
+        raise PplError("SCHEMA_INVALID", "routing must be the routing document")
+    try:
+        routing.validate_config(doc)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise PplError("SCHEMA_INVALID", "routing.toml is not a routing document: %s" % exc)
+
+
 def validate(key, text):
     """Refuse content ppl would refuse: a routing.toml that does not route, or a
     harness file that leaves its harness invalid."""
     if not isinstance(text, str):
         raise PplError("SCHEMA_INVALID", "the content of %s must be text" % key)
     if key == "routing":
-        doc = _toml(text, "routing.toml", "SCHEMA_INVALID")
-        try:
-            routing.validate_config(doc)
-        except (AttributeError, KeyError, TypeError, ValueError) as exc:
-            raise PplError("SCHEMA_INVALID", "routing.toml is not a routing document: %s" % exc)
+        check_routing(_toml(text, "routing.toml", "SCHEMA_INVALID"))
         return
     resolve(key)
     name, rel = _split(key)

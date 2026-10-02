@@ -84,10 +84,33 @@ def load():
         raise PplError("SCHEMA_INVALID", "no routing.toml at %s" % path)
     except tomllib.TOMLDecodeError as exc:
         raise PplError("SCHEMA_INVALID", "routing.toml at %s is not valid TOML: %s" % (path, exc))
+    return _require_roles(config)
+
+
+def loads(text):
+    """The routing document of routing.toml's text, checked as load() checks the file."""
+    try:
+        config = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise PplError("SCHEMA_INVALID", "routing.toml at %s is not valid TOML: %s"
+                       % (paths.routing_file(), exc))
+    return _require_roles(config)
+
+
+def _require_roles(config):
     missing = [r for r in REQUIRED_ROLES if r not in config.get("roles", {})]
     if missing:
         raise PplError("SCHEMA_INVALID", "routing.toml is missing roles: %s" % ", ".join(missing))
     return config
+
+
+def _plain_id(value, what):
+    """A model or provider id is written into an agent file's frontmatter
+    unescaped, so it is one line of printable text. No stricter shape, an id
+    may carry a bracketed suffix."""
+    if not isinstance(value, str) or not value.strip() or not value.isprintable():
+        raise PplError("SCHEMA_INVALID", "%s must be a non-empty single line of text without "
+                       "control characters, got %r" % (what, value))
 
 
 def tiers(config=None):
@@ -101,6 +124,8 @@ def tiers(config=None):
             raise PplError("SCHEMA_INVALID",
                            "tier %r must be { provider = ..., model = ... } with string values"
                            % name)
+        _plain_id(entry["provider"], "tier %r provider" % name)
+        _plain_id(entry["model"], "tier %r model" % name)
     return table
 
 
@@ -120,6 +145,8 @@ def _concrete(config, role_name, entry):
     if "model" not in entry or "provider" not in entry:
         raise PplError("SCHEMA_INVALID",
                        "role %r must name a tier, or a provider and a model" % role_name)
+    _plain_id(entry["provider"], "role %r provider" % role_name)
+    _plain_id(entry["model"], "role %r model" % role_name)
     return entry
 
 
@@ -216,6 +243,7 @@ def validate_config(config):
     missing = [r for r in REQUIRED_ROLES if r not in (config.get("roles") or {})]
     if missing:
         raise PplError("SCHEMA_INVALID", "routing.toml is missing roles: %s" % ", ".join(missing))
+    tiers(config)
     for name in REQUIRED_ROLES:
         _entry_and_provider(config, name)
         for level, tier in _by_risk(config, name).items():

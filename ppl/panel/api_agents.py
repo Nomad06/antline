@@ -15,24 +15,16 @@ def _active():
     return name, harness.load(name)
 
 
-def _check_role(role):
-    if role not in routing.REQUIRED_ROLES:
-        raise PplError("SCHEMA_INVALID", "unknown role %r (roles: %s)"
-                       % (role, ", ".join(routing.REQUIRED_ROLES)))
-
-
 def _overlay_key(name, role):
     return "harness:%s:templates/%s.part" % (name, role)
 
 
-def _routing_document(doc):
-    if not isinstance(doc, dict):
-        raise PplError("SCHEMA_INVALID", "routing must be the routing document")
-    try:
-        routing.validate_config(doc)
-    except (AttributeError, KeyError, TypeError, ValueError) as exc:
-        raise PplError("SCHEMA_INVALID", "routing is not a routing document: %s" % exc)
-    return doc
+def _notes(value, message):
+    if not isinstance(value, str):
+        raise PplError("SCHEMA_INVALID", message)
+    if "\x00" in value:
+        raise PplError("SCHEMA_INVALID", "the project notes must not hold a NUL character")
+    return value
 
 
 def _verified():
@@ -45,22 +37,29 @@ def _verified():
 
 
 def overview(params, body, query):
-    doc = routing.load()
-    name, harness_doc = _active()
+    current = files.read("routing")
+    doc = routing.loads(current["text"])
+    try:
+        name, harness_doc = _active()
+        harness_error = None
+    except PplError as exc:
+        # a broken harness must not lock the routing editor
+        name, harness_doc, harness_error = None, None, exc.message
     states = _verified()
     roles = []
     for row in routing.summary(doc):
         tools = (routing.role_tools(row["role"], harness_doc) if harness_doc
                  else list(routing.BASE_TOOLS[row["role"]]["tools"]))
         roles.append(dict(row, tools=tools, verified=states.get(row["model"], "unverified")))
-    return {"roles": roles, "routing": doc, "routing_hash": files.read("routing")["hash"],
+    return {"roles": roles, "routing": doc, "routing_hash": current["hash"],
             "tiers": routing.tiers(doc), "effort_levels": list(routing.EFFORT_LEVELS),
-            "presets": presets.listing(), "preset": presets.matching(doc), "harness": name}
+            "presets": presets.listing(), "preset": presets.matching(doc), "harness": name,
+            "harness_error": harness_error}
 
 
 def detail(params, body, query):
     role = params["role"]
-    _check_role(role)
+    enforced.check_role(role)
     base = (paths.root() / "templates" / ("%s.md.body" % role)).read_text(encoding="utf-8")
     name, harness_doc = _active()
     return {"role": role, "base": base,
@@ -71,7 +70,7 @@ def detail(params, body, query):
 
 def preview(params, body, query):
     role = params["role"]
-    _check_role(role)
+    enforced.check_role(role)
     name, harness_doc = _active()
     if not harness_doc:
         raise PplError("SCHEMA_INVALID", "no active harness yet: finish the harness and apply "
@@ -79,12 +78,11 @@ def preview(params, body, query):
     body = body or {}
     routing_doc = body.get("routing")
     if routing_doc is not None:
-        _routing_document(routing_doc)
+        files.check_routing(routing_doc)
     overlay = body.get("overlay")
     if overlay is None:
         return {"rendered": routing.render(role, harness_doc, config=routing_doc)}
-    if not isinstance(overlay, str):
-        raise PplError("SCHEMA_INVALID", "overlay must be text")
+    _notes(overlay, "overlay must be text")
     fragments = files.harness_fragments(name)
     fragments["templates/%s.part" % role] = overlay
     # a private scratch root per preview: two previews never share a directory
@@ -99,6 +97,8 @@ def preview(params, body, query):
 
 def save_routing(params, body, query):
     body = body or {}
+    if "text" in body and "config" in body:
+        raise PplError("SCHEMA_INVALID", "send the routing document as config or as text, not both")
     if "text" in body:
         text = body["text"]
         if not isinstance(text, str):
@@ -116,13 +116,11 @@ def save_routing(params, body, query):
 
 def save_overlay(params, body, query):
     role = params["role"]
-    _check_role(role)
+    enforced.check_role(role)
     name, _ = _active()
     if not name:
         raise PplError("SCHEMA_INVALID", "no active harness yet: the project notes live in it")
-    text = (body or {}).get("text")
-    if not isinstance(text, str):
-        raise PplError("SCHEMA_INVALID", "text must be the project notes for the role")
+    text = _notes((body or {}).get("text"), "text must be the project notes for the role")
     key = _overlay_key(name, role)
     files.validate(key, text)
     return {"hash": files.save(key, text, (body or {}).get("hash"))}
