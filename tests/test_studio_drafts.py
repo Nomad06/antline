@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
@@ -54,11 +55,20 @@ class TestCheck(DraftTestCase):
         self.assertIn("not an MCP tool name", result["errors"][0])
 
     def test_a_shape_whose_free_args_take_anything_is_flagged(self):
-        draft = self.preset()
-        draft["doc"]["guard"]["shape"][0]["free_args"] = ".*"
-        result = drafts.check("demo", draft["doc"], draft["fragments"])
-        self.assertTrue(result["ok"])
-        self.assertIn("accepts any token", result["flags"][0]["reasons"][0])
+        for free_args in (".*", ".+", r"\S+", "[^ ]+", ".{1,}"):
+            with self.subTest(free_args=free_args):
+                draft = self.preset()
+                draft["doc"]["guard"]["shape"][0]["free_args"] = free_args
+                result = drafts.check("demo", draft["doc"], draft["fragments"])
+                self.assertTrue(result["ok"])
+                self.assertIn("accepts any token", result["flags"][0]["reasons"][0])
+
+    def test_a_narrow_free_args_class_is_not_flagged(self):
+        for free_args in ("[a-z]+", r"\w+", "^[A-Z_]+=[A-Za-z0-9_./:,-]*$"):
+            with self.subTest(free_args=free_args):
+                draft = self.preset()
+                draft["doc"]["guard"]["shape"][0]["free_args"] = free_args
+                self.assertEqual(drafts.check("demo", draft["doc"], draft["fragments"])["flags"], [])
 
     def test_a_shell_as_argv0_without_a_required_flag_is_flagged(self):
         draft = self.preset()
@@ -84,6 +94,72 @@ class TestCheck(DraftTestCase):
         draft = self.preset()
         draft["doc"]["forge"]["mcp_server"] = None
         self.assertTrue(drafts.check("demo", draft["doc"], draft["fragments"])["ok"])
+
+    def test_the_names_setup_keeps_for_its_own_directories_are_refused(self):
+        for suffix in (".git", ".replacing", ".replaced"):
+            with self.subTest(suffix=suffix):
+                with self.assertRaises(PplError) as caught:
+                    drafts.check_name("demo" + suffix)
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                self.assertIn(suffix, caught.exception.message)
+
+    def test_a_name_with_a_trailing_newline_is_refused_and_leaves_no_directory(self):
+        draft = self.preset()
+        with self.assertRaises(PplError) as caught:
+            drafts.check_name("demo\n")
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        result = drafts.check("demo\n", draft["doc"], draft["fragments"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(drafts.drafts_dir().exists() and any(drafts.drafts_dir().iterdir()))
+
+    def test_a_relative_repo_path_is_refused(self):
+        draft = self.preset()
+        draft["doc"]["repo"]["path"] = "relative/repo"
+        result = drafts.check("demo", draft["doc"], draft["fragments"])
+        self.assertFalse(result["ok"])
+        self.assertIn("absolute", result["errors"][0])
+
+    def test_a_home_relative_repo_path_is_accepted(self):
+        draft = self.preset()
+        draft["doc"]["repo"]["path"] = "~/work/demo"
+        self.assertTrue(drafts.check("demo", draft["doc"], draft["fragments"])["ok"])
+
+    def test_a_joined_forge_server_name_is_refused_by_role_tool_composition(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        draft = self.preset()
+        draft["doc"]["forge"] = {"kind": "gitlab", "mcp_server": "GitLab-MCP, Write"}
+        result = drafts.check("demo", draft["doc"], draft["fragments"])
+        self.assertFalse(result["ok"])
+        self.assertIn("not a single tool name", result["errors"][0])
+        with self.assertRaises(PplError) as caught:
+            drafts.install("demo", draft["doc"], draft["fragments"], False, lambda line: None)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertNotIn("demo", harness.list_names())
+
+    def test_write_refuses_bad_input_before_it_touches_the_previous_draft(self):
+        draft = self.preset()
+        target = drafts.write("demo", draft["doc"], draft["fragments"])
+
+        def snapshot():
+            return {path.relative_to(target).as_posix(): path.read_bytes()
+                    for path in sorted(target.rglob("*")) if path.is_file()}
+        before = snapshot()
+        changed = copy.deepcopy(draft["doc"])
+        changed["gate"][0]["command"] = "make all"
+        broken = copy.deepcopy(draft["doc"])
+        broken["task"] = {1: "not a toml key"}
+        bad_inputs = (("a non-text fragment", changed, dict(draft["fragments"], **{"skill/gates.md": 5})),
+                      ("an unknown fragment", changed, dict(draft["fragments"], **{"hooks/x.py": "x"})),
+                      ("a fragment that is not UTF-8", changed,
+                       dict(draft["fragments"], **{"skill/gates.md": "\ud800"})),
+                      ("a document TOML cannot hold", broken, draft["fragments"]))
+        for label, doc, fragments in bad_inputs:
+            with self.subTest(label):
+                with self.assertRaises(PplError) as caught:
+                    drafts.write("demo", doc, fragments)
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                self.assertEqual(snapshot(), before)
+                self.assertEqual([path.name for path in drafts.drafts_dir().iterdir()], ["demo"])
 
 
 class TestInstall(DraftTestCase):
@@ -114,6 +190,40 @@ class TestInstall(DraftTestCase):
         self.install(draft)
         self.assertEqual(self.install(draft)["done"], ["harness"])
 
+    def install_with_a_check_in_between(self, draft, other):
+        original = harness._copy
+
+        def interleaved(name, source, target):
+            drafts.check("demo", other["doc"], other["fragments"])
+            return original(name, source, target)
+        with mock.patch.object(harness, "_copy", interleaved):
+            return self.install(draft)
+
+    def test_a_concurrent_check_does_not_change_what_install_installs(self):
+        draft = self.preset()
+        other = copy.deepcopy(draft)
+        other["doc"]["gate"][0]["command"] = "make OTHER-TAB"
+        self.install_with_a_check_in_between(draft, other)
+        self.assertEqual(harness.load("demo")["gate"][0]["command"],
+                         draft["doc"]["gate"][0]["command"])
+
+    def test_install_leaves_no_private_copy_behind(self):
+        draft = self.preset()
+        self.install(draft)
+        broken = copy.deepcopy(draft)
+        broken["doc"]["forge"] = {"kind": "gitlab", "mcp_server": "GitLab-MCP, Write"}
+        with self.assertRaises(PplError):
+            self.install(broken, replace=True)
+        self.assertEqual(sorted(path.name for path in drafts.drafts_dir().iterdir()), [])
+
+    def test_install_refuses_a_reserved_name_before_it_writes_anything(self):
+        draft = self.preset()
+        with self.assertRaises(PplError) as caught:
+            drafts.install("demo.replacing", draft["doc"], draft["fragments"], False,
+                           lambda line: None)
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertEqual(harness.list_names(), [])
+
     def test_install_refuses_an_invalid_draft_before_setup_runs(self):
         # rule: R-STUDIO-SAME-VALIDATION
         draft = self.preset()
@@ -142,6 +252,33 @@ class TestDraftRoutes(DraftTestCase):
         job = self.wait(payload)
         self.assertEqual(job["state"], "done", job)
         self.assertIn("demo", harness.list_names())
+
+    def test_the_install_route_takes_replace_only_when_it_is_true(self):
+        draft = self.preset()
+        body = {"name": "demo", "doc": draft["doc"], "fragments": draft["fragments"]}
+        status, payload, _ = panel_client.call("POST", "/api/harness/draft/install", body=body)
+        self.assertEqual(self.wait(payload)["state"], "done")
+        changed = copy.deepcopy(draft)
+        changed["doc"]["gate"][0]["command"] = "make all"
+        body = {"name": "demo", "doc": changed["doc"], "fragments": changed["fragments"]}
+        for replace in ("no", "yes"):
+            with self.subTest(replace=replace):
+                status, payload, _ = panel_client.call("POST", "/api/harness/draft/install",
+                                                       body=dict(body, replace=replace))
+                job = self.wait(payload)
+                self.assertEqual(job["state"], "failed", job)
+                self.assertEqual(job["error"]["error_code"], "SETUP_INCOMPLETE")
+        self.assertNotEqual(harness.load("demo")["gate"][0]["command"], "make all")
+        status, payload, _ = panel_client.call("POST", "/api/harness/draft/install",
+                                               body=dict(body, replace=True))
+        self.assertEqual(self.wait(payload)["state"], "done")
+        self.assertEqual(harness.load("demo")["gate"][0]["command"], "make all")
+
+    def test_the_install_route_refuses_a_reserved_name_at_once(self):
+        status, payload, _ = panel_client.call("POST", "/api/harness/draft/install",
+                                               body={"name": "demo.replacing", "doc": {}, "fragments": {}})
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
 
     def test_the_install_route_refuses_a_bad_name_at_once(self):
         status, payload, _ = panel_client.call("POST", "/api/harness/draft/install",

@@ -50,7 +50,7 @@ def _check(params, body, query):
 def _install(params, body, query):
     name, doc, fragments = _parts(body)
     drafts.check_name(name)
-    replace = bool((body or {}).get("replace"))
+    replace = (body or {}).get("replace") is True
     return {"job": JOBS.start("setup",
                               lambda emit: drafts.install(name, doc, fragments, replace, emit))}
 

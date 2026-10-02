@@ -4,6 +4,9 @@ harness.load, validate, render_skill and the setup harness step read a draft
 exactly the way they read an installed harness."""
 import re
 import shutil
+import tempfile
+import uuid
+from pathlib import Path
 
 from .. import harness, paths, routing, tomlout
 from ..errors import PplError
@@ -13,10 +16,13 @@ FRAGMENTS = (("skill/gates.md", "skill/baseline.md", "skill/extra-gates.md",
               "skill/tracker-close.md")
              + tuple("templates/%s.part" % role for role in routing.REQUIRED_ROLES))
 INTERPRETERS = stacks.INTERPRETERS
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-# Short on purpose: a catastrophic regex a user typed must not hold a server
-# thread, and "" plus twelve letters is enough to tell `.*` from a word class.
-_PROBES = ("", "a" * 12)
+# Endings that git and setup keep for their own directories: a source ending in
+# .git is cloned, and setup removes <name>.replacing and <name>.replaced.
+_RESERVED_SUFFIXES = (".git", ".replacing", ".replaced")
+# A free_args class that matches every probe takes any token. The probes stay
+# short and the plain word comes first: a catastrophic regex a user typed stalls
+# the whole server (re holds the GIL), and all() stops at the first refusal.
+_PROBES = ("x", ";", "$(id)", "/etc/passwd", "a" * 12)
 
 
 def drafts_dir():
@@ -24,9 +30,13 @@ def drafts_dir():
 
 
 def check_name(name):
-    if not isinstance(name, str) or not _NAME_RE.match(name):
+    if not isinstance(name, str) or not harness._NAME_RE.fullmatch(name):
         raise PplError("SCHEMA_INVALID", "harness name %r must be letters, digits, '.', '_' or "
                        "'-', starting with a letter or digit" % (name,))
+    if name.endswith(_RESERVED_SUFFIXES):
+        raise PplError("SCHEMA_INVALID", "harness name %r must not end in %s: git and setup use "
+                       "those endings for their own directories"
+                       % (name, ", ".join(_RESERVED_SUFFIXES)))
 
 
 def _without_nulls(value):
@@ -37,7 +47,9 @@ def _without_nulls(value):
     return value
 
 
-def write(name, doc, fragments):
+def _prepare(name, doc, fragments):
+    """The TOML text and the fragment bytes of a draft, every input checked
+    before anything touches the disk."""
     check_name(name)
     if not isinstance(doc, dict) or not isinstance(fragments, dict):
         raise PplError("SCHEMA_INVALID", "a draft is a document object and a fragments object")
@@ -52,17 +64,39 @@ def write(name, doc, fragments):
         text = tomlout.dumps(clean)
     except (TypeError, ValueError) as exc:
         raise PplError("SCHEMA_INVALID", "the draft cannot be written as TOML: %s" % exc)
-    target = drafts_dir() / name
-    shutil.rmtree(target, ignore_errors=True)
-    (target / "skill").mkdir(parents=True)
-    (target / "templates").mkdir()
-    (target / "harness.toml").write_text(text, encoding="utf-8")
+    bodies = {}
     for rel, fragment in fragments.items():
         if not isinstance(fragment, str):
             raise PplError("SCHEMA_INVALID", "fragment %s must be text" % rel)
         if fragment.strip():
             body = fragment if fragment.endswith("\n") else fragment + "\n"
-            (target / rel).write_text(body, encoding="utf-8")
+            try:
+                bodies[rel] = body.encode("utf-8")
+            except UnicodeEncodeError:
+                raise PplError("SCHEMA_INVALID", "fragment %s is not valid UTF-8 text" % rel)
+    return text, bodies
+
+
+def write(name, doc, fragments, root=None):
+    """The draft as <root>/<name>/, root being drafts_dir() unless given. It
+    is built in a sibling directory and renamed into place, so a refused or
+    failed write leaves the previous draft as it was."""
+    text, bodies = _prepare(name, doc, fragments)
+    root = Path(root) if root is not None else drafts_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    staging = root / (".writing-" + uuid.uuid4().hex)
+    try:
+        (staging / "skill").mkdir(parents=True)
+        (staging / "templates").mkdir()
+        (staging / "harness.toml").write_text(text, encoding="utf-8")
+        for rel, body in bodies.items():
+            (staging / rel).write_bytes(body)
+        target = root / name
+        shutil.rmtree(target, ignore_errors=True)
+        staging.rename(target)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return target
 
 
@@ -87,36 +121,75 @@ def flags(doc):
     return found
 
 
-def check(name, doc, fragments):
-    """Validate a draft the way ppl will use it: written to its draft directory,
-    loaded back, validated, its skill rendered and every role's tools composed.
-    A draft problem comes back as ok False with the message, never a raise."""
+def _refused(exc):
+    return {"ok": False, "errors": [exc.message], "warnings": [], "flags": []}
+
+
+def _require_absolute_repo(loaded):
+    path = loaded["repo"]["path"]
     try:
-        target = write(name, doc, fragments)
+        absolute = Path(path).expanduser().is_absolute()
+    except RuntimeError:
+        absolute = False
+    if not absolute:
+        raise PplError("HARNESS_INVALID", "repo.path %r must be an absolute path or start with "
+                       "~/: setup would resolve a relative one against the working directory "
+                       "of ppl serve" % path)
+
+
+def _verify(target, name):
+    """The check of a draft already written to `target`: loaded back,
+    validated, its skill rendered and every role's tools composed."""
+    try:
         loaded = harness.load(str(target))
         warnings = harness.validate(loaded, name)
+        _require_absolute_repo(loaded)
         harness.render_skill(loaded)
         for role in routing.REQUIRED_ROLES:
             routing.role_tools(role, loaded)
     except PplError as exc:
-        return {"ok": False, "errors": [exc.message], "warnings": [], "flags": []}
+        return _refused(exc)
     return {"ok": True, "errors": [], "warnings": warnings, "flags": flags(loaded)}
+
+
+def _checked(name, doc, fragments, root):
+    try:
+        target = write(name, doc, fragments, root)
+    except PplError as exc:
+        return None, _refused(exc)
+    return target, _verify(target, name)
+
+
+def check(name, doc, fragments):
+    """Validate a draft the way ppl will use it: written to its draft directory,
+    then loaded back, validated, its skill rendered and every role's tools
+    composed. A draft problem comes back as ok False with the message, never a
+    raise."""
+    return _checked(name, doc, fragments, drafts_dir())[1]
 
 
 def install(name, doc, fragments, replace, emit):
     """Install a checked draft through setup's harness step, the step `ppl setup
-    harness --answer harness_from=<draft dir>` runs."""
-    result = check(name, doc, fragments)
-    if not result["ok"]:
-        raise PplError("HARNESS_INVALID", "; ".join(result["errors"]))
-    target = drafts_dir() / name
-    loaded = harness.load(str(target))
-    answers = {"harness_from": str(target), "harness_name": name,
-               "repo": loaded["repo"]["path"], "default_branch": loaded["repo"]["default_branch"],
-               "task_url_template": loaded["task"]["url_template"],
-               "key_pattern": loaded["task"]["key_pattern"], "forge": loaded["forge"]["kind"]}
-    if loaded["forge"]["kind"] == "gitlab":
-        answers["gitlab_mcp_server"] = loaded["forge"]["mcp_server"]
-    if replace:
-        answers["replace_harness"] = "yes"
-    return wizard.run_step("harness", answers, emit)
+    harness --answer harness_from=<draft dir>` runs. The step reads a private
+    copy of the draft written for this call alone, so a check of the same name
+    from another request cannot change what was checked and what is installed."""
+    check_name(name)
+    drafts_dir().mkdir(parents=True, exist_ok=True)
+    private = Path(tempfile.mkdtemp(dir=drafts_dir(), prefix=".install-"))
+    try:
+        target, result = _checked(name, doc, fragments, private)
+        if not result["ok"]:
+            raise PplError("HARNESS_INVALID", "; ".join(result["errors"]))
+        loaded = harness.load(str(target))
+        answers = {"harness_from": str(target), "harness_name": name,
+                   "repo": loaded["repo"]["path"],
+                   "default_branch": loaded["repo"]["default_branch"],
+                   "task_url_template": loaded["task"]["url_template"],
+                   "key_pattern": loaded["task"]["key_pattern"], "forge": loaded["forge"]["kind"]}
+        if loaded["forge"]["kind"] == "gitlab":
+            answers["gitlab_mcp_server"] = loaded["forge"]["mcp_server"]
+        if replace:
+            answers["replace_harness"] = "yes"
+        return wizard.run_step("harness", answers, emit)
+    finally:
+        shutil.rmtree(private, ignore_errors=True)
