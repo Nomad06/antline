@@ -223,7 +223,9 @@ class TestGateFragments(unittest.TestCase):
                "(`-run TestFoo/`) or name a package path (`./pkg/...`): a plain word is refused.\n")
     RUST_NOTE = ("- Run only `%s` for focused runs. Name the test by its module path "
                  "(`mod::my_test`): a plain word is refused.\n")
-    NOTES = {"go": GO_NOTE, "rust": RUST_NOTE}
+    GRADLE_NOTE = ("- Run only `%s` for focused runs. Name the test by its class or method "
+                   "(`--tests app.FooTest`, `--tests app.FooTest.bar`): a plain word is refused.\n")
+    NOTES = {"go": GO_NOTE, "rust": RUST_NOTE, "gradle": GRADLE_NOTE}
 
     def test_the_test_worker_part_tells_how_to_name_the_test(self):
         gates = [{"name": "focused-tests", "command": "make test TEST=<test_class>"}]
@@ -238,7 +240,9 @@ class TestGateFragments(unittest.TestCase):
         self.assertEqual(go, self.GO_NOTE % "go test ./... -run <test_class>")
         rust = stacks.gate_fragments(gates, stack="rust")["templates/ppl-test-worker.part"]
         self.assertEqual(rust, self.RUST_NOTE % "go test ./... -run <test_class>")
-        for stack in ("node", "python", "gradle", "make", "generic", "no-such-stack", None):
+        gradle = stacks.gate_fragments(gates, stack="gradle")["templates/ppl-test-worker.part"]
+        self.assertEqual(gradle, self.GRADLE_NOTE % "go test ./... -run <test_class>")
+        for stack in ("node", "python", "make", "generic", "no-such-stack", None):
             part = stacks.gate_fragments(gates, stack=stack)["templates/ppl-test-worker.part"]
             self.assertEqual(part, self.NOTE % "go test ./... -run <test_class>", stack)
 
@@ -290,6 +294,10 @@ class TestSafeGradleArgs(unittest.TestCase):
     def test_refuses_a_task_path_besides_the_other_escapes(self):
         for token in self.REFUSED:
             self.assertIsNone(re.fullmatch(stacks.SAFE_GRADLE_ARGS, token), repr(token))
+
+    def test_the_gradle_note_examples_pass_the_gradle_class(self):
+        for token in ("--tests", "app.FooTest", "app.FooTest.bar"):
+            self.assertIsNotNone(re.fullmatch(stacks.SAFE_GRADLE_ARGS, token), token)
 
     def test_only_the_gradle_shape_uses_the_class_without_a_colon(self):
         for stack, spec in stacks.STACKS.items():

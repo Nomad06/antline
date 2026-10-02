@@ -31,6 +31,8 @@ NAMING_GENERIC = ("Name the test with a path or a qualified name "
 NAMING_GO = ("Name the test with a trailing slash (`-run TestFoo/`) "
              "or name a package path (`./pkg/...`)")
 NAMING_RUST = "Name the test by its module path (`mod::my_test`)"
+NAMING_GRADLE = ("Name the test by its class or method "
+                 "(`--tests app.FooTest`, `--tests app.FooTest.bar`)")
 
 INSTALL_EDITABLE = "python3 -m pip install -e ."
 INSTALL_REQUIREMENTS = "python3 -m pip install -r requirements.txt"
@@ -59,7 +61,7 @@ STACKS = {
     "gradle": {
         "label": "Java or Kotlin (Gradle)",
         "markers": ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"),
-        "base": "example-generic", "build": "./gradlew assemble",
+        "base": "example-generic", "build": "./gradlew assemble", "naming": NAMING_GRADLE,
         "gates": [{"name": "build", "command": "./gradlew assemble"},
                   {"name": "focused-tests", "command": "./gradlew test --tests <test_class>"},
                   {"name": "integration-tests", "command": "./gradlew check"}],
