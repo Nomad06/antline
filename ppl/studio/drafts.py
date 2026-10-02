@@ -66,13 +66,7 @@ def _prepare(name, doc, fragments):
     if unknown:
         raise PplError("SCHEMA_INVALID", "unknown fragment %s (fragments: %s)"
                        % (", ".join(unknown), ", ".join(FRAGMENTS)))
-    clean = _without_nulls({key: value for key, value in doc.items() if not str(key).startswith("_")})
-    if isinstance(clean.get("harness"), dict):
-        clean["harness"] = dict(clean["harness"], name=name)
-    try:
-        text = tomlout.dumps(clean)
-    except (TypeError, ValueError) as exc:
-        raise PplError("SCHEMA_INVALID", "the draft cannot be written as TOML: %s" % exc)
+    text = toml_text(name, doc)
     bodies = {}
     for rel, fragment in fragments.items():
         if not isinstance(fragment, str):
@@ -84,6 +78,24 @@ def _prepare(name, doc, fragments):
             except UnicodeEncodeError:
                 raise PplError("SCHEMA_INVALID", "fragment %s is not valid UTF-8 text" % rel)
     return text, bodies
+
+
+def document(name, doc):
+    """The draft document as it is written: private keys and nulls dropped,
+    harness.name set to the name it is saved under."""
+    if not isinstance(doc, dict):
+        raise PplError("SCHEMA_INVALID", "a draft is a document object and a fragments object")
+    clean = _without_nulls({key: value for key, value in doc.items() if not str(key).startswith("_")})
+    if isinstance(clean.get("harness"), dict):
+        clean["harness"] = dict(clean["harness"], name=name)
+    return clean
+
+
+def toml_text(name, doc):
+    try:
+        return tomlout.dumps(document(name, doc))
+    except (TypeError, ValueError) as exc:
+        raise PplError("SCHEMA_INVALID", "the draft cannot be written as TOML: %s" % exc)
 
 
 def write(name, doc, fragments, root=None):

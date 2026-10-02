@@ -593,6 +593,30 @@ allow_test = "tests/test_studio_drafts.py::TestCheck::test_a_preset_draft_checks
 owner = "panel"
 residual = "the flags the form shows for a permissive shape are advice, not a refusal: a user who ticks them installs the shape, and the guard enforces it as written"
 
+[[rule]]
+id = "R-STUDIO-NO-RAW-PATHS"
+statement = "The studio's file routes name a file by a key, routing or harness:<installed name>:<one of the harness files>, and a history version by its timestamp, so a request cannot reach a path outside routing.toml and the installed harnesses, and a route placeholder binds one segment of name characters only."
+scope = "panel"
+event = "every studio file route"
+enforcement = "blocking"
+hook_or_check = "ppl/studio/files.py:resolve, ppl/studio/files.py:version_text, ppl/panel/router.py:_bind"
+deny_test = "tests/test_studio_files.py::TestKeys::test_a_key_naming_a_path_outside_the_harness_files_is_refused, tests/test_studio_files.py::TestKeys::test_a_history_version_that_is_not_a_timestamp_is_refused"
+allow_test = "tests/test_studio_files.py::TestKeys::test_the_routing_key_and_a_harness_file_key_resolve"
+owner = "panel"
+residual = "the wizard's project path is the one path a client sends, and it is read only: inspected with git and walked for md files, never written"
+
+[[rule]]
+id = "R-STUDIO-CHANGED-ON-DISK"
+statement = "A studio save names the sha256 of the content the page loaded and is refused when the file changed since, every file of one save checked before the first write, so a second tab or a terminal edit is never silently overwritten."
+scope = "panel"
+event = "every studio save and restore"
+enforcement = "blocking"
+hook_or_check = "ppl/studio/files.py:save_many"
+deny_test = "tests/test_studio_files.py::TestSave::test_a_save_with_a_stale_hash_is_refused, tests/test_studio_files.py::TestSave::test_a_batch_with_one_stale_hash_writes_nothing"
+allow_test = "tests/test_studio_files.py::TestSave::test_a_save_with_the_current_hash_writes_and_keeps_history"
+owner = "panel"
+residual = "the check and the write sit under one lock in the studio process only: a terminal edit that lands between the check and os.replace is overwritten, a window of microseconds"
+
 # ---------------------------------------------------------------------------
 # Done gate
 # ---------------------------------------------------------------------------
