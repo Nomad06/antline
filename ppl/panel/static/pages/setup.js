@@ -46,19 +46,20 @@ function ModelsStep({ mode, done }) {
   const [tiers, setTiers] = useState({});
   const [error, setError] = useState(null);
   const show = (data) => {
+    setError(null);
     setInfo(data);
     setTiers(Object.fromEntries(Object.entries(data.tiers).map(([tier, entry]) => [tier, entry.model])));
   };
   useEffect(() => {
     get("/api/routing/presets").then(show, (e) => setError(e.message));
   }, []);
-  if (error) {
-    return html`<${Notice} kind="error">${error}<//>`;
-  }
   if (!info) {
-    return html`<p class="muted">Loading...</p>`;
+    return error ? html`<${Notice} kind="error">${error}<//>` : html`<p class="muted">Loading...</p>`;
   }
-  const choose = (name) => post("/api/routing/preset", { name }).then(show, (e) => setError(e.message));
+  const choose = (name) => {
+    setError(null);
+    return post("/api/routing/preset", { name }).then(show, (e) => setError(e.message));
+  };
   const answers = { verify: "yes" };
   Object.entries(tiers).forEach(([tier, model]) => { answers["tier." + tier] = model; });
   return html`<div>
@@ -67,6 +68,7 @@ function ModelsStep({ mode, done }) {
         <strong>${preset.label}</strong> <${Badge}>${preset.cost} cost<//>
         <ul>${preset.roles.map((role) => html`<li>${role.role.replace("ppl-", "")}: ${role.tier}, ${role.effort}</li>`)}</ul>
       </button>`)}</div>
+    ${error ? html`<${Notice} kind="error">${error}<//>` : null}
     ${mode === "expert" ? html`<div class="grid">${Object.keys(tiers).sort().map((tier) => html`
       <${Field} label=${"Model for tier " + tier}><input value=${tiers[tier]} onInput=${(e) => setTiers(Object.assign({}, tiers, { [tier]: e.target.value }))} /><//>`)}</div>` : null}
     <${Button} primary busy=${step.busy} onClick=${() => step.run(answers)}>Verify the models<//>
@@ -119,6 +121,7 @@ export function SetupPage({ mode }) {
   const [state, setState] = useState(null);
   const [open, setOpen] = useState(null);
   const [error, setError] = useState(null);
+  const [problem, setProblem] = useState(null);
   const refresh = async () => {
     const fresh = await get("/api/setup");
     setState(fresh);
@@ -131,7 +134,11 @@ export function SetupPage({ mode }) {
   if (!state) {
     return html`<p class="muted">Loading...</p>`;
   }
-  const skip = (name) => post("/api/setup/" + name + "/skip").then(refresh, (e) => setError(e.message));
+  const skip = (name) => {
+    setProblem(null);
+    return post("/api/setup/" + name + "/skip").then(refresh)
+      .catch((e) => setProblem({ step: name, message: e.message }));
+  };
   return html`<section>
     <h1>Set up antline</h1>
     <p class="muted">Every step can be skipped and run again later. <code>ppl setup</code> in a terminal reads and writes the same state.</p>
@@ -144,6 +151,7 @@ export function SetupPage({ mode }) {
         ${open === item.name ? html`<div class="body">
           <p class="muted">${item.intro}</p>
           <${View} state=${state} mode=${mode} done=${refresh} />
+          ${problem && problem.step === item.name ? html`<${Notice} kind="error">${problem.message}<//>` : null}
           <p class="skip"><a href="#/setup" onClick=${(e) => { e.preventDefault(); skip(item.name); }}>Skip, set this up later</a></p>
         </div>` : null}
       </article>`;

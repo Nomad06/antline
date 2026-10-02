@@ -30,6 +30,7 @@ _CHECK_LOCK = threading.Lock()
 # short and the plain word comes first: a catastrophic regex a user typed stalls
 # the whole server (re holds the GIL), and all() stops at the first refusal.
 _PROBES = ("x", ";", "$(id)", "/etc/passwd", "a" * 12)
+_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def drafts_dir():
@@ -144,12 +145,33 @@ def _require_absolute_repo(loaded):
                        "of ppl serve" % path)
 
 
+def _program(command):
+    for token in command.split():
+        if not _ASSIGNMENT_RE.match(token):
+            return token
+    return ""
+
+
+def _unrunnable_focused_tests(loaded):
+    """A warning when the focused-tests gate starts a program no command shape
+    names: the test writer's shell would refuse the command it is told to run."""
+    shapes = {row["argv0"] for row in harness.shape_rows(loaded, "draft")}
+    for gate in loaded.get("gate") or []:
+        if gate["name"] == harness.FOCUSED_TESTS_GATE:
+            program = _program(gate["command"])
+            if program and program not in shapes:
+                return ["the test writer cannot run the focused-tests command: no command "
+                        "shape starts with %s" % program]
+    return []
+
+
 def _verify(target, name):
     """The check of a draft already written to `target`: loaded back,
     validated, its skill rendered and every role's tools composed."""
     try:
         loaded = harness.load(str(target))
         warnings = harness.validate(loaded, name)
+        warnings.extend(_unrunnable_focused_tests(loaded))
         _require_absolute_repo(loaded)
         harness.render_skill(loaded)
         for role in routing.REQUIRED_ROLES:

@@ -1,4 +1,4 @@
-import { html, useEffect, useRef, useState } from "../vendor/htm-preact.mjs";
+import { html, useEffect, useState } from "../vendor/htm-preact.mjs";
 import { post } from "../api.js";
 import { Badge, Button, Field, Notice } from "./controls.js";
 
@@ -10,57 +10,98 @@ function words(text) {
   return text.split(",").map((part) => part.trim()).filter(Boolean);
 }
 
+function withEnv(doc, rows) {
+  const env = {};
+  rows.forEach(([key, value]) => {
+    if (key.trim()) {
+      env[key] = value;
+    }
+  });
+  return Object.assign({}, doc, { env });
+}
+
+function rowsProblem(rows) {
+  if (rows.some(([key]) => !key.trim())) {
+    return "Every variable needs a name: fill it in or remove the row.";
+  }
+  const seen = new Set();
+  for (const [key] of rows) {
+    if (seen.has(key)) {
+      return key + " is set twice: keep one row.";
+    }
+    seen.add(key);
+  }
+  return null;
+}
+
 export function HarnessForm({ draft, extras, mode, saveLabel, onSave }) {
   const [name, setName] = useState(draft.doc.harness.name);
-  const [doc, setDoc] = useState(clone(draft.doc));
+  const [doc, setDoc] = useState(() => {
+    const copy = clone(draft.doc);
+    delete copy.env;
+    return copy;
+  });
+  const [envRows, setEnvRows] = useState(() => Object.entries(draft.doc.env || {}));
   const [fragments, setFragments] = useState(clone(draft.fragments || {}));
   const [check, setCheck] = useState(null);
-  const [pending, setPending] = useState(true);
   const [acked, setAcked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [replaceable, setReplaceable] = useState(false);
-  const timer = useRef(null);
   const sources = draft.sources || {};
   const notes = (extras && extras.notes) || [];
   const dropped = (extras && extras.dropped) || [];
 
   useEffect(() => {
     let current = true;
+    const inputs = { name, doc, envRows, fragments };
     const land = (result) => {
       if (current) {
-        setCheck(result);
-        setPending(false);
+        setCheck({ for: inputs, result });
       }
     };
-    setPending(true);
-    clearTimeout(timer.current);
-    timer.current = setTimeout(() => {
-      post("/api/harness/draft/check", { name, doc, fragments }).then(land,
+    const timer = setTimeout(() => {
+      post("/api/harness/draft/check", { name, doc: withEnv(doc, envRows), fragments }).then(land,
         (e) => land({ ok: false, errors: [e.message], warnings: [], flags: [] }));
     }, 400);
     return () => {
       current = false;
-      clearTimeout(timer.current);
+      clearTimeout(timer);
     };
-  }, [name, doc, fragments]);
+  }, [name, doc, envRows, fragments]);
 
+  const touch = () => {
+    setReplaceable(false);
+    setError(null);
+  };
   const update = (mutate) => {
     const next = clone(doc);
     mutate(next);
     setDoc(next);
     setAcked(false);
+    touch();
+  };
+  const editRows = (change) => {
+    setEnvRows(change(envRows));
+    touch();
   };
   const gates = doc.gate || [];
   const shapes = (doc.guard && doc.guard.shape) || [];
-  const env = Object.entries(doc.env || {});
-  const flagged = Boolean(check && check.flags && check.flags.length);
-  const flagsFor = (index) => (check && check.flags ? check.flags.filter((f) => f.shape === index) : []);
+  const result = check && check.result;
+  const fresh = Boolean(check) && check.for.name === name && check.for.doc === doc
+    && check.for.envRows === envRows && check.for.fragments === fragments;
+  const flagged = Boolean(result && result.flags && result.flags.length);
+  const flagsFor = (index) => (result && result.flags ? result.flags.filter((f) => f.shape === index) : []);
+  const problem = rowsProblem(envRows);
+  const canSave = fresh && result.ok && !problem && (!flagged || acked);
   const save = async (replace) => {
+    if (!canSave) {
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      await onSave({ name, doc, fragments, replace });
+      await onSave({ name, doc: withEnv(doc, envRows), fragments, replace });
       setReplaceable(false);
     } catch (e) {
       setError(e.message);
@@ -75,7 +116,7 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave }) {
     ${dropped.length ? html`<details><summary>${dropped.length} item(s) left out</summary>
       <ul>${dropped.map((item) => html`<li><code>${item.item}</code>: ${item.reason}</li>`)}</ul></details>` : null}
     <div class="grid">
-      <${Field} label="Harness name"><input value=${name} onInput=${(e) => setName(e.target.value)} /><//>
+      <${Field} label="Harness name"><input value=${name} onInput=${(e) => { setName(e.target.value); touch(); }} /><//>
       <${Field} label="Default branch" help=${sources["repo.default_branch"] || ""}>
         <input value=${doc.repo.default_branch} onInput=${(e) => update((d) => { d.repo.default_branch = e.target.value; })} /><//>
       <${Field} label="Task key pattern" help="A regex every task key matches, for example ^APP-[0-9]+$">
@@ -119,24 +160,25 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave }) {
     </div>`)}
 
     <h3>Build environment</h3>
-    <div class="rows">${env.map(([key, value]) => html`<div class="row">
-      <input value=${key} aria-label="variable" onInput=${(e) => update((d) => { d.env = Object.fromEntries(Object.entries(d.env).map(([k, v]) => (k === key ? [e.target.value, v] : [k, v]))); })} />
-      <input value=${value} aria-label="value" onInput=${(e) => update((d) => { d.env[key] = e.target.value; })} />
+    <div class="rows">${envRows.map(([key, value], i) => html`<div class="row">
+      <input value=${key} aria-label="variable" onInput=${(e) => editRows((rows) => rows.map((row, at) => (at === i ? [e.target.value, row[1]] : row)))} />
+      <input value=${value} aria-label="value" onInput=${(e) => editRows((rows) => rows.map((row, at) => (at === i ? [row[0], e.target.value] : row)))} />
       <${Badge}>${sources["env:" + key] || "edited"}<//>
-      <button onClick=${() => update((d) => { delete d.env[key]; })}>Remove</button>
+      <button onClick=${() => editRows((rows) => rows.filter((row, at) => at !== i))}>Remove</button>
     </div>`)}</div>
-    <button onClick=${() => update((d) => { d.env = Object.assign({}, d.env || {}, { NEW_VARIABLE: "" }); })}>Add a variable</button>
+    ${problem ? html`<${Notice} kind="error">${problem}<//>` : null}
+    <button onClick=${() => editRows((rows) => rows.concat([["", ""]]))}>Add a variable</button>
 
     ${mode === "expert" ? html`<h3>Fragments</h3>
       ${Object.keys(fragments).sort().map((rel) => html`<${Field} label=${rel}>
-        <textarea value=${fragments[rel]} onInput=${(e) => setFragments(Object.assign({}, fragments, { [rel]: e.target.value }))}></textarea><//>`)}` : null}
+        <textarea value=${fragments[rel]} onInput=${(e) => { setFragments(Object.assign({}, fragments, { [rel]: e.target.value })); touch(); }}></textarea><//>`)}` : null}
 
-    ${check && check.errors.length ? html`<${Notice} kind="error">${check.errors.join(" ")}<//>` : null}
-    ${check && check.warnings.length ? html`<${Notice} kind="warn">${check.warnings.join(" ")}<//>` : null}
+    ${result && result.errors.length ? html`<${Notice} kind="error">${result.errors.join(" ")}<//>` : null}
+    ${result && result.warnings.length ? html`<${Notice} kind="warn">${result.warnings.join(" ")}<//>` : null}
     ${flagged ? html`<label class="check"><input type="checkbox" checked=${acked} onChange=${(e) => setAcked(e.target.checked)} />
       I checked the commands marked check, install them as they are</label>` : null}
-    <${Button} primary busy=${busy} disabled=${pending || !check || !check.ok || (flagged && !acked)} onClick=${() => save(false)}>${saveLabel || "Install the harness"}<//>
-    ${replaceable ? html`<${Button} busy=${busy} onClick=${() => save(true)}>Replace the installed harness<//>` : null}
+    <${Button} primary busy=${busy} disabled=${!canSave} onClick=${() => save(false)}>${saveLabel || "Install the harness"}<//>
+    ${replaceable ? html`<${Button} busy=${busy} disabled=${!canSave} onClick=${() => save(true)}>Replace the installed harness<//>` : null}
     ${error ? html`<${Notice} kind="error">${error}<//>` : null}
   </div>`;
 }

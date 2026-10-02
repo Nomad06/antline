@@ -39,6 +39,36 @@ class TestCheck(DraftTestCase):
             self.assertTrue(result["ok"], (stack, result))
             self.assertEqual(result["flags"], [], stack)
 
+    def test_every_stack_preset_checks_without_a_warning(self):
+        for stack in stacks.STACKS:
+            draft = self.preset(stack)
+            result = drafts.check("demo", draft["doc"], draft["fragments"])
+            self.assertEqual(result["warnings"], [], stack)
+
+    def set_focused_command(self, draft, command):
+        for gate in draft["doc"]["gate"]:
+            if gate["name"] == harness.FOCUSED_TESTS_GATE:
+                gate["command"] = command
+
+    def test_a_focused_tests_command_no_shape_starts_with_is_warned_about(self):
+        draft = self.preset("node")
+        self.set_focused_command(draft, "npx jest <test_class>")
+        result = drafts.check("demo", draft["doc"], draft["fragments"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["warnings"], [
+            "the test writer cannot run the focused-tests command: no command shape starts with npx"])
+
+    def test_a_focused_tests_command_a_later_shape_starts_with_is_not_warned_about(self):
+        draft = self.preset("node")
+        self.set_focused_command(draft, "npx jest <test_class>")
+        draft["doc"]["guard"]["shape"].append(dict(draft["doc"]["guard"]["shape"][0], argv0="npx"))
+        self.assertEqual(drafts.check("demo", draft["doc"], draft["fragments"])["warnings"], [])
+
+    def test_an_env_assignment_ahead_of_the_focused_tests_program_is_not_the_program(self):
+        draft = self.preset("node")
+        self.set_focused_command(draft, "CI=1 npm test -- <test_class>")
+        self.assertEqual(drafts.check("demo", draft["doc"], draft["fragments"])["warnings"], [])
+
     def test_a_draft_granting_a_tracker_write_tool_is_refused(self):
         # rule: R-STUDIO-SAME-VALIDATION
         draft = self.preset()
