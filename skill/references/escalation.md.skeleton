@@ -1,0 +1,25 @@
+# Escalation matrix
+
+`error_code` is the field name in every JSON error `ppl` prints to stderr on exit 2, and the
+`--code` / `--blocker` value `ppl escalate` and `ppl park` accept. The two rows marked
+"self-inflicted" below are never valid values for `--code` or `--blocker` - they mean you
+asked `ppl` for something it does not accept, not that the task needs an owner decision.
+
+| error_code | What it means | What you do |
+|---|---|---|
+| SPEC_GAP | the governing requirements do not define the behaviour | `ppl escalate --code SPEC_GAP --question "..."`, stop this branch of work, the owner decides and the decision is written back into the spec |
+| CONTEXT_INSUFFICIENT | the answer exists but the brief did not carry it | enrich the briefer prompt with the exact miss, re-brief once, then treat as SPEC_GAP |
+| IMPLEMENTATION_FAILURE | the code does not satisfy the contract | bounded rework, fresh worker, new SHA, new verdict |
+| TEST_FAILURE | the test is wrong or incomplete | test worker rework, never a code change to satisfy a bad test |
+| BASELINE_FAILURE | the problem lives on the base revision | park it with provenance, continue on independent work, never mask it |
+| BOUNDARY_VIOLATION | a role exceeded its authority | halt, the guard hook already blocked the write, re-derive the boundary or re-brief |
+| BUDGET_EXHAUSTED | dispatch, retry, or cost limit reached | park with an exact handoff, do not continue with another model |
+| OWNER_DECISION | a material decision is required, or the operator paused/stopped the run via `control.json` | halt that branch, surface options, consequences, recommendation and safe default |
+| EXTERNAL_BLOCKED | the forge, the tracker or CI is unavailable, or a worktree that once existed is no longer usable | park, retry on the next tick, do not fabricate the missing fact |
+| TIMED_OUT | no `ppl` activity was recorded on this run since its inactivity deadline - `ppl` parked it itself and bumped the lease generation | run `ppl recover`, inspect what the stuck attempt last wrote and whether it is still running, then resume with a fresh dispatch or re-brief; never just retry into the same stage |
+| VERIFICATION_UNAVAILABLE | ppl verdict record itself refused: this is the second consecutive INCONCLUSIVE/ERROR/CANCELLED/TIMEOUT verdict recorded for the same candidate_sha, and it parked the run rather than let a broken verifier masquerade as an undecided candidate forever | run ppl recover, inspect why the verifier keeps failing to reach a result on this sha (not the code), then resume with a different verification approach or an owner decision - never just redispatch the same check a third time |
+| ILLEGAL_TRANSITION (self-inflicted) | you asked for a stage or lifecycle transition the state machine does not allow from where it actually is | you are lost, run `ppl recover` and re-read the state before trying again |
+| SCHEMA_INVALID (self-inflicted) | an artifact, argument, or command line does not match its contract - includes a bad `ppl` invocation itself, a run whose repo does not exist as a directory at all (its worktree was never created), leaving the baseline stage with no baseline ever recorded, or routing.toml naming a provider kind `ppl` has no adapter for, all of which report this same code | fix the artifact or the invocation and retry once; a missing worktree is fixed by creating it (Stage 1), not by waiting, and a missing adapter is fixed by routing the role elsewhere, not by waiting either; three format failures from one role means its output is discarded and the role is redispatched with the exact mismatch named |
+
+Silence from the owner is never consent. A parked task with a clear question is a better
+outcome than a green screen with an invented answer.

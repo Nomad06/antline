@@ -1,0 +1,52 @@
+[harness]
+name = "example-maven"
+format = 1
+
+[repo]
+path = "/home/dev/src/project"
+default_branch = "master"
+worktrees = "/home/dev/src/project/.worktrees"
+
+[task]
+key_pattern = "^[A-Z][A-Z0-9]+-[0-9]+$"
+url_template = "https://example.atlassian.net/browse/<TASK-ID>"
+
+[tracker]
+kind = "jira"
+mcp_prefixes = ["mcp__atlassian__", "mcp__claude_ai_Atlassian_Rovo__"]
+write_operations = ["addOrEditJiraIssueComment", "addCommentToJiraIssue", "editJiraIssue", "transitionJiraIssue", "addWorklogToJiraIssue", "createJiraIssue", "executeWrite", "executeDestructive", "createConfluenceContent", "updateConfluenceContent", "addGraphContext", "createConfluencePage", "updateConfluencePage", "createConfluenceFooterComment", "createConfluenceInlineComment"]
+read_tools = ["getJiraIssue", "getConfluenceContent", "getConfluencePage", "searchJiraIssuesUsingJql", "searchConfluence", "executeRead"]
+
+[forge]
+kind = "gitlab"
+mcp_server = "GitLab-MCP"
+
+[knowledge]
+skills = []
+extra_tools = []
+
+[env]
+JAVA_HOME = "/opt/jdk"
+
+[[gate]]
+name = "install"
+command = "mvn install -pl :<module> -am -DskipTests -Dmaven.gitcommitid.skip=true"
+
+[[gate]]
+name = "checkstyle"
+command = "mvn -pl :<module> -am -Dmaven.gitcommitid.skip=true checkstyle:check"
+
+[[gate]]
+name = "focused-tests"
+command = "mvn -pl :<module> -am -Dtest=<test_class> -DfailIfNoTests=false -Dmaven.gitcommitid.skip=true test"
+
+[[gate]]
+name = "integration-tests"
+command = "mvn -pl :<module> -am -Dmaven.gitcommitid.skip=true verify"
+
+[[guard.shape]]
+argv0 = "mvn"
+env_prefix = true
+required_flags = [["-pl", "^:[A-Za-z][\\w.-]*$"], ["-am", ""]]
+one_goal_of = ["install", "checkstyle:check", "test", "verify"]
+free_args = "^-D[\\w.]+(=.*)?$"

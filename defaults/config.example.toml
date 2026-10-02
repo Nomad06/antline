@@ -1,0 +1,19 @@
+# Per-machine settings. Project settings live in a harness directory.
+
+[setup]
+version = 1
+done = []
+skipped = []
+
+[claude]
+binary = "claude"
+workspace = ""
+agents_dir = ""
+skills_dir = ""
+hooks = "local"
+
+[models]
+verify_ttl_days = 30
+
+[harness]
+active = ""

@@ -1,0 +1,53 @@
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -q
+      - run: python tools/cage_check.py
+  python-floor:
+    # The interpreter floor under Python 3.9: both hooks deny a role and exit 0,
+    # bin/ppl names the version it found. The suite itself needs 3.11 and does
+    # not run here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: both hooks deny a role and exit 0
+        shell: bash
+        run: |
+          export PPL_HOME="$RUNNER_TEMP/ppl-home"
+          python3 --version
+          payload='{"hook_event_name": "PreToolUse", "agent_type": "ppl-code-worker", "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": "/tmp"}'
+          for hook in ppl_guard ppl_dispatch; do
+            status=0
+            out=$(printf '%s' "$payload" | python3 "hooks/$hook.py" 2> stderr.txt) || status=$?
+            echo "$hook exit=$status stdout=$out"
+            cat stderr.txt
+            test "$status" -eq 0
+            grep -q '"permissionDecision": "deny"' <<< "$out"
+            grep -q 'needs 3.11 or newer' <<< "$out"
+            grep -q 'older than the 3.11' stderr.txt
+          done
+      - name: bin/ppl names the version it found and exits 2
+        shell: bash
+        run: |
+          export PPL_HOME="$RUNNER_TEMP/ppl-home"
+          status=0
+          bin/ppl doctor > stdout.txt 2> stderr.txt || status=$?
+          cat stdout.txt stderr.txt
+          test "$status" -eq 2
+          grep -q 'ppl needs Python 3.11 or newer, but python3 on PATH is 3\.9\.' stderr.txt

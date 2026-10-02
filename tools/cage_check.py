@@ -1,0 +1,882 @@
+"""Physical cage proof, driven the way Claude Code drives the hook: a JSON
+payload on stdin, the hook run as a subprocess, the decision read off stdout.
+
+It stands in for a live check that dispatches ppl-code-worker and
+ppl-verifier subagents against a real run and watches the hook deny their
+write attempts. This script cannot dispatch subagents, and registering the
+guard hook in ~/.claude/settings.json would arm it for every Claude Code
+session on the machine, which is the operator's decision, not this script's.
+So instead: build the exact stdin payload Claude Code would send,
+invoke hooks/ppl_guard.py as a subprocess against a temporary PPL_HOME and a
+real temporary git worktree, and check the JSON (or its absence) on stdout -
+the same contract the harness itself uses.
+
+Every case below prints one line: "PASS <name>" or "FAIL <name>: <detail>".
+Exit code is 0 only if every case passed.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+GUARD_HOOK = REPO_ROOT / "hooks" / "ppl_guard.py"
+
+sys.path.insert(0, str(REPO_ROOT))
+
+
+def make_ppl_home():
+    """The data root at <fake home>/.ppl, the default layout, so a `~` spelling
+    of the runs directory in a case really lands in this sandbox's runs/."""
+    home = Path(tempfile.mkdtemp(prefix="ppl-cage-home-")) / ".ppl"
+    home.mkdir()
+    return home
+
+
+def make_worktree():
+    """A real git worktree. The guard never reads git itself, but the brief
+    asks for one and a real repo keeps this an honest rehearsal rather than
+    a bare directory standing in for one.
+    """
+    tree = Path(tempfile.mkdtemp(prefix="ppl-cage-repo-"))
+    run = lambda *args: subprocess.run(  # noqa: E731 - local one-liner helper
+        ["git", "-C", str(tree)] + list(args),
+        check=True, capture_output=True, text=True)
+    run("init", "-q")
+    run("config", "user.email", "cage@example.com")
+    run("config", "user.name", "cage")
+    (tree / "source").mkdir()
+    (tree / "source" / "Main.java").write_text("class Main {}\n", encoding="utf-8")
+    (tree / "source" / "MainTest.java").write_text("class MainTest {}\n", encoding="utf-8")
+    (tree / "source" / "src" / "test").mkdir(parents=True)
+    (tree / "source" / "src" / "test" / "OtherTest.java").write_text(
+        "class OtherTest {}\n", encoding="utf-8")
+    run("add", "source/Main.java", "source/MainTest.java", "source/src/test/OtherTest.java")
+    run("commit", "-q", "-m", "initial")
+    return tree
+
+
+def run_hook(payload, ppl_home):
+    env = dict(os.environ)
+    env["PPL_HOME"] = str(ppl_home)
+    env["HOME"] = str(ppl_home.parent)
+    result = subprocess.run(
+        [sys.executable, str(GUARD_HOOK)],
+        input=json.dumps(payload), capture_output=True, text=True, env=env,
+        timeout=10)
+    return result
+
+
+def decision(result):
+    """Returns ("allow", None) or ("deny", (code, reason))."""
+    if result.stderr.strip():
+        return "error", result.stderr.strip()
+    out = result.stdout.strip()
+    if not out:
+        return "allow", None
+    doc = json.loads(out)
+    hso = doc["hookSpecificOutput"]
+    reason = hso["permissionDecisionReason"]
+    code = reason.split(" ", 1)[0]
+    return "deny", (code, reason)
+
+
+class Cage:
+    def __init__(self):
+        self.ppl_home = make_ppl_home()
+        self.worktree = make_worktree()
+        self.unrelated = Path(tempfile.mkdtemp(prefix="ppl-cage-unrelated-"))
+        os.environ["PPL_HOME"] = str(self.ppl_home)
+        # ppl modules are imported only after PPL_HOME is set, matching the
+        # convention every test module in tests/ already uses, so paths.home()
+        # resolves to this run's sandbox and never to the real data root (~/.ppl).
+        from ppl import harness, run, store, paths  # noqa: E402
+        self._run = run
+        self._store = store
+        self._paths = paths
+        self.task_id = "CAGE-90001"
+        run.init(self.task_id, "https://example.atlassian.net/browse/CAGE-90001",
+                 str(self.worktree))
+        store.write_json(paths.run_dir(self.task_id) / "boundary.json",
+                          {"write": ["source/**"], "forbid": []})
+        # The test worker's build shapes come from the run's harness snapshot,
+        # so the sandbox run carries the example Maven harness's one.
+        source = REPO_ROOT / "defaults" / "harnesses" / "example-maven"
+        target = paths.harness_dir("example-maven")
+        if not target.exists():
+            shutil.copytree(source, target)
+        store.write_json(paths.run_dir(self.task_id) / "harness.json",
+                         harness.snapshot(harness.load("example-maven")))
+        self.results = []
+
+    def payload(self, agent, tool, tool_input, cwd):
+        return {"hook_event_name": "PreToolUse", "agent_type": agent,
+                "tool_name": tool, "tool_input": tool_input, "cwd": cwd}
+
+    def check(self, name, payload, expect):
+        """expect is "allow" or a (deny_code_substring,) tuple."""
+        result = run_hook(payload, self.ppl_home)
+        kind, detail = decision(result)
+        if kind == "error":
+            ok, detail_str = False, "hook raised: %s" % detail
+        elif expect == "allow":
+            ok = kind == "allow"
+            detail_str = "allowed" if kind == "allow" else "denied: %s" % (detail,)
+        else:
+            code_wanted = expect
+            ok = kind == "deny" and code_wanted in detail[0]
+            detail_str = ("denied %s: %s" % detail) if kind == "deny" else "allowed (expected deny)"
+        self.results.append((name, ok, detail_str))
+        print(("PASS " if ok else "FAIL ") + name + ": " + detail_str)
+        return ok
+
+    def set_stage(self, stage):
+        state = self._run.load(self.task_id)
+        state["stage"] = stage
+        self._run.save(state)
+
+    def run_dir(self):
+        return self._paths.run_dir(self.task_id)
+
+
+def main():
+    cage = Cage()
+    try:
+        return run_cases(cage)
+    finally:
+        # This harness used to leave three directories per invocation behind in
+        # TMPDIR, the same leak the test suite had.
+        for path in (cage.ppl_home.parent, cage.worktree, cage.unrelated):
+            shutil.rmtree(str(path), ignore_errors=True)
+
+
+def run_cases(cage):
+    wt = str(cage.worktree)
+    unrelated = str(cage.unrelated)
+
+    cage.check(
+        "ppl-code-worker editing main source inside boundary is allowed",
+        cage.payload("ppl-code-worker", "Edit",
+                     {"file_path": wt + "/source/Main.java"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-code-worker editing a test source is denied (BOUNDARY_VIOLATION)",
+        cage.payload("ppl-code-worker", "Write",
+                     {"file_path": wt + "/source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker editing a main source is denied",
+        cage.payload("ppl-test-worker", "Edit",
+                     {"file_path": wt + "/source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-verifier writing anything is denied",
+        cage.payload("ppl-verifier", "Write",
+                     {"file_path": wt + "/notes.txt"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "git add -A from any agent is denied, even outside the run's worktree",
+        cage.payload("ppl-code-worker", "Bash", {"command": "git add -A"}, unrelated),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "a refspec force push (+HEAD:main) is denied",
+        cage.payload("ppl-code-worker", "Bash", {"command": "git push origin +HEAD:main"}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "git stash clear is denied, it empties every session's stash",
+        cage.payload(None, "Bash", {"command": "git stash clear"}, unrelated),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a bare git stash drop is denied, it takes the top entry",
+        cage.payload("ppl-code-worker", "Bash", {"command": "git stash drop"}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "git stash drop stash@{N}, the shared-stack recipe's own drop, is allowed",
+        cage.payload("ppl-code-worker", "Bash", {"command": "git stash drop stash@{2}"}, wt),
+        "allow")
+    cage.check(
+        "listing the ~/.ppl data root is not read as a ppl invocation",
+        cage.payload("ppl-code-worker", "Bash", {"command": "cd ~/.ppl && ls"}, wt),
+        "allow")
+
+    runs_target = str(cage.run_dir() / "state.json")
+    cage.check(
+        "a Bash redirect into the runs directory is denied",
+        cage.payload(None, "Bash", {"command": "echo x > %s" % runs_target}, wt),
+        "BOUNDARY_VIOLATION")
+
+    # The same path in the spellings a role will actually type: the hook
+    # resolves the target, it does not look for the literal runs path.
+    tilde_run = "~/.ppl/runs/%s" % cage.task_id
+    cage.check(
+        "a ~-spelled Bash redirect into the runs directory is denied for ppl-code-worker",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "echo '{}' > %s/state.json" % tilde_run}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a ~-spelled tee into the runs directory is denied for an unroled session",
+        cage.payload(None, "Bash",
+                     {"command": "echo '{}' | tee %s/boundary.json" % tilde_run}, unrelated),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a cd-relative Bash write into the runs directory is denied for ppl-test-worker",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "cd ~/.ppl/runs && echo x > %s/harness.json" % cage.task_id},
+                     wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a subshell (cd into the runs directory, then a write, is denied for ppl-code-worker",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "(cd %s && echo x > boundary.json)" % tilde_run}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a pushd into the runs directory, then a write, is denied for an unroled session",
+        cage.payload(None, "Bash",
+                     {"command": "pushd %s && echo x > boundary.json" % tilde_run}, unrelated),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a pushd's own redirect into a test source is denied for ppl-code-worker",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "pushd /tmp > source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a redirect after a subshell's ) into a test source is denied for ppl-code-worker",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "(cd /tmp && echo x) > source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a redirect after a brace group's } into a test source is denied for ppl-code-worker",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "{ cd /tmp; echo x; } > source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a write after a subshell closed by an input redirect is denied for ppl-code-worker",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "(cd /tmp && echo x) < /dev/null; echo y > source/MainTest.java"},
+                     wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a cp behind a bare & into a test source is denied for ppl-code-worker",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "true & cp /tmp/x source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a recursive copy of a directory named runs into the data root is denied unroled",
+        cage.payload(None, "Bash", {"command": "cp -r /tmp/x/runs ~/.ppl/"}, unrelated),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a nohup in front of a cp into the runs directory is unwrapped and denied for a role",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "nohup cp /tmp/x %s/state.json" % tilde_run}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a nested nice -n 5 behind time in front of a tee into runs/ is denied unroled",
+        cage.payload(None, "Bash",
+                     {"command": "time nice -n 5 tee %s/boundary.json" % tilde_run}, unrelated),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a nohup cp elsewhere is still allowed",
+        cage.payload("ppl-code-worker", "Bash", {"command": "nohup cp /tmp/x /tmp/y"}, wt),
+        "allow")
+    cage.check(
+        "removing the data root that holds the runs directory is denied",
+        cage.payload(None, "Bash", {"command": "rm -rf ~/.ppl"}, unrelated),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a copy into the home that holds the data root is allowed, only a removal "
+        "takes runs/ with it",
+        cage.payload(None, "Bash", {"command": "cp /tmp/x ~/"}, unrelated),
+        "allow")
+    cage.check(
+        "a $HOME-spelled Bash write into the runs directory is denied for a role "
+        "(an unresolvable target fails closed)",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "echo x > $HOME/.ppl/runs/%s/state.json" % cage.task_id}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "a ~-spelled Bash write to control.json is denied for a role (no carve-out)",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "echo '{}' > %s/control.json" % tilde_run}, wt),
+        "BOUNDARY_VIOLATION")
+    cage.check(
+        "the same control.json write is allowed for the unroled operator session",
+        cage.payload(None, "Bash", {"command": "echo '{}' > %s/control.json" % tilde_run},
+                     unrelated),
+        "allow")
+    cage.check(
+        "a ~-spelled Bash write under the data root but outside runs/ is allowed",
+        cage.payload("ppl-code-worker", "Bash", {"command": "echo x > ~/.ppl/notes.txt"}, wt),
+        "allow")
+
+    cage.check(
+        "an unrelated agent in an unrelated directory is allowed "
+        "(the cage does not leak into other projects)",
+        cage.payload("SomeOtherProjectAgent", "Edit",
+                     {"file_path": unrelated + "/Foo.java"}, unrelated),
+        "allow")
+
+    cage.check(
+        "a ppl-* role writing the run's repo from a session sitting OUTSIDE the "
+        "worktree is denied (cwd must not be the scope)",
+        cage.payload("ppl-verifier", "Write",
+                     {"file_path": wt + "/notes.txt"}, unrelated),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "a write with no agent_type at all into the run's repo is denied "
+        "(the orchestrator has a write boundary too)",
+        cage.payload(None, "Write",
+                     {"file_path": wt + "/DANGER.txt"}, unrelated),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "a Jira write tool before merge_watch is denied",
+        cage.payload(None, "mcp__atlassian__addCommentToJiraIssue",
+                     {"body": "done"}, wt),
+        "OWNER_DECISION")
+    cage.check(
+        "the same Jira write under the claude.ai Rovo prefix is denied too",
+        cage.payload(None, "mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue",
+                     {"body": "done"}, wt),
+        "OWNER_DECISION")
+
+    cage.set_stage("merge_watch")
+    cage.check(
+        "the same Jira write tool at merge_watch is allowed",
+        cage.payload(None, "mcp__atlassian__addCommentToJiraIssue",
+                     {"body": "done"}, wt),
+        "allow")
+    cage.check(
+        "the Rovo-prefixed Jira write at merge_watch is allowed",
+        cage.payload(None, "mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue",
+                     {"body": "done"}, wt),
+        "allow")
+
+    # --- round 1 review, C4: a worker role driving the ppl CLI directly
+    # through its own Bash tool bypasses the registry, the lease and the done
+    # gate, since none of those write a path the shape-based Bash checks
+    # above would ever see. R-GUARD-PPL-CLI-DENIED. ---
+
+    cage.check(
+        "ppl-code-worker marking its own finding fixed via the ppl CLI is denied",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "ppl findings status --finding-id F1 --status fixed "
+                                 "--fix-link x --generation 1"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker deleting a finding via the ppl CLI is denied",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "ppl findings delete --finding-id F1 --reason done"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-code-worker recording its own passing evidence via the ppl CLI is denied",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "ppl evidence add --check build --result pass "
+                                 "--generation 1"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-code-worker opening its own done gate via the ppl CLI is denied",
+        cage.payload("ppl-code-worker", "Bash", {"command": "ppl transition done"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-code-worker listing findings via the ppl CLI (read-only) is allowed",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "ppl findings list --task %s" % cage.task_id}, wt),
+        "allow")
+
+    # --- round 2 review: the first version of this check called .search()
+    # once, so a read-only ppl call in front of anything at all waved the
+    # whole compound command through, and treated an unparseable ppl
+    # invocation (e.g. a reordered --task flag) as a non-match - i.e. an
+    # allow - instead of as unclassifiable and therefore denied. ---
+
+    cage.check(
+        "a read-only ppl call does not hide a second, unsafe one after &&",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "ppl show --json && ppl findings status abc fixed "
+                                 "--fix-link x --generation 1"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "a read-only ppl call does not hide a second, unsafe one after ;",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "ppl status; ppl transition done"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "a read-only ppl call does not hide a second, unsafe one after &&, "
+        "the findings-specific case",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "ppl findings list && ppl findings delete abc "
+                                 "--reason x"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "a ppl invocation whose shape does not parse (a flag ahead of the "
+        "subcommand) is denied, not allowed as a non-match",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "ppl --task DEMO-1 findings status abc fixed"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    # --- round 3 review: a worker whose PATH lacks `ppl` may reach for
+    # `python3 -m ppl` / `python3 -m ppl.cli` with no intent to evade
+    # anything - those shapes get the same allowlist and the same
+    # fail-closed default as the word `ppl` itself. ---
+
+    cage.check(
+        "python3 -m ppl.cli invoking a state-changing subcommand is denied",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "python3 -m ppl.cli findings status abc fixed"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "python3 -m ppl (no .cli) invoking a state-changing subcommand is denied",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "python3 -m ppl transition done"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "a read-only ppl call does not hide a python3 -m ppl.cli one after &&",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "ppl show && python3 -m ppl.cli transition done"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "python3 -m ppl.cli invoking a read-only subcommand is still allowed",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "python3 -m ppl.cli show --task %s" % cage.task_id}, wt),
+        "allow")
+
+    cage.check(
+        "a git stash tag that merely contains the substring ppl is still not "
+        "a false positive (round 2's own guard, kept passing here)",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "git stash push -u -m ppl-700"}, unrelated),
+        "allow")
+
+    # --- Task 8: read isolation for the test worker. R-TEST-WORKER-READ-TOOLS
+    # (exact: Read/Grep/Glob carry a path argument) and
+    # R-TEST-WORKER-BASH-READS (lexical: Bash is a string). ---
+
+    cage.check(
+        "ppl-test-worker reading a main source via the Read tool is denied",
+        cage.payload("ppl-test-worker", "Read",
+                     {"file_path": wt + "/source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker reading a test source via the Read tool is allowed",
+        cage.payload("ppl-test-worker", "Read",
+                     {"file_path": wt + "/source/MainTest.java"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-test-worker's Grep with no path argument falls back to cwd "
+        "(the repo root, not a test path) and is denied",
+        cage.payload("ppl-test-worker", "Grep", {"pattern": "TODO"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker's Glob scoped to a test source is allowed",
+        cage.payload("ppl-test-worker", "Glob",
+                     {"pattern": "*.java", "path": wt + "/source/src/test"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-test-worker cat of a main source via Bash is denied",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "cat " + wt + "/source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker cat of a test source via Bash is allowed",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "cat " + wt + "/source/MainTest.java"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-test-worker git diff with no pathspec is denied (an unrestricted "
+        "diff can surface any file, main sources included)",
+        cage.payload("ppl-test-worker", "Bash", {"command": "git diff"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker git diff with a global flag before the subcommand "
+        "is still denied (the gates recipe itself uses git -C <worktree>)",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "git -C " + wt + " diff"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker grep -n of a main source is denied (a shared "
+        "value-flag set would misread the pattern as -n's value)",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "grep -n TODO " + wt + "/source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker grep -e of a main source is denied (-e supplies the "
+        "pattern as a flag value, not positionally)",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "grep -e TODO " + wt + "/source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker head -n of a test source is still allowed (head's "
+        "own -n takes a count, unrelated to grep's -n)",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "head -n 20 " + wt + "/source/MainTest.java"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-test-worker git diff is denied even restricted to a test path "
+        "(round 1 review: git diff/show are not in the derived allowlist "
+        "at all, the role has no documented need for either)",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "git diff -- source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    # --- Round 1 review, allowlist rewrite: the repo commands the role
+    # genuinely needs (git status, git add of test paths, git commit, ls),
+    # and the coordinator's 18-attempt probe against the old blocklist. ---
+
+    cage.check(
+        "ppl-test-worker git status is allowed",
+        cage.payload("ppl-test-worker", "Bash", {"command": "git status"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-test-worker git add of a test path is allowed",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "git add " + wt + "/source/MainTest.java"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-test-worker git add of a main source is denied",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "git add " + wt + "/source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker git commit with a message is allowed",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "git commit -m 'add tests'"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-test-worker ls is allowed",
+        cage.payload("ppl-test-worker", "Bash", {"command": "ls -la source"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-test-worker command substitution denies the whole command, "
+        "even hidden inside an otherwise-allowed shape's own argument",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "git commit -m \"$(cat " + wt + "/source/Main.java)\""}, wt),
+        "BOUNDARY_VIOLATION")
+
+    for name, command in [
+        ("nl", "nl " + wt + "/source/Main.java"),
+        ("tac", "tac " + wt + "/source/Main.java"),
+        ("cut", "cut -d' ' -f1 " + wt + "/source/Main.java"),
+        ("od", "od -c " + wt + "/source/Main.java"),
+        ("xxd", "xxd " + wt + "/source/Main.java"),
+        ("strings", "strings " + wt + "/source/Main.java"),
+        ("more", "more " + wt + "/source/Main.java"),
+        ("diff", "diff " + wt + "/source/Main.java /dev/null"),
+        ("git log -p", "git log -p"),
+        ("git blame", "git blame " + wt + "/source/Main.java"),
+        ("git cat-file", "git cat-file -p HEAD:source/Main.java"),
+        ("python3 -c reading a file",
+         "python3 -c \"print(open('source/Main.java').read())\""),
+        ("while read redirected from a main source",
+         "while read l; do echo $l; done < " + wt + "/source/Main.java"),
+    ]:
+        cage.check(
+            "the coordinator's probe: %s is denied (round 1 review)" % name,
+            cage.payload("ppl-test-worker", "Bash", {"command": command}, wt),
+            "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker git show of a main-source object with no pathspec "
+        "is denied",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "git show HEAD:source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "a bash -c wrapper around cat of a main source does not hide the "
+        "read - the literal word survives inside the quoted string",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "bash -c 'cat " + wt + "/source/Main.java'"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "an artifactId containing a verb word (cat-service) is not a false "
+        "positive, same trap as the ppl-700 stash tag",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "mvn -pl :cat-service -am test"}, wt),
+        "allow")
+
+    cage.check(
+        "the gates recipe's real mvn/test command shape is unaffected by the "
+        "test-worker read isolation",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "JAVA_HOME=/opt/jdk mvn -pl :cat-service -am "
+                                 "-Dtest=FooTest -DfailIfNoTests=false "
+                                 "-Dmaven.gitcommitid.skip=true test "
+                                 "> /tmp/focused.log 2>&1; echo $? > /tmp/focused.rc"}, wt),
+        "allow")
+
+    cage.check(
+        "the gates recipe's mvn install shape (goal right after mvn) is allowed",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "mvn install -pl :cat-service -am -DskipTests "
+                                 "-Dmaven.gitcommitid.skip=true"}, wt),
+        "allow")
+
+    cage.check(
+        "the gates recipe's mvn checkstyle:check shape is allowed",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "mvn -pl :cat-service -am "
+                                 "-Dmaven.gitcommitid.skip=true checkstyle:check"}, wt),
+        "allow")
+
+    cage.check(
+        "the gates recipe's mvn verify shape is allowed",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "mvn -pl :cat-service -am "
+                                 "-Dmaven.gitcommitid.skip=true verify"}, wt),
+        "allow")
+
+    cage.check(
+        "mvn with -pl/-am but no recognised goal is denied, not waved "
+        "through just because it looks like an mvn invocation",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "mvn -pl :cat-service -am "
+                                 "-Dexec.mainClass=Foo"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "cd into a test dir then climbing back out past it with .. is denied "
+        "(the launch cwd does not move, but the cd inside the command does)",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "cd source && cat ../source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-code-worker reading a test source is not restricted by this "
+        "check (the mirror decision: reads are not denied)",
+        cage.payload("ppl-code-worker", "Read",
+                     {"file_path": wt + "/source/MainTest.java"}, wt),
+        "allow")
+
+    # --- C1 (whole-branch review): the write boundary ran only for
+    # Edit/Write/MultiEdit/NotebookEdit, and both workers hold Bash. Every
+    # case below is the exact repro table from the review, plus the shapes
+    # cp/sed -i/command-substitution add on top of a plain redirect. ---
+
+    cage.check(
+        "ppl-code-worker Bash redirect into a test source is denied "
+        "(C1 repro row 1)",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "echo x > " + wt + "/source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker Bash redirect into a main source is denied, "
+        "absolute path (C1 repro row 3)",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "echo pwned > " + wt + "/source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker Bash redirect into a main source is denied, "
+        "relative path (C1 repro row 4)",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "echo pwned > source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "an unroled session's Bash redirect into the run's repo is denied, "
+        "from a cwd outside it (C1 repro row 5)",
+        cage.payload(None, "Bash",
+                     {"command": "echo x > " + wt + "/source/Main.java"}, unrelated),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-code-worker Bash redirect inside its own write boundary is "
+        "still allowed",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "echo x > source/Main.java"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-test-worker Bash redirect into a test source is still allowed",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "echo x > source/src/test/OtherTest.java"}, wt),
+        "allow")
+
+    cage.check(
+        "a role's Bash build-log redirect outside the repo is unaffected "
+        "(the gates recipe's own convention)",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "mvn -pl :m -am test > /tmp/build.log 2>&1; "
+                                 "echo $? > /tmp/build.rc"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-code-worker cp-ing a file into a test source is denied - not "
+        "a redirect, but the same boundary decision must still apply",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "cp /tmp/x.java source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-code-worker rm outside the repo is unaffected",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "rm /tmp/scratch.txt"}, wt),
+        "allow")
+
+    cage.check(
+        "ppl-code-worker's ambiguous sed -i on a repo path is denied - "
+        "fail closed, GNU's attached suffix and BSD's separate one cannot "
+        "be told apart lexically",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "sed -i 's/a/b/' source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "a command substitution hiding a write-shaped construct's real "
+        "target is denied rather than skipped",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "cp $(pwd)/x.java source/Main.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "an unrelated session's ambiguous sed -i elsewhere is NOT denied - "
+        "the fail-closed direction must not leak into other projects",
+        cage.payload(None, "Bash",
+                     {"command": "sed -i 's/a/b/' notes.txt"}, unrelated),
+        "allow")
+
+    cage._store.write_json(cage.run_dir() / "boundary.json",
+                           {"write": ["source/**"], "forbid": ["source/secrets/**"]})
+    cage.check(
+        "ppl-code-worker Bash write to a forbidden path is denied",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "echo x > source/secrets/key.pem"}, wt),
+        "BOUNDARY_VIOLATION")
+    cage._store.write_json(cage.run_dir() / "boundary.json",
+                           {"write": ["source/**"], "forbid": []})
+
+    # --- Round 2 (whole-branch review, wave A): touch/truncate/ln/install
+    # were missing from BASH_WRITE_SHAPES. Probed against ppl-code-worker,
+    # which has no read allowlist to accidentally cover them the way the
+    # test worker's did. ---
+
+    cage.check(
+        "ppl-code-worker touch of a test source is denied",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "touch " + wt + "/source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-code-worker truncate of a test source is denied",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "truncate -s 0 " + wt + "/source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-code-worker ln replacing a test source is denied - the "
+        "linkname is checked, not the symlink's target",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "ln -sf /etc/passwd " + wt + "/source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-code-worker install into a test source is denied - the "
+        "destination (last argument) is checked, not the source",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "install -m 644 /dev/null " + wt + "/source/MainTest.java"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-code-worker touch inside its own write boundary is still allowed",
+        cage.payload("ppl-code-worker", "Bash",
+                     {"command": "touch " + wt + "/source/Main.java"}, wt),
+        "allow")
+
+    # --- C2 (whole-branch review): _read_verb_allowed treated "no path
+    # operand" as "filtering a pipe" for every read verb - true only of a
+    # genuine pipe. rg is recursive by default with no path at all, and
+    # GNU grep -r/-R defaults to the cwd - neither reads stdin, piped or not. ---
+
+    cage.check(
+        "ppl-test-worker rg with no path is denied (C2 repro)",
+        cage.payload("ppl-test-worker", "Bash", {"command": "rg 'class Main'"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker rg -n with no path is denied (C2 repro)",
+        cage.payload("ppl-test-worker", "Bash", {"command": "rg -n pwn"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker grep -r with no path is denied (C2 repro)",
+        cage.payload("ppl-test-worker", "Bash", {"command": "grep -r pwn"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker grep -rn (bundled) with no path is denied",
+        cage.payload("ppl-test-worker", "Bash", {"command": "grep -rn pwn"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker piped grep -rn (bundled) is still denied - the "
+        "discriminating case, since an unpiped command already denies for "
+        "the other reason and cannot prove the bundling check does anything",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "echo x | grep -rn pwn"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker grep -R with no path is denied",
+        cage.payload("ppl-test-worker", "Bash", {"command": "grep -R pwn"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "ppl-test-worker grep --include=*.java -r with no path is denied "
+        "(C2 repro)",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "grep --include=*.java -r class"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "the genuine pipe-filter case stays allowed",
+        cage.payload("ppl-test-worker", "Bash", {"command": "echo hello | grep hello"}, wt),
+        "allow")
+
+    failed = [name for name, ok, _ in cage.results if not ok]
+    print()
+    print("%d/%d cases passed" % (len(cage.results) - len(failed), len(cage.results)))
+    if failed:
+        print("FAILED: " + ", ".join(failed))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

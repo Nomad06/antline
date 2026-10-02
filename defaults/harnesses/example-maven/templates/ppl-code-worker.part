@@ -1,0 +1,2 @@
+- Build with `JAVA_HOME` set and `mvn -pl :<module> -am`. Always write the exit code to a
+  file: a piped Maven run returns the exit code of the pipe tail.

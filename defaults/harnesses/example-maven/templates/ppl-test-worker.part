@@ -1,0 +1,2 @@
+- Keep test files ASCII only, with no tabs and LF line endings: the repository's style check
+  does not audit test sources.

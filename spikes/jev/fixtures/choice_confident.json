@@ -1,0 +1,38 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "review_class": {
+      "type": "choice",
+      "choice": "NEEDS_REPLY_ONLY",
+      "confidence": 0.93,
+      "probabilities": {
+        "NEEDS_CODE_CHANGE": 0.04,
+        "NEEDS_REPLY_ONLY": 0.94,
+        "DISAGREE": 0.01,
+        "NEEDS_OWNER": 0.01
+      }
+    },
+    "risk_tier": {
+      "type": "choice",
+      "choice": "normal",
+      "confidence": 0.62,
+      "probabilities": {"normal": 0.7, "critical": 0.3}
+    },
+    "acceptance_stable": {"type": "noul", "noul": 0.97},
+    "decisions_closed": {"type": "noul", "noul": 0.55},
+    "blocker": {
+      "type": "choice",
+      "choice": "IMPLEMENTATION_FAILURE",
+      "confidence": 0.9,
+      "probabilities": {
+        "BASELINE_FAILURE": 0.03,
+        "EXTERNAL_BLOCKED": 0.01,
+        "IMPLEMENTATION_FAILURE": 0.92,
+        "TEST_FAILURE": 0.02,
+        "SPEC_GAP": 0.01,
+        "OWNER_DECISION": 0.01
+      }
+    }
+  },
+  "usage": {"input_tokens": 612, "output_tokens": 71}
+}

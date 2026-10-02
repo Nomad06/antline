@@ -1,0 +1,311 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ppl panel</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 16px; }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  #status { color: #b91c1c; font-weight: 700; margin: 0 0 12px; }
+  .run { border: 1px solid #8884; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+  .run.needs-you { border-left: 4px solid #b45309; }
+  .run.error { border-left: 4px solid #b91c1c; background: #b91c1c14; }
+  .head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  .id { font-weight: 700; }
+  .needs { color: #b45309; font-weight: 700; }
+  .error .needs { color: #b91c1c; }
+  .stage { opacity: 0.8; }
+  .outcome { margin: 6px 0; }
+  .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 4px 16px; opacity: 0.85; }
+  button { font: inherit; padding: 4px 10px; margin-right: 6px; cursor: pointer; }
+  button.danger { color: #b91c1c; }
+  pre.log { max-height: 220px; overflow: auto; background: #8881; padding: 8px; border-radius: 4px; }
+  .empty { opacity: 0.6; }
+</style>
+<h1>ppl panel</h1>
+<div id="status" hidden></div>
+<div id="runs" class="empty">loading...</div>
+<script>
+const HEADERS = { "Content-Type": "application/json", "X-PPL": "1" };
+
+// task_id -> { open, offset, text, pending }. offset is the opaque byte
+// offset the server last handed back for that run's log.jsonl; it is only
+// ever set from data.next_offset (or reset to 0 on reopen), never computed
+// here. pending guards against two overlapping fetches for the same task
+// (the click handler opening a pane at the same moment a poll's
+// restoreOpenLogs tries to tail it) both reading offset 0 and one of them
+// clobbering the other's result.
+//
+// Every fetch that ends by writing to a pane's DOM node or its logState
+// entry must, right after the await, re-check both identity
+// (logState[task] === <the entry this fetch started with>, i.e. nothing
+// replaced it with a fresh open/close cycle while the fetch was in
+// flight) and intent (entry.open, i.e. the operator has not since closed
+// it). Skipping either check lets a stale fetch - one started before an
+// intervening close, or before a close-then-reopen swapped in a new
+// entry object - write a closed pane back open, or race a newer fetch to
+// the same DOM node.
+const logState = {};
+
+const LOG_TEXT_CAP = 200000; // characters; oldest text is dropped past this
+
+function encodePath(taskId) {
+  // An error row's task_id is the raw, unvalidated run-directory name (see
+  // server.py's _error_row, which never runs it through check_task_id), so
+  // a "?" or "#" in it must not be allowed to mis-route the request it is
+  // spliced into. Harmless no-op for a normal KEY-123-shaped id.
+  return encodeURIComponent(taskId);
+}
+
+async function post(path, body) {
+  const res = await fetch(path, { method: "POST", headers: HEADERS, body: JSON.stringify(body || {}) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error_code + ": " + data.message); }
+  return data;
+}
+
+function esc(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function safeHref(url) {
+  // esc() only stops attribute breakout; it does nothing about the scheme.
+  // A javascript: URL is still a clickable script trigger inside the
+  // panel's own origin - the same threat the no-third-party-script rule
+  // exists to prevent, arriving through run state data instead of a CDN.
+  // mr.url comes from state.json, which is untrusted everywhere else in
+  // this system, so only ever link an http(s) URL.
+  return typeof url === "string" && /^https?:\/\//i.test(url) ? url : null;
+}
+
+function mrLine(run) {
+  if (!run.mr || !run.mr.url) return "no MR yet";
+  const href = safeHref(run.mr.url);
+  if (href) return '<a href="' + esc(href) + '">MR !' + esc(run.mr.iid) + "</a>";
+  return "MR !" + esc(run.mr.iid) + " (unsafe URL, not linked: " + esc(run.mr.url) + ")";
+}
+
+function budgetLine(b) {
+  return "dispatch " + b.dispatch_used + "/" + b.dispatch_hard +
+         ", retry " + b.retry_used + "/" + b.retry_max +
+         ", usd " + b.usd_used + "/" + (b.usd_max || "unlimited");
+}
+
+function renderErrorRow(run) {
+  // A run whose state.json could not be read comes back with none of the
+  // usual fields (outcome, budgets, mr, ...), only task_id and needs_you.
+  // Falling through to the normal template would read undefined
+  // properties (e.g. budgetLine on an empty {} budgets) and print the
+  // literal string "undefined" into the page, or the row would silently
+  // be missing the very information an operator needs. Render it as an
+  // unmistakably broken row instead: the task id and the reason, nothing
+  // else pretended to be known.
+  return '<div class="run error needs-you" data-task="' + esc(run.task_id) + '">' +
+    '<div class="head">' +
+      '<span class="id">' + esc(run.task_id) + "</span>" +
+      '<span class="stage">error</span>' +
+    "</div>" +
+    '<div class="needs">NEEDS YOU: ' + esc(run.needs_you) + "</div>" +
+    "<div>" +
+      '<button class="danger" data-command="destroy">destroy</button>' +
+    "</div>" +
+  "</div>";
+}
+
+function renderRun(run) {
+  if (run.status === "error") {
+    return renderErrorRow(run);
+  }
+  const rowClass = run.needs_you ? "run needs-you" : "run";
+  return '<div class="' + rowClass + '" data-task="' + esc(run.task_id) + '">' +
+    '<div class="head">' +
+      '<span class="id">' + esc(run.task_id) + "</span>" +
+      '<span class="stage">' + esc(run.stage) + " / " + esc(run.status) + "</span>" +
+      (run.control ? '<span class="needs">' + esc(run.control.toUpperCase()) + "</span>" : "") +
+      (run.needs_you ? '<span class="needs">NEEDS YOU: ' + esc(run.needs_you) + "</span>" : "") +
+    "</div>" +
+    '<div class="outcome">' + esc(run.outcome) + "</div>" +
+    '<div class="meta">' +
+      "<span>next: " + esc(run.next_safe_action) + "</span>" +
+      "<span>sha: " + esc(run.candidate_sha) + "</span>" +
+      "<span>risk: " + esc(run.risk) + "</span>" +
+      "<span>" + esc(budgetLine(run.budgets)) + "</span>" +
+      "<span>" + mrLine(run) + "</span>" +
+      "<span>open findings: " + esc(run.open_findings) + "</span>" +
+    "</div>" +
+    "<div>" +
+      '<button data-command="pause">pause</button>' +
+      '<button data-command="resume">resume</button>' +
+      '<button data-command="stop">stop</button>' +
+      '<button class="danger" data-command="destroy">destroy</button>' +
+      '<button data-command="sigterm">sigterm</button>' +
+      '<button data-command="log">log</button>' +
+    "</div>" +
+    '<pre class="log" hidden></pre>' +
+  "</div>";
+}
+
+function appendLogText(entry, newText) {
+  entry.text = entry.text ? entry.text + "\n" + newText : newText;
+  if (entry.text.length > LOG_TEXT_CAP) {
+    entry.text = entry.text.slice(entry.text.length - LOG_TEXT_CAP);
+  }
+}
+
+// Re-apply any log panes the operator left open across a poll: refresh()
+// rebuilds the whole #runs subtree from scratch every cycle, so without
+// this an open log tail would silently blank itself out every 5 seconds.
+async function restoreOpenLogs(host) {
+  const rows = host.querySelectorAll(".run");
+  for (const row of rows) {
+    const task = row.dataset.task;
+    const entry = logState[task];
+    if (!entry || !entry.open) continue;
+    const pre = row.querySelector("pre.log");
+    if (!pre) continue;
+    pre.hidden = false;
+    pre.textContent = entry.text;
+    if (entry.pending) continue; // a click's own opening fetch is already in flight
+    entry.pending = true;
+    try {
+      const data = await (await fetch("/api/runs/" + encodePath(task) + "/log?offset=" + entry.offset)).json();
+      // Identity + intent: the operator may have closed this pane (or
+      // closed and reopened it, swapping in a different entry object)
+      // while this fetch was in flight. Only a fetch that is still for
+      // the entry currently registered, and still open, may write.
+      if (logState[task] === entry && entry.open) {
+        if (data.lines.length) {
+          appendLogText(entry, data.lines.join("\n"));
+          pre.textContent = entry.text;
+        }
+        entry.offset = data.next_offset;
+      }
+    } catch (err) {
+      // One run's log endpoint failing (e.g. its state just went bad)
+      // must not stop the other open panes from being restored above.
+    } finally {
+      entry.pending = false;
+    }
+  }
+}
+
+function showStaleNotice() {
+  const el = document.getElementById("status");
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  el.textContent = "last update failed at " + pad(now.getHours()) + ":" + pad(now.getMinutes()) + ":" + pad(now.getSeconds());
+  el.hidden = false;
+}
+
+function clearStaleNotice() {
+  const el = document.getElementById("status");
+  el.hidden = true;
+  el.textContent = "";
+}
+
+let refreshing = false;
+
+async function refresh() {
+  if (refreshing) return; // do not stack requests if one is slow
+  refreshing = true;
+  try {
+    let runs;
+    try {
+      runs = await (await fetch("/api/runs")).json();
+    } catch (err) {
+      // A dead server must not look like a healthy, merely idle one: the
+      // last-known rows stay on screen (losing that context on a blip
+      // would be worse), but a visible notice says they are stale.
+      showStaleNotice();
+      return;
+    }
+    clearStaleNotice();
+    const host = document.getElementById("runs");
+    host.className = runs.length ? "" : "empty";
+    host.innerHTML = runs.length ? runs.map(renderRun).join("") : "no runs yet";
+    const statusByTask = new Map(runs.map((run) => [run.task_id, run.status]));
+    for (const task of Object.keys(logState)) {
+      // Drop a pane's state once its run is gone, or once it has flipped
+      // to "error": resuming from a stale offset after a recovery would
+      // show a gapped log instead of picking the tail up cleanly.
+      if (!statusByTask.has(task) || statusByTask.get(task) === "error") delete logState[task];
+    }
+    await restoreOpenLogs(host);
+  } finally {
+    refreshing = false;
+  }
+}
+
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  const task = button.closest(".run").dataset.task;
+  const command = button.dataset.command;
+
+  if (command === "log") {
+    const pre = button.closest(".run").querySelector("pre.log");
+    const entry = logState[task];
+    if (entry && entry.open) {
+      // Already open: close it. Reopening later starts over at offset 0.
+      entry.open = false;
+      pre.hidden = true;
+      return;
+    }
+    // Register the entry before the fetch, not after: a poll landing
+    // mid-flight rebuilds #runs, detaching this "pre" node. Registering
+    // first means restoreOpenLogs finds an "open" entry on its next pass
+    // and shows the pane on the fresh node, instead of the click looking
+    // dead for up to 5s while its own write lands on a detached element.
+    const fresh = { open: true, offset: 0, text: "", pending: true };
+    logState[task] = fresh;
+    try {
+      const data = await (await fetch("/api/runs/" + encodePath(task) + "/log?offset=" + fresh.offset)).json();
+      // Identity + intent, same as restoreOpenLogs: the operator may have
+      // clicked close (fresh.open false) - or close then open again,
+      // which replaces logState[task] with a different entry object -
+      // while this opening fetch was in flight. An unconditional write
+      // here would silently reopen a pane the operator explicitly closed.
+      if (logState[task] === fresh && fresh.open) {
+        appendLogText(fresh, data.lines.join("\n"));
+        fresh.offset = data.next_offset;
+        pre.textContent = fresh.text;
+        pre.hidden = false;
+      }
+    } finally {
+      fresh.pending = false;
+    }
+    return;
+  }
+  if (command === "sigterm") {
+    if (!confirm("Send SIGTERM to the orchestrator of " + task + "?")) return;
+    await post("/api/runs/" + encodePath(task) + "/signal");
+    return refresh();
+  }
+  if (command === "destroy") {
+    const scope = prompt(
+      "Destroy " + task + ".\n\n" +
+      "local = stop the run, remove local state and worktree, leave the MR and remote branch alone\n" +
+      "full  = also close the MR and delete the remote branch (irreversible)\n\n" +
+      "Type local or full:", "local");
+    if (scope !== "local" && scope !== "full") return;
+    if (scope === "full" && prompt("Type the task id to confirm irreversible cleanup:") !== task) return;
+    const record = await post("/api/runs/" + encodePath(task) + "/control",
+                              { command: "destroy", scope: scope });
+    // A local destroy archives the run even when git could not remove the
+    // worktree. Saying nothing here is how an orphaned worktree used to look
+    // exactly like a clean destroy.
+    const outcome = record && record.result;
+    if (outcome && outcome.worktree_error) {
+      alert("Run " + task + " was archived, but its worktree could not be removed:\n\n" +
+            outcome.worktree_error + "\n\nRemove it by hand.");
+    }
+    return refresh();
+  }
+  await post("/api/runs/" + encodePath(task) + "/control", { command: command });
+  refresh();
+});
+
+refresh();
+setInterval(refresh, 5000);
+</script>

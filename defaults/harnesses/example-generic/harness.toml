@@ -1,0 +1,50 @@
+[harness]
+name = "example-generic"
+format = 1
+
+[repo]
+path = "/home/dev/src/project"
+default_branch = "main"
+worktrees = "/home/dev/src/project/.worktrees"
+
+[task]
+key_pattern = "^[A-Z][A-Z0-9]+-[0-9]+$"
+url_template = "https://example.atlassian.net/browse/<TASK-ID>"
+
+[tracker]
+kind = "jira"
+mcp_prefixes = ["mcp__atlassian__", "mcp__claude_ai_Atlassian_Rovo__"]
+write_operations = ["addOrEditJiraIssueComment", "addCommentToJiraIssue", "editJiraIssue", "transitionJiraIssue", "addWorklogToJiraIssue", "createJiraIssue", "executeWrite", "executeDestructive", "createConfluenceContent", "updateConfluenceContent", "addGraphContext", "createConfluencePage", "updateConfluencePage", "createConfluenceFooterComment", "createConfluenceInlineComment"]
+read_tools = ["getJiraIssue", "getConfluenceContent", "getConfluencePage", "searchJiraIssuesUsingJql", "searchConfluence", "executeRead"]
+
+[forge]
+kind = "github"
+
+[knowledge]
+skills = []
+extra_tools = []
+
+[env]
+
+[[gate]]
+name = "build"
+command = "make build"
+
+[[gate]]
+name = "lint"
+command = "make lint"
+
+[[gate]]
+name = "focused-tests"
+command = "make test TEST=<test_class>"
+
+[[gate]]
+name = "integration-tests"
+command = "make integration"
+
+[[guard.shape]]
+argv0 = "make"
+env_prefix = true
+required_flags = []
+one_goal_of = ["build", "lint", "test", "integration"]
+free_args = "^[A-Z_]+=[A-Za-z0-9_./:,-]*$"

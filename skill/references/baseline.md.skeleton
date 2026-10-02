@@ -1,0 +1,18 @@
+# The baseline document
+
+`ppl baseline record <file>` is far more permissive than `ppl brief set` or `ppl verdict
+record` - it is worth saying plainly, so nobody assumes the rest of the document is checked
+just because `base_sha` is (D3, cycle 2 wave D: this file did not exist, which is part of
+why D2's `base_sha == HEAD` confusion bit as hard as it did).
+
+| Field | Type | Shape | Validated? |
+|---|---|---|---|
+| `base_sha` | string | a full commit SHA, an ancestor of HEAD, recorded while the run is still in the baseline stage | Yes - a missing or non-string value is `SCHEMA_INVALID`, a non-ancestor is `SCHEMA_INVALID`, a second call is `ILLEGAL_TRANSITION`, and a call made after the run has moved past the baseline stage is `ILLEGAL_TRANSITION` too [R-BASELINE-WRITE-ONCE] [R-BASELINE-ANCESTOR] [R-BASELINE-NOT-AT-HEAD] |
+| anything else | anything | <!-- include: harness/baseline --> | No - `ppl baseline record` writes the whole document to `baseline.json` and reads only `base_sha` back out of it. There is no schema for the rest, no required keys, and no shape check. It is a durable note for a human or a later `ppl show`, not a gate |
+
+`base_sha` equal to the worktree's current HEAD is accepted, and expected, on a freshly cut
+branch that has no commits of its own yet - that is exactly what "before any of your own
+commits" means when there are none yet. The command's real defence against a baseline
+recorded too late is the stage check, not the value itself: see `references/gates.md` and
+Stage 1 of `SKILL.md` for the sequence (worktree, then baseline record, before any
+implementation work lands).

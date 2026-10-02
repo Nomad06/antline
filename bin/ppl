@@ -1,0 +1,12 @@
+#!/bin/sh
+# Resolve the code root from this script's own location, so `ppl` works from
+# any directory once bin/ is on PATH. PPL_ROOT is the checkout, PPL_HOME the
+# data root (default ~/.ppl).
+PPL_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PPL_ROOT
+# ppl needs Python 3.11 (tomllib), and an older python3 used to answer with a
+# traceback. The check is kept to syntax any python3 parses.
+python3 -c 'import sys
+v = sys.version_info
+sys.exit(0 if v >= (3, 11) else "ppl needs Python 3.11 or newer, but python3 on PATH is %d.%d.%d." % tuple(v[:3]))' || exit 2
+exec env PYTHONPATH="$PPL_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m ppl "$@"

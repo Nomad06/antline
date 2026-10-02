@@ -1,0 +1,42 @@
+# Single source of truth for role routing. Regenerate agents with: ppl harness apply <name>
+# Never edit the generated agent files by hand.
+
+[providers.claude-code-subagent]
+kind = "subagent"
+allow_source_upload = true
+
+# A tier names a provider and a model. Roles name tiers. Change a model here,
+# then run `ppl models verify` and `ppl harness apply <name>`.
+[tiers]
+heavy   = { provider = "claude-code-subagent", model = "fable" }
+good    = { provider = "claude-code-subagent", model = "opus" }
+average = { provider = "claude-code-subagent", model = "sonnet" }
+light   = { provider = "claude-code-subagent", model = "haiku" }
+
+[roles.ppl-briefer]
+tier = "good"
+params = { effort = "high" }
+
+[roles.ppl-brief-challenger]
+tier = "good"
+params = { effort = "xhigh" }
+
+[roles.ppl-code-worker]
+tier = "average"
+params = { effort = "high" }
+# A high-risk task (ppl init --risk high) gets the stronger tier for the
+# implementation. The agent file keeps the default, the orchestrator passes
+# the resolved model at dispatch (ppl routing show --role ppl-code-worker --task X).
+by_risk = { high = "good" }
+
+[roles.ppl-test-worker]
+tier = "average"
+params = { effort = "high" }
+
+[roles.ppl-verifier]
+tier = "good"
+params = { effort = "xhigh" }
+
+[roles.ppl-review-responder]
+tier = "average"
+params = { effort = "high" }

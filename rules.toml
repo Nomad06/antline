@@ -1,0 +1,1870 @@
+# The rule matrix. One row per rule this pipeline claims to hold.
+#
+# Read by ppl/rules.py and asserted by tests/test_rule_matrix.py:
+#   - a blocking row must name a deny test that exists and that names this id
+#   - an n/a row must carry a residual that says which kind of gap it is
+#   - every enforcement sentence in docs/DESIGN.md must name a row id
+#   - a blocking or soft row must name a check that really exists in the tree
+#
+# enforcement: blocking = code refuses the action
+#              soft     = code notices, warns or filters, the action still goes through
+#              n/a      = nothing in this pipeline enforces it
+# residual:    GAP:      needed and not built (counted as a hole)
+#              PROPERTY: a stated fact with nothing here to enforce
+# owner:       who is accountable for the rule holding, or for the residual biting
+
+# ---------------------------------------------------------------------------
+# Role write boundaries
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-ROLE-CODE-WORKER-TESTS"
+statement = "ppl-code-worker may not write a test source, anywhere in the tree - through a structured edit tool or through a write-shaped Bash construct."
+scope = "active run, agent_type ppl-code-worker"
+event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit, and on Bash for a redirect/tee/sed -i/cp/mv/dd/rm whose target lands inside the repo"
+enforcement = "blocking"
+hook_or_check = "ppl/boundary.py:check_path, hooks/ppl_guard.py:decide, hooks/ppl_guard.py:bash_write_boundary_deny"
+deny_test = "tests/test_guard.py::TestGuard::test_code_worker_may_not_edit_a_test, tests/test_boundary.py::TestCodeWorker::test_rejects_test_sources_even_inside_boundary, tests/test_guard.py::TestGuard::test_code_worker_bash_redirect_into_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_cp_into_a_test_source_is_denied"
+allow_test = "tests/test_guard.py::TestGuard::test_code_worker_may_edit_inside_boundary"
+owner = "guard-hook"
+residual = "inert until the hook is registered, see R-GUARD-NOT-ARMED. The Bash half is lexical, like every other Bash check in this module: an interpreter invocation (python3 -c \"open(path,'w').write(...)\") writes the same path and is not caught - see R-GUARD-BASH-WRITE-BOUNDARY"
+
+[[rule]]
+id = "R-ROLE-CODE-WORKER-BOUNDARY"
+statement = "ppl-code-worker may write only paths matching boundary.write - through a structured edit tool or through a write-shaped Bash construct."
+scope = "active run, agent_type ppl-code-worker"
+event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit, and on Bash for a redirect/tee/sed -i/cp/mv/dd/rm whose target lands inside the repo"
+enforcement = "blocking"
+hook_or_check = "ppl/boundary.py:check_path, hooks/ppl_guard.py:bash_write_boundary_deny"
+deny_test = "tests/test_boundary.py::TestCodeWorker::test_rejects_path_outside_write_boundary, tests/test_guard.py::TestGuard::test_code_worker_bash_write_outside_the_write_boundary_is_denied"
+allow_test = "tests/test_boundary.py::TestCodeWorker::test_allows_path_inside_write_boundary, tests/test_guard.py::TestGuard::test_code_worker_bash_redirect_inside_boundary_is_still_allowed"
+owner = "guard-hook"
+residual = "inert until the hook is registered, see R-GUARD-NOT-ARMED. The Bash half is lexical - see R-GUARD-BASH-WRITE-BOUNDARY for exactly what it does and does not catch"
+
+[[rule]]
+id = "R-ROLE-TEST-WORKER-MAIN"
+statement = "ppl-test-worker may write test sources only, never a main source - through a structured edit tool or through a write-shaped Bash construct."
+scope = "active run, agent_type ppl-test-worker"
+event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit, and on Bash for a redirect/tee/sed -i/cp/mv/dd/rm whose target lands inside the repo"
+enforcement = "blocking"
+hook_or_check = "ppl/boundary.py:check_path, hooks/ppl_guard.py:decide, hooks/ppl_guard.py:bash_write_boundary_deny"
+deny_test = "tests/test_guard.py::TestGuard::test_test_worker_may_not_edit_main_source, tests/test_boundary.py::TestTestWorker::test_rejects_main_sources, tests/test_guard.py::TestGuard::test_test_worker_bash_redirect_into_a_main_source_is_denied_absolute, tests/test_guard.py::TestGuard::test_test_worker_bash_redirect_into_a_main_source_is_denied_relative"
+allow_test = "tests/test_boundary.py::TestTestWorker::test_allows_test_sources, tests/test_guard.py::TestGuard::test_test_worker_bash_redirect_into_a_test_source_is_still_allowed"
+owner = "guard-hook"
+residual = "inert until the hook is registered, see R-GUARD-NOT-ARMED. The Bash half is lexical - an interpreter invocation is not caught, see R-GUARD-BASH-WRITE-BOUNDARY"
+
+[[rule]]
+id = "R-ROLE-READONLY-NO-WRITE"
+statement = "ppl-briefer, ppl-brief-challenger, ppl-verifier and ppl-review-responder may write no path at all."
+scope = "active run, read-only roles"
+event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit"
+enforcement = "blocking"
+hook_or_check = "ppl/boundary.py:ROLE_RULES, ppl/boundary.py:check_path"
+deny_test = "tests/test_guard.py::TestGuard::test_verifier_may_not_write_anything, tests/test_guard.py::TestGuard::test_brief_challenger_may_not_write_anything, tests/test_boundary.py::TestReadOnlyRoles::test_verifier_may_write_nothing, tests/test_boundary.py::TestReadOnlyRoles::test_every_read_only_role_may_write_nothing"
+allow_test = ""
+owner = "guard-hook"
+residual = "inert until the hook is registered, see R-GUARD-NOT-ARMED"
+
+[[rule]]
+id = "R-ROLE-TOOLS-READONLY"
+statement = "The generated agent file for a read-only role grants no Edit, Write or Bash tool. The one exception is Bash for ppl-review-responder under a forge whose adapter grants it (github), where the hook caps it to the forge's read shapes, see R-REVIEW-RESPONDER-BASH-SHAPES."
+scope = "global, every dispatch of that role"
+event = "ppl routing apply"
+enforcement = "blocking"
+hook_or_check = "ppl/routing.py:BASE_TOOLS, ppl/routing.py:role_tools, ppl/routing.py:render"
+deny_test = "tests/test_routing.py::TestRouting::test_read_only_roles_get_no_write_tools, tests/test_routing.py::TestRouting::test_verifier_gets_no_bash, tests/test_routing.py::TestRouting::test_only_the_review_responder_may_hold_bash_and_only_under_a_granting_forge, tests/test_harness.py::TestMalformedInputIsRefusedNotATraceback::test_a_built_in_tool_cannot_be_granted_through_extra_tools"
+allow_test = "tests/test_routing.py::TestRouting::test_code_worker_gets_edit_tools"
+owner = "ppl"
+residual = "the allow-list is real only after ppl routing apply has been run against the live agents directory"
+
+[[rule]]
+id = "R-ROLE-FORBIDDEN-PATHS"
+statement = "A path matching boundary.forbid is denied even when it also matches boundary.write - through a structured edit tool or through a write-shaped Bash construct."
+scope = "active run, any writing role"
+event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit, and on Bash for a redirect/tee/sed -i/cp/mv/dd/rm whose target lands inside the repo"
+enforcement = "blocking"
+hook_or_check = "ppl/boundary.py:check_path, hooks/ppl_guard.py:bash_write_boundary_deny"
+deny_test = "tests/test_boundary.py::TestCodeWorker::test_rejects_forbidden_even_if_write_pattern_matches, tests/test_guard.py::TestGuard::test_code_worker_bash_write_to_a_forbidden_path_is_denied"
+allow_test = ""
+owner = "guard-hook"
+residual = "the Bash half is lexical - an interpreter invocation is not caught, see R-GUARD-BASH-WRITE-BOUNDARY"
+
+[[rule]]
+id = "R-PATH-TRAVERSAL"
+statement = "A write path containing a .. segment is denied."
+scope = "active run, any writing role"
+event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit, ppl apply-patch"
+enforcement = "blocking"
+hook_or_check = "ppl/boundary.py:check_path"
+deny_test = "tests/test_boundary.py::TestCodeWorker::test_rejects_path_with_traversal_sequence, tests/test_boundary.py::TestDiff::test_check_diff_rejects_crafted_traversal_path"
+allow_test = ""
+owner = "guard-hook"
+residual = ""
+
+[[rule]]
+id = "R-PATH-ABSOLUTE"
+statement = "An absolute write path is denied, since it cannot be checked against a relative boundary."
+scope = "active run, any writing role"
+event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit, ppl apply-patch"
+enforcement = "blocking"
+hook_or_check = "ppl/boundary.py:check_path"
+deny_test = "tests/test_boundary.py::TestCodeWorker::test_rejects_absolute_path"
+allow_test = ""
+owner = "guard-hook"
+residual = ""
+
+[[rule]]
+id = "R-ROLE-OUTSIDE-REPO"
+statement = "A ppl-* role's structured edit tool call (Edit/Write/MultiEdit/NotebookEdit) may write only inside the active run's repo, whatever its session's cwd."
+scope = "active run, any ppl-* role"
+event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:decide, hooks/ppl_guard.py:targets_repo"
+deny_test = "tests/test_guard.py::TestGuard::test_role_write_outside_the_repo_is_denied, tests/test_guard.py::TestGuard::test_role_outside_any_run_repo_is_still_denied_regardless_of_isolation"
+allow_test = "tests/test_guard.py::TestGuard::test_role_write_into_the_repo_is_denied_from_any_cwd"
+owner = "guard-hook"
+residual = "does NOT extend to Bash by the same shape: R-GUARD-BASH-WRITE-BOUNDARY deliberately does not deny a role's Bash write that lands OUTSIDE the repo (a role's Bash legitimately writes build logs and rc files there, e.g. gates.md's own recipe), so an out-of-repo target is not itself a violation for Bash the way it is for a structured edit tool - see test_code_worker_bash_write_outside_the_repo_is_unaffected"
+
+[[rule]]
+id = "R-UNROLED-REPO-WRITE"
+statement = "A session with no agent_type, the orchestrator included, may not write repo code inside an active run's repo - through a structured edit tool or through a write-shaped Bash construct, whatever its session's cwd."
+scope = "active run, session with no agent_type"
+event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit, and on Bash for a redirect/tee/sed -i/cp/mv/dd/rm whose target lands inside the repo"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:decide, hooks/ppl_guard.py:bash_write_boundary_deny"
+deny_test = "tests/test_guard.py::TestGuard::test_absent_agent_type_writing_inside_the_run_repo_is_denied, tests/test_guard.py::TestGuard::test_unrecognised_agent_writing_inside_the_run_repo_is_denied, tests/test_guard.py::TestGuard::test_unroled_bash_redirect_into_the_run_repo_is_denied"
+allow_test = "tests/test_guard.py::TestGuard::test_unroled_ordinary_write_outside_repo_is_still_untouched_when_isolated"
+owner = "guard-hook"
+residual = "the Bash half is lexical and, unlike the structured-tool half, only fires when the target actually resolves inside the repo (see R-ROLE-OUTSIDE-REPO's residual on why); an interpreter invocation is not caught either - see R-GUARD-BASH-WRITE-BOUNDARY"
+
+# ---------------------------------------------------------------------------
+# Global denials: git landmines, MCP tools, runs/
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-GUARD-GLOBAL-DENIALS"
+statement = "The denied MCP tools, the repo landmines and the runs/ write protection are decided before any run is looked up, so they fire with no active run at all."
+scope = "global, no run required"
+event = "PreToolUse, before active_state()"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:decide"
+deny_test = "tests/test_guard.py::TestGuard::test_landmine_denies_apply_even_outside_the_run_directory"
+allow_test = ""
+owner = "guard-hook"
+residual = ""
+
+[[rule]]
+id = "R-GIT-ADD-ALL"
+statement = "git add -A, git add --all and git add . are denied: git add -A can sweep a live credential into a commit, add explicit paths."
+scope = "global, no run required"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:DENIED_COMMANDS"
+deny_test = "tests/test_guard.py::TestGuard::test_git_add_all_is_denied_for_every_agent, tests/test_guard.py::TestGuard::test_add_all_bypass_via_global_dir_flag_is_denied, tests/test_guard.py::TestGuard::test_add_all_bypass_via_c_flag_is_denied"
+allow_test = ""
+owner = "guard-hook"
+residual = "a regex over the command string, so a shell construct it does not model (an alias, a variable, a here-doc) is not seen"
+
+[[rule]]
+id = "R-GIT-STASH"
+statement = "Bare git stash, git stash pop, git stash clear and a git stash drop that names no stash@{N} are denied: the stash stack is shared across worktrees and other sessions. The shared-stack recipe is push -m <tag>, apply <sha>, then drop the entry by the index it is re-found at, so git stash drop stash@{N} is allowed, while a bare drop takes the top entry, which is likely another session's."
+scope = "global, no run required"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:DENIED_COMMANDS"
+deny_test = "tests/test_guard.py::TestGuard::test_bare_git_stash_is_denied, tests/test_guard.py::TestGuard::test_stash_pop_bypass_via_global_dir_flag_is_denied, tests/test_guard.py::TestGuard::test_git_stash_clear_and_a_bare_drop_are_denied, tests/test_guard.py::TestGuard::test_git_stash_pop_is_still_denied, tests/test_guard.py::TestGuard::test_the_stash_drop_shape_stays_fast_on_decoys"
+allow_test = "tests/test_guard.py::TestGuard::test_named_git_stash_push_is_allowed, tests/test_guard.py::TestGuard::test_the_stash_commands_that_leave_the_stack_alone_are_allowed, tests/test_guard.py::TestGuard::test_a_stash_drop_naming_its_entry_is_allowed"
+owner = "guard-hook"
+residual = "a regex over the command string, same limit as R-GIT-ADD-ALL. An explicit drop is trusted to name the caller's own entry: git stash drop stash@{N} with the wrong N still drops another session's stash, and a drop by a bare number (git stash drop 3) is denied, name it stash@{3}"
+
+[[rule]]
+id = "R-GIT-FORCE-PUSH"
+statement = "git push --force, its -f shorthand (alone or inside a short-option cluster) and a refspec with a leading + (+main, +HEAD:main) are denied: a force push is irreversible on a shared ref."
+scope = "global, no run required"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:DENIED_COMMANDS"
+deny_test = "tests/test_guard.py::TestGuard::test_force_push_is_denied, tests/test_guard.py::TestGuard::test_force_push_shorthand_f_is_denied, tests/test_guard.py::TestGuard::test_refspec_force_push_is_denied"
+allow_test = "tests/test_guard.py::TestGuard::test_plain_git_push_is_allowed, tests/test_guard.py::TestGuard::test_a_push_with_no_plus_refspec_is_still_allowed, tests/test_guard.py::TestGuard::test_the_refspec_span_stays_fast_on_fd_redirects"
+owner = "guard-hook"
+residual = "a regex over the command string, same limit as R-GIT-ADD-ALL. The + refspec is looked for in the push's own command only, up to the next ;, |, newline, or an & that does not belong to an fd redirect (2>&1, &>log and >&log pass, with mutually exclusive alternatives so the span stays linear), so a quoted separator inside the push's own arguments hides a later +refspec. The span shares the --force branch's .* quadratic tail per push start, disclosed by R-GUARD-ROLE-COMMAND-LENGTH and bounded for a role by the 4096-char cap"
+
+[[rule]]
+id = "R-GIT-RESET-HARD"
+statement = "git reset --hard is denied: it discards worker output that has no receipt."
+scope = "global, no run required"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:DENIED_COMMANDS"
+deny_test = "tests/test_guard.py::TestGuard::test_reset_hard_bypass_via_global_dir_flag_is_denied"
+allow_test = ""
+owner = "guard-hook"
+residual = "a regex over the command string, same limit as R-GIT-ADD-ALL"
+
+[[rule]]
+id = "R-MCP-RESOLVE-THREAD"
+statement = "The forge's resolve-thread tool (GitLab: resolve_merge_request_thread under the harness's server name) is denied: only the remark author may resolve a thread."
+scope = "global, no run required"
+event = "PreToolUse on the MCP tool"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:DENIED_TOOLS"
+deny_test = "tests/test_guard.py::TestGuard::test_resolving_a_thread_is_denied, tests/test_guard.py::TestGuard::test_resolve_merge_and_approve_are_denied_under_the_snapshot_server_name"
+allow_test = ""
+owner = "guard-hook"
+residual = ""
+
+[[rule]]
+id = "R-MCP-MERGE-MR"
+statement = "The forge's merge tool (GitLab: merge_merge_request under the harness's server name, GitHub: merge_pull_request) is denied: the pipeline ends at approval and a human performs the merge."
+scope = "global, no run required"
+event = "PreToolUse on the MCP tool"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:DENIED_TOOLS"
+deny_test = "tests/test_guard.py::TestGuard::test_merging_is_denied, tests/test_guard.py::TestGuard::test_resolve_merge_and_approve_are_denied_under_the_snapshot_server_name"
+allow_test = ""
+owner = "guard-hook"
+residual = ""
+
+[[rule]]
+id = "R-MCP-APPROVE-MR"
+statement = "The forge's approve tool (GitLab: approve_merge_request under the harness's server name, GitHub: the pull request review submit tools) is denied: the pipeline never approves its own merge request."
+scope = "global, no run required"
+event = "PreToolUse on the MCP tool"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:DENIED_TOOLS"
+deny_test = "tests/test_guard.py::TestGuard::test_approving_its_own_mr_is_denied, tests/test_guard.py::TestGuard::test_resolve_merge_and_approve_are_denied_under_the_snapshot_server_name"
+allow_test = ""
+owner = "guard-hook"
+residual = ""
+
+[[rule]]
+id = "R-FORGE-DENIALS-FROM-ADAPTER"
+statement = "The denied forge tools are the union of both adapters' default denials, plus the names of the adapter the run's harness snapshot names under its configured server name."
+scope = "global, widened by the active run"
+event = "PreToolUse on an MCP tool"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:denied_tools, hooks/ppl_guard.py:forge_from_snapshot, ppl/forges/__init__.py:all_denied_tools"
+deny_test = "tests/test_guard.py::TestGuard::test_resolve_merge_and_approve_are_denied_under_the_snapshot_server_name, tests/test_guard.py::TestGuard::test_without_a_run_both_adapters_denials_apply"
+allow_test = ""
+owner = "guard-hook"
+residual = "GitHub MCP tool names follow the official server; another server build is covered only by the gh Bash denials. A GitLab MCP server build exposing other tool names (e.g. accept_merge_request) is covered by neither the union nor a custom mcp_server, and the gitlab adapter has no Bash denials, so `glab mr merge` is not denied"
+
+[[rule]]
+id = "R-FORGE-GH-NO-APPROVE-MERGE"
+statement = "gh pr merge, gh pr review --approve and a gh api graphql call carrying resolveReviewThread are denied as Bash for every session, whatever forge the active run names or with no run at all."
+scope = "global"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:forge_bash_denial, ppl/forges/github.py:denied_bash"
+deny_test = "tests/test_guard.py::TestGuard::test_github_merge_approve_resolve_bash_are_denied_for_everyone, tests/test_guard.py::TestGuard::test_gh_merge_is_denied_under_a_gitlab_run_too"
+allow_test = ""
+owner = "guard-hook"
+residual = "lexical: a wrapper script around gh is not seen"
+
+[[rule]]
+id = "R-REVIEW-RESPONDER-BASH-SHAPES"
+statement = "ppl-review-responder's Bash is an allowlist of the forge adapter's read shapes (github: gh pr view/diff/checks and gh api reads of the pull request), and a trailing redirect other than an fd duplication or /dev/null, or a `<`/`>` anywhere in a token, denies; with the gitlab forge it has no Bash shapes and every Bash call is denied."
+scope = "active run, agent_type ppl-review-responder"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:review_responder_bash_denied, ppl/forges/github.py:bash_shapes"
+deny_test = "tests/test_guard.py::TestGuard::test_github_review_responder_bash_is_an_allowlist, tests/test_guard.py::TestGuard::test_gitlab_review_responder_has_no_bash_at_all, tests/test_guard.py::TestGuard::test_review_responder_redirect_into_a_file_is_denied, tests/test_guard.py::TestGuard::test_review_responder_redirect_glued_inside_a_flag_value_is_denied"
+allow_test = "tests/test_guard.py::TestGuard::test_github_review_responder_bash_is_an_allowlist, tests/test_guard.py::TestGuard::test_review_responder_redirect_into_a_file_is_denied"
+owner = "guard-hook"
+residual = ""
+
+[[rule]]
+id = "R-GUARD-INTERNAL-ERROR-DENIES-ROLES"
+statement = "When decide() raises, the hook denies the call for any role in boundary.ROLE_RULES (all six generated roles) instead of allowing it, and keeps allowing an unroled session so a hook defect cannot lock the operator out of unrelated sessions."
+scope = "every PreToolUse call carrying a role"
+event = "exception inside decide"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:main"
+deny_test = "tests/test_guard.py::TestGuard::test_an_internal_error_denies_a_role_and_still_allows_an_unroled_session, tests/test_guard.py::TestGuard::test_an_internal_error_denies_every_generated_role, tests/test_guard.py::TestGuard::test_a_broken_stderr_does_not_undo_the_role_deny"
+allow_test = ""
+owner = "guard-hook"
+residual = "an unroled orchestrator session is still fail-open on an internal error, by design"
+
+[[rule]]
+id = "R-GUARD-ROLE-COMMAND-LENGTH"
+statement = "A Bash command longer than 4096 characters from a ppl role in boundary.ROLE_RULES is denied before any pattern runs, so a padded command cannot outlast the hook's timeout for a role; an unroled session has no cap."
+scope = "active or no run, a ppl role in boundary.ROLE_RULES"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:decide"
+deny_test = "tests/test_guard.py::TestGuard::test_a_role_bash_command_over_the_length_cap_is_denied_before_any_pattern"
+allow_test = "tests/test_guard.py::TestGuard::test_an_unroled_bash_command_has_no_length_cap"
+owner = "guard-hook"
+residual = "the unroled orchestrator session keeps the quadratic tail of the lexical patterns by design, so the operator's own long commands are never refused"
+
+[[rule]]
+id = "R-GUARD-PYTHON-FLOOR"
+statement = "Under a Python older than 3.11 both hooks read the payload before importing anything from ppl, deny a call whose agent_type starts with ppl- (a superset of boundary.ROLE_RULES, so the cage fails closed), write one stderr line naming the version found and the 3.11 floor, and exit 0; an unroled session is allowed."
+scope = "every hook call, under an interpreter older than 3.11"
+event = "PreToolUse and SubagentStart, before the ppl imports"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_python_floor.py:refuse_old_python, hooks/ppl_guard.py, hooks/ppl_dispatch.py"
+deny_test = "tests/test_guard.py::TestPythonFloor::test_an_old_python_denies_a_role_and_names_the_version, tests/test_guard.py::TestPythonFloor::test_every_generated_role_and_any_other_ppl_name_is_denied, tests/test_guard.py::TestPythonFloor::test_the_hooks_deny_a_role_under_the_system_python, tests/test_guard.py::TestPythonFloor::test_the_hooks_start_with_their_own_directory_off_sys_path"
+allow_test = "tests/test_guard.py::TestPythonFloor::test_a_supported_python_passes_through_untouched, tests/test_guard.py::TestPythonFloor::test_an_old_python_lets_an_unroled_session_through_with_the_message, tests/test_guard.py::TestPythonFloor::test_an_unroled_session_under_the_system_python_is_allowed"
+owner = "guard-hook"
+residual = "the floor runs only if the file parses and the floor module imports: each hook appends its own directory to sys.path, so PYTHONSAFEPATH, -P and -I do not hide it, and both hooks and hooks/ppl_python_floor.py are kept to Python 3.9 syntax, and the subprocess test proves that on a machine with an older python3 at /usr/bin/python3 and skips elsewhere, and CI's python-floor job runs both hooks and bin/ppl under Python 3.9 on every push. SubagentStart cannot block (R-DISPATCH-HOOK-CANNOT-BLOCK), so the dispatch hook's deny is informational. ppl setup claude pins the interpreter that ran it, so the floor fires for a hand-written or stale entry; ppl doctor's hook_runs runs each registered guard command once and reports false when it does not exit 0 cleanly"
+
+[[rule]]
+id = "R-RUNS-WRITE-PROTECTION"
+statement = "A file write under runs/ made through Edit, Write, MultiEdit or NotebookEdit, its path resolved against the session cwd and through symlinks, is denied for every session, with control.json as the only carve-out; a Bash write is a separate, narrower check - see R-RUNS-BASH-WRITE."
+scope = "global, no run required"
+event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:decide, hooks/ppl_guard.py:structured_write_lands_in_runs"
+deny_test = "tests/test_guard.py::TestGuard::test_writing_state_json_directly_is_denied, tests/test_guard.py::TestGuard::test_writing_evilcontrol_json_is_denied, tests/test_guard.py::TestGuard::test_structured_write_into_runs_through_a_symlinked_alias_is_denied, tests/test_guard.py::TestGuard::test_structured_write_into_runs_relative_to_the_session_cwd_is_denied"
+allow_test = "tests/test_guard.py::TestGuard::test_writing_control_json_is_allowed"
+owner = "guard-hook"
+residual = "the carve-out is by file name, so any path under runs/ named control.json is writable. This row's own statement used to read 'denied for every tool and every role' - false the moment a Bash write is considered: whole-branch review Warning 7 drove `python3 -c \"open('<runs>/<task>/state.json','w').write('{}')\"` through the real hook from ppl-code-worker and it was ALLOWED, because R-RUNS-BASH-WRITE's own regex (redirect/tee/sed -i/cp/mv/dd/rm) does not model an interpreter invocation - that row's residual already said so honestly, this one's statement did not. Chasing python3 -c specifically would not close the class either (perl -e, ruby -e, node -e reach the same result), so the statement is corrected to say what is actually checked rather than widen the regex for a false sense of completeness - same reasoning as R-GUARD-BASH-WRITE-BOUNDARY and R-GUARD-PPL-CLI-DENIED's quote-splitting residual"
+
+[[rule]]
+id = "R-RUNS-BASH-WRITE"
+statement = "A Bash command with a write-shaped construct whose resolved target lands under the runs directory (spelled absolute, with ~, after a cd, pushd or popd, through a ( subshell or a { group, behind env -C or a wrapper verb - command, builtin, exec, nohup, nice, time, each read by its basename when spelled by a path - with the redirect glued or spaced, relative to the session cwd or through a symlinked alias), or a removal that holds it (rm -rf ~/.ppl, mv ~/.ppl x), or a copy or move into a directory that places a source's own name on runs/ or its parent (cp -r x/runs ~/.ppl - a copy into ~ under any other name writes beside runs/), is denied for every session, and so is one that names the runs directory literally together with a write-shaped construct. A redirect after a group's ) or } is judged in the cwd the group opened in, and a bare & ends a command as ; does. control.json, the operator's inbox, is spared for the unroled operator session alone: for a role in boundary.ROLE_RULES it is denied like any other run file."
+scope = "global, no run required"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:BASH_WRITE_SHAPES, hooks/ppl_guard.py:bash_write_lands_in_runs, hooks/ppl_guard.py:decide"
+deny_test = "tests/test_guard.py::TestGuard::test_bash_redirect_into_runs_dir_is_denied, tests/test_guard.py::TestGuard::test_bash_tee_into_runs_dir_is_denied, tests/test_guard.py::TestGuard::test_bash_sed_inplace_on_runs_dir_is_denied, tests/test_guard.py::TestGuard::test_tilde_spelled_bash_write_into_runs_is_denied_for_every_caller, tests/test_guard.py::TestGuard::test_cd_relative_bash_write_into_runs_is_denied_for_every_caller, tests/test_guard.py::TestGuard::test_bash_write_into_runs_with_no_active_run_is_still_denied, tests/test_guard.py::TestGuard::test_home_variable_spelling_is_denied_for_a_role_by_the_unresolvable_target_rule, tests/test_guard.py::TestGuard::test_a_role_gets_no_control_json_carve_out_in_bash, tests/test_guard.py::TestGuard::test_a_subshell_brace_group_pushd_or_env_cd_into_runs_is_followed, tests/test_guard.py::TestGuard::test_a_clobber_redirect_is_a_redirect, tests/test_guard.py::TestGuard::test_removing_or_moving_a_parent_of_runs_is_denied, tests/test_guard.py::TestGuard::test_a_wrapper_in_front_of_a_write_verb_is_unwrapped, tests/test_guard.py::TestGuard::test_the_wrapper_unwrap_stays_linear, tests/test_guard.py::TestGuard::test_a_redirect_on_a_cd_into_runs_is_denied_for_every_caller, tests/test_guard.py::TestGuard::test_a_quoted_paren_does_not_close_the_subshell, tests/test_guard.py::TestGuard::test_popd_on_an_empty_stack_keeps_the_directory, tests/test_guard.py::TestGuard::test_a_removal_that_takes_runs_with_it_is_still_denied, tests/test_guard.py::TestGuard::test_a_path_spelled_verb_or_wrapper_is_read_by_its_name, tests/test_guard.py::TestGuard::test_a_redirect_glued_to_a_word_into_runs_is_denied, tests/test_guard.py::TestGuard::test_a_group_redirect_into_runs_with_no_active_run_is_denied, tests/test_guard.py::TestGuard::test_a_closed_group_into_runs_gives_its_cwd_back_for_every_caller, tests/test_guard.py::TestGuard::test_a_bare_ampersand_does_not_hide_a_runs_write, tests/test_guard.py::TestGuard::test_a_copy_whose_own_name_lands_on_runs_is_denied"
+allow_test = "tests/test_guard.py::TestGuard::test_bash_read_of_runs_dir_is_allowed, tests/test_guard.py::TestGuard::test_tilde_spelled_bash_write_to_control_json_is_allowed_for_the_operator, tests/test_guard.py::TestGuard::test_tilde_spelled_bash_write_under_the_data_root_but_outside_runs_is_allowed, tests/test_guard.py::TestGuard::test_writing_beside_runs_under_the_data_root_is_allowed, tests/test_guard.py::TestGuard::test_a_wrapped_command_elsewhere_is_still_allowed, tests/test_guard.py::TestGuard::test_a_copy_into_a_parent_of_runs_is_allowed, tests/test_guard.py::TestGuard::test_the_cd_and_grouping_walk_stays_linear, tests/test_guard.py::TestGuard::test_a_group_redirect_after_a_cd_into_runs_opens_outside_it"
+owner = "guard-hook"
+residual = "the global check resolves literal, ~, cd-relative (cd, pushd and popd - popd on an empty stack keeps the cwd - a ( subshell cd that ends at its ), a { group cd, and env -C/--chdir for the command env runs) and payload-relative spellings, for every caller, with env, command, builtin, exec, nohup, nice (-n N, -nN, -N) and time (-p) unwrapped, nested ones too, and a verb or wrapper spelled by a path read by its basename; a cd behind command, builtin or time moves the shell, one behind exec, nohup, nice or env, or one spelled by a path, does not, and a wrapper option this does not know fails closed like an unresolvable target. Grouping and redirects are read off the raw segment text outside quotes, so a quoted ) does not close a subshell, a quoted > (grep \">x\", awk '$1>2') is not a target, and a word-glued redirect (echo x>f, x>|f) is; a cd's own redirect opens in the pre-cd cwd. A redirect after a group's ) or } ((cd d && echo x) > f, { cd d; echo x; } > f) opens in the cwd the group opened in and nested groups unwind one at a time. A tail that also holds a word that is neither a closer nor a redirect (< in, a comment) still closes its groups, with each of its redirects judged at the current cwd, the session cwd and every cwd a group is still open in, while a closer with no open group of its kind fails closed the same way and the cwd stays where it was, so a later relative write is judged there (a process substitution's ) inside a group, (cd d && diff <(ls) b); echo x > f, is such a closer). A fallback adds one target per redirect per distinct open cwd, so a crafted command with thousands of distinct nested cds and unmatched closers grows quadratically: bounded for a role by the 4096-char cap, and kept for the unroled session by design like the patterns' tail (R-GUARD-ROLE-COMMAND-LENGTH). A bare & ends a command as ; does and runs the list before it in a subshell, so a cd in that list does not move the shell. Only a removal (rm, an rm-source mv or git mv, git rm, an rsync --delete) or a source whose own name a copy or move into a directory places on runs/ or its parent (cp -r x/runs ~/.ppl, cp -R x/.ppl ~) counts the parent of runs/ as landing in it, so a copy by contents (rsync -a src/ ~/, cp -r src/. ~) whose tree carries .ppl/runs is not seen. Targets it cannot resolve - $HOME and other variables, $(...) and backticks, sed -i, a cd it cannot pin down (cd -, pushd +N), a segment cut at a ;, &&, || or | inside quotes (echo \"a;b\" > f leaves an open quote in each half) - are not judged by it: they are denied only for a pipeline-scoped session (a role, or a session whose cwd is inside the active run's repo) and only while a run is active, by R-GUARD-BASH-WRITE-BOUNDARY's unresolvable-target rule, and they are allowed for any other unroled session. Some writes have no write shape this module reads at all and are seen by neither check, for any caller: an interpreter invocation (python3 -c, perl -e), a quoted sh -c / bash -c / env -S string (env -C DIR sh -c 'echo x > f' is allowed, pinned by test_a_shell_string_behind_env_cd_is_opaque_and_allowed), a verb inside a >( or <( process substitution (echo >(cp x f), the substitution guard denies those only for the test worker and the review responder), a shell function, a verb with no write shape here (unlink, rmdir, find -delete, rsync --remove-source-files, tar -x), and the wrappers that are not unwrapped, sudo and xargs (xargs takes its operands from stdin, sudo its own option grammar), in front of a verb that names its target as an argument. Structural reads that match BASE: a cd in a pipe stage is tracked although the shell does not move, a failed cd before || counts as a success, and a cd after then, do, ! or a case pattern's ) is not followed. The control.json carve-out is operator-only and applies to the resolved check only: a literal spelling of the runs directory with any write shape is denied even for control.json, for the operator too"
+
+# ---------------------------------------------------------------------------
+# Jira staging gate
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-JIRA-GATE"
+statement = "A tracker write tool - one of the write operations the run's harness snapshot names (the adapter defaults, which cover comment, edit, transition, worklog, create, executeWrite, executeDestructive, Confluence page create/update and page comments, and graph context add, when the snapshot is missing or malformed) under any MCP prefix the same snapshot names (defaults: the Atlassian server's two prefixes with their numbered duplicates) - is denied until the run's stage is merge_watch."
+scope = "active run, scoped by role, target path, cwd, or the isolated broadening"
+event = "PreToolUse on an Atlassian write tool"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:is_tracker_write_tool, hooks/ppl_guard.py:tracker_from_snapshot, hooks/ppl_guard.py:decide"
+deny_test = "tests/test_guard.py::TestGuard::test_jira_write_is_denied_before_merge_watch, tests/test_guard.py::TestGuard::test_jira_gate_fires_for_unroled_session_outside_repo_when_isolated, tests/test_guard.py::TestGuard::test_jira_write_under_the_rovo_prefix_is_denied_before_merge_watch, tests/test_guard.py::TestGuard::test_jira_write_under_a_numbered_rovo_prefix_is_denied_before_merge_watch, tests/test_guard.py::TestGuard::test_tracker_gate_uses_the_snapshot_prefixes, tests/test_guard.py::TestGuard::test_tracker_gate_falls_back_to_the_defaults_without_a_snapshot, tests/test_guard.py::TestGuard::test_tracker_gate_survives_a_malformed_tracker_table, tests/test_guard.py::TestGuard::test_tracker_gate_keeps_the_defaults_when_a_snapshot_prefix_is_not_mcp_shaped, tests/test_guard.py::TestGuard::test_the_current_atlassian_write_tools_are_denied_before_merge_watch, tests/test_guard.py::TestGuard::test_the_graph_context_write_is_denied_before_merge_watch, tests/test_guard.py::TestGuard::test_the_older_confluence_write_tools_are_denied_before_merge_watch"
+allow_test = "tests/test_guard.py::TestGuard::test_jira_write_is_allowed_at_merge_watch, tests/test_guard.py::TestGuard::test_jira_write_under_the_rovo_prefix_is_allowed_at_merge_watch, tests/test_guard.py::TestGuard::test_jira_read_tools_are_not_gated_under_either_prefix, tests/test_guard.py::TestGuard::test_the_current_atlassian_write_tools_are_allowed_at_merge_watch, tests/test_guard.py::TestGuard::test_the_current_atlassian_read_tools_are_not_gated"
+owner = "guard-hook"
+residual = "not global: with no active run nothing is checked, and with a non-isolated run an unroled session outside the repo is not reached either. A run's harness snapshot is frozen at ppl init, so a run started before the adapter defaults or the harness lists gained a write operation keeps the lists it was created with until a new run is started"
+
+[[rule]]
+id = "R-JIRA-NO-ROLE-TOOL"
+statement = "No generated role holds a tracker write tool, so only the unroled orchestrator session can reach the gate. A harness that would grant one is refused at validate and at render."
+scope = "global, every role"
+event = "ppl routing apply"
+enforcement = "blocking"
+hook_or_check = "ppl/routing.py:role_tools, ppl/harness.py:validate"
+deny_test = "tests/test_routing.py::TestNoRoleHoldsAJiraWriteTool::test_no_role_tools_include_a_tracker_write_tool, tests/test_routing.py::TestNoRoleHoldsAJiraWriteTool::test_a_doc_that_would_grant_a_tracker_write_tool_is_refused_at_render, tests/test_harness.py::TestMalformedInputIsRefusedNotATraceback::test_a_read_tool_that_is_also_a_write_operation_is_refused, tests/test_harness.py::TestMalformedInputIsRefusedNotATraceback::test_an_extra_tool_that_is_a_tracker_write_tool_is_refused, tests/test_harness.py::TestMalformedInputIsRefusedNotATraceback::test_a_tool_entry_that_is_not_a_single_tool_name_is_refused, tests/test_routing.py::TestNoRoleHoldsAJiraWriteTool::test_a_tool_entry_that_is_not_a_single_tool_name_is_refused_at_render"
+allow_test = ""
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-JIRA-CONTENT"
+statement = "A post-merge Jira comment is plain informal English, never a formal Russian comment."
+scope = "orchestrator, merge_watch stage"
+event = "the orchestrator composing the Jira comment"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "GAP: an owner decision carried only by the skill prompt; no code inspects the text of a Jira write, so the gate checks when it happens and never what it says"
+
+# ---------------------------------------------------------------------------
+# Operator control: pause, stop, destroy
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-OPERATOR-HALT-HOOK"
+statement = "While the operator has paused, stopped or destroyed a run, the guard denies every tool call in that run's scope, so a halt lands within one tool call."
+scope = "active run, scoped as in 5.4"
+event = "PreToolUse, any matched tool"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:decide, ppl/control.py:HALTING"
+deny_test = "tests/test_guard.py::TestGuard::test_pause_denies_every_tool_call, tests/test_guard.py::TestGuard::test_pause_denies_a_role_wherever_its_session_sits"
+allow_test = "tests/test_guard.py::TestGuard::test_pause_does_not_touch_a_named_agent_from_another_project"
+owner = "operator"
+residual = "cooperative, not preemptive: the in-flight tool call completes first"
+
+[[rule]]
+id = "R-OPERATOR-HALT-CLI"
+statement = "Ten ppl subcommands refuse to run while the operator has halted the run, and park, escalate, status, show, control get and control set resume deliberately stay available."
+scope = "ppl CLI, the ten call sites in cli.py"
+event = "ppl stage/brief/boundary/baseline/transition/budget/mr set/review answered/review approved/recover"
+enforcement = "blocking"
+hook_or_check = "ppl/control.py:enforce, ppl/cli.py:cmd_stage"
+deny_test = "tests/test_cli.py::TestCli::test_paused_run_refuses_stage_enter, tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_boundary_set_is_refused_while_paused, tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_budget_spend_is_refused_while_paused"
+allow_test = "tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_park_still_works_while_paused, tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_escalate_still_works_while_paused, tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_control_set_resume_still_works_while_paused"
+owner = "operator"
+residual = "the other 13 subcommands are unchecked by design; a new one that mutates state has to add its own control.enforce call"
+
+[[rule]]
+id = "R-CONTROL-FAIL-CLOSED"
+statement = "A control file that cannot be read or does not parse halts the run instead of permitting it."
+scope = "active run"
+event = "ppl control.enforce, PreToolUse"
+enforcement = "blocking"
+hook_or_check = "ppl/control.py:read, ppl/control.py:enforce, hooks/ppl_guard.py:decide"
+deny_test = "tests/test_control.py::TestControlFailsClosed::test_enforce_halts_on_invalid_json_bytes, tests/test_guard.py::TestGuard::test_invalid_control_file_denies_rather_than_permits"
+allow_test = "tests/test_control.py::TestControl::test_resume_clears_the_pause"
+owner = "operator"
+residual = ""
+
+[[rule]]
+id = "R-STATE-UNREADABLE-FAIL-CLOSED"
+statement = "When the active run's state cannot be read, a tool call carrying a ppl-* agent_type is denied rather than falling through every scoped check."
+scope = "active run whose state.json is missing, corrupt or malformed"
+event = "PreToolUse"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:active_state, hooks/ppl_guard.py:decide"
+deny_test = "tests/test_guard.py::TestGuard::test_broken_run_state_denies_pipeline_agent_without_raising"
+allow_test = "tests/test_guard.py::TestGuard::test_broken_run_state_permits_a_non_pipeline_agent_without_raising"
+owner = "guard-hook"
+residual = ""
+
+[[rule]]
+id = "R-PARK-BLOCKER-CODE"
+statement = "A parking record must carry a blocker from the closed vocabulary."
+scope = "ppl CLI and panel stop"
+event = "ppl park, ppl escalate, control set stop"
+enforcement = "blocking"
+hook_or_check = "ppl/run.py:BLOCKER_CODES, ppl/run.py:park"
+deny_test = "tests/test_control.py::TestPark::test_park_rejects_an_unknown_blocker_code"
+allow_test = "tests/test_control.py::TestPark::test_park_writes_a_full_record"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-PARK-PRESERVES-RESUME-STAGE"
+statement = "A second park (e.g. ppl park followed by an operator stop) preserves the first park's resume_stage rather than overwriting it with \"parking\" itself."
+scope = "ppl CLI and panel stop"
+event = "ppl park, control set stop, on an already-parked run"
+enforcement = "blocking"
+hook_or_check = "ppl/run.py:park"
+deny_test = "tests/test_control.py::TestPark::test_a_second_park_preserves_the_original_resume_stage"
+allow_test = "tests/test_control.py::TestPark::test_park_writes_a_full_record"
+owner = "ppl"
+residual = "N1, cycle 2 wave B: park() used to read state[\"stage\"] unconditionally to fill resume_stage, then set state[\"stage\"] to \"parking\" - a second park call, reachable via ppl park followed by an operator stop, recorded resume_stage as \"parking\" itself, losing the real resume point"
+
+[[rule]]
+id = "R-DESTROY-SCOPE"
+statement = "A destroy without an explicit local or full scope is refused."
+scope = "ppl CLI and panel"
+event = "ppl destroy, ppl control set destroy, panel control POST"
+enforcement = "blocking"
+hook_or_check = "ppl/control.py:set_command, ppl/run.py:destroy"
+deny_test = "tests/test_control.py::TestControl::test_destroy_requires_a_scope, tests/test_panel_api.py::TestPanelApi::test_control_destroy_without_scope_is_refused"
+allow_test = "tests/test_control.py::TestDestroy::test_local_destroy_archives_the_run_and_clears_active"
+owner = "operator"
+residual = ""
+
+[[rule]]
+id = "R-DESTROY-REMOTE-QUEUED"
+statement = "A full destroy queues remote_cleanup.json for the orchestrator instead of mutating remote state itself, and the run directory survives until that half is done."
+scope = "ppl and panel"
+event = "ppl destroy --scope full"
+enforcement = "soft"
+hook_or_check = "ppl/run.py:destroy"
+deny_test = ""
+allow_test = "tests/test_control.py::TestDestroy::test_full_destroy_queues_remote_cleanup_and_keeps_the_run, tests/test_panel_api.py::TestPanelApi::test_control_destroy_full_queues_the_remote_half"
+owner = "ppl"
+residual = "there is no refusal here to prove - ppl holds no GitLab credentials, so deferring is the only thing it can do. Nothing checks that the orchestrator then performs the queued half, or performs it safely"
+
+[[rule]]
+id = "R-PANEL-TYPED-CONFIRM"
+statement = "The panel destroy dialog asks for a scope and a confirmation before it sends anything, and for a full cleanup that confirmation is the typed task id."
+scope = "panel page only"
+event = "the destroy dialog in index.html"
+enforcement = "soft"
+hook_or_check = "ppl/panel/index.html"
+deny_test = ""
+allow_test = "tests/test_panel_page.py::TestPanelPage::test_destroy_asks_for_a_scope"
+owner = "panel"
+residual = "the confirmation is in the page, not in the server: a direct POST to /api/runs/<id>/control with scope full skips it entirely, and only R-DESTROY-REMOTE-QUEUED keeps that from touching remote state"
+
+[[rule]]
+id = "R-PANEL-SIGTERM-PID"
+statement = "The panel refuses to signal a process whose recorded start time does not match, so a recycled pid is never killed by mistake."
+scope = "panel"
+event = "POST /api/runs/<id>/signal"
+enforcement = "blocking"
+hook_or_check = "ppl/panel/server.py:handle_signal"
+deny_test = "tests/test_panel_api.py::TestPanelApi::test_signal_refuses_when_start_time_does_not_match, tests/test_panel_api.py::TestPanelApi::test_signal_refuses_when_pid_is_gone"
+allow_test = ""
+owner = "panel"
+residual = ""
+
+[[rule]]
+id = "R-PANEL-LOOPBACK"
+statement = "The panel binds to loopback only and refuses a POST that does not carry the panel header and a loopback origin."
+scope = "panel"
+event = "every panel POST"
+enforcement = "blocking"
+hook_or_check = "ppl/panel/server.py:origin_ok, ppl/panel/server.py:serve"
+deny_test = "tests/test_panel_api.py::TestPanelApi::test_handler_post_without_ppl_header_is_rejected, tests/test_panel_api.py::TestPanelApi::test_handler_post_from_a_foreign_origin_is_rejected"
+allow_test = "tests/test_panel_api.py::TestPanelApi::test_handler_post_with_valid_header_and_no_origin_succeeds"
+owner = "panel"
+residual = "a same-machine process can still send the header; the panel is a local control surface, not an authenticated one"
+
+[[rule]]
+id = "R-PANEL-NO-SPAWN"
+statement = "The panel never starts a Claude session; resume only clears the halt."
+scope = "panel"
+event = "resume"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "panel"
+residual = "PROPERTY: there is no spawn code to refuse, and a headless print session could not hold the review-monitor wake-ups anyway; nothing would notice if spawn code were added"
+
+[[rule]]
+id = "R-PANEL-STATE-WRITE"
+statement = "The panel's write surface is confined to control.json."
+scope = "panel"
+event = "POST /api/runs/<id>/control"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "panel"
+residual = "GAP: nothing confines it. The panel imports ppl and runs in-process, so stop parks the run through run.park and destroy archives the whole run directory, both writing run state directly. The guard hook never sees these - they are not tool calls - and no check stands between the panel and ppl's full write surface, so what keeps panel writes narrow is only which functions handle_control happens to call"
+
+# ---------------------------------------------------------------------------
+# Done gate
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-DONE-GATE"
+statement = "ppl transition done refuses unless all seven conditions hold, and no argument overrides it."
+scope = "ppl CLI"
+event = "ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:done_blockers, ppl/cli.py:cmd_transition"
+deny_test = "tests/test_verdict.py::TestVerdict::test_done_blocked_without_verdict, tests/test_cli.py::TestTransitionOrdering::test_an_illegal_lifecycle_target_is_reported_before_the_done_gate_runs"
+allow_test = "tests/test_verdict.py::TestVerdict::test_done_allowed_when_everything_holds"
+owner = "ppl"
+residual = "six of the seven read documents the same session wrote; only the head SHA and the base-to-head diff come from git. N4, cycle 2 wave B: cmd_transition now checks fsm.check_lifecycle BEFORE running done_blockers, so an already-illegal lifecycle target (still planned, say) is reported as ILLEGAL_TRANSITION rather than whatever confusing error the done gate happened to trip over first (EXTERNAL_BLOCKED for a missing base_sha, concretely) - a cheap, always-available check ordered ahead of an expensive one that can fail for unrelated reasons"
+
+[[rule]]
+id = "R-DONE-VERDICT-PASS"
+statement = "Done condition 1: a verdict exists for the candidate and its verdict is PASS - REWORK, BLOCKED, OWNER_DECISION, INCONCLUSIVE, ERROR, CANCELLED and TIMEOUT are all refused as not-PASS by the same equality check, because a check that did not happen is neither evidence the candidate is bad nor evidence it is good."
+scope = "ppl CLI"
+event = "ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:done_blockers"
+deny_test = "tests/test_verdict.py::TestVerdict::test_done_blocked_when_verdict_is_not_pass, tests/test_verdict.py::TestVerdict::test_done_blocked_when_verdict_is_inconclusive, tests/test_verdict.py::TestVerdict::test_done_blocked_when_verdict_is_error, tests/test_verdict.py::TestVerdict::test_done_blocked_when_verdict_is_cancelled, tests/test_verdict.py::TestVerdict::test_done_blocked_when_verdict_is_timeout"
+allow_test = "tests/test_verdict.py::TestVerdict::test_done_allowed_when_everything_holds"
+owner = "ppl"
+residual = "the verdict document is written by the same session that ran the checks"
+
+[[rule]]
+id = "R-DONE-SHA-BINDING"
+statement = "Done condition 2: a verdict is bound to the git head it was produced on, and a verdict for another SHA is refused."
+scope = "ppl CLI"
+event = "ppl verdict record, ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:record, ppl/gitfacts.py:head_sha"
+deny_test = "tests/test_verdict.py::TestVerdict::test_record_refuses_a_verdict_for_another_sha"
+allow_test = "tests/test_verdict.py::TestVerdict::test_record_stores_a_matching_verdict"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-DONE-ACCEPTANCE-EVIDENCE"
+statement = "Done condition 3: every acceptance id has a passing receipt on the candidate SHA."
+scope = "ppl CLI"
+event = "ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:_proven, ppl/verdict.py:done_blockers"
+deny_test = "tests/test_verdict.py::TestVerdict::test_done_blocked_when_acceptance_lacks_evidence"
+allow_test = "tests/test_verdict.py::TestVerdict::test_done_allowed_when_everything_holds"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-DONE-DIFF-BOUNDARY"
+statement = "Done condition 4: the base-to-head diff must stay inside boundary.write, except for test sources, and none of it may match boundary.forbid - checked first and winning over both the write-boundary and the test-path exemption, same order as ppl/boundary.py:check_path at write time."
+scope = "ppl CLI"
+event = "ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:done_blockers, ppl/gitfacts.py:changed_paths"
+deny_test = "tests/test_verdict.py::TestVerdict::test_done_blocked_when_diff_escapes_boundary, tests/test_verdict.py::TestVerdict::test_done_blocked_when_changed_path_matches_forbid"
+allow_test = "tests/test_verdict.py::TestVerdict::test_done_allowed_when_everything_holds"
+owner = "ppl"
+residual = "the test-path exemption is tree-wide; only R-ROLE-CODE-WORKER-TESTS keeps a non-test role out of those paths. Round 1 review (W1, cycle 2 wave B): before this fix, done_blockers never consulted boundary.forbid at all, so it was defence in depth against the guard hook rather than an independent proof of the same claim"
+
+[[rule]]
+id = "R-DONE-OPEN-FINDING"
+statement = "Done condition 5: no unresolved blocking finding is open on the own_diff track of the findings registry, for any SHA - not filtered to the current candidate SHA, because a defect is not an attestation and does not go stale when the head moves. A foreign-track finding never blocks this task's own done gate."
+scope = "ppl CLI"
+event = "ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:done_blockers, ppl/findings.py:open_blocking_on_own_diff"
+deny_test = "tests/test_verdict.py::TestVerdict::test_done_blocked_on_unresolved_blocking_finding, tests/test_verdict.py::TestVerdict::test_done_still_blocked_after_an_unrelated_commit"
+allow_test = "tests/test_verdict.py::TestVerdict::test_done_allowed_when_everything_holds, tests/test_verdict.py::TestVerdict::test_done_allowed_when_the_only_finding_is_foreign, tests/test_verdict.py::TestVerdict::test_done_allowed_once_the_finding_is_marked_fixed"
+owner = "ppl"
+residual = "severity, status and track are now pinned by ppl/findings.py:add (R-FINDINGS-TRACK-DERIVED), and closure is proved not asserted (R-FINDINGS-FIXED-REQUIRES-PROOF), so this gate's own residual is narrower than before: it still trusts that the finding's evidence text is honest, the same trust every check in this gate places in whoever ran it"
+
+[[rule]]
+id = "R-DONE-RETRY-BUDGET"
+statement = "Done condition 6: the retry budget must not be exhausted - retry_used >= retry_max, checked with >= because budget.spend refuses any proposed spend past the cap, so retry_used can reach exactly retry_max through a real path but never exceed it."
+scope = "ppl CLI"
+event = "ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:done_blockers"
+deny_test = "tests/test_verdict.py::TestVerdict::test_done_blocked_when_retry_budget_exhausted"
+allow_test = "tests/test_verdict.py::TestVerdict::test_done_allowed_when_everything_holds"
+owner = "ppl"
+residual = "W6, cycle 2 wave B: the comparison used to be strict `>`, which no real path through budget.spend can ever satisfy (it refuses proposed > cap, so retry_used maxes out AT retry_max) - the condition was unreachable, and its own deny test proved that by writing an impossible state directly into state.json. Fixed to >= and the deny test now drives the state through budget.spend itself, exactly at the cap"
+
+[[rule]]
+id = "R-DONE-SECRET-SCAN"
+statement = "Done condition 7: a passing receipt exists on the candidate SHA for every check in REQUIRED_CHECKS - secret-scan and focused-tests."
+scope = "ppl CLI"
+event = "ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:REQUIRED_CHECKS, ppl/verdict.py:done_blockers"
+deny_test = "tests/test_verdict.py::TestVerdict::test_done_blocked_without_secret_scan"
+allow_test = "tests/test_verdict.py::TestVerdict::test_done_allowed_when_everything_holds"
+owner = "ppl"
+residual = "the gate checks that a receipt exists and its rc was zero, not that a scanner ran. The deny test exercises secret-scan; focused-tests rides the same REQUIRED_CHECKS loop with no test of its own"
+
+[[rule]]
+id = "R-MR-PRECONDITIONS"
+statement = "The stage 6 preconditions - secret scan clean, diff within boundary, no temporary artifacts, verdict PASS - are checked before the push, not only at the terminal transition."
+scope = "ppl CLI"
+event = "ppl stage enter mr"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "GAP: ppl stage enter checks the operator halt, the dispatch cap and the stage graph only; none of the four preconditions is checked anywhere before the push, so the first real check of them is ppl transition done, after the MR exists"
+
+# ---------------------------------------------------------------------------
+# Corrupt or malformed input on disk (cycle 2 wave B, E1/W5)
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-STORE-CORRUPT-JSON"
+statement = "Any document read off disk that is not valid JSON is a routable SCHEMA_INVALID error, not an uncaught json.JSONDecodeError - at every call site, because every reader in the codebase goes through the same function."
+scope = "ppl CLI, panel, hook"
+event = "every store.read_json call - state.json, verdicts/<sha>.json, control.json, threads.json, findings/<id>.json, evidence receipts"
+enforcement = "blocking"
+hook_or_check = "ppl/store.py:read_json"
+deny_test = "tests/test_store.py::TestStore::test_read_corrupt_json_raises_a_routable_error, tests/test_verdict.py::TestVerdict::test_done_blockers_raises_a_routable_error_on_a_corrupt_verdict_file"
+allow_test = "tests/test_store.py::TestStore::test_write_then_read_roundtrip"
+owner = "ppl"
+residual = "callers that used to catch a bare ValueError around store.read_json (ppl/control.py:read) now also catch PplError explicitly, so this fix does not itself change control.json's existing fail-closed behaviour - it only replaces the exception type. A literal JSON `null` or a wrong-shaped-but-valid document (a list where an object belongs) is NOT caught here - see R-EVIDENCE-SHA-PARTITION's non-dict-receipt handling and ppl/findings.py:_load_all for the two different, deliberately different, answers to that case"
+
+[[rule]]
+id = "R-FINDINGS-FAILS-CLOSED-ON-MALFORMED"
+statement = "A findings-registry document this pipeline cannot make sense of - invalid JSON, or valid JSON of the wrong shape such as a list instead of an object - makes list_all, list_open and open_blocking_on_own_diff refuse with SCHEMA_INVALID, rather than silently treating that finding as absent. A rewritten-to-[] blocking finding must not open the done gate."
+scope = "ppl CLI"
+event = "ppl transition done, ppl findings list, ppl findings add/status/delete (reading back the registry)"
+enforcement = "blocking"
+hook_or_check = "ppl/findings.py:_load_all"
+deny_test = "tests/test_findings.py::TestOpenBlockingOnOwnDiff::test_a_wrong_shaped_finding_file_fails_closed_rather_than_opening_the_gate, tests/test_findings.py::TestOpenBlockingOnOwnDiff::test_a_malformed_finding_file_fails_closed_not_with_a_raw_crash"
+allow_test = "tests/test_findings.py::TestOpenBlockingOnOwnDiff::test_an_own_diff_blocking_finding_is_in_the_set"
+owner = "ppl"
+residual = "W4, cycle 2 wave B: before this fix, _load_all silently dropped any non-dict document, so rewriting a blocking finding's file to [] opened the done gate (rc=0) and malformed JSON crashed the whole process (rc=1) instead of routing. Same class hooks/ppl_guard.py:active_state was hardened against in cycle 1 - the registry did not get the same treatment until this fix"
+
+[[rule]]
+id = "R-EVIDENCE-RECEIPT-SHAPE"
+statement = "A receipt file that decoded to something other than a JSON object (a literal null, most concretely, from a truncated or corrupt write) is dropped from evidence.for_sha rather than kept as a value the done gate's `.get(\"result\")` cannot call - missing already means \"no passing receipt\" downstream, so this fails the done gate closed instead of crashing it."
+scope = "ppl CLI"
+event = "ppl transition done, ppl evidence add (reading back a sha's receipts)"
+enforcement = "blocking"
+hook_or_check = "ppl/evidence.py:for_sha"
+deny_test = "tests/test_evidence.py::TestEvidence::test_for_sha_drops_a_receipt_file_whose_content_is_null"
+allow_test = "tests/test_evidence.py::TestEvidence::test_receipts_are_partitioned_by_sha"
+owner = "ppl"
+residual = "same defensive shape as ppl/findings.py:_load_all's isinstance(doc, dict) check, applied here because the gate's polarity is the opposite of findings' - an absent evidence receipt already blocks, so dropping a malformed one is the fail-closed answer, where dropping a malformed FINDING would be fail-open (see R-FINDINGS-FAILS-CLOSED-ON-MALFORMED)"
+
+# ---------------------------------------------------------------------------
+# Same-SHA rule and evidence
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-EVIDENCE-SHA-PARTITION"
+statement = "Every receipt is stored under the candidate SHA it was produced on, and the SHA is read from git when the caller does not give one."
+scope = "ppl CLI"
+event = "ppl evidence add"
+enforcement = "blocking"
+hook_or_check = "ppl/evidence.py:add, ppl/cli.py:cmd_evidence"
+deny_test = "tests/test_evidence.py::TestEvidence::test_add_rejects_sha_with_traversal, tests/test_evidence.py::TestEvidence::test_add_rejects_sha_with_non_hex"
+allow_test = "tests/test_evidence.py::TestEvidence::test_receipts_are_partitioned_by_sha, tests/test_cli.py::TestEvidenceShaDefault::test_sha_defaults_to_git_head_when_not_given"
+owner = "ppl"
+residual = "an explicit --sha still wins, so a caller can still file a receipt against a SHA it did not run on"
+
+[[rule]]
+id = "R-EVIDENCE-RC-FILE"
+statement = "A receipt claiming pass with a non-zero exit code, or with no exit-code file at all, is refused: a piped maven run returns the exit code of the pipe tail."
+scope = "ppl CLI"
+event = "ppl evidence add"
+enforcement = "blocking"
+hook_or_check = "ppl/evidence.py:read_rc, ppl/evidence.py:add"
+deny_test = "tests/test_evidence.py::TestEvidence::test_pass_receipt_requires_rc_zero, tests/test_evidence.py::TestEvidence::test_missing_rc_file_is_refused"
+allow_test = "tests/test_evidence.py::TestEvidence::test_pass_receipt_is_stored_when_rc_is_zero, tests/test_evidence.py::TestEvidence::test_fail_receipt_with_nonzero_rc_is_accepted"
+owner = "ppl"
+residual = "the file is written by the same session that ran the command"
+
+[[rule]]
+id = "R-EVIDENCE-CHECK-NAME"
+statement = "A check name that a verdict could not cite as evidence:<check> is refused when the receipt is filed."
+scope = "ppl CLI"
+event = "ppl evidence add"
+enforcement = "blocking"
+hook_or_check = "ppl/evidence.py:_validate_check, ppl/schema.py:ACCEPTANCE_EVIDENCE_RE"
+deny_test = "tests/test_evidence.py::TestCheckNameMatchesTheVerdictReference::test_a_space_in_a_check_name_is_refused, tests/test_evidence.py::TestEvidence::test_add_rejects_check_with_traversal_slash"
+allow_test = "tests/test_evidence.py::TestCheckNameMatchesTheVerdictReference::test_every_accepted_check_name_is_referenceable_from_a_verdict"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-ACCEPTANCE-EVIDENCE-FORMAT"
+statement = "An acceptance-to-evidence entry must be the string evidence:<check>, and an entry in any other shape proves nothing at the done gate."
+scope = "ppl CLI"
+event = "ppl verdict record, ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/schema.py:validate_verdict, ppl/verdict.py:_proven"
+deny_test = "tests/test_verdict.py::TestVerdict::test_done_blocked_when_acceptance_evidence_has_no_prefix, tests/test_verdict.py::TestVerdict::test_done_blocked_when_acceptance_evidence_is_not_a_string"
+allow_test = ""
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-SHA-APPROVAL-STALE"
+statement = "An approval recorded on one SHA is reported stale once head moves."
+scope = "ppl CLI"
+event = "ppl approval check, ppl mr state"
+enforcement = "soft"
+hook_or_check = "ppl/review.py:approval_state, ppl/cli.py:cmd_approval"
+deny_test = ""
+allow_test = "tests/test_cli.py::TestCli::test_approval_reports_stale_when_approved_sha_is_not_head, tests/test_review.py::TestReviewLedger::test_approval_state_stale_after_head_moves"
+owner = "orchestrator"
+residual = "reported, never refused: the done gate does not require an approval at all, so a stale approval blocks nothing by itself"
+
+[[rule]]
+id = "R-BASELINE-WRITE-ONCE"
+statement = "base_sha is written once; a second ppl baseline record is refused."
+scope = "ppl CLI"
+event = "ppl baseline record"
+enforcement = "blocking"
+hook_or_check = "ppl/cli.py:cmd_baseline"
+deny_test = "tests/test_cli.py::TestBaselineGuards::test_recording_a_baseline_twice_is_an_illegal_transition"
+allow_test = "tests/test_cli.py::TestCli::test_baseline_records_the_branch_alongside_base_sha"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-BASELINE-ANCESTOR"
+statement = "A base_sha that HEAD does not descend from is refused, because the done gate diffs against it."
+scope = "ppl CLI"
+event = "ppl baseline record"
+enforcement = "blocking"
+hook_or_check = "ppl/cli.py:cmd_baseline, ppl/gitfacts.py:is_ancestor"
+deny_test = "tests/test_cli.py::TestBaselineGuards::test_a_base_sha_that_is_not_an_ancestor_of_head_is_refused"
+allow_test = "tests/test_cli.py::TestBaselineGuards::test_an_ancestor_base_sha_is_accepted_after_later_commits"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-BASELINE-NOT-AT-HEAD"
+statement = "ppl baseline record is refused unless the run is still in the baseline stage - a baseline recorded after the run has moved past it is refused with ILLEGAL_TRANSITION, whatever commit it names."
+scope = "ppl CLI"
+event = "ppl baseline record"
+enforcement = "blocking"
+hook_or_check = "ppl/cli.py:cmd_baseline"
+deny_test = "tests/test_cli.py::TestBaselineGuards::test_recording_after_the_stage_has_moved_on_is_refused_even_at_an_ancestor"
+allow_test = "tests/test_cli.py::TestBaselineGuards::test_base_sha_equal_to_head_on_a_fresh_branch_is_accepted"
+owner = "ppl"
+residual = "D2, cycle 2 wave D, correcting C3 (cycle 2 wave B). C3 refused base_sha == HEAD outright; that is wrong on a freshly cut branch with no commits of its own yet, where HEAD IS the correct base_sha and there is no other commit to name - the wave-B fix made the documented Stage 1 flow (record the baseline right after cutting the branch) impossible to complete without inventing a commit (HEAD~1) that may not exist. The real hazard is recording a baseline AFTER work has landed, so this rule catches WHEN the call happens (has the run's stage moved past baseline) rather than WHICH commit it names. Accepted gap: a commit made DURING the baseline stage, before this call, still passes, because nothing here inspects the branch's own history - only when the call happens. Closing that fully would need a merge-base check against the target branch, which the run's state does not currently carry enough to perform."
+
+# ---------------------------------------------------------------------------
+# State machine
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-FSM-STAGE-GRAPH"
+statement = "A stage transition that the graph does not allow is refused with ILLEGAL_TRANSITION."
+scope = "ppl CLI"
+event = "ppl stage enter"
+enforcement = "blocking"
+hook_or_check = "ppl/fsm.py:check_stage, ppl/run.py:stage_enter"
+deny_test = "tests/test_fsm.py::TestStageGraph::test_cannot_skip_verification, tests/test_run.py::TestRun::test_stage_enter_rejects_an_illegal_jump"
+allow_test = "tests/test_fsm.py::TestStageGraph::test_happy_path_is_legal"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-MERGE-WATCH-TERMINAL"
+statement = "The merge_watch tail cannot reopen or alter the lifecycle: it has no outgoing stage edge and done is a terminal lifecycle state."
+scope = "ppl CLI"
+event = "ppl stage enter, ppl transition"
+enforcement = "blocking"
+hook_or_check = "ppl/fsm.py:_FORWARD, ppl/fsm.py:check_lifecycle"
+deny_test = "tests/test_fsm.py::TestLifecycle::test_done_is_terminal, tests/test_fsm.py::TestStageGraph::test_merge_watch_only_follows_closure"
+allow_test = ""
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-PARK-RESUME-RESTORES-LIFECYCLE"
+statement = "Resuming from the parking stage (ppl stage enter <resume_stage>) restores lifecycle status from blocked to in_progress, so a parked run can still reach done - a run parked before it ever reached in_progress (still planned) is left untouched."
+scope = "ppl CLI"
+event = "ppl stage enter, immediately after ppl park"
+enforcement = "blocking"
+hook_or_check = "ppl/run.py:stage_enter"
+deny_test = "tests/test_fsm.py::TestLifecycle::test_blocked_cannot_reach_done_directly"
+allow_test = "tests/test_run.py::TestResumeFromParking::test_resuming_from_parking_restores_in_progress, tests/test_run.py::TestResumeFromParking::test_resuming_from_parking_before_baseline_does_not_fabricate_in_progress"
+owner = "ppl"
+residual = "W3, cycle 2 wave B: before this fix, a parked run's lifecycle status stayed `blocked` forever - _LIFECYCLE_EDGES['blocked'] is only {in_progress, failed}, so `ppl transition done` from a resumed-but-never-restored run was ILLEGAL_TRANSITION, and the string `in_progress` appears nowhere in skill/, so the documented flow had no way out either. Fixed in code rather than in the skill: a recovery path that depends on the operator remembering an undocumented `ppl transition in_progress` call is not a recovery path"
+
+[[rule]]
+id = "R-PARK-RESUME-EXACT"
+statement = "A run resuming from parking or escalation may enter only the resume stage it was actually in when it parked or escalated - not any other real stage - and a missing or untrustworthy resume record refuses every target rather than allowing one."
+scope = "ppl CLI"
+event = "ppl stage enter, immediately after a run leaves parking or escalation"
+enforcement = "blocking"
+hook_or_check = "ppl/run.py:_resume_target, ppl/run.py:_parking_resume_stage, ppl/run.py:stage_enter"
+deny_test = "tests/test_run.py::TestParkingCannotTeleport::test_briefing_to_gates_is_illegal_whether_or_not_the_run_is_parked, tests/test_run.py::TestParkingCannotTeleport::test_resuming_from_parking_only_the_recorded_stage_is_legal, tests/test_run.py::TestParkingCannotTeleport::test_missing_parking_record_fails_closed_rather_than_wide_open, tests/test_run.py::TestParkingCannotTeleport::test_direct_stage_enter_into_parking_is_refused, tests/test_run.py::TestEscalationCannotTeleport::test_resuming_from_escalation_only_the_recorded_stage_is_legal"
+allow_test = "tests/test_run.py::TestParkingCannotTeleport::test_a_second_park_still_resumes_to_the_first_recorded_stage, tests/test_run.py::TestEscalationCannotTeleport::test_escalation_from_admission_resumes_through_admissions_own_edges"
+owner = "ppl"
+residual = "D1, cycle 2 wave D: `fsm._FORWARD['parking']` and `fsm._FORWARD['escalation']` are both `set(STAGES) - {merge_watch}`, by design, for ENTERING those stages from anywhere - fsm.py stays a pure, unaware-of-any-particular-run stage graph, so it still accepts any real stage as a target FROM parking or escalation too, at the fsm layer. This rule is the layer above it, in ppl/run.py, that narrows that back down for a real run using the recorded resume point - the same layering `control.enforce` already uses on top of fsm.check_stage for the pause gate. Escalation gets the identical treatment as parking rather than an exemption: it is reachable directly with `ppl stage enter escalation` (never only through `ppl escalate`, which parks instead - see ppl/watchdog.py's comment on this), carried the identical wide edge, and the ledger had already flagged (c2-task-4 review) that cmd_escalate never produces it - a separate, deliberately deferred question about whether the stage should exist at all, not a reason to leave its resume edge open in the meantime."
+
+[[rule]]
+id = "R-BRIEF-SCHEMA"
+statement = "A brief with no acceptance id, a non-string or blank acceptance entry, an empty write boundary, or overlapping write and forbid lists is refused."
+scope = "ppl CLI"
+event = "ppl brief set"
+enforcement = "blocking"
+hook_or_check = "ppl/schema.py:validate_brief, ppl/cli.py:cmd_brief"
+deny_test = "tests/test_run.py::TestSchema::test_brief_rejects_empty_write_boundary, tests/test_run.py::TestSchema::test_brief_rejects_overlap_between_write_and_forbid, tests/test_run.py::TestSchema::test_brief_rejects_a_dict_shaped_acceptance_entry, tests/test_run.py::TestSchema::test_brief_rejects_a_list_shaped_acceptance_entry, tests/test_run.py::TestSchema::test_brief_rejects_an_empty_string_acceptance_entry"
+allow_test = "tests/test_run.py::TestSchema::test_brief_accepts_a_complete_document"
+owner = "ppl"
+residual = "E1 CRITICAL, cycle 2 wave B: only presence (a non-empty list) was ever checked, never the elements' shape - a dict-shaped acceptance entry was accepted here and crashed done_blockers with a raw TypeError five stages later, exit 1 rather than a routable exit 2, at the single most load-bearing step in the system"
+
+[[rule]]
+id = "R-BOUNDARY-SET-DISJOINT"
+statement = "ppl boundary set enforces the same disjoint-write/forbid rule as the brief path."
+scope = "ppl CLI"
+event = "ppl boundary set"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "ppl"
+residual = "GAP: the disjointness check (write and forbid must not overlap) lives in schema.validate_brief only; a boundary written directly via ppl boundary set can still overlap forbid, where forbid then silently wins in check_path. Narrower than before this commit - see R-BOUNDARY-SET-NO-WILDCARD, which closes the non-emptiness sibling gap (a wildcard write boundary) that used to sit alongside this one"
+
+[[rule]]
+id = "R-BOUNDARY-SET-NO-WILDCARD"
+statement = "ppl boundary set refuses a write boundary containing \"**\", which would match every path in the tree and make the done gate's diff-boundary check (condition 4) unconditionally true."
+scope = "ppl CLI"
+event = "ppl boundary set"
+enforcement = "blocking"
+hook_or_check = "ppl/cli.py:cmd_boundary"
+deny_test = "tests/test_cli.py::TestCli::test_boundary_set_refuses_a_wildcard_write_boundary"
+allow_test = "tests/test_cli.py::TestCli::test_boundary_set_still_accepts_a_narrow_glob"
+owner = "ppl"
+residual = "N5, cycle 2 wave B: before this fix, cmd_boundary checked only that write was non-empty - {\"write\": [\"**\"]} was accepted, and this command can be called AFTER a verdict already passed, the same shape as the C3 baseline attack (rewrite the criterion the gate reads, then run the gate). Refused at the narrowest point that closes the degenerate case outright; a merely-too-wide-but-not-\"**\" glob (e.g. an overly broad but legitimate-looking directory) is not judged here - see R-BOUNDARY-SET-DISJOINT for the sibling gap this does not close. REOPENED AND REVERSED in cycle 2 wave F: wave B also decided a boundary change should NOT stale an already-recorded PASS, on the reasoning that done_blockers re-reads boundary.json fresh on every call. That freshness is exactly the property the acceptance-shrink defect (R-BRIEF-SPEC-REVISION-STALE) exploited - a criterion the gate re-reads live can be rewritten by the same session being gated to fit a diff that already exists - and widening the write boundary to cover a path an already-produced diff had already escaped to is that same move with a different noun. cmd_boundary now rebinds spec_revision too (R-BOUNDARY-SPEC-REVISION-STALE), so any boundary edit - widen, narrow or an honest correction alike - stales an outstanding verdict the same way a name_contract or acceptance edit does. The low-cost-narrowing convenience wave B optimized for is traded away deliberately: judging widen-vs-narrow case by case would need a general superset check on arbitrary globs this codebase has no way to compute, and a false-deny (an unnecessary re-verification) is recoverable while the false-allow wave B's ruling left open was not"
+
+[[rule]]
+id = "R-BOUNDARY-SPEC-REVISION-STALE"
+statement = "ppl boundary set rebinds spec_revision (using the run's current name_contract and acceptance, combined with the new write/forbid lists) whenever a spec_revision is already bound, so a boundary edit made after a PASS verdict was recorded - widening, narrowing or an honest correction alike - stales that verdict through the same ppl transition done staleness check R-BRIEF-SPEC-REVISION-STALE uses for name_contract and acceptance. A no-op boundary rewrite (byte-identical write/forbid content) does not change the fingerprint and does not stale anything."
+scope = "ppl CLI"
+event = "ppl boundary set, ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/cli.py:cmd_boundary, ppl/schema.py:spec_revision, ppl/verdict.py:done_blockers"
+deny_test = "tests/test_cli.py::TestBoundaryChangeSpecRevisionStaleness::test_widening_the_write_boundary_after_a_pass_stales_the_verdict"
+allow_test = "tests/test_cli.py::TestBoundaryChangeSpecRevisionStaleness::test_rewriting_the_boundary_to_the_same_content_does_not_stale_the_verdict"
+owner = "ppl"
+residual = "Skipped when no spec_revision has ever been bound (no ppl brief set yet, or a boundary-only run with none planned): there is no name_contract or acceptance to combine the new boundary with, and R-DONE-REQUIRES-BRIEF already refuses such a run at ppl transition done regardless of what its boundary says. Reads brief.json with a {} default rather than requiring one to exist, for the same reason. Deliberately does not distinguish a widening from a narrowing - see R-BOUNDARY-SET-NO-WILDCARD's residual for why that distinction was not attempted."
+
+[[rule]]
+id = "R-INIT-ONCE"
+statement = "ppl init refuses to overwrite an existing run."
+scope = "ppl CLI"
+event = "ppl init"
+enforcement = "blocking"
+hook_or_check = "ppl/run.py:init"
+deny_test = "tests/test_run.py::TestRun::test_init_twice_is_refused"
+allow_test = "tests/test_run.py::TestRun::test_init_creates_state_at_admission"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-TASK-ID-TRAVERSAL"
+statement = "A task id that does not match the generic KEY-123 shape is refused, so no run path can be steered out of runs/."
+scope = "ppl CLI, panel, hook"
+event = "every path built from a task id"
+enforcement = "blocking"
+hook_or_check = "ppl/paths.py:check_task_id"
+deny_test = "tests/test_store.py::TestPaths::test_run_dir_rejects_traversal"
+allow_test = "tests/test_store.py::TestPaths::test_run_dir_is_under_runs"
+owner = "ppl"
+residual = ""
+
+# ---------------------------------------------------------------------------
+# Budgets
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-BUDGET-DISPATCH-CAP"
+statement = "Once dispatch_used reaches the hard cap, ppl stage enter and ppl transition refuse with BUDGET_EXHAUSTED, and ppl park stays available."
+scope = "ppl CLI"
+event = "ppl stage enter, ppl transition, ppl budget spend dispatch"
+enforcement = "blocking"
+hook_or_check = "ppl/cli.py:check_dispatch_budget, ppl/budget.py:spend"
+deny_test = "tests/test_cli.py::TestDispatchHardCap::test_stage_enter_is_refused_once_the_hard_cap_is_reached, tests/test_cli.py::TestDispatchHardCap::test_transition_is_refused_once_the_hard_cap_is_reached, tests/test_verdict.py::TestBudget::test_dispatch_hard_cap_raises"
+allow_test = "tests/test_cli.py::TestDispatchHardCap::test_stage_enter_still_works_one_dispatch_below_the_cap"
+owner = "ppl"
+residual = "the counter only moves when something spends it: the SubagentStart hook cannot block (R-DISPATCH-HOOK-CANNOT-BLOCK) and is not armed, so dispatch_used can lag the real number of dispatches"
+
+[[rule]]
+id = "R-BUDGET-RETRY"
+statement = "Spending past the retry cap is refused with BUDGET_EXHAUSTED."
+scope = "ppl CLI"
+event = "ppl budget spend retry"
+enforcement = "blocking"
+hook_or_check = "ppl/budget.py:spend"
+deny_test = "tests/test_verdict.py::TestBudget::test_retry_cap_raises"
+allow_test = "tests/test_verdict.py::TestBudget::test_dispatch_spend_accumulates"
+owner = "ppl"
+residual = "same counter provenance as R-BUDGET-DISPATCH-CAP: nothing increments it automatically"
+
+[[rule]]
+id = "R-BUDGET-USD"
+statement = "Spending past usd_max is refused, and a zero cap means unlimited only because subscription providers have no dollar meter."
+scope = "ppl CLI"
+event = "ppl budget spend usd"
+enforcement = "blocking"
+hook_or_check = "ppl/budget.py:spend, ppl/budget.py:KINDS"
+deny_test = "tests/test_verdict.py::TestBudget::test_usd_cap_enforced_when_set"
+allow_test = "tests/test_verdict.py::TestBudget::test_usd_unlimited_when_max_is_zero"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-BUDGET-USD-BEFORE-DISPATCH"
+statement = "The dollar budget is spent before a dispatch, not after it."
+scope = "ppl CLI"
+event = "ppl dispatch"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "GAP: routing.dispatch never calls budget.spend, so the ordering is a convention the caller has to keep; with the only v1 provider being a subagent there is no dollar meter to spend against yet"
+
+[[rule]]
+id = "R-BUDGET-FORMAT-VIOLATIONS"
+statement = "Three schema failures from the same role discard its output as unusable and record the routing as a signal."
+scope = "orchestrator"
+event = "repeated schema-invalid role output"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "GAP: nothing counts schema failures per role anywhere; each ppl call refuses its own malformed input and forgets it"
+
+# ---------------------------------------------------------------------------
+# Dispatch, adapters and context isolation
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-DISPATCH-HOOK-CANNOT-BLOCK"
+statement = "SubagentStart is informational, so the dispatch hook counts and can never refuse a dispatch."
+scope = "global"
+event = "SubagentStart"
+enforcement = "soft"
+hook_or_check = "hooks/ppl_dispatch.py:on_start"
+deny_test = ""
+allow_test = "tests/test_dispatch_hook.py::TestDispatchHook::test_start_increments_the_dispatch_counter, tests/test_dispatch_hook.py::TestDispatchHook::test_start_denies_past_the_hard_cap, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_dispatched_from_beside_the_worktree_is_counted"
+owner = "harness"
+residual = "the deny document the hook returns past the cap is never acted on by the harness; R-BUDGET-DISPATCH-CAP is the only real enforcement of that budget"
+
+[[rule]]
+id = "R-EGRESS-SOURCE-UPLOAD"
+statement = "A role whose provider is not permitted to receive source cannot be dispatched with a payload carrying repository files; the dispatch is refused rather than trimmed."
+scope = "ppl CLI"
+event = "ppl dispatch"
+enforcement = "blocking"
+hook_or_check = "ppl/routing.py:check_egress"
+deny_test = "tests/test_routing.py::TestRouting::test_dispatch_refuses_source_upload_when_the_provider_forbids_it, tests/test_routing.py::TestRouting::test_dispatch_refuses_source_upload_when_the_key_is_absent"
+allow_test = "tests/test_routing.py::TestRouting::test_dispatch_for_a_subagent_provider_tells_the_caller_to_use_the_agent_tool"
+owner = "ppl"
+residual = "only the ppl dispatch path is checked, and v1 never routes a subagent through it"
+
+[[rule]]
+id = "R-APPLY-PATCH-BOUNDARY"
+statement = "ppl apply-patch validates every path a diff touches against the boundary before applying it, independently of any hook."
+scope = "ppl CLI"
+event = "ppl apply-patch"
+enforcement = "blocking"
+hook_or_check = "ppl/boundary.py:check_diff, ppl/cli.py:cmd_apply_patch"
+deny_test = "tests/test_boundary.py::TestDiff::test_check_diff_rejects_when_any_path_escapes"
+allow_test = ""
+owner = "ppl"
+residual = "unexercised in v1: no workflow step calls apply-patch, because the only provider is a subagent whose worker writes the tree directly"
+
+[[rule]]
+id = "R-TEST-WORKER-READ-TOOLS"
+statement = "ppl-test-worker's Read, Grep and Glob calls are denied when their path argument - or, when the tool omits one, the session's cwd - resolves inside the active run's repo to something other than a test source; a relative path resolves against the session's cwd, and one with no cwd to resolve against is denied."
+scope = "active run, agent_type ppl-test-worker"
+event = "PreToolUse on Read/Grep/Glob"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:decide, hooks/ppl_guard.py:read_target_path, ppl/boundary.py:path_is_test_scoped"
+deny_test = "tests/test_guard.py::TestGuard::test_test_worker_may_not_read_a_main_source, tests/test_guard.py::TestGuard::test_test_worker_grep_with_no_path_defaults_to_cwd_and_is_denied, tests/test_guard.py::TestGuard::test_test_worker_relative_read_path_resolves_against_the_payload_cwd, tests/test_guard.py::TestGuard::test_test_worker_relative_read_path_with_no_cwd_is_denied"
+allow_test = "tests/test_guard.py::TestGuard::test_test_worker_may_read_a_test_source, tests/test_guard.py::TestGuard::test_test_worker_grep_scoped_to_a_test_directory_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_glob_over_test_sources_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_reading_the_brief_outside_the_repo_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_relative_read_of_a_test_path_is_allowed"
+owner = "guard-hook"
+residual = "exact on the path argument, not on the tool's actual read set: a Grep/Glob path that is itself an ancestor of a test directory but also of main sources (an ordinary module root) is denied even though the caller's pattern might have narrowed the real hits to test files only - a false deny, the accepted direction. A symlink inside the repo whose target escapes it resolves through realpath like every other check in this module, so it is caught the same way, not specially"
+
+[[rule]]
+id = "R-TEST-WORKER-BASH-READS"
+statement = "A ppl-test-worker Bash command is denied unless every segment of it is one of a small set of shapes the role is derived to need - the build/test shapes the run's harness snapshot declares, the echo used by its rc-file idiom, git status/add (test paths only)/commit, ls, and reading a test source with a read verb. Anything else, including a shape the hook cannot parse, denies. A command or process substitution anywhere in the command - $(, a backtick, <( or >( - denies the whole command before any segment is looked at."
+scope = "active run, agent_type ppl-test-worker"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:bash_denies_main_source_read, hooks/ppl_guard.py:_segment_allowed, hooks/ppl_guard.py:ShapeMatcher"
+deny_test = "tests/test_guard.py::TestGuard::test_test_worker_cat_of_main_source_is_denied, tests/test_guard.py::TestGuard::test_test_worker_git_diff_with_no_pathspec_is_denied, tests/test_guard.py::TestGuard::test_test_worker_git_show_of_a_main_source_object_is_denied, tests/test_guard.py::TestGuard::test_test_worker_grep_of_main_source_via_bash_is_denied, tests/test_guard.py::TestGuard::test_test_worker_bash_c_wrapper_around_cat_of_main_source_is_denied, tests/test_guard.py::TestGuard::test_test_worker_cd_then_climb_past_the_test_dir_via_dotdot_is_denied, tests/test_guard.py::TestGuard::test_test_worker_grep_dash_n_of_main_source_is_denied, tests/test_guard.py::TestGuard::test_test_worker_sed_dash_n_of_main_source_is_denied, tests/test_guard.py::TestGuard::test_test_worker_grep_dash_e_of_main_source_is_denied, tests/test_guard.py::TestGuard::test_test_worker_git_diff_with_a_global_flag_before_the_subcommand_is_denied, tests/test_guard.py::TestGuard::test_test_worker_git_diff_is_denied_even_restricted_to_a_test_path, tests/test_guard.py::TestGuard::test_test_worker_git_add_of_a_main_source_is_denied, tests/test_guard.py::TestGuard::test_test_worker_command_substitution_denies_the_whole_command, tests/test_guard.py::TestGuard::test_test_worker_process_substitution_inside_a_free_arg_is_denied, tests/test_guard.py::TestGuard::test_probe_nl_is_denied, tests/test_guard.py::TestGuard::test_probe_tac_is_denied, tests/test_guard.py::TestGuard::test_probe_cut_is_denied, tests/test_guard.py::TestGuard::test_probe_od_is_denied, tests/test_guard.py::TestGuard::test_probe_xxd_is_denied, tests/test_guard.py::TestGuard::test_probe_strings_is_denied, tests/test_guard.py::TestGuard::test_probe_more_is_denied, tests/test_guard.py::TestGuard::test_probe_diff_is_denied, tests/test_guard.py::TestGuard::test_probe_git_log_dash_p_is_denied, tests/test_guard.py::TestGuard::test_probe_git_blame_is_denied, tests/test_guard.py::TestGuard::test_probe_git_cat_file_is_denied, tests/test_guard.py::TestGuard::test_probe_python_dash_c_reading_a_file_is_denied, tests/test_guard.py::TestGuard::test_probe_while_read_redirected_from_a_main_source_is_denied, tests/test_guard.py::TestGuard::test_test_worker_mvn_with_no_recognised_goal_is_denied, tests/test_guard.py::TestGuard::test_test_worker_rg_with_no_path_is_denied, tests/test_guard.py::TestGuard::test_test_worker_rg_with_a_flag_and_no_path_is_denied, tests/test_guard.py::TestGuard::test_test_worker_grep_dash_r_with_no_path_is_denied, tests/test_guard.py::TestGuard::test_test_worker_grep_bundled_dash_rn_with_no_path_is_denied, tests/test_guard.py::TestGuard::test_test_worker_piped_grep_bundled_dash_rn_is_still_denied, tests/test_guard.py::TestGuard::test_test_worker_grep_dash_capital_r_with_no_path_is_denied, tests/test_guard.py::TestGuard::test_test_worker_grep_long_include_and_dash_r_with_no_path_is_denied"
+allow_test = "tests/test_guard.py::TestGuard::test_test_worker_cat_of_a_test_source_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_grep_with_no_file_argument_reads_a_pipe_and_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_mvn_build_and_test_commands_are_unaffected, tests/test_guard.py::TestGuard::test_test_worker_artifact_id_containing_a_verb_word_is_not_a_false_positive, tests/test_guard.py::TestGuard::test_test_worker_head_dash_n_of_a_test_source_is_still_allowed, tests/test_guard.py::TestGuard::test_test_worker_mvn_install_shape_from_gates_recipe_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_mvn_checkstyle_shape_from_gates_recipe_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_mvn_verify_shape_from_gates_recipe_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_git_status_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_git_add_of_a_test_path_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_git_commit_with_a_message_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_ls_is_allowed, tests/test_guard.py::TestGuard::test_test_worker_genuine_pipe_filter_with_no_path_is_still_allowed, tests/test_guard.py::TestGuard::test_test_worker_rg_with_an_explicit_test_path_is_still_allowed"
+owner = "guard-hook"
+residual = "round 1 review found the first version was a blocklist and ruled it unsound in principle - the design's own sentence is 'any command shape that cannot be classified is denied', and a blocklist can never satisfy that, because an unrecognised command is by construction unclassified and therefore allowed under a blocklist; naming more verbs would not have fixed it either, since python3 -c or perl -e alone subsumes every reader anyone could name. Rebuilt as an allowlist: everything not matching one of the derived shapes denies, including a shape this cannot parse. Still lexical, like every other Bash check in this module (5.4): a speed bump against the easy path, not a proof no path exists. `bash -c '...'` denies via a leftover unbalanced quote making shlex raise on the wrapped segment - fail-closed on unparseable, not by recognising the wrapper, so a bash -c wrapping an otherwise-allowed shape (e.g. cat of a real test source) also denies, a false deny in the accepted direction. git diff/show are not in the allowlist at all, not even restricted to a test pathspec, since the role has no documented need for either. A shell input redirect (`< file`) has no dedicated handling - it happens to deny in every shape checked (either an unclassified leading token like `done <`, or the `<` operator itself being swept up as a bogus path token that then fails the test-scoped check), which is incidental to the classifier rather than a designed protection, and no attempt was made to find a shape where that incidence does not hold. Whole-branch review C2: the read-verb classifier treated any empty path list as 'filtering a pipe', including rg (recursive by default with no path at all) and grep -r/-R (defaults to the cwd, bundled or not - '-rn' counts) - neither reads stdin, piped or not. Fixed by asking whether the verb is a tree-read regardless of a pipe first, and only falling back to 'genuine pipe filter' when a real `|` fed the segment"
+
+[[rule]]
+id = "R-GUARD-SHAPES-FROM-SNAPSHOT"
+statement = "The build/test command shapes a ppl-test-worker may run are read from runs/<task>/harness.json, the snapshot ppl init wrote from the harness, and matched token by token: argv0 exactly, every required flag with its value regex, exactly one declared goal, any other token against free_args."
+scope = "active run, agent_type ppl-test-worker"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:ShapeMatcher, hooks/ppl_guard.py:harness_shapes"
+deny_test = "tests/test_guard.py::TestGuard::test_shape_matcher_reproduces_the_maven_allowlist, tests/test_guard.py::TestGuard::test_generic_harness_shapes_allow_make_and_nothing_else, tests/test_guard.py::TestGuard::test_an_unanchored_value_regex_matches_the_whole_token_not_a_prefix, tests/test_guard.py::TestGuard::test_a_token_longer_than_the_cap_is_denied_before_any_regex_runs"
+allow_test = "tests/test_guard.py::TestGuard::test_the_documented_gates_recipe_is_allowed_where_the_orchestrator_runs_it"
+owner = "guard-hook"
+residual = "a harness author can declare an over-permissive shape, ppl harness validate warns when a row has neither required_flags nor one_goal_of. A harness regex with nested quantifiers can still exceed the hook budget (exponential backtracking), harness regexes are operator-authored: the 4096-character token cap bounds polynomial cases only"
+
+[[rule]]
+id = "R-GUARD-SNAPSHOT-FAIL-CLOSED"
+statement = "A missing or unreadable runs/<task>/harness.json yields zero build shapes, so a ppl-test-worker build command is denied rather than allowed by default."
+scope = "active run, agent_type ppl-test-worker"
+event = "PreToolUse on Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:load_snapshot, hooks/ppl_guard.py:harness_shapes"
+deny_test = "tests/test_guard.py::TestGuard::test_test_worker_build_is_denied_without_a_snapshot, tests/test_guard.py::TestGuard::test_test_worker_build_is_denied_on_a_corrupt_snapshot, tests/test_guard.py::TestGuard::test_malformed_snapshot_shapes_deny_the_build_instead_of_raising"
+allow_test = ""
+owner = "guard-hook"
+residual = ""
+
+[[rule]]
+id = "R-TEST-WORKER-NO-DIFF"
+statement = "Nothing stops the orchestrator pasting the implementation diff into the literal text of the test worker's own dispatch prompt; only the worker's own tool-call reads are denied, not the content of the prompt it is given."
+scope = "orchestrator, dispatch of ppl-test-worker"
+event = "dispatch of the test worker"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "GAP: ppl assembles no payload on the v1 path - the orchestrator composes the subagent prompt itself, with no adapter boundary a hook could inspect. R-TEST-WORKER-READ-TOOLS and R-TEST-WORKER-BASH-READS now close the worker's OWN reads of main sources through its tools, but neither says anything about what the orchestrator chooses to type into the dispatch prompt - pasting the diff there is still a sentence in templates/ppl-test-worker.md.body (and in the orchestrator's own discipline) and nothing structural"
+
+[[rule]]
+id = "R-TEST-WORKER-EXECUTION-CHANNEL"
+statement = "Running the build and tests the test worker itself invokes necessarily surfaces the implementation - a compiler error names the offending method, a stack trace names classes, a failing assertion prints the actual value - and nothing here closes that while the worker still has to run its own tests."
+scope = "ppl-test-worker"
+event = "the worker running its own build/test commands"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "PROPERTY: deliberate and casual reads are closed by R-TEST-WORKER-READ-TOOLS and R-TEST-WORKER-BASH-READS, but the execution-shaped channel is inherent, not an oversight - a worker cannot verify RED-before-fix without running something, and running it prints implementation detail no hook can filter out of a tool result. The channel this leaves open in plain words: a worker could in principle fit an assertion's expected value to whatever the run just printed rather than to the specified behaviour, and nothing here or elsewhere in this codebase tells that apart from a legitimately-derived assertion. Note also that target/surefire-reports/*.txt lands under the repo tree and is not a test path by is_test_path, so R-TEST-WORKER-BASH-READS denies a direct `cat` of it even though its content already reached the worker live in the same Bash call's own output - a denial that closes nothing this residual does not already admit is open"
+
+[[rule]]
+id = "R-CODE-WORKER-READS-UNRESTRICTED"
+statement = "ppl-code-worker is not denied reads of test sources; only its writes are boundary-checked."
+scope = "ppl-code-worker"
+event = "PreToolUse on Read/Grep/Glob/Bash"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = "tests/test_guard.py::TestGuard::test_code_worker_reading_a_test_source_is_not_restricted, tests/test_guard.py::TestGuard::test_code_worker_cat_of_a_main_source_is_not_restricted_by_this_check"
+owner = "design"
+residual = "PROPERTY: a deliberate mirror decision, not an oversight. Doctrine's rule that the implementation worker 'does not touch tests' is about writes - one agent writing both the code and the test that checks it is the profanation the split exists to prevent. A worker reading the tests it must satisfy while it implements is ordinary TDD, not that failure mode: the property this design protects is the test's independence from the implementation, not the reverse, and restricting the code worker's reads would buy nothing it does not already have another way, since it runs the tests directly and sees their output regardless"
+
+[[rule]]
+id = "R-BRIEFER-SPEC-GAP"
+statement = "A briefer that cannot derive the brief returns SPEC_GAP instead of inventing product truth."
+scope = "ppl-briefer"
+event = "briefing"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "GAP: ppl brief set validates the shape of a brief, never its provenance, so an invented brief with the right fields passes exactly like a derived one"
+
+[[rule]]
+id = "R-NO-RECURSIVE-DELEGATION"
+statement = "A subagent cannot spawn a subagent."
+scope = "global"
+event = "any role dispatch"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "harness"
+residual = "PROPERTY: Claude Code itself makes this true and ppl cannot check a harness behaviour from inside a hook. The half that is checkable - that no role is handed a subagent-spawning tool - is R-ROLE-TOOLS-NO-AGENT"
+
+[[rule]]
+id = "R-PROVIDER-AGNOSTIC"
+statement = "No model name appears anywhere in ppl/, hooks/, templates/ or tools/: the example routing in defaults/ and the data root's routing.toml are the only places a model is named."
+scope = "the whole toolchain"
+event = "a routing change"
+enforcement = "soft"
+hook_or_check = "ppl/routing.py:load, defaults/routing.example.toml"
+deny_test = ""
+allow_test = "tests/test_routing.py::TestProviderAgnosticWorkflow::test_no_model_name_appears_outside_routing_toml"
+owner = "ppl"
+residual = "this pins the half that can be pinned - no module, hook, template or tool names a model. The other half, that a role really moves to another provider without touching the workflow, stays untested until a second adapter exists"
+
+[[rule]]
+id = "R-PARAMS-PROVIDER-SPECIFIC"
+statement = "params is a provider-specific blob and a Claude concept such as effort does not leak into the shared schema."
+scope = "routing.toml"
+event = "ppl routing apply, ppl routing show"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "ppl"
+residual = "GAP: nothing validates the keys inside params, and the shared adapter schema exists only as prose in DESIGN 10.2, so there is no schema for a key to leak into yet"
+
+[[rule]]
+id = "R-PRODUCER-ATTRIBUTION"
+statement = "Every receipt and every verdict carries producer, so a result can be attributed to the routing profile that produced it."
+scope = "ppl CLI"
+event = "ppl evidence add, ppl verdict record"
+enforcement = "soft"
+hook_or_check = "ppl/schema.py:VERDICT_FIELDS, ppl/evidence.py:add, ppl/cli.py:cmd_evidence"
+deny_test = ""
+allow_test = "tests/test_evidence.py::TestEvidence::test_receipt_carries_producer_attribution, tests/test_cli.py::TestCli::test_evidence_defaults_producer_when_not_given"
+owner = "ppl"
+residual = "the field is required on a verdict but defaulted on a receipt, and its contents are whatever the caller passes - nothing checks it against the model that actually ran"
+
+# ---------------------------------------------------------------------------
+# Isolation of the guard hook itself
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-INIT-ISOLATION-CHECK"
+statement = "ppl init --isolated refuses with SCHEMA_INVALID when the guard hook is registered only globally, registered both locally and globally, or its registration cannot be confirmed."
+scope = "ppl CLI, this directory plus the Claude home"
+event = "ppl init --isolated, ppl doctor"
+enforcement = "blocking"
+hook_or_check = "ppl/doctor.py:mismatch, ppl/doctor.py:inspect, ppl/cli.py:cmd_init"
+deny_test = "tests/test_cli.py::TestInitVerifiesTheGuardHookRegistration::test_init_refuses_when_hook_is_registered_only_globally, tests/test_cli.py::TestInitVerifiesTheGuardHookRegistration::test_init_refuses_when_the_hook_is_registered_both_locally_and_globally, tests/test_cli.py::TestInitVerifiesTheGuardHookRegistration::test_init_refuses_when_local_is_confirmed_but_global_is_unreadable"
+allow_test = "tests/test_cli.py::TestInitVerifiesTheGuardHookRegistration::test_init_is_not_refused_when_the_hook_is_registered_locally, tests/test_cli.py::TestInitVerifiesTheGuardHookRegistration::test_init_no_isolated_is_not_refused_when_hook_is_registered_only_globally"
+owner = "operator"
+residual = "a file inspection, not a proof about the session actually driving the run - see R-ISOLATION-SESSION-IDENTITY, R-ISOLATION-POINT-IN-TIME, R-ISOLATION-CLAUDE-HOME and R-ISOLATION-GUARD-BASENAME"
+
+[[rule]]
+id = "R-ISOLATION-CLAUDE-HOME"
+statement = "The isolation check inspects the real Claude home."
+scope = "ppl doctor, ppl init --isolated"
+event = "doctor.inspect"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "operator"
+residual = "GAP: PPL_CLAUDE_HOME fully substitutes for ~/.claude, a deliberate test seam, so a stray value in a real invocation makes the check inspect an unrelated and likely empty directory and report none, seeing no mismatch that may in fact exist"
+
+[[rule]]
+id = "R-ISOLATION-GUARD-BASENAME"
+statement = "The isolation check identifies this pipeline's own guard hook."
+scope = "ppl doctor, ppl init --isolated"
+event = "doctor._has_guard"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "operator"
+residual = "GAP: _has_guard matches the literal substring ppl_guard.py in a hook command, so another checkout's guard hook at a different path reads as this one's"
+
+[[rule]]
+id = "R-ISOLATION-SESSION-IDENTITY"
+statement = "The guard identifies which session made a tool call, and the isolation check proves that session was launched where the hook is registered."
+scope = "guard hook, ppl doctor"
+event = "PreToolUse, doctor.inspect"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "operator"
+residual = "GAP: the hook payload carries agent_type and cwd but no session identity, and doctor reads files on disk, so a hook registered locally in one directory while a differently launched session drives the pipeline reports local and sees no mismatch"
+
+[[rule]]
+id = "R-ISOLATION-POINT-IN-TIME"
+statement = "The isolation check holds for the lifetime of the run."
+scope = "ppl doctor, ppl init --isolated"
+event = "ppl init --isolated"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "operator"
+residual = "GAP: the check runs once at init; nothing re-verifies registration afterwards, so an edit to ~/.claude/settings.json mid-run silently invalidates the isolated flag"
+
+[[rule]]
+id = "R-GUARD-NOT-ARMED"
+statement = "Every guard-hook rule in this table fires only once the hook is actually registered as a PreToolUse hook."
+scope = "global"
+event = "hook registration"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "operator"
+residual = "GAP: only ppl setup claude or the operator by hand registers the hook (README.md Hooks), ppl doctor reports none for an unregistered hook and ppl init --isolated deliberately does not refuse it, so a run started without the hook passes every cage rule unenforced"
+
+[[rule]]
+id = "R-GUARD-MATCHER"
+statement = "Every registered guard entry's PreToolUse matcher passes every tool name the cage acts on (hooks/ppl_guard.py:GUARDED_TOOL_NAMES - the four file-editing tools, the three read tools Read, Grep and Glob, Bash, the denied GitLab MCP tools and the Jira write tools under every known Atlassian prefix), judged as a full regex match. ppl doctor reports the verdict and the uncovered names per settings file, and ppl init refuses SCHEMA_INVALID to create a run while any confirmed registration leaves a name uncovered, --no-isolated or not."
+scope = "hook registration"
+event = "ppl doctor, ppl init"
+enforcement = "blocking"
+hook_or_check = "ppl/doctor.py:matcher_covers, ppl/doctor.py:matcher_problem, ppl/cli.py:cmd_init"
+deny_test = "tests/test_cli.py::TestInitVerifiesTheGuardMatcher::test_init_refuses_when_the_registered_matcher_leaves_guarded_tools_uncovered, tests/test_cli.py::TestInitVerifiesTheGuardMatcher::test_init_no_isolated_still_refuses_an_incomplete_matcher"
+allow_test = "tests/test_cli.py::TestInitVerifiesTheGuardMatcher::test_init_is_not_refused_when_the_matcher_covers_every_guarded_tool, tests/test_doctor.py::TestMatcher::test_the_recommended_matcher_covers_every_guarded_tool, tests/test_doctor.py::TestMatcher::test_the_readme_recipe_registers_the_recommended_matcher, tests/test_doctor.py::TestMatcher::test_coverage_is_the_union_over_the_guard_entries"
+owner = "ppl"
+residual = "judged only against the two settings files ppl reads, at doctor and init time: a matcher narrowed after the run started, a registration in a file ppl does not read (managed policy, a project settings.json), or an entry whose command names another checkout's ppl_guard.py is not caught, and full-match is the stricter of the two readings Claude Code could give a matcher, so a registration that passes here fires under either"
+
+# ---------------------------------------------------------------------------
+# Brief challenge, open decisions, simplification, routing by risk
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-BRIEF-CHALLENGED-BEFORE-IMPLEMENTATION"
+statement = "A run leaves briefing for implementation only with an ACCEPTED brief challenge bound to the current spec_revision, and the done gate refuses a head whose challenge is missing or bound to an older spec_revision."
+scope = "ppl CLI"
+event = "ppl stage enter implementation, ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/run.py:stage_enter, ppl/run.py:challenge_current, ppl/verdict.py:done_blockers"
+deny_test = "tests/test_run.py::TestBriefChallengeGate::test_leaving_briefing_without_a_challenge_is_refused, tests/test_verdict.py::TestDoneGateSimplificationReceipt::test_done_refuses_when_the_challenge_is_stale"
+allow_test = "tests/test_run.py::TestBriefChallengeGate::test_an_accepted_challenge_opens_implementation"
+owner = "ppl"
+residual = "a resume from parking re-enters implementation without passing this guard, the same as the baseline guard; the challenge it relies on was checked when the run first left briefing"
+
+[[rule]]
+id = "R-BRIEF-CHALLENGE-SELF-CONSISTENT"
+statement = "ppl brief challenge refuses an ACCEPTED report that still lists an unjustified new class, a wire shape off the spec text, or a cheap parked decision; such a report is recorded as REVISE and the brief is redone."
+scope = "ppl CLI"
+event = "ppl brief challenge"
+enforcement = "blocking"
+hook_or_check = "ppl/schema.py:validate_challenge"
+deny_test = "tests/test_run.py::TestChallengeSchema::test_accepted_with_an_unjustified_new_class_is_refused"
+allow_test = "tests/test_run.py::TestChallengeSchema::test_revise_may_carry_the_problems_it_reports"
+owner = "ppl"
+residual = "a challenger that answers the three questions dishonestly (every class justified, every shape matching) is not caught: ppl checks the report against itself, not against the tree"
+
+[[rule]]
+id = "R-BRIEF-OPEN-DECISION-NOT-PARKED-CHEAP"
+statement = "An open decision given as an object with decision parked and cost_to_close_files of five or fewer is refused at ppl brief set and at ppl brief challenge; a gap that small is taken in scope or handed to the owner."
+scope = "ppl CLI"
+event = "ppl brief set, ppl brief challenge"
+enforcement = "blocking"
+hook_or_check = "ppl/schema.py:validate_open_decisions"
+deny_test = "tests/test_run.py::TestOpenDecisionsSchema::test_a_cheap_parked_decision_is_refused"
+allow_test = "tests/test_run.py::TestOpenDecisionsSchema::test_an_expensive_parked_decision_is_accepted"
+owner = "ppl"
+residual = "a bare-string open decision carries no cost and is not checked; the briefer template asks for objects, nothing forces them"
+
+[[rule]]
+id = "R-DONE-SIMPLIFICATION-RECEIPT"
+statement = "ppl transition done refuses a head without a simplification receipt whose result is pass or skip."
+scope = "ppl CLI"
+event = "ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:done_blockers"
+deny_test = "tests/test_verdict.py::TestDoneGateSimplificationReceipt::test_done_refuses_without_a_simplification_receipt"
+allow_test = "tests/test_verdict.py::TestDoneGateSimplificationReceipt::test_done_accepts_a_skipped_simplification"
+owner = "ppl"
+residual = "skip is honoured on the record alone; nothing checks that the reason in its log is true"
+
+[[rule]]
+id = "R-ROUTING-BY-RISK"
+statement = "routing.resolve applies the by_risk tier override of a role for the run's risk, mapping the tier to its model; ppl routing show --role --task prints the model the orchestrator passes at dispatch."
+scope = "ppl CLI"
+event = "ppl routing show"
+enforcement = "soft"
+hook_or_check = "ppl/routing.py:resolve"
+deny_test = ""
+allow_test = "tests/test_routing.py::TestRouting::test_resolve_applies_the_risk_override"
+owner = "orchestrator"
+residual = "the generated agent file keeps the default model; an orchestrator that dispatches by agent name without passing the resolved model runs the default"
+
+[[rule]]
+id = "R-METRIC-OUTCOMPETED"
+statement = "ppl label accepts outcompeted for an accepted candidate that a parallel implementation replaced, and ppl metrics reports outcompeted_rate over labelled PASS verdicts, undefined until a label exists."
+scope = "ppl CLI"
+event = "ppl label, ppl metrics"
+enforcement = "soft"
+hook_or_check = "ppl/metrics.py:_outcompeted_rate"
+deny_test = ""
+allow_test = "tests/test_metrics.py::TestLabelDependentRates::test_outcompeted_rate_counts_outcompeted_labels_on_pass_verdicts"
+owner = "orchestrator"
+residual = "the label is a human judgement after the fact; nothing in the pipeline produces it"
+
+# ---------------------------------------------------------------------------
+# Review loop
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-REVIEW-NO-DOUBLE-REPLY"
+statement = "ppl review pending drops resolved threads, threads whose newest note is a reply by the pipeline identity (a thread the identity merely opened stays pending, since the identity is often the human MR author), and threads already answered on the same last_note_id."
+scope = "ppl CLI"
+event = "ppl review pending"
+enforcement = "soft"
+hook_or_check = "ppl/review.py:pending, ppl/review.py:already_answered"
+deny_test = ""
+allow_test = "tests/test_review.py::TestReviewLedger::test_pending_excludes_already_answered_threads, tests/test_review.py::TestReviewLedger::test_pending_keeps_a_thread_the_pipeline_identity_opened, tests/test_review.py::TestReviewLedger::test_pending_excludes_a_thread_the_pipeline_identity_replied_to, tests/test_cli.py::TestCli::test_review_pending_uses_a_note_id_recorded_through_answered"
+owner = "orchestrator"
+residual = "a filter, not a refusal: nothing stops the orchestrator posting a reply without asking the ledger first"
+
+[[rule]]
+id = "R-REVIEW-CLASSIFICATION"
+statement = "A reply is recorded only with one of the four classifications; anything else is refused."
+scope = "ppl CLI"
+event = "ppl review answered"
+enforcement = "blocking"
+hook_or_check = "ppl/review.py:CLASSIFICATIONS, ppl/review.py:record_reply"
+deny_test = "tests/test_review.py::TestReviewLedger::test_unknown_classification_is_refused"
+allow_test = "tests/test_review.py::TestReviewLedger::test_reply_is_recorded_per_thread_and_sha"
+owner = "ppl"
+residual = ""
+
+# ---------------------------------------------------------------------------
+# Repo gates, and the matrix itself
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-GATE-REPO-RECIPES"
+statement = "The repo-specific build gates a harness declares (gate commands, env, baseline notes) are applied to every build the pipeline runs."
+scope = "orchestrator"
+event = "any build invocation"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "GAP: these are recipes rendered into the skill; only the exit-code rule has code behind it (R-EVIDENCE-RC-FILE), and nothing inspects a build command for the rest"
+
+[[rule]]
+id = "R-LEASE-STALE-WRITE"
+statement = "A timed-out attempt that comes back cannot write: evidence, verdicts, findings, review answers and patches from a stale lease generation are refused."
+scope = "ppl CLI"
+event = "ppl evidence add, ppl verdict record, ppl findings add/status/delete, ppl review answered, ppl apply-patch"
+enforcement = "blocking"
+hook_or_check = "ppl/run.py:check_generation, ppl/cli.py:require_current_generation"
+deny_test = "tests/test_run.py::TestLease::test_check_generation_rejects_a_stale_generation, tests/test_cli.py::TestLeaseFencesTheWritePaths::test_evidence_add_refuses_a_stale_generation, tests/test_cli.py::TestLeaseFencesTheWritePaths::test_verdict_record_refuses_a_stale_generation, tests/test_cli.py::TestLeaseFencesTheWritePaths::test_review_answered_refuses_a_stale_generation, tests/test_cli.py::TestLeaseFencesTheWritePaths::test_apply_patch_refuses_a_stale_generation, tests/test_cli.py::TestLeaseFencesTheWritePaths::test_findings_add_refuses_a_stale_generation"
+allow_test = "tests/test_run.py::TestLease::test_check_generation_accepts_the_current_generation"
+owner = "cycle2-task3"
+residual = "the fence holds against an attempt that writes with the generation it actually captured earlier; one that re-reads `ppl show --json` after a recover call reads the new, current value and is not stale by this counter - that is the design's stated premise (a timed-out worker returning with what it had), not a hole in it. It is CLI-level only: a direct Python caller of evidence.add/verdict.record/review.record_reply bypasses it, and today none exists. A same-session retry that never runs `ppl recover` and never overruns its deadline is not fenced from a concurrent attempt either, because both hold the same generation - only `ppl recover` and the watchdog (R-WATCHDOG-DEADLINE, on TIMED_OUT) bump it."
+
+[[rule]]
+id = "R-WATCHDOG-DEADLINE"
+statement = "A run with no ppl activity since its inactivity deadline is parked with blocker TIMED_OUT and its lease generation is bumped, refusing every state-changing command and being reported (not itself refused) by ppl recover; the deadline is refreshed by control.enforce, require_current_generation and a not-already-timed-out ppl recover, each only after their own gate has passed, so a stale write can never refresh it; ppl park, ppl escalate, ppl destroy and the merge_watch tail stay exempt."
+scope = "ppl CLI"
+event = "any state-changing ppl command, ppl recover, ppl watchdog check"
+enforcement = "blocking"
+hook_or_check = "ppl/watchdog.py:check, ppl/run.py:refresh_deadline, ppl/control.py:enforce, ppl/cli.py:require_current_generation, ppl/cli.py:cmd_watchdog, ppl/recover.py:reconcile"
+deny_test = "tests/test_watchdog.py::TestWatchdogCheck::test_parks_with_timed_out_once_the_deadline_has_passed, tests/test_watchdog.py::TestWatchdogCheck::test_bumps_the_lease_generation_on_timeout, tests/test_watchdog.py::TestHeartbeatSemantics::test_a_hang_with_zero_ppl_calls_still_times_out, tests/test_cli.py::TestWatchdog::test_a_control_enforce_gated_command_refuses_past_the_deadline, tests/test_cli.py::TestWatchdog::test_evidence_add_refuses_past_the_deadline_even_with_a_current_generation, tests/test_cli.py::TestWatchdog::test_watchdog_check_parks_and_reports_timed_out, tests/test_cli.py::TestWatchdog::test_a_stale_generation_write_does_not_refresh_the_deadline, tests/test_cli.py::TestWatchdog::test_a_paused_run_is_not_refreshed_merely_for_being_asked_to_act, tests/test_cli.py::TestWatchdog::test_a_malformed_control_file_is_not_refreshed_merely_for_being_asked_to_act"
+allow_test = "tests/test_watchdog.py::TestWatchdogCheck::test_does_nothing_before_the_deadline, tests/test_watchdog.py::TestHeartbeatSemantics::test_a_quiet_recover_tick_refreshes_the_deadline, tests/test_cli.py::TestWatchdog::test_ppl_park_stays_free_of_the_watchdog_gate, tests/test_cli.py::TestWatchdog::test_recover_reports_the_timeout_as_an_exit_zero_fact, tests/test_cli.py::TestWatchdog::test_a_control_enforce_gated_command_refreshes_the_deadline, tests/test_watchdog.py::TestWatchdogCheck::test_escalation_is_exempt_even_past_its_deadline"
+owner = "cycle2-task4"
+residual = "checked only at the two CLI-level shared gates (control.enforce and require_current_generation) plus recover and the watchdog command itself, same as R-LEASE-STALE-WRITE's own CLI-level scope: a direct Python caller of run.stage_enter/run.park/run.refresh_deadline bypasses it, and today none exists outside ppl/cli.py and ppl/recover.py. `ppl destroy` calls neither gate at all, deliberately (cmd_destroy): an owner teardown must not be blocked by a stale lease or by the operator halt it may itself be ending. A human running `ppl recover` before expiry extends detection by one more inactivity window, the same as any other refresh - see DESIGN 6.9. See R-WATCHDOG-NO-LIVE-TIMER for the honest limit on when this ever fires on its own rather than on the next command."
+
+[[rule]]
+id = "R-NEXT-SAFE-ACTION-CURRENT"
+statement = "next_safe_action is restamped from the current stage on every ppl stage enter call and on ppl transition done, instead of being written once at admission and left stale for the rest of the run."
+scope = "ppl CLI"
+event = "ppl stage enter, ppl transition done"
+enforcement = "soft"
+hook_or_check = "ppl/run.py:stage_enter, ppl/run.py:STAGE_NEXT_ACTION, ppl/cli.py:cmd_transition"
+deny_test = ""
+allow_test = "tests/test_run.py::TestNextSafeActionStaysCurrent::test_next_safe_action_changes_with_the_stage, tests/test_run.py::TestNextSafeActionStaysCurrent::test_parking_keeps_the_callers_own_safe_next_action, tests/test_cli.py::TestNameContractSpecRevision::test_transition_done_stamps_a_current_next_safe_action"
+owner = "ppl"
+residual = "a field kept current rather than a refusal proved, so there is no deny_test to name - D6, cycle 2 wave D: next_safe_action used to be set once by _new_state and never touched again by an ordinary transition, so ppl show --json at done still read complete admission checklist, a stale field in a contract status.card, ppl/panel/server.py and ppl/panel/index.html all read verbatim"
+
+[[rule]]
+id = "R-WATCHDOG-NO-LIVE-TIMER"
+statement = "Nothing in this pipeline runs on its own between ppl commands, so the watchdog is bookkeeping checked on every write, not a live timer: a hang before an MR exists is only discovered the next time a human or a freshly dispatched attempt runs a ppl command, or ppl recover, against that run."
+scope = "global"
+event = "any hang before stage mr"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "repository-owner"
+residual = "PROPERTY: a hook-driven, session-scoped harness has no process that can run code while no session is dispatching a tool call, so no caller exists to fire the check during exactly that kind of hang. From stage mr onward the review loop's own scheduled wake-up (DESIGN 8) is that caller and does fire during a hang; before mr there is no scheduled caller at all - this is a structural limit of the architecture, not something left unbuilt."
+
+[[rule]]
+id = "R-DOC-RULE-IDS"
+statement = "Every sentence in docs/DESIGN.md that claims something is enforced, denied, refused, rejected, impossible or must not happen names a row in this table, and every blocking row names a deny test whose body carries the rule id."
+scope = "docs/DESIGN.md, README.md, the rendered SKILL.md and this table"
+event = "the test suite"
+enforcement = "blocking"
+hook_or_check = "tests/test_rule_matrix.py:unmapped, ppl/rules.py:validate"
+deny_test = "tests/test_rule_matrix.py::TestTheScannerItself::test_an_unmarked_enforcement_sentence_is_reported, tests/test_rule_matrix.py::TestTheScannerItself::test_a_marker_naming_a_row_that_does_not_exist_is_reported, tests/test_rule_matrix.py::TestValidateRejectsATableThatWouldLie::test_a_blocking_row_without_a_deny_test_is_refused, tests/test_rule_matrix.py::TestValidateRejectsATableThatWouldLie::test_an_na_residual_must_say_which_kind_it_is, tests/test_rule_matrix.py::TestTheScannerItself::test_a_longer_rule_id_does_not_stand_in_for_its_prefix"
+allow_test = "tests/test_rule_matrix.py::TestTheScannerItself::test_a_sentence_with_no_keyword_needs_no_marker"
+owner = "repository-owner"
+residual = "a marker proves a row exists, not that it is the right row; the keyword list is finite (R-DOC-KEYWORD-FREE-CLAIM); and REFUSAL_SHAPES is a heuristic over the code of a test with comments and docstrings stripped, not a semantic check that the test exercises this rule"
+
+[[rule]]
+id = "R-MATRIX-SCOPE"
+statement = "Every enforcing branch in the code has a row in this table."
+scope = "this table"
+event = "the test suite"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "repository-owner"
+residual = "GAP: the table is seeded from the scanned documents and the design's rule families, not from a sweep of the code, so a refusal added to ppl with no row fails nothing. R-MATRIX-GUARD-SELF-DESCRIBING closes this for the guard's own deny tables only; the opposite motion, disowning a rule the code still enforces, is R-MATRIX-DISOWNED-RULE"
+
+[[rule]]
+id = "R-FSM-LIFECYCLE"
+statement = "A lifecycle transition the graph does not allow is refused, so a second ppl transition blocked after ppl park is an ILLEGAL_TRANSITION."
+scope = "ppl CLI"
+event = "ppl transition"
+enforcement = "blocking"
+hook_or_check = "ppl/fsm.py:check_lifecycle, ppl/fsm.py:_LIFECYCLE_EDGES"
+deny_test = "tests/test_fsm.py::TestLifecycle::test_done_is_terminal"
+allow_test = "tests/test_fsm.py::TestLifecycle::test_normal_progression, tests/test_fsm.py::TestLifecycle::test_blocked_can_return_to_in_progress"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-ROLE-TOOLS-NO-AGENT"
+statement = "No generated role holds a tool that could dispatch another agent."
+scope = "global, every role"
+event = "ppl routing apply"
+enforcement = "blocking"
+hook_or_check = "ppl/routing.py:BASE_TOOLS, ppl/routing.py:role_tools"
+deny_test = "tests/test_routing.py::TestNoRoleCanDelegate::test_no_role_holds_a_subagent_spawning_tool"
+allow_test = ""
+owner = "ppl"
+residual = "the harness is what makes recursive delegation impossible (R-NO-RECURSIVE-DELEGATION); this only keeps the tool lists from inviting it"
+
+[[rule]]
+id = "R-MATRIX-GUARD-SELF-DESCRIBING"
+statement = "Every entry in the guard's three deny tables - DENIED_TOOLS, DENIED_COMMANDS and JIRA_WRITE_TOOLS - maps to a blocking row, and a row whose entry has left the code fails too."
+scope = "this table and hooks/ppl_guard.py"
+event = "the test suite"
+enforcement = "blocking"
+hook_or_check = "tests/test_rule_matrix.py:disowned"
+deny_test = "tests/test_rule_matrix.py::TestTheScannerItself::test_a_denial_the_matrix_disowns_is_reported, tests/test_rule_matrix.py::TestTheScannerItself::test_a_denial_with_no_row_at_all_is_reported, tests/test_rule_matrix.py::TestTheScannerItself::test_a_row_whose_denial_left_the_code_is_reported"
+allow_test = ""
+owner = "repository-owner"
+residual = "the mapping from a code entry to a row id is written in the test, so a determined edit can move both at once - what it stops is the quiet single-sided move. BASH_WRITE_SHAPES is one regex rather than a table, so it gets an existence check and a row assertion instead of the bidirectional sweep: a write shape added to or removed from that regex changes nothing here"
+
+[[rule]]
+id = "R-MATRIX-DISOWNED-RULE"
+statement = "A rule the code enforces cannot be relabelled n/a in this table."
+scope = "this table and the whole of ppl"
+event = "the test suite"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "repository-owner"
+residual = "GAP: relabel an enforced rule n/a, invent a GAP residual for it, correct the two counts in DESIGN 5.5 and the suite stays green. R-MATRIX-GUARD-SELF-DESCRIBING closes this for the guard's deny tables; nothing sweeps ppl/ for a refusal that a row disowns, and the ten control.enforce call sites and the done gate's conditions are the obvious next targets"
+
+[[rule]]
+id = "R-DOC-KEYWORD-FREE-CLAIM"
+statement = "A claim written without any of the claim words is caught by the matrix."
+scope = "the scanned documents"
+event = "the test suite"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "repository-owner"
+residual = "GAP: assertion 3 iterates sentences and only sees the claim words, assertion 4 iterates rows and never reads a document, so a claim carrying no claim word and no row is invisible to both. That is the cycle-1 apply-patch defect exactly - 'ppl apply-patch validates every touched path' would pass today if its row were deleted"
+
+# ---------------------------------------------------------------------------
+# Verdict outcomes and metrics (cycle 2, Task 5)
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-VERDICT-OUTCOME-VOCAB"
+statement = "A verdict's outcome must be one of PASS, REWORK, BLOCKED, OWNER_DECISION, INCONCLUSIVE, ERROR, CANCELLED or TIMEOUT; any other value is refused when the verdict is recorded."
+scope = "ppl CLI"
+event = "ppl verdict record"
+enforcement = "blocking"
+hook_or_check = "ppl/schema.py:validate_verdict, ppl/schema.py:VERDICT_OUTCOMES"
+deny_test = "tests/test_run.py::TestSchema::test_verdict_rejects_an_out_of_enum_value"
+allow_test = "tests/test_run.py::TestSchema::test_verdict_accepts_each_check_did_not_happen_outcome, tests/test_run.py::TestSchema::test_verdict_accepts_a_complete_document"
+owner = "ppl"
+residual = "the document is still written by the same session that ran the checks; this closes only the shape of the enum, not who chose the value"
+
+[[rule]]
+id = "R-METRIC-LABEL-DEPENDENT-UNDEFINED"
+statement = "ppl metrics reports defect escape rate and false FAIL rate as undefined, never as zero, and distinguishes WHY: no verdict of the matching kind has been recorded at all (nothing to label, so the reason must not suggest ppl label), versus a verdict of that kind exists but none carries a ppl label yet (the reason names a real, copyable sha and task id, not a placeholder)."
+scope = "ppl CLI"
+event = "ppl metrics"
+enforcement = "blocking"
+hook_or_check = "ppl/metrics.py:_labeled_rate, ppl/metrics.py:_defect_escape_rate, ppl/metrics.py:_false_fail_rate"
+deny_test = "tests/test_metrics.py::TestLabelDependentRates::test_defect_escape_rate_undefined_without_a_label, tests/test_metrics.py::TestLabelDependentRates::test_defect_escape_rate_undefined_with_no_pass_verdict_at_all, tests/test_metrics.py::TestLabelDependentRates::test_false_fail_rate_undefined_without_a_label, tests/test_metrics.py::TestLabelDependentRates::test_false_fail_rate_undefined_with_no_rejected_verdict_at_all, tests/test_metrics.py::TestLabelDependentRates::test_an_incomplete_outcome_never_feeds_either_labelled_rate"
+allow_test = "tests/test_metrics.py::TestLabelDependentRates::test_defect_escape_rate_after_a_label, tests/test_metrics.py::TestLabelDependentRates::test_false_fail_rate_after_a_label"
+owner = "ppl"
+residual = "a label is a human's word for it, filed by whoever ran ppl label - nothing here verifies the label itself is accurate. The named example sha is always the first unlabelled candidate found, not necessarily the most useful one to label first"
+
+[[rule]]
+id = "R-METRIC-SAMPLE-DEPENDENT-UNDEFINED"
+statement = "ppl metrics reports incomplete check rate and time to acceptance as undefined, never as zero, on an empty sample. Time to acceptance distinguishes WHY when sliced by producer: nothing anywhere has reached done, versus something has reached done but not under this producer (the reason names how many tasks did finish, rather than falsely implying the whole fleet is idle)."
+scope = "ppl CLI"
+event = "ppl metrics"
+enforcement = "blocking"
+hook_or_check = "ppl/metrics.py:_incomplete_check_rate, ppl/metrics.py:_time_to_acceptance"
+deny_test = "tests/test_metrics.py::TestIncompleteCheckRate::test_undefined_with_no_verdicts_anywhere, tests/test_metrics.py::TestTimeToAcceptance::test_undefined_when_nothing_has_reached_done, tests/test_metrics.py::TestTimeToAcceptance::test_undefined_reason_distinguishes_nothing_done_from_not_this_producer"
+allow_test = "tests/test_metrics.py::TestIncompleteCheckRate::test_a_mix_of_outcomes_is_a_real_rate_not_undefined, tests/test_metrics.py::TestTimeToAcceptance::test_defined_once_a_task_reaches_done_and_attributed_to_its_producer"
+owner = "ppl"
+residual = "incomplete check rate has one cause only, not two - the records passed in are already producer-scoped by compute(), so an empty list unambiguously means nothing of this producer's has a verdict yet. Corrected here: an earlier version of this residual claimed time to acceptance only sees undestroyed runs, which stopped being true once R-METRIC-SCANS-ARCHIVE landed"
+
+[[rule]]
+id = "R-METRIC-STRUCTURALLY-UNDEFINED"
+statement = "ppl metrics reports cost per accepted task as undefined always, never as zero: v1 has no billed adapter, so the metric has nothing to compute even in principle."
+scope = "ppl CLI"
+event = "ppl metrics"
+enforcement = "blocking"
+hook_or_check = "ppl/metrics.py:_cost_per_accepted_task"
+deny_test = "tests/test_metrics.py::TestStructurallyUndefinedMetrics::test_cost_per_accepted_task_is_always_undefined"
+allow_test = ""
+owner = "ppl"
+residual = "a PROPERTY, not a GAP: becomes computable the day an API-billed adapter exists (DESIGN 10.3), but until then there is no dollar meter anywhere for this to read, not merely one nobody wrote"
+
+[[rule]]
+id = "R-METRIC-HUMAN-MINUTES-UNDEFINED"
+statement = "ppl metrics reports human minutes as undefined always, never as zero: no event or field anywhere in this pipeline records a human's working minutes."
+scope = "ppl CLI"
+event = "ppl metrics"
+enforcement = "blocking"
+hook_or_check = "ppl/metrics.py:_human_minutes"
+deny_test = "tests/test_metrics.py::TestStructurallyUndefinedMetrics::test_human_minutes_is_always_undefined"
+allow_test = ""
+owner = "ppl"
+residual = "unlike R-METRIC-STRUCTURALLY-UNDEFINED this is a real GAP, not a property: a data source (a --minutes flag on ppl label, or a dedicated command) is buildable today and simply has not been built"
+
+[[rule]]
+id = "R-LABEL-NO-LIVENESS-REFRESH"
+statement = "ppl label does not call control.enforce or refresh the run's inactivity deadline: a human labelling a past SHA is not run activity, and refreshing the deadline on it would mask a real stall."
+scope = "ppl CLI"
+event = "ppl label"
+enforcement = "soft"
+hook_or_check = "ppl/cli.py:cmd_label, ppl/metrics.py:record_label"
+deny_test = ""
+allow_test = "tests/test_cli.py::TestLabelIsNotLivenessOrLease::test_label_succeeds_even_though_the_deadline_has_already_passed, tests/test_cli.py::TestLabelIsNotLivenessOrLease::test_label_does_not_refresh_the_deadline, tests/test_cli.py::TestLabelIsNotLivenessOrLease::test_label_does_not_park_the_run"
+owner = "ppl"
+residual = "labelled below soft, not blocking: nothing is refused here, this is the deliberate absence of a side effect rather than a denial of an action"
+
+[[rule]]
+id = "R-LABEL-NO-LEASE-FENCE"
+statement = "ppl label takes no --generation argument and does not call require_current_generation: it is a human's fact about a SHA already in the past, never a write a dispatched attempt races, so a lease generation would fence nothing real."
+scope = "ppl CLI"
+event = "ppl label"
+enforcement = "soft"
+hook_or_check = "ppl/cli.py:cmd_label, ppl/metrics.py:record_label"
+deny_test = ""
+allow_test = "tests/test_cli.py::TestLabelIsNotLivenessOrLease::test_label_does_not_bump_the_lease_generation, tests/test_cli.py::TestLabelIsNotLivenessOrLease::test_label_takes_no_generation_argument_at_all"
+owner = "ppl"
+residual = "labelled soft for the same reason as R-LABEL-NO-LIVENESS-REFRESH: an absence of a gate, not a refusal"
+
+[[rule]]
+id = "R-LABEL-VALUE-VOCAB"
+statement = "ppl label refuses a sha that is not hexadecimal or that carries a path traversal, and refuses an --actual value other than defective or correct."
+scope = "ppl CLI"
+event = "ppl label"
+enforcement = "blocking"
+hook_or_check = "ppl/metrics.py:record_label, ppl/metrics.py:_validate_sha"
+deny_test = "tests/test_metrics.py::TestRecordLabel::test_rejects_an_unknown_actual, tests/test_metrics.py::TestRecordLabel::test_rejects_a_non_hex_sha, tests/test_metrics.py::TestRecordLabel::test_rejects_a_sha_with_traversal, tests/test_metrics.py::TestRecordLabel::test_rejects_labelling_a_task_that_does_not_exist"
+allow_test = "tests/test_metrics.py::TestRecordLabel::test_records_a_readable_label"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-METRIC-SCANS-ARCHIVE"
+statement = "Every metrics.py reader, and record_label's existence check, sees a run archived by ppl destroy --scope local as well as a live one; labels are stored outside the run directory entirely so ppl destroy never moves or loses them."
+scope = "ppl CLI"
+event = "ppl metrics, ppl label"
+enforcement = "soft"
+hook_or_check = "ppl/metrics.py:_run_records, ppl/metrics.py:_archived_dirs, ppl/metrics.py:_task_exists, ppl/metrics.py:_label_dir"
+deny_test = ""
+allow_test = "tests/test_metrics.py::TestArchivedRunsAreVisible::test_verdicts_from_a_destroyed_run_still_count, tests/test_metrics.py::TestArchivedRunsAreVisible::test_time_to_acceptance_counts_a_destroyed_done_task, tests/test_metrics.py::TestArchivedRunsAreVisible::test_a_label_recorded_before_destroy_is_still_joined_after, tests/test_metrics.py::TestArchivedRunsAreVisible::test_a_task_can_be_labelled_only_after_it_is_destroyed, tests/test_cli.py::TestLabelAndMetricsSurviveDestroyThroughTheRealCli::test_label_destroy_label_again_then_metrics_sees_both, tests/test_metrics.py::TestRecordLabel::test_records_a_readable_label"
+owner = "ppl"
+residual = "a property, not a refusal, so it has no deny_test to prove - nothing here denies anything, it is the deliberate absence of a data-visibility gap. The archive-directory task id is read from that directory's own state.json, not from the mangled archive directory name - a directory whose state.json was itself lost or corrupted between destroy and a later ppl metrics call is invisible to every reader here, the same way a live run with a corrupted state.json already is"
+
+[[rule]]
+id = "R-VERIFICATION-UNAVAILABLE-PARK"
+statement = "ppl verdict record refuses to let a second consecutive INCONCLUSIVE/ERROR/CANCELLED/TIMEOUT verdict on the same candidate_sha pass silently: it parks the run with blocker VERIFICATION_UNAVAILABLE and exits 2, rather than let a broken verifier masquerade as an undecided candidate forever."
+scope = "ppl CLI"
+event = "ppl verdict record"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:record, ppl/verdict.py:_previous_verdict_outcome, ppl/schema.py:INCOMPLETE_OUTCOMES"
+deny_test = "tests/test_verdict.py::TestVerificationUnavailablePark::test_two_consecutive_incomplete_verdicts_on_the_same_sha_park, tests/test_verdict.py::TestVerificationUnavailablePark::test_two_different_incomplete_outcomes_in_a_row_still_count"
+allow_test = "tests/test_verdict.py::TestVerificationUnavailablePark::test_a_single_incomplete_verdict_does_not_park, tests/test_verdict.py::TestVerificationUnavailablePark::test_an_incomplete_verdict_right_after_a_real_outcome_does_not_park, tests/test_verdict.py::TestVerificationUnavailablePark::test_the_verdict_is_still_durably_recorded_even_though_it_parks"
+owner = "ppl"
+residual = "the recurrence is read from log.jsonl's append-only verdict-event trail for this exact sha, so a direct Python caller of verdict.record that never goes through log.jsonl at all - none exists today - would bypass it, the same CLI-level scope R-LEASE-STALE-WRITE already carries"
+
+# ---------------------------------------------------------------------------
+# Findings registry (cycle 2, Task 6)
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-FINDINGS-TRACK-DERIVED"
+statement = "ppl findings add derives whether a finding is own_diff or foreign from gitfacts.changed_paths(base_sha, affected_sha), never from a caller-supplied argument - there is no track parameter to accept one through, so a third box cannot be introduced by passing one in."
+scope = "ppl CLI"
+event = "ppl findings add"
+enforcement = "blocking"
+hook_or_check = "ppl/findings.py:add, ppl/findings.py:_derive_track"
+deny_test = "tests/test_findings.py::TestTrackIsDerivedNotAccepted::test_add_has_no_track_parameter_to_pass"
+allow_test = "tests/test_findings.py::TestTrackIsDerivedNotAccepted::test_a_path_touched_by_the_diff_is_own_diff, tests/test_findings.py::TestTrackIsDerivedNotAccepted::test_a_path_the_diff_never_touched_is_foreign"
+owner = "ppl"
+residual = "changed_paths compares the literal path string; a rename that changes a file's path between base_sha and affected_sha without otherwise touching its content is diffed as delete+add by git, which changed_paths still lists, so this is not a gap - but a caller who reports the pre-rename path for a finding filed against the post-rename tree would be misclassified. Not exercised because ppl findings add is always called about the tree at affected_sha, where the current path is the only one known"
+
+[[rule]]
+id = "R-FINDINGS-FOREIGN-OWNER"
+statement = "A foreign-track finding must record an owner to batch-escalate to; ppl findings add refuses one with no owner."
+scope = "ppl CLI"
+event = "ppl findings add"
+enforcement = "blocking"
+hook_or_check = "ppl/findings.py:add"
+deny_test = "tests/test_findings.py::TestFindingsAdd::test_a_foreign_finding_with_no_owner_is_refused"
+allow_test = "tests/test_findings.py::TestFindingsAdd::test_a_foreign_finding_with_an_owner_is_escalated"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-FINDINGS-DELETE-REASON"
+statement = "ppl findings delete refuses to run without a non-empty --reason; the reason is written to log.jsonl before the finding file is removed."
+scope = "ppl CLI"
+event = "ppl findings delete"
+enforcement = "blocking"
+hook_or_check = "ppl/findings.py:delete"
+deny_test = "tests/test_findings.py::TestFindingsDelete::test_delete_without_a_reason_is_refused, tests/test_findings.py::TestFindingsDelete::test_delete_with_a_blank_reason_is_refused"
+allow_test = "tests/test_findings.py::TestFindingsDelete::test_delete_with_a_reason_removes_the_finding_and_logs_it"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-FINDINGS-VERDICT-FIELD-RETIRED"
+statement = "ppl verdict record refuses a verdict document whose findings array is not empty: findings are recorded separately via ppl findings add, bound to the same candidate_sha, not embedded in the verdict document."
+scope = "ppl CLI"
+event = "ppl verdict record"
+enforcement = "blocking"
+hook_or_check = "ppl/schema.py:validate_verdict"
+deny_test = "tests/test_run.py::TestSchema::test_verdict_rejects_a_non_empty_inline_findings_list"
+allow_test = "tests/test_run.py::TestSchema::test_verdict_accepts_a_complete_document"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-FINDINGS-VOCAB"
+statement = "ppl findings add refuses a severity outside blocking/important/minor, and ppl findings status refuses a status outside open/escalated/fixed."
+scope = "ppl CLI"
+event = "ppl findings add, ppl findings status"
+enforcement = "blocking"
+hook_or_check = "ppl/findings.py:_validate_severity, ppl/findings.py:set_status"
+deny_test = "tests/test_findings.py::TestFindingsAdd::test_an_unknown_severity_is_refused, tests/test_findings.py::TestFindingsSetStatus::test_an_unknown_status_is_refused"
+allow_test = "tests/test_findings.py::TestFindingsAdd::test_a_path_touched_by_the_diff_is_own_diff"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-FINDINGS-FIXED-REQUIRES-PROOF"
+statement = "ppl findings status ... --status fixed refuses without a --fix-link, and refuses unless affected_path appears in gitfacts.changed_paths(affected_sha, head) - a commit that never touched the defective file, or no commit at all, is not a fix. The commit checked is recorded as fixed_at_sha."
+scope = "ppl CLI"
+event = "ppl findings status"
+enforcement = "blocking"
+hook_or_check = "ppl/findings.py:set_status"
+deny_test = "tests/test_findings.py::TestFindingsSetStatus::test_fixed_without_a_fix_link_is_refused, tests/test_findings.py::TestFindingsSetStatus::test_fixed_with_no_commit_touching_affected_path_is_refused, tests/test_findings.py::TestFindingsSetStatus::test_fixed_after_only_an_unrelated_commit_is_still_refused"
+allow_test = "tests/test_findings.py::TestFindingsSetStatus::test_set_status_to_fixed_records_a_fix_link_and_the_fixing_sha, tests/test_findings.py::TestFindingsSetStatus::test_status_change_to_open_needs_no_proof"
+owner = "ppl"
+residual = "round 1 review of cycle 2 Task 6 (C2): fixed used to require nothing at all. fix_link is still an unvalidated free-text string - nothing checks it actually points at the commit named by fixed_at_sha, only that one was supplied for the human trail"
+
+[[rule]]
+id = "R-GUARD-PPL-CLI-DENIED"
+statement = "The guard hook denies every role in boundary.ROLE_RULES from invoking a state-changing ppl CLI subcommand through Bash - directly as ppl, or as python3 -m ppl[.cli] / a bare ppl.cli token - global, no run required; only a fixed set of read-only subcommands (ppl show, ppl status, ppl doctor, ppl metrics, ppl findings list, ppl control get, ppl routing show, ppl approval check, ppl mr state, ppl review pending) stay allowed."
+scope = "guard hook"
+event = "PreToolUse, tool=Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:_ppl_cli_is_state_changing, hooks/ppl_guard.py:decide"
+deny_test = "tests/test_guard.py::TestGuard::test_code_worker_marking_its_own_finding_fixed_is_denied, tests/test_guard.py::TestGuard::test_test_worker_deleting_a_finding_is_denied, tests/test_guard.py::TestGuard::test_code_worker_recording_its_own_passing_evidence_is_denied, tests/test_guard.py::TestGuard::test_code_worker_opening_its_own_done_gate_is_denied, tests/test_guard.py::TestGuard::test_a_readonly_call_does_not_hide_a_second_unsafe_one_after_and, tests/test_guard.py::TestGuard::test_a_readonly_call_does_not_hide_a_second_unsafe_one_after_semicolon, tests/test_guard.py::TestGuard::test_a_readonly_findings_list_does_not_hide_a_findings_delete, tests/test_guard.py::TestGuard::test_an_unparseable_ppl_invocation_is_denied_not_allowed, tests/test_guard.py::TestGuard::test_python_dash_m_ppl_cli_invocation_is_denied, tests/test_guard.py::TestGuard::test_python_dash_m_ppl_invocation_without_dot_cli_is_denied, tests/test_guard.py::TestGuard::test_a_readonly_ppl_call_does_not_hide_a_python_dash_m_one, tests/test_guard.py::TestGuard::test_a_ppl_invoked_by_path_is_still_denied, tests/test_guard.py::TestGuard::test_the_deny_message_names_ppl_show_in_the_form_the_cage_allows"
+allow_test = "tests/test_guard.py::TestGuard::test_code_worker_listing_findings_is_still_allowed, tests/test_guard.py::TestGuard::test_code_worker_running_ppl_show_is_still_allowed, tests/test_guard.py::TestGuard::test_the_data_root_named_dot_ppl_is_not_a_ppl_invocation, tests/test_guard.py::TestGuard::test_orchestrator_with_no_role_may_still_run_ppl_transition_done, tests/test_guard.py::TestGuard::test_python_dash_m_ppl_read_only_lookup_is_still_allowed, tests/test_guard.py::TestGuard::test_git_stash_tag_containing_ppl_is_still_not_a_false_positive"
+owner = "ppl"
+residual = "round 2 review fixed the two fail-open holes (first-match-only via .search(), and an unparseable shape defaulting to allow) - every occurrence is now scanned (finditer, anchored per-occurrence with .match(command, pos)) and an unparseable one denies. round 3 review: probed six more shapes; a variable holding the literal word (P=ppl; $P ...), bash -c '...', and a pipe to sh all already denied, because the literal word ppl survives in each - the previous residual's claim that this check is bypassed through an alias or a variable was wrong and has been removed rather than softened. python3 -m ppl / python3 -m ppl.cli / a bare ppl.cli token are now matched the same as the word ppl. What remains open, on purpose: quote-splitting (p''pl, and by the same reasoning base64 or any other shell-quoting or encoding trick) is not caught - a lexical matcher cannot win that arms race, and this check is a speed bump against an agent taking the easy path, not a proof no path exists (see DESIGN 5.4's closing paragraph). A word ppl right after a dot is not read as an invocation, since ~/.ppl is the default data root, so a launcher renamed to .ppl is not seen, like a launcher under any other name. A positional ppl show <id> is denied: show takes --task <id>, and the deny message names that form. Confirmed by direct probe throughout, not merely reasoned"
+
+[[rule]]
+id = "R-GUARD-BASH-WRITE-BOUNDARY"
+statement = "A write-shaped Bash construct (a redirect - spaced, glued to a word like echo x>f, or a cd's own redirect - tee, sed -i, cp, mv and git mv with their sources, dd, rm, touch, truncate, ln, install, rsync, patch, git rm/checkout/restore/apply, or an `&>` or `>|` redirect) whose target resolves inside the active run's repo is denied unless the same per-role decision boundary.check_path would allow it through a structured Write - for a role, or an outright deny for a session with no role."
+scope = "active run, any writing role or a session with no agent_type"
+event = "PreToolUse, tool=Bash"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:bash_write_boundary_deny, hooks/ppl_guard.py:_bash_write_targets, hooks/ppl_guard.py:decide"
+deny_test = "tests/test_guard.py::TestGuard::test_code_worker_bash_redirect_into_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_test_worker_bash_redirect_into_a_main_source_is_denied_absolute, tests/test_guard.py::TestGuard::test_test_worker_bash_redirect_into_a_main_source_is_denied_relative, tests/test_guard.py::TestGuard::test_unroled_bash_redirect_into_the_run_repo_is_denied, tests/test_guard.py::TestGuard::test_code_worker_cp_into_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_ambiguous_sed_inplace_on_a_repo_path_is_denied, tests/test_guard.py::TestGuard::test_code_worker_command_substitution_write_target_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_write_to_a_forbidden_path_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_write_outside_the_write_boundary_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_touch_of_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_truncate_of_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_ln_replacing_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_install_into_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_ln_with_a_single_argument_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_ampersand_redirect_into_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_ampersand_append_into_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_glued_ampersand_redirect_into_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_csh_redirect_into_a_test_source_names_the_real_target, tests/test_guard.py::TestGuard::test_test_worker_bash_ampersand_redirect_into_a_main_source_is_denied, tests/test_guard.py::TestGuard::test_unroled_bash_ampersand_redirect_into_the_run_repo_is_denied, tests/test_guard.py::TestGuard::test_code_worker_git_checkout_of_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_git_restore_of_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_git_rm_of_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_git_mv_onto_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_git_dash_c_relocates_the_rm_target, tests/test_guard.py::TestGuard::test_code_worker_git_apply_is_denied_as_unresolvable, tests/test_guard.py::TestGuard::test_code_worker_git_checkout_of_a_ref_is_denied_as_unresolvable, tests/test_guard.py::TestGuard::test_code_worker_rsync_onto_a_test_source_is_denied, tests/test_guard.py::TestGuard::test_code_worker_patch_is_denied_as_unresolvable, tests/test_guard.py::TestGuard::test_a_subshell_or_pushd_cd_ends_where_the_shell_says, tests/test_guard.py::TestGuard::test_a_wrapper_in_front_of_a_repo_write_gets_the_role_decision, tests/test_guard.py::TestGuard::test_a_redirect_on_a_cd_pushd_or_popd_is_still_a_write, tests/test_guard.py::TestGuard::test_code_worker_moving_a_test_source_out_is_denied, tests/test_guard.py::TestGuard::test_a_path_spelled_verb_into_the_repo_gets_the_role_decision, tests/test_guard.py::TestGuard::test_a_redirect_glued_to_a_word_is_a_redirect, tests/test_guard.py::TestGuard::test_a_redirect_after_a_group_opens_where_the_group_opened, tests/test_guard.py::TestGuard::test_a_closer_with_no_group_resolves_its_redirect_everywhere, tests/test_guard.py::TestGuard::test_a_closed_group_gives_its_cwd_back_whatever_follows_its_closer, tests/test_guard.py::TestGuard::test_a_bare_ampersand_ends_a_command"
+allow_test = "tests/test_guard.py::TestGuard::test_code_worker_bash_redirect_inside_boundary_is_still_allowed, tests/test_guard.py::TestGuard::test_test_worker_bash_redirect_into_a_test_source_is_still_allowed, tests/test_guard.py::TestGuard::test_code_worker_bash_write_outside_the_repo_is_unaffected, tests/test_guard.py::TestGuard::test_code_worker_rm_outside_the_repo_is_unaffected, tests/test_guard.py::TestGuard::test_unrelated_session_ambiguous_write_elsewhere_is_not_denied, tests/test_guard.py::TestGuard::test_code_worker_bash_touch_inside_boundary_is_still_allowed, tests/test_guard.py::TestGuard::test_code_worker_bash_ampersand_redirect_of_build_output_is_still_allowed, tests/test_guard.py::TestGuard::test_test_worker_mvn_with_ampersand_redirect_is_still_allowed, tests/test_guard.py::TestGuard::test_code_worker_bash_tilde_redirect_resolves_to_home_not_cwd, tests/test_guard.py::TestGuard::test_code_worker_git_add_commit_and_read_subcommands_are_still_allowed, tests/test_guard.py::TestGuard::test_orchestrator_stage_one_worktree_setup_is_still_allowed, tests/test_guard.py::TestGuard::test_the_documented_gates_recipe_is_allowed_where_the_orchestrator_runs_it, tests/test_guard.py::TestGuard::test_a_cd_with_a_harmless_redirect_still_moves_the_shell, tests/test_guard.py::TestGuard::test_a_quoted_paren_inside_a_subshell_keeps_its_directory, tests/test_guard.py::TestGuard::test_moving_a_main_source_or_a_file_outside_the_repo_is_allowed, tests/test_guard.py::TestGuard::test_a_quoted_or_escaped_angle_bracket_is_no_redirect, tests/test_guard.py::TestGuard::test_a_redirect_after_a_group_outside_the_repo_is_still_allowed, tests/test_guard.py::TestGuard::test_an_fd_ampersand_or_a_quoted_one_is_no_command_end, tests/test_guard.py::TestGuard::test_closing_an_fd_names_no_file"
+owner = "guard-hook"
+residual = "whole-branch review C1 fixed the class this row exists to close (a Bash write walking straight past a hook that denies the identical write through Write/Edit), but it is lexical like every other Bash check in this module: an interpreter invocation - python3 -c \"open(path,'w').write(...)\", or the same in perl/ruby/node - writes the same path with no redirect, tee, cp, or any other shape this looks for, and is not caught. Naming one such shape would buy a longer regex and a false sense of completeness, not a closed class (the same call made for p''pl quote-splitting in R-GUARD-PPL-CLI-DENIED and for the test-worker's execution channel in R-TEST-WORKER-EXECUTION-CHANNEL). An out-of-repo target is deliberately NOT denied for a role (see R-ROLE-OUTSIDE-REPO's residual); an ambiguous target (sed -i, a missing tee/cp/mv/rm/redirect/touch/truncate/ln/install argument, a command substitution, an unresolvable cd) denies only when the command is otherwise pipeline-scoped (a ppl-* role, or a cwd inside the run's repo), so it cannot leak into an unrelated session's ordinary work elsewhere on the machine. A redirect is found outside quotes on the raw segment text, glued to a word (echo x>f) or spaced, a cd's own redirect opening in the pre-cd cwd, while a quoted > (grep \">x\") and a >( process substitution are not targets; a verb spelled by a path (/bin/cp) is read by its basename. A redirect after a subshell's ) or a brace group's } ((cd d && echo x) > f) opens in the cwd the group opened in, and a closer that cannot be matched to an open group of its kind fails closed, its redirects judged at the current cwd, the session cwd and every cwd a group is still open in, as are those of a tail holding another word after its closer (< in, a comment), which still closes the group. A bare & ends a command as ; does and runs its list in a subshell. A copy or move into an existing directory also writes <dest>/<source name>, and a >&- fd close names no file. Round 2 (wave A): touch, truncate, ln and install were missing, found by probing ppl-code-worker specifically after ppl-test-worker denied all four by accident, through the read allowlist R-TEST-WORKER-BASH-READS builds for an unrelated purpose - a role with no read allowlist had nothing else in front of it. ln and install write their LAST positional argument (the linkname / destination), not their first (the symlink target / source) - denying the wrong one would have been a false deny that looked like a pass, so their extraction is the same rule as cp/mv's, not a special case. A single-argument ln (linkname implied by cwd and basename) is unresolvable and denies rather than guesses. A verb with no write shape here (unlink, rmdir, find -delete) removes a repo path unseen, the same lexical limit"
+
+[[rule]]
+id = "R-FINDINGS-DEDUPE-PROTOCOL"
+statement = "Findings are no longer SHA-filtered (R-DONE-OPEN-FINDING), so a verifier re-reporting an already-open defect on a later candidate would otherwise pile up duplicate blockers. The orchestrator lists open findings before dispatch and hands them to the verifier, which reports only what is genuinely new - this is protocol (SKILL.md, templates/ppl-verifier.md.body), not a code-level refusal."
+scope = "orchestrator protocol"
+event = "ppl stage enter verification"
+enforcement = "soft"
+hook_or_check = "skill/SKILL.md.skeleton, templates/ppl-verifier.md.body"
+deny_test = ""
+allow_test = "tests/test_skill_contract.py::TestSkillContract::test_it_carries_the_findings_dedupe_protocol"
+owner = "ppl"
+residual = "nothing in code stops a second, near-duplicate finding being added for the same defect - the choice not to refuse duplicates in ppl findings add was deliberate (a code-level refusal cannot tell a repeated report of the same defect from a second, genuinely different one in the same file), so this is enforced by prose the orchestrator is trusted to follow, not by a check"
+
+[[rule]]
+id = "R-FINDINGS-FOREIGN-NO-NOTIFICATION"
+statement = "A foreign-track finding is born escalated with an owner recorded, but nothing notifies that owner - no email, ticket or message is sent."
+scope = "ppl CLI"
+event = "ppl findings add"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "ppl"
+residual = "GAP: v1 has no notification channel at all - recording an owner string is not the same as reaching them. Acceptable for now (the panel and ppl findings list make escalated findings visible to anyone who looks), but a real handoff needs a real notification, not yet built"
+
+[[rule]]
+id = "R-BRIEF-SPEC-REVISION-STALE"
+statement = "ppl brief set binds spec_revision to a deterministic fingerprint of every brief field verdict.done_blockers actually reads: name_contract, acceptance, and the write/forbid boundary (cycle 2 wave F - previously name_contract alone). ppl verdict record refuses a verdict whose spec_revision does not match the run's currently bound one, and ppl transition done refuses to close over a PASS verdict recorded against a spec_revision the run has since moved past - once a spec_revision has actually been bound by a prior ppl brief set."
+scope = "ppl CLI"
+event = "ppl brief set, ppl verdict record, ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/schema.py:spec_revision, ppl/verdict.py:record, ppl/verdict.py:done_blockers"
+deny_test = "tests/test_verdict.py::TestSpecRevisionStaleness::test_record_refuses_a_verdict_bound_to_a_stale_spec_revision, tests/test_verdict.py::TestSpecRevisionStaleness::test_done_blockers_flags_a_pass_verdict_recorded_before_a_rebrief, tests/test_cli.py::TestNameContractSpecRevision::test_a_rebrief_that_changes_the_name_contract_stales_an_already_recorded_pass, tests/test_cli.py::TestNameContractSpecRevision::test_a_rebrief_that_shrinks_acceptance_stales_an_already_recorded_pass"
+allow_test = "tests/test_verdict.py::TestSpecRevisionStaleness::test_record_accepts_a_verdict_matching_the_bound_spec_revision, tests/test_verdict.py::TestSpecRevisionStaleness::test_record_allows_any_spec_revision_when_none_has_been_bound_yet, tests/test_verdict.py::TestSpecRevisionStaleness::test_done_blockers_allow_when_spec_revision_still_matches, tests/test_cli.py::TestNameContractSpecRevision::test_transition_done_succeeds_when_the_name_contract_never_changed, tests/test_cli.py::TestNameContractSpecRevision::test_a_rebrief_that_changes_nothing_gate_relevant_does_not_stale_a_pass"
+owner = "ppl"
+residual = "Gated on a spec_revision actually having been bound by a prior ppl brief set: a run that never called brief set has state[spec_revision] == None, so record() is a comparison against the last binding and has nothing to compare an unbriefed run's verdict against, and accepts whatever string it carries. Round 1 review of this task found that this alone left the done gate with no floor - a run that never briefed at all reached done_blockers -> [] with zero acceptance criteria and a fabricated spec_revision, because nothing else in the gate required a brief to exist either. record()'s leniency here is upstream of the actual floor: R-DONE-REQUIRES-BRIEF now refuses an unbriefed run at ppl transition done regardless of what record() was willing to accept, so an unbound spec_revision can be recorded but can never reach done. Cycle 2 wave F found and closed a second gap in the same spirit: the fingerprint hashed name_contract alone, so a re-brief that shrank acceptance without touching name_contract left every outstanding verdict looking current - the done gate proves the criteria that are currently listed, and the list was editable by the same session being gated. Widened to cover acceptance and the write/forbid boundary too; see R-BOUNDARY-SPEC-REVISION-STALE for the ppl boundary set half of the same fix. Deliberately still excludes purpose, success_outcome, governing_requirements, verification and open_decisions - none of them is read by done_blockers, so hashing them would stale a PASS verdict over a change that could not have affected the gate."
+
+[[rule]]
+id = "R-NAME-CONTRACT-STRUCTURAL-ONLY"
+statement = "validate_brief can only prove name_contract is present and a non-empty mapping - that somebody wrote something. It cannot prove the method signatures, DTO field names or error codes inside are the right ones, and it cannot prove the eventual implementation actually matches them."
+scope = "ppl CLI"
+event = "ppl brief set"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = "tests/test_run.py::TestSchema::test_brief_accepts_a_complete_document, tests/test_run.py::TestSchema::test_brief_rejects_an_empty_name_contract"
+owner = "ppl"
+residual = "PROPERTY: schema.validate_brief proves structural completeness, not correctness - a name_contract full of wrong names hashes and validates exactly as cleanly as a correct one. No static check in this pipeline can prove the test worker's and the code worker's names actually agree without executing both sides against each other, which is out of scope here; the contract reduces the drift a blind test worker risks, it does not close it."
+
+[[rule]]
+id = "R-LANE-RESOURCE-ISOLATION"
+statement = "A worktree separates files and nothing else. Test databases, ports, temporary directories, queues and object storage are not separated per lane, and no code in this pipeline provides that isolation."
+scope = "architecture"
+event = "precondition for parallel waves, not a runtime check"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "ppl"
+residual = "GAP: v1 is one sequential lane (section 2), so nothing here needed per-lane resource isolation yet - the gap is named now because parallel waves (also out of scope for v1) must not be enabled before it closes. This repository's own local dev stack (localenv/docker/base/docker-compose.yml) shares one Postgres, one MinIO, one Kafka, one Consul/Redis/OpenSearch and a fixed set of ports across every worktree on the machine, and its Testcontainers-based integration test modules bind the same host Docker daemon - two lanes running integration tests at once would collide on all of it, not just the schema or the bucket names."
+
+[[rule]]
+id = "R-DONE-REQUIRES-BRIEF"
+statement = "ppl transition done refuses a run with no spec_revision bound or an empty acceptance list, independently of any other check - a run that never called ppl brief set (ppl boundary set is its own command and needs no brief) must not reach done just because every other blocker happens to iterate zero times or has nothing to compare against."
+scope = "ppl CLI"
+event = "ppl transition done"
+enforcement = "blocking"
+hook_or_check = "ppl/verdict.py:done_blockers"
+deny_test = "tests/test_verdict.py::TestDoneGateRequiresABrief::test_the_reviewers_probe_no_longer_reaches_zero_blockers, tests/test_verdict.py::TestDoneGateRequiresABrief::test_refuses_specifically_on_an_unbound_spec_revision, tests/test_verdict.py::TestDoneGateRequiresABrief::test_refuses_specifically_on_an_empty_acceptance_list"
+allow_test = "tests/test_verdict.py::TestDoneGateRequiresABrief::test_allowed_once_the_run_was_actually_briefed"
+owner = "ppl"
+residual = "Round 1 review of cycle 2 Task 7 found this: both of the task's own new spec_revision checks were gated on state[spec_revision] is not None, so a run that never briefed at all was never checked by either of them, and the pre-existing empty-acceptance-list vacuity (not introduced by this task) let the same run's verdict, carrying an invented spec_revision, reach done with zero blockers. Fixed by making a bound spec_revision and a non-empty acceptance list blockers in their own right rather than preconditions for other checks."
+
+# ---------------------------------------------------------------------------
+# Setup and verification gates
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "R-INIT-MODELS-VERIFIED"
+statement = "ppl init refuses with MODELS_UNVERIFIED while any model a role can route to for the run's risk is unverified or stale, unless --skip-model-check is passed, in which case the run records model_check = skipped."
+scope = "ppl CLI"
+event = "ppl init"
+enforcement = "blocking"
+hook_or_check = "ppl/models.py:require_verified, ppl/cli.py:cmd_init"
+deny_test = "tests/test_cli.py::TestInitModelCheck::test_init_refuses_when_models_are_unverified"
+allow_test = "tests/test_cli.py::TestInitModelCheck::test_init_passes_when_verified, tests/test_cli.py::TestInitModelCheck::test_skip_model_check_is_recorded"
+owner = "ppl"
+residual = "a skipped check is visible in ppl status and the init log, nothing prevents the operator from always skipping"
+
+[[rule]]
+id = "R-INIT-SETUP-COMPLETE"
+statement = "ppl init refuses with SETUP_INCOMPLETE while the setup steps models (unless --skip-model-check), harness and apply are not recorded done in config.toml, and when no --harness is passed."
+scope = "ppl CLI"
+event = "ppl init"
+enforcement = "blocking"
+hook_or_check = "ppl/doctor.py:setup_problem, ppl/doctor.py:setup_state, ppl/cli.py:cmd_init"
+deny_test = "tests/test_cli.py::TestInitRequiresSetup::test_init_refuses_when_setup_is_incomplete, tests/test_cli.py::TestInitRequiresSetup::test_the_refusal_names_the_missing_step_and_its_command, tests/test_cli.py::TestInitRequiresSetup::test_init_without_a_harness_refuses_and_names_the_active_one"
+allow_test = "tests/test_cli.py::TestInitHarness::test_init_with_harness_writes_the_snapshot"
+owner = "ppl"
+residual = "the steps paths, claude and forge are reported by ppl doctor but not required: a run can start with hooks registered by hand and the forge unchecked"
+
+[[rule]]
+id = "R-INIT-HARNESS-APPLIED"
+statement = "ppl init --harness refuses with HARNESS_NOT_APPLIED unless config.toml [harness].active names the installed harness directory being loaded, because the agent files and the skill on disk were rendered for the active one."
+scope = "ppl CLI"
+event = "ppl init"
+enforcement = "blocking"
+hook_or_check = "ppl/harness.py:require_applied, ppl/cli.py:cmd_init"
+deny_test = "tests/test_cli.py::TestInitHarness::test_init_refuses_a_harness_that_is_not_the_applied_one, tests/test_cli.py::TestInitHarness::test_init_refuses_when_no_harness_was_ever_applied, tests/test_cli.py::TestInitHarness::test_init_refuses_a_harness_directory_outside_the_data_root"
+allow_test = "tests/test_cli.py::TestInitHarness::test_init_with_harness_writes_the_snapshot"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-INIT-TASK-KEY-PATTERN"
+statement = "ppl init refuses a task id that does not match the harness task.key_pattern; paths.check_task_id keeps the generic shape for path safety independently."
+scope = "ppl CLI"
+event = "ppl init"
+enforcement = "blocking"
+hook_or_check = "ppl/cli.py:cmd_init, ppl/paths.py:check_task_id"
+deny_test = "tests/test_cli.py::TestInitHarness::test_init_refuses_a_task_id_outside_the_harness_pattern"
+allow_test = "tests/test_cli.py::TestInitHarness::test_init_with_harness_writes_the_snapshot"
+owner = "ppl"
+residual = ""
+
+[[rule]]
+id = "R-SKILL-GENERATED"
+statement = "The orchestrator skill on disk is rendered by ppl harness apply from skill/ skeletons plus the forge and harness fragments, carries a generated notice, and every include marker is resolved or the render refuses."
+scope = "ppl harness apply"
+event = "ppl harness apply"
+enforcement = "soft"
+hook_or_check = "ppl/harness.py:render_skill, ppl/harness.py:write_skill"
+deny_test = ""
+allow_test = "tests/test_harness.py::TestRenderSkill::test_every_marker_is_replaced"
+owner = "ppl"
+residual = "nothing stops a hand edit of the rendered file, the next apply overwrites it silently"
+
+[[rule]]
+id = "R-NO-PRIVATE-STRINGS"
+statement = "No tracked file names the private project, company, person or machine path this tool was first built for; the test greps every tracked file for the forbidden patterns."
+scope = "the whole tree"
+event = "test run"
+enforcement = "soft"
+hook_or_check = "tests/test_no_private_strings.py:tracked_files"
+deny_test = ""
+allow_test = "tests/test_no_private_strings.py::TestNoPrivateStrings::test_no_tracked_file_names_a_private_string"
+owner = "maintainer"
+residual = "a test, not a hook: it catches a string at test time, not at commit time, and only in tracked files: an untracked or ignored file is never scanned"
