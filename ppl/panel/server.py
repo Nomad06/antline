@@ -1,6 +1,7 @@
 import json
 import os
 import signal
+import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -8,9 +9,13 @@ from urllib.parse import parse_qs, urlparse
 
 from .. import control, findings, paths, run, status, store
 from ..errors import PplError
-from . import session
+from . import routes, session
+from .router import Raw
 
 PAGE = Path(__file__).with_name("index.html")
+ROUTES = routes.build()
+# A route's PplError code that is not a plain bad request.
+STATUS_BY_CODE = {"SESSION_REQUIRED": 403, "NOT_FOUND": 404, "BUSY": 409, "CHANGED_ON_DISK": 409}
 
 
 def _needs_you(state, command):
@@ -245,8 +250,44 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _parse_path(self):
+        """The parsed request path, or None after a 400 for one urlparse refuses."""
+        try:
+            return urlparse(self.path)
+        except ValueError:
+            self._send(400, {"error_code": "SCHEMA_INVALID", "message": "malformed request path"})
+            return None
+
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        if not isinstance(body, dict):
+            raise PplError("SCHEMA_INVALID", "request body must be a JSON object")
+        return body
+
+    def _dispatch(self, method, parsed, body):
+        fn, params = ROUTES.match(method, parsed.path)
+        if fn is None:
+            return self._send(404, {"error_code": "SCHEMA_INVALID", "message": "no such route"})
+        if fn is False:
+            return self._send(405, {"error_code": "SCHEMA_INVALID",
+                                    "message": "this route does not take %s" % method})
+        try:
+            result = fn(params, body, parse_qs(parsed.query))
+        except PplError as err:
+            return self._send(STATUS_BY_CODE.get(err.code, 400), err.as_dict())
+        except Exception as exc:
+            traceback.print_exc()
+            return self._send(500, {"error_code": "INTERNAL_ERROR",
+                                    "message": "%s: %s" % (type(exc).__name__, exc)})
+        if isinstance(result, Raw):
+            return self._send(200, result.body, result.content_type)
+        return self._send(200, result)
+
     def do_GET(self):
-        parsed = urlparse(self.path)
+        parsed = self._parse_path()
+        if parsed is None:
+            return
         parts = [p for p in parsed.path.split("/") if p]
         if not parts and "t" in parse_qs(parsed.query):
             return self._exchange_token(parsed.query)
@@ -263,7 +304,7 @@ class Handler(BaseHTTPRequestHandler):
                     and parts[3] == "log"):
                 offset = int(parse_qs(parsed.query).get("offset", ["0"])[0])
                 return self._send(200, read_log(parts[2], offset))
-            self._send(404, {"error_code": "SCHEMA_INVALID", "message": "no such route"})
+            return self._dispatch("GET", parsed, None)
         except PplError as err:
             self._send(400, err.as_dict())
         except ValueError:
@@ -274,32 +315,48 @@ class Handler(BaseHTTPRequestHandler):
                              "message": "offset must be an integer"})
 
     def do_POST(self):
-        parts = [p for p in urlparse(self.path).path.split("/") if p]
+        parsed = self._parse_path()
+        if parsed is None:
+            return
+        parts = [p for p in parsed.path.split("/") if p]
         if not self._session_ok():
             return
         if not self._write_headers_ok():
             return self._send(403, {"error_code": "BOUNDARY_VIOLATION",
                                     "message": "panel requests must come from the panel"})
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
-            if not isinstance(body, dict):
-                raise PplError("SCHEMA_INVALID", "request body must be a JSON object")
+            body = self._read_body()
             if (len(parts) == 4 and parts[0] == "api" and parts[1] == "runs"
                     and parts[3] == "control"):
                 return self._send(200, handle_control(parts[2], body))
             if (len(parts) == 4 and parts[0] == "api" and parts[1] == "runs"
                     and parts[3] == "signal"):
                 return self._send(200, handle_signal(parts[2]))
-            self._send(404, {"error_code": "SCHEMA_INVALID", "message": "no such route"})
         except PplError as err:
-            self._send(400, err.as_dict())
+            return self._send(400, err.as_dict())
         except ValueError as exc:
-            # Malformed JSON body or a non-numeric Content-Length. Brief-
-            # verbatim code read these before the try block, so they dropped
-            # the connection with a bare traceback instead of a 400.
-            self._send(400, {"error_code": "SCHEMA_INVALID",
-                             "message": "malformed request: %s" % exc})
+            # Malformed JSON body or a non-numeric Content-Length.
+            return self._send(400, {"error_code": "SCHEMA_INVALID",
+                                    "message": "malformed request: %s" % exc})
+        return self._dispatch("POST", parsed, body)
+
+    def do_PUT(self):
+        parsed = self._parse_path()
+        if parsed is None:
+            return
+        if not self._session_ok():
+            return
+        if not self._write_headers_ok():
+            return self._send(403, {"error_code": "BOUNDARY_VIOLATION",
+                                    "message": "panel requests must come from the panel"})
+        try:
+            body = self._read_body()
+        except PplError as err:
+            return self._send(400, err.as_dict())
+        except ValueError as exc:
+            return self._send(400, {"error_code": "SCHEMA_INVALID",
+                                    "message": "malformed request: %s" % exc})
+        return self._dispatch("PUT", parsed, body)
 
 
 def serve(port=8787, open_browser=False):

@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 
 from ppl import models
-from ppl.panel import server, session
+from ppl.panel import jobs, server, session
 
 PORT = 8787
 HOST = "127.0.0.1:%d" % PORT
@@ -111,6 +111,13 @@ class StudioTestCase(unittest.TestCase):
         patcher = mock.patch.object(models, "claude_version", lambda binary="claude": "9.9.9")
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def wait(self, payload):
+        """The finished state of the job a {"job": id} response started."""
+        self.assertTrue(jobs.JOBS.wait(payload["job"], timeout=60))
+        status, state, _ = call("GET", "/api/jobs/%s" % payload["job"])
+        self.assertEqual(status, 200)
+        return state
 
     def tearDown(self):
         for name, value in self._saved_env.items():
