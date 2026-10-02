@@ -36,6 +36,10 @@ def _split(key):
     return parts[1], parts[2]
 
 
+def _escape(rel):
+    return PplError("SCHEMA_INVALID", "%s leaves the harness directory" % rel)
+
+
 def _inside(folder, rel):
     """folder/rel, refused when a symlink in it leads out of the folder."""
     path = folder / rel
@@ -44,7 +48,7 @@ def _inside(folder, rel):
     except (OSError, RuntimeError):
         inside = False
     if not inside:
-        raise PplError("SCHEMA_INVALID", "%s leaves the harness directory" % rel)
+        raise _escape(rel)
     return path
 
 
@@ -169,6 +173,10 @@ def _plan(key, text, expected):
         raise PplError("SCHEMA_INVALID", "the save of %s must name the hash of the content "
                        "the page loaded" % key)
     target = _target(resolve(key))
+    if key != "routing":
+        name, rel = _split(key)
+        if not target.is_relative_to(paths.harness_dir(name).resolve()):
+            raise _escape(rel)
     current = _bytes(target)
     if digest(current) != expected:
         raise PplError("CHANGED_ON_DISK", "%s changed since the page loaded it: reload to "

@@ -248,6 +248,20 @@ class TestSaveThroughLinks(FilesTestCase):
         self.assertEqual(sorted(item.name for item in (folder / "skill").iterdir()),
                          ["baseline.md", "extra-gates.md", "gates.md"])
 
+    def test_a_target_that_resolves_outside_the_harness_after_the_key_check_is_refused(self):
+        # rule: R-STUDIO-NO-RAW-PATHS
+        outside = Path(tmphome.mkdtemp(prefix="pploutside-"))
+        secret = outside / "gates.md"
+        secret.write_bytes(files.resolve(GATES).read_bytes())
+        gates = files.read(GATES)
+        with mock.patch.object(files, "_target", return_value=secret.resolve()):
+            with self.assertRaises(PplError) as caught:
+                files.save(GATES, "overwritten\n", gates["hash"])
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertEqual(secret.read_bytes(), files.resolve(GATES).read_bytes())
+        self.assertEqual(sorted(item.name for item in outside.iterdir()), ["gates.md"])
+        self.assertEqual(files.read(GATES), gates)
+
     def test_a_save_keeps_the_permission_bits_of_a_regular_file(self):
         path = paths.harness_dir("demo") / "skill" / "gates.md"
         path.chmod(0o600)
@@ -317,6 +331,18 @@ class TestCheckHarness(FilesTestCase):
         for message in result["errors"]:
             self.assertNotIn(".check-", message)
             self.assertIn(str(paths.harness_dir("demo") / "harness.toml"), message)
+
+    def test_a_value_of_the_wrong_type_that_breaks_rendering_comes_back_as_a_result(self):
+        key = "harness:demo:harness.toml"
+        broken = files.read(key)["text"].replace(
+            'worktrees = "/home/dev/src/project/.worktrees"', "worktrees = 1", 1)
+        self.assertIn("worktrees = 1", broken)
+        result = files.check_harness("demo", [("harness.toml", broken)])
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["errors"])
+        with self.assertRaises(PplError) as caught:
+            files.validate(key, broken)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
 
     def test_a_fragment_that_is_not_utf8_text_comes_back_as_a_result(self):
         (paths.harness_dir("demo") / "skill" / "gates.md").write_bytes(b"\xff\xfe not text")

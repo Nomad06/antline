@@ -212,6 +212,9 @@ def verify(target, name):
         return _refused(exc)
     except UnicodeDecodeError as exc:
         return _refused(PplError("HARNESS_INVALID", "a harness file is not UTF-8 text: %s" % exc))
+    except (TypeError, ValueError) as exc:
+        return _refused(PplError("HARNESS_INVALID", "the harness has a value of the wrong type "
+                                 "and cannot be rendered: %s" % exc))
     return {"ok": True, "errors": [], "warnings": warnings, "flags": flags(loaded)}
 
 
