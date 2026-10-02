@@ -639,7 +639,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 149 rows: 107 `blocking`, 16 `soft` and 26 `n/a`. Of the
+As of this commit the table carries 152 rows: 110 `blocking`, 16 `soft` and 26 `n/a`. Of the
 `n/a` rows, 20 are `GAP:` - a rule this design names and no code performs - and 6 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the orchestrator's dispatch prompt for the test worker
@@ -1708,6 +1708,14 @@ The panel binds to loopback only, not the network [R-PANEL-LOOPBACK]. It is a co
 surface for local runs and holds no credentials of its own: every outward mutation it can
 trigger is executed by `ppl` or by an orchestrator session using the credentials those
 already have.
+
+Every request must carry the session token `ppl serve` creates at each start: the printed
+URL carries it once, the first load turns it into an `HttpOnly`, `SameSite=Strict` cookie,
+and a request without it is refused [R-STUDIO-SESSION-TOKEN]. A request whose Host header is
+not `127.0.0.1` or `localhost` on the serving port is refused, so a DNS-rebinding page cannot
+reach the panel through a hostname it controls [R-STUDIO-HOST-CHECK]. A POST or PUT is refused
+unless it carries `X-PPL: 1`, a loopback Origin when it has one, and a JSON content type, so a
+cross-site form cannot submit to it [R-STUDIO-JSON-ONLY].
 
 ## 10. Role adapters and model substitution
 

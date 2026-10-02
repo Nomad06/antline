@@ -1,4 +1,3 @@
-import io
 import itertools
 import json
 import os
@@ -17,12 +16,13 @@ from unittest import mock
 # by path. It must be imported before PPL_HOME is chosen below.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
+import panel_client
 HOME = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_HOME"] = HOME
 
 from ppl import control, findings, paths, run, store
 from ppl.errors import PplError
-from ppl.panel import server
+from ppl.panel import server, session
 
 COUNTER = itertools.count(950)
 
@@ -48,17 +48,8 @@ def _make_handler(method, path, headers=None, body=b""):
     # actually touch: headers, rfile, wfile, path. This exercises the real
     # Handler class over a real request/response cycle without binding a
     # socket, per the "do not leave a server running" rule.
-    handler = server.Handler.__new__(server.Handler)
-    handler.headers = headers or {}
-    handler.rfile = io.BytesIO(body)
-    handler.wfile = io.BytesIO()
-    handler.path = path
-    handler.command = method
-    handler.request_version = "HTTP/1.1"
-    handler.client_address = ("127.0.0.1", 12345)
-    handler.requestline = "%s %s HTTP/1.1" % (method, path)
-    handler.close_connection = True
-    return handler
+    base = dict(panel_client.session_headers(), **{"Content-Type": "application/json"})
+    return panel_client.make_handler(method, path, headers, body, base=base)
 
 
 class TestPanelApi(unittest.TestCase):
@@ -452,12 +443,16 @@ class TestPanelApi(unittest.TestCase):
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         try:
             self.assertEqual(httpd.server_address[0], "127.0.0.1")
+            port = httpd.server_address[1]
+            token = session.start(port)
+            request = ("GET /api/runs HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                       "Cookie: %s=%s\r\n\r\n" % (port, session.COOKIE, token))
             thread = threading.Thread(target=httpd.serve_forever)
             thread.daemon = True
             thread.start()
             time.sleep(0.05)
-            with socket.create_connection(("127.0.0.1", httpd.server_address[1]), timeout=2) as sock:
-                sock.sendall(b"GET /api/runs HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
+                sock.sendall(request.encode("ascii"))
                 sock.settimeout(2)
                 data = sock.recv(65536)
             self.assertIn(b"200", data)

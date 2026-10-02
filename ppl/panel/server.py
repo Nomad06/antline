@@ -1,12 +1,14 @@
 import json
 import os
 import signal
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import control, findings, paths, run, status, store
 from ..errors import PplError
+from . import session
 
 PAGE = Path(__file__).with_name("index.html")
 
@@ -207,9 +209,49 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _refuse_host(self):
+        self._send(403, {"error_code": "BOUNDARY_VIOLATION",
+                         "message": "the Host header names neither 127.0.0.1 nor localhost "
+                                    "on this port"})
+
+    def _refuse_session(self):
+        self._send(403, {"error_code": "SESSION_REQUIRED",
+                         "message": "this studio session is not open in this browser: use the "
+                                    "URL `ppl serve` printed, or start it again"})
+
+    def _session_ok(self):
+        if not session.host_ok(self.headers):
+            self._refuse_host()
+            return False
+        if not session.has_session(self.headers):
+            self._refuse_session()
+            return False
+        return True
+
+    def _write_headers_ok(self):
+        return (self.headers.get("X-PPL") == "1" and origin_ok(self.headers)
+                and session.json_body(self.headers))
+
+    def _exchange_token(self, query):
+        """GET /?t=<token>: the token becomes the session cookie and the browser
+        goes to the clean URL, so the token leaves the address bar."""
+        if not session.host_ok(self.headers):
+            return self._refuse_host()
+        if not session.matches(parse_qs(query).get("t", [""])[0]):
+            return self._refuse_session()
+        self.send_response(302)
+        self.send_header("Set-Cookie", session.cookie_header())
+        self.send_header("Location", "/")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
         parsed = urlparse(self.path)
         parts = [p for p in parsed.path.split("/") if p]
+        if not parts and "t" in parse_qs(parsed.query):
+            return self._exchange_token(parsed.query)
+        if not self._session_ok():
+            return
         try:
             if not parts:
                 return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
@@ -233,7 +275,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parts = [p for p in urlparse(self.path).path.split("/") if p]
-        if self.headers.get("X-PPL") != "1" or not origin_ok(self.headers):
+        if not self._session_ok():
+            return
+        if not self._write_headers_ok():
             return self._send(403, {"error_code": "BOUNDARY_VIOLATION",
                                     "message": "panel requests must come from the panel"})
         try:
@@ -258,10 +302,13 @@ class Handler(BaseHTTPRequestHandler):
                              "message": "malformed request: %s" % exc})
 
 
-def serve(port=8787):
+def serve(port=8787, open_browser=False):
     if isinstance(port, bool) or not isinstance(port, int) or not (0 < port < 65536):
         raise PplError("SCHEMA_INVALID",
                        "port must be an integer between 1 and 65535, got: %r" % (port,))
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print("ppl panel on http://127.0.0.1:%d  (loopback only, ctrl-c to stop)" % port)
+    session.start(port)
+    print("antline studio on %s  (loopback only, ctrl-c to stop)" % session.url())
+    if open_browser:
+        webbrowser.open(session.url())
     httpd.serve_forever()

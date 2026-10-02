@@ -640,7 +640,7 @@ def cmd_watchdog(args):
 
 def cmd_serve(args):
     from .panel import server
-    server.serve(args.port)
+    server.serve(args.port, open_browser=args.open)
     return 0
 
 
@@ -1002,6 +1002,7 @@ def build_parser():
 
     p = sub.add_parser("serve")
     p.add_argument("--port", type=int, default=8787)
+    p.add_argument("--open", action="store_true", help="open the studio in the default browser")
 
     p = sub.add_parser("control")
     p.add_argument("action", choices=["set", "get"])

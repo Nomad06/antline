@@ -533,6 +533,42 @@ allow_test = ""
 owner = "panel"
 residual = "GAP: nothing confines it. The panel imports ppl and runs in-process, so stop parks the run through run.park and destroy archives the whole run directory, both writing run state directly. The guard hook never sees these - they are not tool calls - and no check stands between the panel and ppl's full write surface, so what keeps panel writes narrow is only which functions handle_control happens to call"
 
+[[rule]]
+id = "R-STUDIO-SESSION-TOKEN"
+statement = "Every panel and studio route refuses a request that does not carry the session token ppl serve created at its start, in the session cookie or, on the first page load only, in the URL."
+scope = "panel"
+event = "every panel request"
+enforcement = "blocking"
+hook_or_check = "ppl/panel/session.py:has_session, ppl/panel/server.py:_session_ok, ppl/panel/server.py:_exchange_token"
+deny_test = "tests/test_studio_session.py::TestStudioSession::test_a_request_without_the_session_cookie_is_refused, tests/test_studio_session.py::TestStudioSession::test_a_wrong_session_cookie_is_refused, tests/test_studio_session.py::TestStudioSession::test_a_cookie_from_an_earlier_start_is_refused, tests/test_studio_session.py::TestStudioSession::test_a_wrong_url_token_is_refused"
+allow_test = "tests/test_studio_session.py::TestStudioSession::test_a_request_with_the_session_cookie_is_served, tests/test_studio_session.py::TestStudioSession::test_the_url_token_is_exchanged_for_a_cookie"
+owner = "panel"
+residual = "the token is printed to the terminal that ran ppl serve and lives in a browser cookie, so a local process that can read that terminal or the browser profile can use it; the studio is a local tool, not a multi-user one"
+
+[[rule]]
+id = "R-STUDIO-HOST-CHECK"
+statement = "A panel request whose Host header names anything but 127.0.0.1 or localhost on the serving port is refused, so a DNS-rebinding page cannot reach the panel through a hostname it controls."
+scope = "panel"
+event = "every panel request"
+enforcement = "blocking"
+hook_or_check = "ppl/panel/session.py:host_ok, ppl/panel/server.py:_session_ok"
+deny_test = "tests/test_studio_session.py::TestStudioSession::test_a_foreign_host_header_is_refused, tests/test_studio_session.py::TestStudioSession::test_a_loopback_host_on_another_port_is_refused"
+allow_test = "tests/test_studio_session.py::TestStudioSession::test_localhost_is_accepted_as_the_host"
+owner = "panel"
+residual = "a request with no Host header at all is let through, which no browser sends"
+
+[[rule]]
+id = "R-STUDIO-JSON-ONLY"
+statement = "A panel POST or PUT is refused unless it carries X-PPL: 1, a loopback Origin when it has one, and a JSON content type, so a cross-site form cannot submit to the panel."
+scope = "panel"
+event = "every panel POST and PUT"
+enforcement = "blocking"
+hook_or_check = "ppl/panel/session.py:json_body, ppl/panel/server.py:_write_headers_ok"
+deny_test = "tests/test_studio_session.py::TestStudioSession::test_a_post_without_a_json_content_type_is_refused"
+allow_test = "tests/test_studio_session.py::TestStudioSession::test_a_json_content_type_with_a_charset_passes_the_guard"
+owner = "panel"
+residual = ""
+
 # ---------------------------------------------------------------------------
 # Done gate
 # ---------------------------------------------------------------------------
