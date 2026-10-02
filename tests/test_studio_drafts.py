@@ -257,6 +257,44 @@ class TestCheck(DraftTestCase):
                 self.assertEqual([path.name for path in drafts.drafts_dir().iterdir()], ["demo"])
 
 
+def tree(folder):
+    return {str(item.relative_to(folder)): item.read_bytes()
+            for item in sorted(Path(folder).rglob("*")) if item.is_file()}
+
+
+class TestCheckPrivate(DraftTestCase):
+    def test_a_private_check_gives_the_result_of_check_and_leaves_the_drafts_alone(self):
+        draft = self.preset()
+        wizard = drafts.write("demo", draft["doc"], draft["fragments"])
+        (wizard / "skill" / "gates.md").write_text("a wizard edit\n", encoding="utf-8")
+        before = tree(drafts.drafts_dir())
+        names = sorted(item.name for item in drafts.drafts_dir().iterdir())
+        self.assertEqual(drafts.check_private("demo", draft["doc"], draft["fragments"]),
+                         {"ok": True, "errors": [], "warnings": [], "flags": []})
+        refused = drafts.check_private("demo", None, draft["fragments"])
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["errors"], drafts.check("demo", None, draft["fragments"])["errors"])
+        self.assertEqual(tree(drafts.drafts_dir()), before)
+        self.assertEqual(sorted(item.name for item in drafts.drafts_dir().iterdir()), names)
+
+    def test_a_private_check_works_before_any_draft_exists(self):
+        draft = self.preset()
+        self.assertFalse(drafts.drafts_dir().exists())
+        self.assertTrue(drafts.check_private("demo", draft["doc"], draft["fragments"])["ok"])
+        self.assertEqual(list(drafts.drafts_dir().iterdir()), [])
+
+    def test_a_checked_copy_is_written_where_asked_and_verified(self):
+        draft = self.preset()
+        root = Path(tmphome.mkdtemp(prefix="pplcopy-"))
+        target, result = drafts.checked_copy("demo", draft["doc"], draft["fragments"], root)
+        self.assertEqual(target, root / "demo")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(drafts.verify(target, "demo"), result)
+        refused, result = drafts.checked_copy("demo.git", draft["doc"], draft["fragments"], root)
+        self.assertIsNone(refused)
+        self.assertFalse(result["ok"])
+
+
 class TestInstall(DraftTestCase):
     def install(self, draft, replace=False):
         return drafts.install("demo", draft["doc"], draft["fragments"], replace, lambda line: None)

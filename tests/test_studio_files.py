@@ -1,6 +1,7 @@
 import os
 import shutil
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -11,7 +12,7 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
 from ppl import config, harness, paths, routing
 from ppl.errors import PplError
-from ppl.studio import files
+from ppl.studio import drafts, files
 
 GATES = "harness:demo:skill/gates.md"
 
@@ -91,7 +92,7 @@ class TestKeyContainment(FilesTestCase):
                                              "templates/ppl-code-worker.part",
                                              "templates/ppl-test-worker.part"])
         self.assertEqual(fragments["skill/gates.md"], files.read(GATES)["text"])
-        for name in ("../demo", "../../x", "demo.git", None):
+        for name in ("../demo", "../../x", "demo.git", None, "nope"):
             with self.assertRaises(PplError) as caught:
                 files.harness_fragments(name)
             self.assertEqual(caught.exception.code, "SCHEMA_INVALID", name)
@@ -204,6 +205,193 @@ class TestSaveHardening(FilesTestCase):
         files.save(key, "- Check the migration notes.\n", files.read(key)["hash"])
         self.assertEqual((folder / "templates" / "ppl-verifier.part").read_text(encoding="utf-8"),
                          "- Check the migration notes.\n")
+
+
+def snapshot(folder):
+    return {str(item.relative_to(folder)): item.read_bytes()
+            for item in sorted(Path(folder).rglob("*")) if item.is_file()}
+
+
+def nameless(text):
+    return text.replace('name = "example-generic"\n', "", 1)
+
+
+class TestSaveThroughLinks(FilesTestCase):
+    def test_a_save_through_a_symlinked_routing_file_keeps_the_link(self):
+        outside = Path(tmphome.mkdtemp(prefix="pploutside-"))
+        real = outside / "routing.toml"
+        real.write_bytes(paths.routing_file().read_bytes())
+        real.chmod(0o640)
+        paths.routing_file().unlink()
+        paths.routing_file().symlink_to(real)
+        current = files.read("routing")
+        edited = current["text"] + "\n# edited in the studio\n"
+        files.save("routing", edited, current["hash"])
+        self.assertTrue(paths.routing_file().is_symlink())
+        self.assertEqual(os.readlink(paths.routing_file()), str(real))
+        self.assertEqual(real.read_text(encoding="utf-8"), edited)
+        self.assertEqual(real.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(sorted(item.name for item in outside.iterdir()), ["routing.toml"])
+        self.assertEqual(files.version_text("routing", files.versions("routing")[0]["version"]),
+                         current["text"])
+
+    def test_a_save_through_an_in_harness_fragment_link_keeps_the_link(self):
+        folder = paths.harness_dir("demo")
+        link = folder / "skill" / "extra-gates.md"
+        link.symlink_to("gates.md")
+        key = "harness:demo:skill/extra-gates.md"
+        files.save(key, "Targets: `make all`.\n", files.read(key)["hash"])
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), "gates.md")
+        self.assertEqual((folder / "skill" / "gates.md").read_text(encoding="utf-8"),
+                         "Targets: `make all`.\n")
+        self.assertEqual(sorted(item.name for item in (folder / "skill").iterdir()),
+                         ["baseline.md", "extra-gates.md", "gates.md"])
+
+    def test_a_save_keeps_the_permission_bits_of_a_regular_file(self):
+        path = paths.harness_dir("demo") / "skill" / "gates.md"
+        path.chmod(0o600)
+        files.save(GATES, "Targets: `make all`.\n", files.read(GATES)["hash"])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_a_batch_naming_two_links_to_one_file_is_refused(self):
+        folder = paths.harness_dir("demo")
+        (folder / "skill" / "extra-gates.md").symlink_to("gates.md")
+        gates = files.read(GATES)
+        link = "harness:demo:skill/extra-gates.md"
+        with self.assertRaises(PplError) as caught:
+            files.save_many([(GATES, "first\n", gates["hash"]), (link, "second\n", gates["hash"])])
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertEqual(files.read(GATES)["text"], gates["text"])
+
+
+class TestHistoryOrder(FilesTestCase):
+    def test_a_clock_stepped_back_does_not_sort_a_new_version_below_older_ones(self):
+        folder = paths.home() / "studio" / "history" / "routing"
+        folder.mkdir(parents=True)
+        (folder / "29990101T000000000000Z").write_bytes(b"from the future\n")
+        current = files.read("routing")
+        files.save("routing", current["text"] + "\n# edited\n", current["hash"])
+        newest = files.versions("routing")[0]["version"]
+        self.assertGreater(newest, "29990101T000000000000Z")
+        self.assertEqual(files.version_text("routing", newest), current["text"])
+
+    def test_nothing_is_pruned_when_a_replace_of_the_batch_fails(self):
+        real_replace = os.replace
+        with mock.patch.object(files, "KEEP", 2):
+            for index in range(2):
+                files.save(GATES, "version %d\n" % index, files.read(GATES)["hash"])
+            self.assertEqual(len(files.versions(GATES)), 2)
+            target = files.resolve(GATES).resolve()
+
+            def replace(source, destination):
+                if Path(destination) == target:
+                    raise OSError("disk gone")
+                return real_replace(source, destination)
+            with mock.patch.object(files.os, "replace", side_effect=replace):
+                with self.assertRaises(OSError):
+                    files.save(GATES, "never lands\n", files.read(GATES)["hash"])
+            self.assertEqual(len(files.versions(GATES)), 3)
+            files.save(GATES, "lands\n", files.read(GATES)["hash"])
+            self.assertEqual(len(files.versions(GATES)), 2)
+
+
+class TestCheckHarness(FilesTestCase):
+    def test_the_installed_harness_checks_clean_and_a_change_is_checked_with_it(self):
+        self.assertTrue(files.check_harness("demo")["ok"])
+        self.assertTrue(files.check_harness("demo", [("skill/gates.md", "Targets: `make all`.\n")])["ok"])
+        result = files.check_harness("demo", [("harness.toml", nameless(
+            files.read("harness:demo:harness.toml")["text"]))])
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["errors"])
+
+    def test_a_copy_that_does_not_load_comes_back_as_a_result_never_a_raise(self):
+        for text in ("this is = not toml [", "", "[harness]\n"):
+            result = files.check_harness("demo", [("harness.toml", text)])
+            self.assertFalse(result["ok"], text)
+            self.assertTrue(result["errors"], text)
+
+    def test_a_refusal_names_the_installed_harness_not_the_scratch_copy(self):
+        result = files.check_harness("demo", [("harness.toml", "")])
+        self.assertFalse(result["ok"])
+        for message in result["errors"]:
+            self.assertNotIn(".check-", message)
+            self.assertIn(str(paths.harness_dir("demo") / "harness.toml"), message)
+
+    def test_a_fragment_that_is_not_utf8_text_comes_back_as_a_result(self):
+        (paths.harness_dir("demo") / "skill" / "gates.md").write_bytes(b"\xff\xfe not text")
+        result = files.check_harness("demo")
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["errors"])
+        with self.assertRaises(PplError) as caught:
+            files.validate("harness:demo:skill/baseline.md", "fine\n")
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+
+    def test_a_change_to_a_file_or_a_harness_that_is_not_there_is_refused(self):
+        for name, changes in (("nope", ()), ("demo.git", ()), ("demo", [("hooks/x.py", "x\n")]),
+                              ("demo", [("skill/gates.md", None)])):
+            with self.assertRaises(PplError) as caught:
+                files.check_harness(name, changes)
+            self.assertEqual(caught.exception.code, "SCHEMA_INVALID", (name, changes))
+
+    def test_the_check_leaves_the_harness_and_a_wizard_draft_of_the_same_name_alone(self):
+        doc = tomllib.loads(files.read("harness:demo:harness.toml")["text"])
+        drafts.write("demo", doc, files.harness_fragments("demo"))
+        draft = drafts.drafts_dir() / "demo"
+        (draft / "skill" / "gates.md").write_text("a wizard edit\n", encoding="utf-8")
+        before = (snapshot(draft), snapshot(paths.harness_dir("demo")), sorted(
+            item.name for item in drafts.drafts_dir().iterdir()))
+        files.validate(GATES, "Targets: `make all`.\n")
+        files.validate("harness:demo:harness.toml", files.read("harness:demo:harness.toml")["text"])
+        files.check_harness("demo", [("skill/gates.md", "changed\n")])
+        with self.assertRaises(PplError):
+            files.validate("harness:demo:harness.toml", "this is = not toml [")
+        after = (snapshot(draft), snapshot(paths.harness_dir("demo")), sorted(
+            item.name for item in drafts.drafts_dir().iterdir()))
+        self.assertEqual(after, before)
+
+    def test_the_copy_holds_the_exact_bytes_of_the_change_and_follows_links(self):
+        folder = paths.harness_dir("demo")
+        (folder / "skill" / "extra-gates.md").symlink_to("gates.md")
+        seen = {}
+        real_verify = drafts.verify
+
+        def verify(path, name):
+            seen["parent"] = Path(path).parent.parent
+            seen["name"] = Path(path).name
+            seen["files"] = snapshot(path)
+            return real_verify(path, name)
+        with mock.patch.object(drafts, "verify", side_effect=verify):
+            files.check_harness("demo", [("skill/extra-gates.md", "no trailing newline")])
+        self.assertEqual(seen["parent"], drafts.drafts_dir())
+        self.assertEqual(seen["name"], "demo")
+        self.assertEqual(seen["files"]["skill/gates.md"], b"no trailing newline")
+        self.assertEqual(seen["files"]["skill/extra-gates.md"], b"no trailing newline")
+        self.assertEqual(seen["files"]["skill/baseline.md"],
+                         (folder / "skill" / "baseline.md").read_bytes())
+        self.assertEqual((folder / "skill" / "gates.md").read_text(encoding="utf-8").strip(),
+                         files.read(GATES)["text"].strip())
+
+    def test_a_harness_toml_with_no_name_is_refused_before_it_is_saved(self):
+        key = "harness:demo:harness.toml"
+        broken = nameless(files.read(key)["text"])
+        self.assertNotEqual(broken, files.read(key)["text"])
+        with self.assertRaises(PplError) as caught:
+            files.validate(key, broken)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+
+    def test_restoring_a_harness_toml_with_no_name_is_refused_and_leaves_the_file(self):
+        key = "harness:demo:harness.toml"
+        good = files.read(key)
+        files.save(key, nameless(good["text"]), good["hash"])
+        files.save(key, good["text"], files.read(key)["hash"])
+        nameless_version = files.versions(key)[0]["version"]
+        before = files.read(key)
+        with self.assertRaises(PplError) as caught:
+            files.restore(key, nameless_version, before["hash"])
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertEqual(files.read(key), before)
+        self.assertEqual(len(files.versions(key)), 2)
 
 
 class TestValidate(FilesTestCase):

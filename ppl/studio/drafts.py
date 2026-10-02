@@ -195,9 +195,11 @@ def _unrunnable_focused_tests(loaded):
     return []
 
 
-def _verify(target, name):
-    """The check of a draft already written to `target`: loaded back,
-    validated, its skill rendered and every role's tools composed."""
+def verify(target, name):
+    """The check of a harness directory on disk, a draft or a copy of an
+    installed harness: loaded back, validated, its skill rendered and every
+    role's tools composed. A problem comes back as ok False with the
+    message, never a raise."""
     try:
         loaded = harness.load(str(target))
         warnings = harness.validate(loaded, name)
@@ -208,15 +210,19 @@ def _verify(target, name):
             routing.role_tools(role, loaded)
     except PplError as exc:
         return _refused(exc)
+    except UnicodeDecodeError as exc:
+        return _refused(PplError("HARNESS_INVALID", "a harness file is not UTF-8 text: %s" % exc))
     return {"ok": True, "errors": [], "warnings": warnings, "flags": flags(loaded)}
 
 
-def _checked(name, doc, fragments, root):
+def checked_copy(name, doc, fragments, root):
+    """(path, result) of a draft written to <root>/<name>/ and verified, or
+    (None, a refusal) when it cannot be written."""
     try:
         target = write(name, doc, fragments, root)
     except PplError as exc:
         return None, _refused(exc)
-    return target, _verify(target, name)
+    return target, verify(target, name)
 
 
 def check(name, doc, fragments):
@@ -225,7 +231,19 @@ def check(name, doc, fragments):
     composed. A draft problem comes back as ok False with the message, never a
     raise."""
     with _CHECK_LOCK:
-        return _checked(name, doc, fragments, drafts_dir())[1]
+        return checked_copy(name, doc, fragments, drafts_dir())[1]
+
+
+def check_private(name, doc, fragments):
+    """The checks of `check` on a scratch copy that is removed after, so a
+    draft of the same name that the wizard keeps in drafts_dir() is never
+    rewritten, and two checks never meet."""
+    drafts_dir().mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(dir=drafts_dir(), prefix=".check-"))
+    try:
+        return checked_copy(name, doc, fragments, scratch)[1]
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def install(name, doc, fragments, replace, emit):
@@ -237,7 +255,7 @@ def install(name, doc, fragments, replace, emit):
     drafts_dir().mkdir(parents=True, exist_ok=True)
     private = Path(tempfile.mkdtemp(dir=drafts_dir(), prefix=".install-"))
     try:
-        target, result = _checked(name, doc, fragments, private)
+        target, result = checked_copy(name, doc, fragments, private)
         if not result["ok"]:
             raise PplError("HARNESS_INVALID", "; ".join(result["errors"]))
         loaded = harness.load(str(target))
