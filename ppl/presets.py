@@ -1,6 +1,7 @@
 """Model presets for the wizard: a tier and an effort per role. A preset
 names tiers, never models, so the models stay in routing.toml [tiers] and a
 preset fits whichever models the user put behind each tier."""
+from . import routing
 
 PRESETS = {
     "economy": {
@@ -32,9 +33,9 @@ LABELS = {"economy": "Economy", "balanced": "Balanced", "max": "Max quality"}
 COST = {"economy": "low", "balanced": "medium", "max": "high"}
 
 
-def _same(entry, spec):
+def _same(entry, role, spec):
     return (entry.get("tier") == spec["tier"]
-            and (entry.get("params") or {}).get("effort") == spec["effort"]
+            and routing.role_params(entry, role).get("effort") == spec["effort"]
             and dict(entry.get("by_risk") or {}) == spec.get("by_risk", {}))
 
 
@@ -42,7 +43,7 @@ def matching(config):
     """The preset routing.toml's roles equal exactly, or None."""
     roles = config.get("roles") or {}
     for name, spec in PRESETS.items():
-        if all(_same(roles.get(role) or {}, role_spec) for role, role_spec in spec.items()):
+        if all(_same(roles.get(role) or {}, role, role_spec) for role, role_spec in spec.items()):
             return name
     return None
 

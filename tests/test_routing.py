@@ -166,6 +166,14 @@ class TestRouting(unittest.TestCase):
             self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
             self.assertIn("by_risk must be a table", caught.exception.message)
 
+    def test_a_non_table_params_is_schema_invalid_when_the_agent_file_is_rendered(self):
+        self.use_example_with('[roles.ppl-verifier]\ntier = "good"\nparams = { effort = "xhigh" }',
+                              '[roles.ppl-verifier]\ntier = "good"\nparams = "fast"')
+        with self.assertRaises(PplError) as caught:
+            routing.render("ppl-verifier", self.doc)
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("ppl-verifier", caught.exception.message)
+
     def test_a_non_string_tier_or_provider_name_is_schema_invalid(self):
         cases = {
             "role tier": ('[roles.ppl-briefer]\ntier = "good"',

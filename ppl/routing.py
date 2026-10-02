@@ -199,6 +199,16 @@ def models_in_use(risk=None):
     return found
 
 
+def role_params(entry, role_name):
+    """The params table of a role entry, empty when it has none."""
+    params = entry.get("params")
+    if params is None:
+        return {}
+    if not isinstance(params, dict):
+        raise PplError("SCHEMA_INVALID", "role %r params must be a table" % role_name)
+    return params
+
+
 def validate_config(config):
     """Refuse a routing document ppl cannot route with: a missing role, an
     unknown tier or provider, a by_risk tier that is not declared, params that
@@ -210,10 +220,7 @@ def validate_config(config):
         _entry_and_provider(config, name)
         for level, tier in _by_risk(config, name).items():
             _by_risk_tier(config, name, level, tier)
-        params = config["roles"][name].get("params") or {}
-        if not isinstance(params, dict):
-            raise PplError("SCHEMA_INVALID", "role %r params must be a table" % name)
-        effort = params.get("effort")
+        effort = role_params(config["roles"][name], name).get("effort")
         if effort is not None and effort not in EFFORT_LEVELS:
             raise PplError("SCHEMA_INVALID", "role %r effort %r is not one of %s"
                            % (name, effort, ", ".join(EFFORT_LEVELS)))
@@ -221,7 +228,8 @@ def validate_config(config):
 
 def apply_preset(name):
     """Rewrite every role's tier, effort and by_risk from a preset and save
-    routing.toml. The tiers, the providers and every other param stay."""
+    routing.toml. A provider and model a role pinned itself are replaced by
+    its tier. The tiers, the providers and every param but effort stay."""
     from . import presets, tomlout
     if name not in presets.PRESETS:
         raise PplError("SCHEMA_INVALID", "unknown preset %r (presets: %s)"
@@ -238,7 +246,7 @@ def apply_preset(name):
         entry.pop("provider", None)
         entry.pop("model", None)
         entry["tier"] = spec["tier"]
-        entry["params"] = dict(entry.get("params") or {}, effort=spec["effort"])
+        entry["params"] = dict(role_params(entry, role_name), effort=spec["effort"])
         if spec.get("by_risk"):
             entry["by_risk"] = dict(spec["by_risk"])
         else:
@@ -258,7 +266,7 @@ def summary(config=None):
         entry, _ = _entry_and_provider(config, name)
         rows.append({"role": name, "description": BASE_TOOLS[name]["description"],
                      "tier": raw.get("tier"), "model": entry["model"],
-                     "effort": (raw.get("params") or {}).get("effort"),
+                     "effort": role_params(raw, name).get("effort"),
                      "by_risk": dict(_by_risk(config, name))})
     return rows
 
@@ -325,7 +333,7 @@ def render(name, harness_doc):
              "description: %s" % meta["description"],
              "tools: [%s]" % ", ".join(role_tools(name, harness_doc)),
              "model: %s" % entry["model"]]
-    effort = (entry.get("params") or {}).get("effort")
+    effort = role_params(entry, name).get("effort")
     if effort:
         lines.append("effort: %s" % effort)
     lines += ["maxTurns: %d" % meta["max_turns"],

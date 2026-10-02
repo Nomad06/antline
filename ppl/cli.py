@@ -631,6 +631,10 @@ def cmd_control(args):
 
 
 def cmd_routing(args):
+    if args.preset and args.action != "preset":
+        flag = {"apply": "--harness <name>", "show": "--role <name>"}[args.action]
+        raise PplError("SCHEMA_INVALID",
+                       "ppl routing %s takes %s, not a positional name" % (args.action, flag))
     if args.action == "preset":
         if not args.preset:
             raise PplError("SCHEMA_INVALID", "name a preset: ppl routing preset economy|balanced|max")
