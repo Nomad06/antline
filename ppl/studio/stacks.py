@@ -35,8 +35,10 @@ SAFE_GRADLE_ARGS = (r"^(?:--?[A-Za-z][A-Za-z0-9-]*|--"
 INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "fish", "ksh", "csh", "tcsh", "python",
                           "node", "perl", "ruby", "php", "lua", "tclsh", "pwsh", "osascript",
                           "awk", "gawk", "mawk", "busybox", "env", "sudo", "doas", "xargs", "eval",
-                          "exec", "source", ".", "command", "nohup", "time", "timeout", "nice"})
-_VERSION_SUFFIX_RE = re.compile(r"[0-9][0-9.]*$")
+                          "exec", "source", ".", "command", "nohup", "time", "timeout", "nice",
+                          "nodejs", "pypy", "ipython", "ash", "rbash", "xonsh", "nu", "tsx",
+                          "ts-node", "java", "jshell", "ssh", "find", "expect"})
+_VERSION_SUFFIX_RE = re.compile(r"[-_]?[0-9][0-9.]*$")
 
 NAMING_GENERIC = ("Name the test with a path or a qualified name "
                   "(`app.FooTest`, `mod::my_test`, `tests/test_x.py::T::t`, `./pkg/...`)")
@@ -112,9 +114,10 @@ PACKAGE_JSON_MAX_BYTES = 200_000
 
 
 def is_interpreter(argv0):
-    """True when the program's basename, less one trailing version (`python3.12`,
-    `node18`, `perl5.36`), is in INTERPRETERS."""
-    name = _VERSION_SUFFIX_RE.sub("", os.path.basename(argv0))
+    """True when the program's basename, in lower case and less one trailing
+    version (`python3.12`, `node18`, `bash-5.2`), is in INTERPRETERS. The case
+    is folded because a case-insensitive filesystem runs `SH` as `sh`."""
+    name = _VERSION_SUFFIX_RE.sub("", os.path.basename(argv0).lower())
     return name in INTERPRETERS
 
 

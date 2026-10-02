@@ -46,6 +46,7 @@ def fake(stdout, returncode=0):
     return runner, calls
 
 
+ZWSP = "\u200b"
 FORBIDDEN = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
 UNCLEAN = ("\ud800", "\x00", "\x0b", "\x0c", "\x1b", "\x1c", "\x7f", "\x85", "\x9f",
            "\u2028", "\u2029")
@@ -183,7 +184,14 @@ class TestExtract(panel_client.StudioTestCase):
                              ("timeout", ["test"]), ("nice", ["test"]),
                              ("python3.12", ["test"]), ("python3", ["test"]), ("node18", ["test"]),
                              ("perl5.36", ["test"]), ("./python3.11", ["test"]),
-                             ("/usr/bin/env", ["test"]), ("tools/ruby3.3", ["test"])):
+                             ("/usr/bin/env", ["test"]), ("tools/ruby3.3", ["test"]),
+                             ("Bash", ["test"]), ("SH", ["test"]), ("PYTHON3.12", ["test"]),
+                             ("Node18", ["test"]), ("bash-5.2", ["test"]), ("nodejs", ["test"]),
+                             ("pypy3", ["test"]), ("ipython", ["test"]), ("ash", ["test"]),
+                             ("rbash", ["test"]), ("xonsh", ["test"]), ("nu", ["test"]),
+                             ("tsx", ["test"]), ("ts-node", ["test"]), ("java", ["test"]),
+                             ("jshell", ["test"]), ("ssh", ["test"]), ("find", ["test"]),
+                             ("expect", ["test"]), ("./Python3.11", ["test"])):
             with self.subTest(argv0=argv0, goals=goals):
                 result = self.shapes_result([shape(argv0, goals)])
                 self.assertEqual(result["extracted"]["test_shapes"], [])
@@ -246,6 +254,71 @@ class TestExtract(panel_client.StudioTestCase):
                 result, _ = self.run_with(answer(dict(GOOD_DRAFT, notes=["a" + char + "b"])))
                 self.assertEqual([text for text in strings(result["extracted"])
                                   if FORBIDDEN.search(text)], [])
+
+    def test_every_at_sign_in_the_extraction_text_is_defused(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
+        files = [{"path": "packages/@scope/CLAUDE.md",
+                  "text": "See @/etc/x and @~/.zshrc\n @~/y\n@../z\n@a first on its line\n"
+                          "x@@y\nmail me@host\n"},
+                 {"path": "AGENTS.md", "text": "@AGENTS.md"}]
+        text = extract.bundle(files)
+        offenders = [index for index, char in enumerate(text)
+                     if char == "@" and (index == 0 or text[index - 1] != ZWSP)]
+        self.assertEqual(offenders, [])
+        self.assertEqual(text.count("@"), sum(2 * item["path"].count("@") + item["text"].count("@")
+                                              for item in files))
+        self.assertEqual(text.count(ZWSP), text.count("@"))
+        self.assertIsNone(re.search(r"(^|\s)@", text))
+        self.assertNotIn("\n@", text)
+
+    def test_the_runner_receives_no_text_that_can_attach_a_file(self):
+        files = [{"path": "CLAUDE.md", "text": "Docs: @~/.ssh/id_rsa\n@../secret.txt\nnpm ci\n"}]
+        runner, calls = fake(answer())
+        with mock.patch.object(extract, "RUNNER", runner):
+            extract.extract(files, lambda line: None)
+        text = calls[0][1]
+        self.assertIsNone(re.search(r"(^|\s)@", text))
+        self.assertIn("3: npm ci", text)
+        self.assertNotIn("@", " ".join(calls[0][0]))
+
+    def test_check_removes_the_zero_width_spaces_it_finds(self):
+        marked = dict(GOOD_DRAFT,
+                      gates=[{"name": "Pl" + ZWSP + "aywright", "command": "npx " + ZWSP + "@playwright/test",
+                              "source": "CLAUDE.md:" + ZWSP + "3"}],
+                      test_shapes=[{"argv0": "np" + ZWSP + "x", "goals": ["te" + ZWSP + "st"],
+                                    "example": "npx " + ZWSP + "@playwright/test x", "source": "x"}],
+                      env=[{"name": "PW" + ZWSP + "_TOKEN", "value": ZWSP + "@home/x", "source": "x"}],
+                      notes=["see " + ZWSP + "@docs"], default_branch="ma" + ZWSP + "in",
+                      task_key_pattern="^A" + ZWSP + "PP-[0-9]+$")
+        clean, dropped = extract.check(marked)
+        self.assertEqual(dropped, [])
+        self.assertEqual(clean["gates"][0]["command"], "npx @playwright/test")
+        self.assertEqual(clean["gates"][0]["name"], "Playwright")
+        self.assertEqual(clean["gates"][0]["source"], "CLAUDE.md:3")
+        self.assertEqual(clean["test_shapes"][0]["argv0"], "npx")
+        self.assertEqual(clean["test_shapes"][0]["goals"], ["test"])
+        self.assertEqual(clean["test_shapes"][0]["example"], "npx @playwright/test x")
+        self.assertEqual(clean["env"][0], {"name": "PW_TOKEN", "value": "@home/x", "source": "x"})
+        self.assertEqual(clean["notes"], ["see @docs"])
+        self.assertEqual(clean["default_branch"], "main")
+        self.assertEqual(clean["task_key_pattern"], "^APP-[0-9]+$")
+        self.assertEqual([text for text in strings(clean) if ZWSP in text], [])
+
+    def test_a_scratch_directory_that_cannot_be_removed_does_not_fail_the_answer(self):
+        real = extract.tempfile.TemporaryDirectory
+        seen = {}
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            return real(*args, **kwargs)
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, stdout=answer(), stderr="")
+
+        with mock.patch.object(extract.tempfile, "TemporaryDirectory", spy), \
+                mock.patch.object(extract.subprocess, "run", fake_run):
+            extract.extract(FILES, lambda line: None)
+        self.assertIs(seen.get("ignore_cleanup_errors"), True)
 
     def test_a_result_that_is_not_text_fails_with_a_reason(self):
         for value in (5, [1], {"a": 1}, True):

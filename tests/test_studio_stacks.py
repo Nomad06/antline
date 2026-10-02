@@ -349,12 +349,16 @@ class TestInterpreters(unittest.TestCase):
                                     "python", "node", "perl", "ruby", "php", "lua", "tclsh",
                                     "pwsh", "osascript", "awk", "gawk", "mawk", "busybox", "env",
                                     "sudo", "doas", "xargs", "eval", "exec", "source", ".",
-                                    "command", "nohup", "time", "timeout", "nice"}))
+                                    "command", "nohup", "time", "timeout", "nice", "nodejs",
+                                    "pypy", "ipython", "ash", "rbash", "xonsh", "nu", "tsx",
+                                    "ts-node", "java", "jshell", "ssh", "find", "expect"}))
 
     def test_a_version_suffix_and_a_directory_do_not_hide_an_interpreter(self):
         for argv0 in ("python3.12", "python3", "python", "node18", "perl5.36", "ruby3.3",
                       "bash5.2", "./python3.11", "/usr/bin/env", "tools/bash", "awk", "gawk",
-                      "busybox", ".", "source", "./.", "command", "timeout", "sh"):
+                      "busybox", ".", "source", "./.", "command", "timeout", "sh", "Bash", "SH",
+                      "PYTHON3.12", "Node18", "bash-5.2", "sh_5", "nodejs", "pypy3", "ts-node18",
+                      "./Python3.11", "/USR/BIN/ENV", "ssh", "find", "java", "expect"):
             with self.subTest(argv0=argv0):
                 self.assertTrue(stacks.is_interpreter(argv0))
 
