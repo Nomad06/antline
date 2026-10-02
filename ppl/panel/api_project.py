@@ -1,7 +1,7 @@
 """The wizard's harness screen: inspect the repository, draft from a stack
 preset, draft from Claude reading the md files, check and install a draft."""
 from ..errors import PplError
-from ..studio import extract, project, stacks
+from ..studio import drafts, extract, project, stacks
 from .jobs import JOBS
 
 
@@ -36,7 +36,28 @@ def _extract(params, body, query):
     return {"job": JOBS.start("extract", work)}
 
 
+def _parts(body):
+    body = body or {}
+    return body.get("name"), body.get("doc"), body.get("fragments") or {}
+
+
+def _check(params, body, query):
+    name, doc, fragments = _parts(body)
+    drafts.check_name(name)
+    return drafts.check(name, doc, fragments)
+
+
+def _install(params, body, query):
+    name, doc, fragments = _parts(body)
+    drafts.check_name(name)
+    replace = bool((body or {}).get("replace"))
+    return {"job": JOBS.start("setup",
+                              lambda emit: drafts.install(name, doc, fragments, replace, emit))}
+
+
 def register(router):
     router.add("POST", "/api/project/inspect", _inspect)
     router.add("POST", "/api/harness/preset", _preset)
     router.add("POST", "/api/harness/extract", _extract)
+    router.add("POST", "/api/harness/draft/check", _check)
+    router.add("POST", "/api/harness/draft/install", _install)

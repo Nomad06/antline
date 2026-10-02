@@ -581,6 +581,18 @@ allow_test = "tests/test_studio_extract.py::TestExtract::test_a_good_answer_beco
 owner = "panel"
 residual = "the md files are untrusted text a model reads: the item checks drop an interpreter or absolute program, a goal that is not a plain word and any control character, and what remains is lexical - npx can run a dotted package name it is given, an env prefix carries any value once the files name a build variable, and gate commands are shell by design, reviewed in the form and not decided by the model"
 
+[[rule]]
+id = "R-STUDIO-SAME-VALIDATION"
+statement = "A harness draft the studio checks or installs is refused by the same harness.validate and role-tool composition the CLI runs, so a draft that grants a role a tracker write tool or a joined tool list is refused in the browser as it is on the command line."
+scope = "panel"
+event = "POST /api/harness/draft/check, POST /api/harness/draft/install"
+enforcement = "blocking"
+hook_or_check = "ppl/studio/drafts.py:check, ppl/studio/drafts.py:install, ppl/harness.py:validate, ppl/routing.py:role_tools"
+deny_test = "tests/test_studio_drafts.py::TestCheck::test_a_draft_granting_a_tracker_write_tool_is_refused, tests/test_studio_drafts.py::TestCheck::test_a_draft_granting_a_joined_tool_list_is_refused, tests/test_studio_drafts.py::TestInstall::test_install_refuses_an_invalid_draft_before_setup_runs"
+allow_test = "tests/test_studio_drafts.py::TestCheck::test_a_preset_draft_checks_clean"
+owner = "panel"
+residual = "the flags the form shows for a permissive shape are advice, not a refusal: a user who ticks them installs the shape, and the guard enforces it as written"
+
 # ---------------------------------------------------------------------------
 # Done gate
 # ---------------------------------------------------------------------------
