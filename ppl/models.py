@@ -19,7 +19,7 @@ DEFAULT_TTL_DAYS = 30
 PROBE_SYSTEM_PROMPT = "Answer with the single word OK."
 PROBE_TIMEOUT_SECONDS = 90
 VERSION_TIMEOUT_SECONDS = 20
-_SESSION_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
+SESSION_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
 _TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -67,7 +67,7 @@ def parse_probe(returncode, stdout, stderr):
 
 def probe(model, binary="claude", env=None):
     environment = dict(env if env is not None else os.environ)
-    for marker in _SESSION_MARKERS:
+    for marker in SESSION_MARKERS:
         environment.pop(marker, None)
     try:
         result = subprocess.run(probe_command(model, binary), capture_output=True, text=True,
