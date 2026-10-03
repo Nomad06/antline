@@ -640,8 +640,8 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 157 rows: 114 `blocking`, 16 `soft` and 27 `n/a`. Of the
-`n/a` rows, 21 are `GAP:` - a rule this design names and no code performs - and 6 are
+As of this commit the table carries 158 rows: 114 `blocking`, 16 `soft` and 28 `n/a`. Of the
+`n/a` rows, 21 are `GAP:` - a rule this design names and no code performs - and 7 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the orchestrator's dispatch prompt for the test worker
 being unchecked (the hook closes the worker's own tool-call reads, not what it is handed), the

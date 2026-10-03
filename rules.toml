@@ -629,6 +629,18 @@ allow_test = ""
 owner = "panel"
 residual = "GAP: nothing confines it. The studio runs in-process with ppl's whole write surface, as the panel does (R-PANEL-STATE-WRITE): what keeps its writes narrow is which functions its routes call and that files.resolve names only routing.toml and the harness files. The guard hook never sees these writes, they are not tool calls"
 
+[[rule]]
+id = "R-STUDIO-PLAYGROUND-SANDBOX"
+statement = "The cage playground builds its run under a temporary data root and runs the real hook against it, so a check never touches the real runs directory."
+scope = "panel"
+event = "POST /api/playground"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "panel"
+residual = "PROPERTY: playground.check hands the hook a PPL_HOME made by tempfile.TemporaryDirectory and deletes it when the hook has answered, and tests/test_studio_playground.py::TestPlayground::test_the_playground_leaves_no_files_behind shows it; nothing refuses a change that would point the playground at the real data root"
+
 # ---------------------------------------------------------------------------
 # Done gate
 # ---------------------------------------------------------------------------
