@@ -617,6 +617,18 @@ allow_test = "tests/test_studio_files.py::TestSave::test_a_save_with_the_current
 owner = "panel"
 residual = "the check and the write sit under one lock in the studio process only: a terminal edit that lands between the check and os.replace is overwritten, a window of microseconds"
 
+[[rule]]
+id = "R-STUDIO-WRITE-SURFACE"
+statement = "The studio writes config.toml, routing.toml, the harness directories, the agent and skill files apply renders, and ~/.ppl/studio, and nothing else."
+scope = "panel"
+event = "every studio write route"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "panel"
+residual = "GAP: nothing confines it. The studio runs in-process with ppl's whole write surface, as the panel does (R-PANEL-STATE-WRITE): what keeps its writes narrow is which functions its routes call and that files.resolve names only routing.toml and the harness files. The guard hook never sees these writes, they are not tool calls"
+
 # ---------------------------------------------------------------------------
 # Done gate
 # ---------------------------------------------------------------------------

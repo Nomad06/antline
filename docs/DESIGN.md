@@ -640,8 +640,8 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 156 rows: 114 `blocking`, 16 `soft` and 26 `n/a`. Of the
-`n/a` rows, 20 are `GAP:` - a rule this design names and no code performs - and 6 are
+As of this commit the table carries 157 rows: 114 `blocking`, 16 `soft` and 27 `n/a`. Of the
+`n/a` rows, 21 are `GAP:` - a rule this design names and no code performs - and 6 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the orchestrator's dispatch prompt for the test worker
 being unchecked (the hook closes the worker's own tool-call reads, not what it is handed), the
@@ -649,12 +649,12 @@ stage 6 preconditions being unchecked before the push, the four isolation-check 
 5.4, the harness gate recipes of section 11, the three blind spots the matrix has as GAP rows
 of its own, a foreign finding's owner not actually being notified (6.6a), per-lane resources
 (test databases, ports, temp directories, queues, object storage) having no isolation at all
-beyond the worktree's own files (5.4), and seven rules only prose or a convention holds: the
-content of a tracker write, the panel's own state writes, write/forbid disjointness at `ppl
-boundary set`, the USD spend coming before a dispatch, a per-role count of format violations,
-the briefer returning `SPEC_GAP` instead of inventing, and the keys inside a provider's
-`params`. These counts are read back out of `rules.toml` by the suite, so this
-paragraph cannot drift from the table it describes [R-DOC-RULE-IDS].
+beyond the worktree's own files (5.4), and eight rules only prose or a convention holds: the
+content of a tracker write, the panel's own state writes, the studio's write surface,
+write/forbid disjointness at `ppl boundary set`, the USD spend coming before a dispatch, a
+per-role count of format violations, the briefer returning `SPEC_GAP` instead of inventing,
+and the keys inside a provider's `params`. These counts are read back out of `rules.toml`
+by the suite, so this paragraph cannot drift from the table it describes [R-DOC-RULE-IDS].
 
 ### 5.6 Harness
 
