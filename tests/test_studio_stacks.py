@@ -415,6 +415,15 @@ class TestSafeGradleArgs(unittest.TestCase):
         for token in ("--tests", "app.FooTest", "app.FooTest.bar"):
             self.assertIsNotNone(re.fullmatch(stacks.SAFE_GRADLE_ARGS, token), token)
 
+    def test_gradle_and_maven_and_their_wrappers_read_a_colon_as_a_task_in_any_case(self):
+        for argv0 in ("gradle", "./gradlew", "Gradlew", "./Gradlew", "GRADLE", "gradle-8.5",
+                      "mvn", "./mvnw", "MVN", "mvn3", "tools/mvnw", "Mvnw_3.9"):
+            with self.subTest(argv0=argv0):
+                self.assertTrue(stacks.colon_runs_a_task(argv0))
+        for argv0 in ("npm", "npx", "go", "cargo", "make", "pytest", "gradle-wrapper", "bazel"):
+            with self.subTest(argv0=argv0):
+                self.assertFalse(stacks.colon_runs_a_task(argv0))
+
     def test_only_the_gradle_shape_uses_the_class_without_a_colon(self):
         for stack, spec in stacks.STACKS.items():
             for row in spec.get("shapes", []):

@@ -1749,11 +1749,12 @@ numbered data, from an empty temporary working directory, and the call writes no
 [R-STUDIO-EXTRACT-LEAN]. `claude -p` attaches any file a whitespace-led `@path` in its prompt
 names, tools or not, so every `@` in the file text is sent behind a zero-width space and the
 answer has those stripped. Every value Claude returns is checked before it reaches the form:
-one line with no control character, a plain program name (never a shell or interpreter, an
+one line with no control or format character, a plain program name (never a shell or interpreter, an
 absolute path or a `..` path), plain-word goals [R-STUDIO-EXTRACT-LEAN]. Claude is not asked for
 a command-shape regex: a test-worker shape comes back as a program, its goals and an example, and its free
-arguments get the fixed token class `SAFE_FREE_ARGS` (`SAFE_GRADLE_ARGS` for Gradle, which
-reads `sub:task` as one more task): a bare flag, `--`, or a relative path or qualified name,
+arguments get the fixed token class `SAFE_FREE_ARGS` (`SAFE_GRADLE_ARGS`, without the colon,
+for Gradle, Maven and their wrappers in any letter case, which read `sub:task` and `plugin:goal`
+as one more task): a bare flag, `--`, or a relative path or qualified name,
 never a plain word [R-STUDIO-EXTRACT-LEAN], so `go doc ... test` or `npm run x test` cannot ride
 beside the `test` goal of a shape that does not look at token order [R-STUDIO-EXTRACT-LEAN]. A bare flag the tool
 reads as a write or exec target (`go test -o x.bin`) still passes: the shapes stay lexical.

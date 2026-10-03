@@ -25,9 +25,11 @@ from ..errors import PplError
 # shell metacharacter.
 SAFE_FREE_ARGS = (r"^(?:--?[A-Za-z][A-Za-z0-9-]*|--"
                   r"|(?!(?:.*[/:])?\.\.(?:[/:]|$))[A-Za-z0-9_+,.][A-Za-z0-9_+,-]*[./:][A-Za-z0-9_./:+,-]*)$")
-# Gradle reads `sub:task` as another task to run, so its class has no `:` at all.
+# Gradle reads `sub:task` and Maven `plugin:goal` as another task to run, so the
+# class of their shapes (colon_runs_a_task) has no `:` at all.
 SAFE_GRADLE_ARGS = (r"^(?:--?[A-Za-z][A-Za-z0-9-]*|--"
                     r"|(?!(?:.*/)?\.\.(?:/|$))[A-Za-z0-9_+,.][A-Za-z0-9_+,-]*[./][A-Za-z0-9_./+,-]*)$")
+COLON_TASK_PROGRAMS = frozenset({"gradle", "gradlew", "mvn", "mvnw"})
 
 # Programs that run whatever they are given: a test-worker shape for one of them
 # would let the worker run any script or command line. Matched by is_interpreter,
@@ -51,8 +53,10 @@ NAMING_GRADLE = ("Name the test by its class or method "
 INSTALL_EDITABLE = "python3 -m pip install -e ."
 INSTALL_REQUIREMENTS = "python3 -m pip install -r requirements.txt"
 
-# The presets leave the shapes' env_prefix off: the cage takes any value in an
-# env assignment, so one token ahead of argv0 would carry what the classes above refuse.
+# The node, python, gradle, go and rust presets leave the shapes' env_prefix off: the
+# cage takes any value in an env assignment, so one token ahead of argv0 would carry
+# what the classes above refuse. maven, make and generic keep the shapes of their
+# example harness, which take an env prefix.
 STACKS = {
     "node": {
         "label": "Node.js (npm)", "markers": ("package.json",), "base": "example-generic",
@@ -113,12 +117,23 @@ FRAGMENT_GLOBS = ("skill/*.md", "templates/*.part")
 PACKAGE_JSON_MAX_BYTES = 200_000
 
 
+def _program(argv0):
+    """The program's basename in lower case, less one trailing version
+    (`python3.12`, `node18`, `bash-5.2`). The case is folded because a
+    case-insensitive filesystem runs `SH` as `sh`."""
+    return _VERSION_SUFFIX_RE.sub("", os.path.basename(argv0).lower())
+
+
 def is_interpreter(argv0):
-    """True when the program's basename, in lower case and less one trailing
-    version (`python3.12`, `node18`, `bash-5.2`), is in INTERPRETERS. The case
-    is folded because a case-insensitive filesystem runs `SH` as `sh`."""
-    name = _VERSION_SUFFIX_RE.sub("", os.path.basename(argv0).lower())
-    return name in INTERPRETERS
+    """True when the program, folded as _program folds it, is in INTERPRETERS."""
+    return _program(argv0) in INTERPRETERS
+
+
+def colon_runs_a_task(argv0):
+    """True for Gradle and Maven and their wrappers, folded as _program folds
+    them (`./Gradlew`, `GRADLE`, `mvn3`): they read a token with a `:` as one
+    more task or goal to run."""
+    return _program(argv0) in COLON_TASK_PROGRAMS
 
 
 def detect(root):

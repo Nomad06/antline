@@ -57,11 +57,21 @@ SCHEMA = {
     "required": ["gates", "test_shapes", "env", "default_branch", "task_key_pattern", "notes"],
 }
 
-# No C0 or C1 control, no DEL, no Unicode line or paragraph separator and no
-# surrogate: a line break splits a value, a lone surrogate cannot be written out
-# as TOML. Always used with fullmatch, so a trailing newline cannot slip past a $.
-_CLEAN = r"[^\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]"
+# No C0 or C1 control, no DEL, no Unicode line or paragraph separator, no
+# surrogate and no Unicode format character (category Cf: bidi controls, zero
+# width joiners, a byte order mark, tag characters): a line break splits a value,
+# a lone surrogate cannot be written out as TOML, and a format character makes a
+# gate read in the review form otherwise than it runs. The zero width space the
+# bundle puts before every @ is a Cf too, and check strips it before this class
+# sees the text. Always used with fullmatch, so a trailing newline cannot slip
+# past a $.
+_FORMAT = (r"\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f"
+           r"\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd"
+           r"\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001"
+           r"\U000e0020-\U000e007f")
+_CLEAN = r"[^\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff" + _FORMAT + "]"
 _TEXT_RE = re.compile(_CLEAN + "*")
+_UNCLEAN = "holds a control or format character or a line break"
 _ONE_LINE_RE = re.compile(_CLEAN + "{1,400}")
 _VALUE_RE = re.compile(_CLEAN + "{0,400}")
 _ARGV0_RE = re.compile(r"[A-Za-z0-9_./-]{1,64}")
@@ -211,9 +221,9 @@ def check(draft):
             drop("gate", item, "the gate has no name")
         elif not _ONE_LINE_RE.fullmatch(item["command"].strip()):
             drop("gate", item, "the command is empty, longer than 400 characters, spans lines "
-                 "or holds a control character")
+                 "or holds a control or format character")
         elif _unclean(item, ("name", "source")):
-            drop("gate", item, "the name or the source holds a control character or a line break")
+            drop("gate", item, "the name or the source " + _UNCLEAN)
         else:
             clean["gates"].append({"name": item["name"].strip()[:60],
                                    "command": item["command"].strip(),
@@ -233,9 +243,9 @@ def check(draft):
             drop("shape", item, "a goal is not a plain word")
         elif not _ONE_LINE_RE.fullmatch(item["example"].strip()):
             drop("shape", item, "the example is empty, longer than 400 characters, spans lines "
-                 "or holds a control character")
+                 "or holds a control or format character")
         elif _unclean(item, ("source",)):
-            drop("shape", item, "the source holds a control character or a line break")
+            drop("shape", item, "the source " + _UNCLEAN)
         else:
             clean["test_shapes"].append({"argv0": item["argv0"], "goals": list(dict.fromkeys(goals)),
                                          "example": item["example"].strip(),
@@ -249,9 +259,9 @@ def check(draft):
             drop("env", item, "the name is not a shell variable name")
         elif not _VALUE_RE.fullmatch(item["value"]):
             drop("env", item, "the value is longer than 400 characters, spans lines "
-                 "or holds a control character")
+                 "or holds a control or format character")
         elif _unclean(item, ("source",)):
-            drop("env", item, "the source holds a control character or a line break")
+            drop("env", item, "the source " + _UNCLEAN)
         else:
             clean["env"].append({"name": item["name"], "value": item["value"],
                                  "source": item["source"].strip()[:200]})
@@ -264,7 +274,7 @@ def check(draft):
     pattern = (draft.get("task_key_pattern") or "").strip()
     if pattern:
         if not _TEXT_RE.fullmatch(pattern):
-            drop("task_key_pattern", pattern, "the pattern holds a control character or a line break")
+            drop("task_key_pattern", pattern, "the pattern " + _UNCLEAN)
         else:
             try:
                 if len(pattern) > 200:
@@ -278,7 +288,7 @@ def check(draft):
         if text and _TEXT_RE.fullmatch(text):
             clean["notes"].append(text)
         elif text:
-            drop("note", note, "the note holds a control character")
+            drop("note", note, "the note holds a control or format character")
     return clean, dropped
 
 
@@ -323,9 +333,9 @@ def _named_gates(gates):
 
 
 def _free_args(argv0):
-    """Gradle reads a sub:task token as one more task to run, so its shapes
-    take the class without the colon."""
-    if os.path.basename(argv0) in ("gradle", "gradlew"):
+    """Gradle reads a sub:task token and Maven a plugin:goal token as one more
+    task to run, so their shapes take the class without the colon."""
+    if stacks.colon_runs_a_task(argv0):
         return stacks.SAFE_GRADLE_ARGS
     return stacks.SAFE_FREE_ARGS
 

@@ -4,6 +4,7 @@ import re
 import shlex
 import subprocess
 import sys
+import unicodedata
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -56,8 +57,31 @@ UNCLEAN = ("\ud800", "\x00", "\x0b", "\x0c", "\x1b", "\x1c", "\x7f", "\x85", "\x
            "\u2028", "\u2029")
 
 
+# Unicode format characters: bidi controls and isolates, zero width joiners, a
+# word joiner, a byte order mark, a soft hyphen and a tag character.
+FORMAT = ("\u202e", "\u202a", "\u2066", "\u2069", "\u200e", "\u200f", "\u200c", "\u200d",
+          "\u2060", "\ufeff", "\u00ad", "\U000e0041")
+
+
 def shape(argv0, goals=("test",)):
     return {"argv0": argv0, "goals": list(goals), "example": "x", "source": "x"}
+
+
+# One draft per string field of the answer, the character c inside the field.
+SLOTS = {
+    "gate name": lambda c: {"gates": [{"name": "a" + c + "b", "command": "make", "source": "x"}]},
+    "gate command": lambda c: {"gates": [{"name": "a", "command": "ma" + c + "ke", "source": "x"}]},
+    "gate source": lambda c: {"gates": [{"name": "a", "command": "make", "source": "x" + c + "y"}]},
+    "shape argv0": lambda c: {"test_shapes": [shape("np" + c + "x")]},
+    "shape goal": lambda c: {"test_shapes": [shape("npx", ["te" + c + "st"])]},
+    "shape example": lambda c: {"test_shapes": [dict(shape("npx"), example="a" + c + "b")]},
+    "shape source": lambda c: {"test_shapes": [dict(shape("npx"), source="a" + c + "b")]},
+    "env name": lambda c: {"env": [{"name": "A" + c + "B", "value": "1", "source": "x"}]},
+    "env value": lambda c: {"env": [{"name": "A", "value": "1" + c + "2", "source": "x"}]},
+    "env source": lambda c: {"env": [{"name": "A", "value": "1", "source": "x" + c + "y"}]},
+    "task key pattern": lambda c: {"task_key_pattern": "^A" + c + "B$"},
+    "default branch": lambda c: {"default_branch": "ma" + c + "in"},
+}
 
 
 def strings(value):
@@ -237,25 +261,8 @@ class TestExtract(panel_client.StudioTestCase):
 
     def test_no_string_item_keeps_a_control_character_surrogate_or_line_break(self):
         # rule: R-STUDIO-EXTRACT-LEAN
-        slots = {
-            "gate name": lambda c: {"gates": [{"name": "a" + c + "b", "command": "make",
-                                               "source": "x"}]},
-            "gate command": lambda c: {"gates": [{"name": "a", "command": "ma" + c + "ke",
-                                                  "source": "x"}]},
-            "gate source": lambda c: {"gates": [{"name": "a", "command": "make",
-                                                 "source": "x" + c + "y"}]},
-            "shape argv0": lambda c: {"test_shapes": [shape("np" + c + "x")]},
-            "shape goal": lambda c: {"test_shapes": [shape("npx", ["te" + c + "st"])]},
-            "shape example": lambda c: {"test_shapes": [dict(shape("npx"), example="a" + c + "b")]},
-            "shape source": lambda c: {"test_shapes": [dict(shape("npx"), source="a" + c + "b")]},
-            "env name": lambda c: {"env": [{"name": "A" + c + "B", "value": "1", "source": "x"}]},
-            "env value": lambda c: {"env": [{"name": "A", "value": "1" + c + "2", "source": "x"}]},
-            "env source": lambda c: {"env": [{"name": "A", "value": "1", "source": "x" + c + "y"}]},
-            "task key pattern": lambda c: {"task_key_pattern": "^A" + c + "B$"},
-            "default branch": lambda c: {"default_branch": "ma" + c + "in"},
-        }
         for char in UNCLEAN:
-            for slot, build in slots.items():
+            for slot, build in SLOTS.items():
                 with self.subTest(slot=slot, char=char):
                     result, _ = self.run_with(answer(dict(GOOD_DRAFT, **build(char))))
                     self.assertEqual(len(result["dropped"]), 1, result["dropped"])
@@ -265,6 +272,26 @@ class TestExtract(panel_client.StudioTestCase):
                 result, _ = self.run_with(answer(dict(GOOD_DRAFT, notes=["a" + char + "b"])))
                 self.assertFalse([text for text in strings(result["extracted"])
                                   if FORBIDDEN.search(text)])
+
+    def test_a_format_character_is_dropped_so_no_field_reads_otherwise_than_it_runs(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
+        for char in FORMAT:
+            for slot, build in SLOTS.items():
+                with self.subTest(slot=slot, char=hex(ord(char))):
+                    result, _ = self.run_with(answer(dict(GOOD_DRAFT, **build(char))))
+                    self.assertEqual(len(result["dropped"]), 1, result["dropped"])
+                    self.assertFalse([text for text in strings(result["extracted"]) if char in text])
+            with self.subTest(slot="note", char=hex(ord(char))):
+                result, _ = self.run_with(answer(dict(GOOD_DRAFT, notes=["a" + char + "b"])))
+                self.assertEqual(result["extracted"]["notes"], [])
+                self.assertEqual([item["kind"] for item in result["dropped"]], ["note"])
+
+    def test_every_format_character_python_knows_is_outside_the_one_line_class(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
+        found = [chr(code) for code in range(sys.maxunicode + 1)
+                 if unicodedata.category(chr(code)) == "Cf"]
+        self.assertIn("\u202e", found)
+        self.assertFalse([hex(ord(char)) for char in found if extract._TEXT_RE.fullmatch(char)])
 
     def test_every_at_sign_in_the_extraction_text_is_defused(self):
         # rule: R-STUDIO-EXTRACT-LEAN
@@ -294,6 +321,7 @@ class TestExtract(panel_client.StudioTestCase):
         self.assertNotIn("@", " ".join(calls[0][0]))
 
     def test_check_removes_the_zero_width_spaces_it_finds(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
         marked = dict(GOOD_DRAFT,
                       gates=[{"name": "Pl" + ZWSP + "aywright", "command": "npx " + ZWSP + "@playwright/test",
                               "source": "CLAUDE.md:" + ZWSP + "3"}],
@@ -314,7 +342,8 @@ class TestExtract(panel_client.StudioTestCase):
         self.assertEqual(clean["notes"], ["see @docs"])
         self.assertEqual(clean["default_branch"], "main")
         self.assertEqual(clean["task_key_pattern"], "^APP-[0-9]+$")
-        self.assertEqual([text for text in strings(clean) if ZWSP in text], [])
+        for text in strings(clean):
+            self.assertNotIn(ZWSP, text)
 
     def test_a_scratch_directory_that_cannot_be_removed_does_not_fail_the_answer(self):
         real = extract.tempfile.TemporaryDirectory
@@ -440,6 +469,24 @@ class TestMerge(unittest.TestCase):
                    "source": "CLAUDE.md:3"}]
         merged = extract.merge(self.preset(), self.checked(dict(GOOD_DRAFT, test_shapes=shapes)))
         self.assertEqual(merged["doc"]["guard"]["shape"][0]["free_args"], stacks.SAFE_GRADLE_ARGS)
+
+    def test_an_extracted_maven_or_gradle_shape_refuses_a_colon_task_beside_the_goal(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
+        programs = ("mvn", "./mvnw", "./Gradlew", "GRADLE", "gradle", "./gradlew")
+        shapes = [{"argv0": argv0, "goals": ["test"], "example": "%s test" % argv0, "source": "x"}
+                  for argv0 in programs]
+        merged = extract.merge(self.preset(), self.checked(dict(GOOD_DRAFT, test_shapes=shapes)))
+        matcher = ppl_guard.ShapeMatcher.from_rows(harness.shape_rows(merged["doc"]))
+        for command in ("mvn test jar:jar deploy:deploy",
+                        "./mvnw test org.codehaus.mojo:exec-maven-plugin:3.1.0:exec",
+                        "./Gradlew test app:publish", "GRADLE test app:publish",
+                        "gradle test app:publish", "./gradlew test app:publish"):
+            with self.subTest(command=command):
+                self.assertFalse(matcher.allows(shlex.split(command)))
+        for command in ("./gradlew test --tests app.FooTest", "GRADLE test --tests app.FooTest",
+                        "mvn -q test", "./mvnw test -B"):
+            with self.subTest(command=command):
+                self.assertTrue(matcher.allows(shlex.split(command)))
 
     def test_a_merged_extracted_shape_refuses_a_plain_word_subcommand_beside_the_goal(self):
         # rule: R-STUDIO-EXTRACT-LEAN
