@@ -61,12 +61,17 @@ The studio listens on loopback only. Every request needs the session token in th
 
 After setup the studio has three more pages. **Agents** sets the model tier and effort per
 role (or a preset for all of them), shows each role's base prompt beside its project notes
-and the agent file apply would write, and lists what the cage enforces for that role
-whatever its prompt says [R-GUARD-NOT-ARMED n/a]. **Harness** edits, adds and creates harnesses, and applies one, which also makes it the
-active harness, as `ppl harness apply` does.
-In Expert mode a raw editor sits beside every form, every save keeps the content it replaced
-in `~/.ppl/studio/history/` with a restore, and **Playground** runs one tool call through the
-real guard hook against a throwaway run. A save that would overwrite a file changed in
+and the agent file apply would write, and lists the blocking rules of the cage that cover that
+role, which hold whatever its prompt says once the guard hook is registered
+[R-GUARD-NOT-ARMED n/a]. **Harness** edits, adds and creates harnesses, and applies one, which
+also makes it the active harness, as `ppl harness apply` does.
+
+In Expert mode the Harness page adds a raw `harness.toml` editor and the fragments beside its
+form, the Agents page adds the high-risk tier and the history of the notes and of
+`routing.toml`, and **Playground** runs one tool call through the real guard hook against a
+throwaway run. Every save from a form or an editor keeps the content it replaced in
+`~/.ppl/studio/history/`, and Expert mode shows those versions with a restore for
+`harness.toml`, the role notes and `routing.toml`. A save that would overwrite a file changed in
 another tab or a terminal since the page loaded it is refused [R-STUDIO-CHANGED-ON-DISK].
 
 ## Hooks

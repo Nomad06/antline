@@ -1728,7 +1728,11 @@ CLI calls: a setup step runs through `setup.run` non-interactively, a preset thr
 `routing.apply_preset` (`ppl routing preset`), a harness draft through the setup harness step
 with `harness_from=<draft directory>`, and the last wizard screen shows `doctor.report()`, which
 `ppl doctor` prints. A draft is refused by the same `harness.validate` and role-tool
-composition the CLI runs [R-STUDIO-SAME-VALIDATION].
+composition the CLI runs [R-STUDIO-SAME-VALIDATION]. A file the studio edits in place
+(`routing.toml`, a harness file, a role's notes) has no CLI command of its own: `files.save_many`
+writes it, and only after the check ppl makes of it, `routing.validate_config` for `routing.toml`
+and, for a harness file or a role's notes, `harness.validate`, the skill render and the role-tool
+composition of the harness with that content laid in.
 
 **Slow actions are jobs.** A model probe, the extraction or an apply runs in a worker
 thread: the route returns a job id and the page polls `/api/jobs/<id>`. One job of a kind runs
@@ -1770,22 +1774,27 @@ beside it and run the suite.
 
 **Saves.** The studio names a file by a key, `routing` or `harness:<installed
 name>:<file>` with the file one of `harness.toml`, the four `skill/` fragments and the six
-`templates/<role>.part` overlays, and a history version by its timestamp. A request cannot
-reach any other path [R-STUDIO-NO-RAW-PATHS]. A save carries the sha256 of the content the
-page loaded, and it is refused when the file changed since: every file of one save is
-checked before the first write [R-STUDIO-CHANGED-ON-DISK]. The replaced content goes to
-`~/.ppl/studio/history/<key>/`, the newest 50 versions per file, and a restore goes through
-the same validation as a save. A harness edit is validated on a private copy of the
-installed harness with exactly the bytes the save will write laid over it, so the check
-never touches a wizard draft of the same name, and a file that is a symlink is written
-through to its target, which must stay inside the harness directory
-[R-STUDIO-NO-RAW-PATHS]. What the studio writes at all is held by its routes, not by a check
-[R-STUDIO-WRITE-SURFACE n/a].
+`templates/<role>.part` overlays, and a history version by its timestamp. No studio file route
+reaches any other path [R-STUDIO-NO-RAW-PATHS]. The project path, the harness source and the
+playground's value and repo path that a request sends are read, never written
+[R-STUDIO-NO-RAW-PATHS]. The wizard's workspace directory is written: the claude step creates
+it and, for local hooks, registers them in it [R-STUDIO-WRITE-SURFACE n/a]. A save carries the
+sha256 of the content the page loaded, and it is refused when the file changed since: every
+file of one save is checked before the first write [R-STUDIO-CHANGED-ON-DISK]. The replaced
+content goes to `~/.ppl/studio/history/<key>/`, with `:` and `/` in the key written as `__`,
+one file per version named by its timestamp, the newest 50 versions per file, and a restore
+goes through the same validation as a save. A harness edit is validated on a private copy of
+the installed harness with exactly the bytes the save will write laid over it, so the check
+leaves a wizard draft of the same name alone. A harness file that is a symlink is written
+through to its target, which must stay inside the harness directory [R-STUDIO-NO-RAW-PATHS],
+while `routing.toml` may be a symlink to anywhere. What the studio writes at all is held by its
+routes, not by a check [R-STUDIO-WRITE-SURFACE n/a].
 
 **Agents page.** For each role, the base prompt (`templates/<role>.md.body`) is shown
 read-only beside the harness overlay and the agent file `routing.render` would produce from
-the draft. The blocking rows of the rule table whose scope covers the role are listed with
-them (`ppl/studio/enforced.py`) [R-GUARD-NOT-ARMED n/a].
+the active harness with the notes and routing as edited on the page. The blocking rows of the
+rule table whose scope covers the role are listed with them; the rows that act through the guard
+hook fire only once it is registered [R-GUARD-NOT-ARMED n/a].
 
 **Playground.** One tool call goes through the real `hooks/ppl_guard.py` in a subprocess,
 against a fake active run built under a temporary data root: `harness.json` is the draft's
