@@ -262,11 +262,12 @@ def validate_config(config):
         _effort(config["roles"][name], name)
 
 
-def apply_preset(name):
-    """Rewrite every role's tier, effort and by_risk from a preset and save
-    routing.toml. A provider and model a role pinned itself are replaced by
-    its tier. The tiers, the providers and every param but effort stay."""
-    from . import presets, tomlout
+def preset_document(name):
+    """routing.toml with every role's tier, effort and by_risk rewritten from a
+    preset, nothing written. A provider and model a role pinned itself are
+    replaced by its tier. The tiers, the providers and every param but effort
+    stay."""
+    from . import presets
     if name not in presets.PRESETS:
         raise PplError("SCHEMA_INVALID", "unknown preset %r (presets: %s)"
                        % (name, ", ".join(presets.PRESETS)))
@@ -288,6 +289,13 @@ def apply_preset(name):
         else:
             entry.pop("by_risk", None)
     validate_config(config)
+    return config
+
+
+def apply_preset(name):
+    """`ppl routing preset`: the preset document written to routing.toml."""
+    from . import tomlout
+    config = preset_document(name)
     paths.routing_file().write_text(tomlout.dumps(config), encoding="utf-8")
     return config
 

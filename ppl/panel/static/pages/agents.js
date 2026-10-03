@@ -145,7 +145,7 @@ export function AgentsPage({ mode }) {
     await load();
   });
   const preset = (name) => act("preset", async () => {
-    await post("/api/routing/preset", { name });
+    await post("/api/routing/preset", { name, hash: data.routing_hash });
     done("The " + name + " preset is in routing.toml. Apply to write the agent files.");
     await load();
   });
@@ -189,9 +189,10 @@ export function AgentsPage({ mode }) {
     <h1>Agents</h1>
     <p class="muted">Each role runs as its own Claude Code subagent. Changes reach the agent files when you apply, and a run already started keeps the files it started with.</p>
     ${data.harness_error ? html`<${Notice} kind="warn">The active harness does not load, so Apply is off. Fix it on the Harness page. The routing can still be edited here.<br />${data.harness_error}<//>` : null}
-    <div class="cards">${data.presets.map((p) => html`<button class=${"card" + (data.preset === p.name ? " on" : "")} disabled=${Boolean(busy)} onClick=${() => preset(p.name)}>
+    <div class="cards">${data.presets.map((p) => html`<button class=${"card" + (data.preset === p.name ? " on" : "")} disabled=${dirty || Boolean(busy)} onClick=${() => preset(p.name)}>
       <strong>${p.label}</strong> <${Badge}>${p.cost} cost<//></button>`)}</div>
-    <p class="help">A preset sets the tier and the effort of every role and writes routing.toml at once. Comments in it are dropped and no earlier version is kept.</p>
+    <p class="help">${dirty ? "Save or reload the routing first: a preset replaces the saved routing.toml, not the edits on this page."
+      : "A preset sets the tier and the effort of every role and writes routing.toml at once. Comments in it are dropped, and its history keeps the old file."}</p>
     ${data.roles.map((row) => {
       const entry = doc.roles[row.role];
       const params = entry.params || {};

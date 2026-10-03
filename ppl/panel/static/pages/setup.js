@@ -58,7 +58,7 @@ function ModelsStep({ mode, done }) {
   }
   const choose = (name) => {
     setError(null);
-    return post("/api/routing/preset", { name }).then(show, (e) => setError(e.message));
+    return post("/api/routing/preset", { name, hash: info.routing_hash }).then(show, (e) => setError(e.message));
   };
   const answers = { verify: "yes" };
   Object.entries(tiers).forEach(([tier, model]) => { answers["tier." + tier] = model; });

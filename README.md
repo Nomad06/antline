@@ -69,7 +69,7 @@ also makes it the active harness, as `ppl harness apply` does.
 In Expert mode the Harness page adds a raw `harness.toml` editor and the fragments beside its
 form, the Agents page adds the high-risk tier and the history of the notes and of
 `routing.toml`, and **Playground** runs one tool call through the real guard hook against a
-throwaway run. Every save from a form or an editor keeps the content it replaced in
+throwaway run. Every save from a form, an editor or a preset keeps the content it replaced in
 `~/.ppl/studio/history/`, and Expert mode shows those versions with a restore for
 `harness.toml`, the role notes and `routing.toml`. A save that would overwrite a file changed in
 another tab or a terminal since the page loaded it is refused [R-STUDIO-CHANGED-ON-DISK].

@@ -13,6 +13,7 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
 from ppl import cli, config, paths, presets, routing, tomlout
 from ppl.errors import PplError
+from ppl.studio import files
 
 
 class TestPresets(panel_client.StudioTestCase):
@@ -208,6 +209,16 @@ class TestPresets(panel_client.StudioTestCase):
             self.assertEqual(cli.main(["routing", "preset", "max"]), 0)
         self.assertEqual(presets.matching(routing.load()), "max")
 
+    def test_the_preset_document_writes_nothing_and_is_what_the_cli_writes(self):
+        before = paths.routing_file().read_bytes()
+        document = routing.preset_document("economy")
+        self.assertEqual(presets.matching(document), "economy")
+        self.assertEqual(paths.routing_file().read_bytes(), before)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["routing", "preset", "economy"]), 0)
+        self.assertEqual(paths.routing_file().read_text(encoding="utf-8"), tomlout.dumps(document))
+        self.assertFalse((paths.home() / "studio").exists())
+
     def test_summary_names_the_model_each_role_resolves_to(self):
         rows = {row["role"]: row for row in routing.summary()}
         tiers = routing.tiers(routing.load())
@@ -228,10 +239,44 @@ class TestPresetRoutes(panel_client.StudioTestCase):
         self.assertEqual(list(data["effort_levels"]), list(routing.EFFORT_LEVELS))
         self.assertEqual(len(data["roles"]), len(routing.REQUIRED_ROLES))
 
+    def choose(self, name, hash_value):
+        return panel_client.call("POST", "/api/routing/preset",
+                                 body={"name": name, "hash": hash_value})
+
     def test_choosing_a_preset_through_the_api_applies_it(self):
-        status, data, _ = panel_client.call("POST", "/api/routing/preset", body={"name": "economy"})
+        _, view, _ = panel_client.call("GET", "/api/routing/presets")
+        self.assertEqual(view["routing_hash"], files.read("routing")["hash"])
+        status, data, _ = self.choose("economy", view["routing_hash"])
         self.assertEqual(status, 200)
         self.assertEqual(data["current"], "economy")
+        self.assertEqual(data["routing_hash"], files.read("routing")["hash"])
+
+    def test_a_preset_through_the_api_keeps_the_replaced_routing_as_one_history_version(self):
+        before = files.read("routing")
+        status, _, _ = self.choose("economy", before["hash"])
+        self.assertEqual(status, 200)
+        versions = files.versions("routing")
+        self.assertEqual(len(versions), 1)
+        self.assertEqual(files.version_text("routing", versions[0]["version"]), before["text"])
+        self.assertEqual(presets.matching(routing.load()), "economy")
+
+    def test_a_preset_with_a_stale_hash_is_refused_and_writes_nothing(self):
+        # rule: R-STUDIO-CHANGED-ON-DISK
+        loaded = files.read("routing")
+        changed = loaded["text"] + "\n# edited in a terminal\n"
+        paths.routing_file().write_text(changed, encoding="utf-8")
+        status, payload, _ = self.choose("economy", loaded["hash"])
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error_code"], "CHANGED_ON_DISK")
+        self.assertEqual(paths.routing_file().read_text(encoding="utf-8"), changed)
+        self.assertEqual(files.versions("routing"), [])
+
+    def test_a_preset_without_a_hash_is_refused_and_writes_nothing(self):
+        before = paths.routing_file().read_bytes()
+        status, payload, _ = panel_client.call("POST", "/api/routing/preset", body={"name": "economy"})
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+        self.assertEqual(paths.routing_file().read_bytes(), before)
 
     def test_params_that_are_not_a_table_answer_400_not_500(self):
         doc = routing.load()

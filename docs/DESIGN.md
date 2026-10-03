@@ -1725,10 +1725,11 @@ harnesses. The run list of 9.1 moved to `/runs`, and `/` is the studio shell.
 
 **One implementation.** Every studio change to the installation goes through the function the
 CLI calls: a setup step runs through `setup.run` non-interactively, a preset through
-`routing.apply_preset` (`ppl routing preset`), a harness draft through the setup harness step
-with `harness_from=<draft directory>`, and the last wizard screen shows `doctor.report()`, which
-`ppl doctor` prints. A draft is refused by the same `harness.validate` and role-tool
-composition the CLI runs [R-STUDIO-SAME-VALIDATION]. A file the studio edits in place
+`routing.preset_document`, the document `ppl routing preset` writes, saved as the edits below
+are saved, a harness draft through the setup harness step with `harness_from=<draft directory>`,
+and the last wizard screen shows `doctor.report()`, which `ppl doctor` prints. A draft is
+refused by the same `harness.validate` and role-tool composition the CLI runs
+[R-STUDIO-SAME-VALIDATION]. A file the studio edits in place
 (`routing.toml`, a harness file, a role's notes) has no CLI command of its own: `files.save_many`
 writes it, and only after the check ppl makes of it, `routing.validate_config` for `routing.toml`
 and, for a harness file or a role's notes, `harness.validate`, the skill render and the role-tool
