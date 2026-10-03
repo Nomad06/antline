@@ -1,5 +1,6 @@
 import copy
 import os
+import shutil
 import sys
 import unittest
 from pathlib import Path
@@ -91,13 +92,32 @@ class TestHarnessApi(HarnessApiTestCase):
         self.assertEqual(data["text"], "not = [toml")
         self.assertFalse(data["check"]["ok"])
 
-    def test_activating_switches_and_an_unknown_name_is_refused(self):
+    def test_there_is_no_activate_route_so_activation_goes_through_apply(self):
         harness.add(EXAMPLE, name="other")
-        status, data, _ = panel_client.call("POST", "/api/harnesses/other/activate", body={})
-        self.assertEqual(data, {"active": "other"})
-        self.assertEqual(config.active_harness(), "other")
-        status, payload, _ = panel_client.call("POST", "/api/harnesses/nope/activate", body={})
-        self.assertEqual(status, 404)
+        for name in ("other", "nope"):
+            status, payload, _ = panel_client.call("POST", "/api/harnesses/%s/activate" % name,
+                                                   body={})
+            self.assertEqual(status, 404, name)
+        self.assertEqual(config.active_harness(), "demo")
+
+    def test_applying_makes_the_harness_the_active_one(self):
+        harness.add(EXAMPLE, name="other")
+        status, payload, _ = panel_client.call("POST", "/api/harnesses/other/apply", body={})
+        job = self.wait(payload)
+        self.assertEqual(job["state"], "done", job)
+        status, data, _ = panel_client.call("GET", "/api/harnesses")
+        self.assertEqual(data, {"names": ["demo", "other"], "active": "other"})
+        self.assertTrue(self.get("other")["active"])
+        self.assertFalse(self.get("demo")["active"])
+
+    def test_applying_a_broken_harness_fails_the_job_and_activates_nothing(self):
+        harness.add(EXAMPLE, name="other")
+        (paths.harness_dir("other") / "harness.toml").write_text("not = [toml", encoding="utf-8")
+        status, payload, _ = panel_client.call("POST", "/api/harnesses/other/apply", body={})
+        job = self.wait(payload)
+        self.assertEqual(job["state"], "failed")
+        self.assertEqual(job["error"]["error_code"], "HARNESS_INVALID")
+        self.assertEqual(config.active_harness(), "demo")
 
     def test_apply_runs_as_a_job_into_the_configured_dirs(self):
         status, payload, _ = panel_client.call("POST", "/api/harnesses/demo/apply", body={})
@@ -240,6 +260,40 @@ class TestHarnessApiEdges(HarnessApiTestCase):
         for body in ({}, {"source": "  "}, {"source": 5}, {"source": EXAMPLE, "name": "../x"}):
             status, payload, _ = panel_client.call("POST", "/api/harnesses", body=body)
             self.assertEqual((status, payload["error_code"]), (400, "SCHEMA_INVALID"), body)
+
+    def source_named(self, name):
+        source = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / name
+        shutil.copytree(EXAMPLE, source)
+        return source
+
+    def test_adding_without_a_name_checks_the_name_derived_from_the_source(self):
+        sources = [str(self.source_named(name)) for name in ("Demo.Replacing", "demo.replaced")]
+        sources.append("https://example.invalid/team/demo.git.git")
+        for source in sources:
+            for given in ({}, {"name": ""}, {"name": None}):
+                status, payload, _ = panel_client.call("POST", "/api/harnesses",
+                                                       body=dict(given, source=source))
+                self.assertEqual((status, payload["error_code"]), (400, "SCHEMA_INVALID"),
+                                 (source, given))
+        self.assertEqual(harness.list_names(), ["demo"])
+
+    def test_adding_without_a_name_installs_under_the_derived_name(self):
+        status, payload, _ = panel_client.call("POST", "/api/harnesses",
+                                               body={"source": str(self.source_named("team"))})
+        self.assertEqual(self.wait(payload)["result"], {"name": "team"})
+        self.assertIn("team", harness.list_names())
+
+    def test_adding_refuses_a_relative_local_source(self):
+        for source in ("defaults/harnesses/example-generic", "./example-generic", "example-generic"):
+            status, payload, _ = panel_client.call("POST", "/api/harnesses",
+                                                   body={"source": source, "name": "rel"})
+            self.assertEqual((status, payload["error_code"]), (400, "SCHEMA_INVALID"), source)
+        self.assertEqual(harness.list_names(), ["demo"])
+
+    def test_adding_takes_a_source_that_is_absolute_after_the_home_is_expanded(self):
+        shutil.copytree(EXAMPLE, Path(os.environ["HOME"]) / "mine")
+        status, payload, _ = panel_client.call("POST", "/api/harnesses", body={"source": "~/mine"})
+        self.assertEqual(self.wait(payload)["result"], {"name": "mine"})
 
     def test_adding_a_directory_without_a_harness_fails_the_job_and_installs_nothing(self):
         empty = tmphome.mkdtemp(prefix="pplempty-")

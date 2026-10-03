@@ -1,9 +1,12 @@
 """The Harness page: the installed harnesses, one harness's document and
-fragments with their hashes, and check, save, activate, apply, add, create."""
+fragments with their hashes, and check, save, apply, add, create. A harness
+becomes the active one only by apply, which validates and renders it first,
+as `ppl harness apply` does."""
 import json
 import shutil
 import tempfile
 import tomllib
+from pathlib import Path
 
 from .. import config, harness, paths
 from ..errors import PplError
@@ -31,6 +34,13 @@ def _document(text):
     except (tomllib.TOMLDecodeError, TypeError, ValueError):
         return None
     return doc
+
+
+def _absolute(path):
+    try:
+        return Path(path).expanduser().is_absolute()
+    except RuntimeError:
+        return False
 
 
 def _object(body, field):
@@ -96,13 +106,6 @@ def save(params, body, query):
             "check": result}
 
 
-def activate(params, body, query):
-    name = params["name"]
-    _installed(name)
-    config.set_active_harness(name)
-    return {"active": name}
-
-
 def apply_job(params, body, query):
     name = params["name"]
     _installed(name)
@@ -114,10 +117,14 @@ def add_job(params, body, query):
     source = body.get("source")
     if not isinstance(source, str) or not source.strip():
         raise PplError("SCHEMA_INVALID", "give a git URL or the directory of a harness")
-    name = body.get("name") or None
-    if name is not None:
-        drafts.check_name(name)
-    return {"job": JOBS.start("add", lambda emit: {"name": harness.add(source.strip(), name).name})}
+    source = source.strip()
+    if not harness.is_git_source(source) and not _absolute(source):
+        raise PplError("SCHEMA_INVALID", "a local source must be an absolute path or start with "
+                       "~/: a relative one would resolve against the working directory of "
+                       "ppl serve")
+    name = body.get("name") or harness.derived_name(source)
+    drafts.check_name(name)
+    return {"job": JOBS.start("add", lambda emit: {"name": harness.add(source, name).name})}
 
 
 def create(params, body, query):
@@ -147,5 +154,4 @@ def register(router):
     router.add("GET", "/api/harnesses/<name>", one)
     router.add("PUT", "/api/harnesses/<name>", save)
     router.add("POST", "/api/harnesses/<name>/check", check)
-    router.add("POST", "/api/harnesses/<name>/activate", activate)
     router.add("POST", "/api/harnesses/<name>/apply", apply_job)

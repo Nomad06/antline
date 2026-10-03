@@ -263,11 +263,20 @@ def _copy(name, source, target):
         _fail(name, "copy failed: %s" % exc)
 
 
+def is_git_source(source):
+    return "://" in source or source.endswith(".git") or source.startswith("git@")
+
+
+def derived_name(source):
+    """The name `add` installs a source under when it is given none: the last
+    part of the URL or directory, without a trailing .git."""
+    base = source.rstrip("/") if is_git_source(source) else str(_absolute(Path(source).expanduser()))
+    return Path(base).name.removesuffix(".git")
+
+
 def add(source, name=None):
-    is_url = "://" in source or source.endswith(".git") or source.startswith("git@")
     if not name:
-        base = source.rstrip("/") if is_url else str(_absolute(Path(source).expanduser()))
-        name = Path(base).name.removesuffix(".git")
+        name = derived_name(source)
     if not _NAME_RE.match(name):
         _fail(name, "not a valid harness name")
     target = paths.harness_dir(name)
@@ -275,7 +284,7 @@ def add(source, name=None):
         _fail(name, "already exists at %s" % target)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        if is_url:
+        if is_git_source(source):
             _clone(name, source, target)
         else:
             _copy(name, source, target)

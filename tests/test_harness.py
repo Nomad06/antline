@@ -357,6 +357,21 @@ class TestAddEdges(HarnessTestCase):
         shutil.copytree(self.example, copy)
         self.assertEqual(harness.add(str(copy) + "/"), paths.harness_dir("team-harness"))
 
+    def test_derived_name_is_the_last_part_of_a_directory_or_a_url_without_dot_git(self):
+        directory = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / "team-harness"
+        for source, expected in ((str(directory), "team-harness"),
+                                 (str(directory) + "/", "team-harness"),
+                                 ("https://example.invalid/team/harness.git", "harness"),
+                                 ("https://example.invalid/team/harness/", "harness"),
+                                 ("git@example.invalid:team/harness.git", "harness"),
+                                 ("https://example.invalid/team/harness.git.git", "harness.git")):
+            self.assertEqual(harness.derived_name(source), expected, source)
+
+    def test_add_keeps_a_derived_name_the_studio_refuses_for_setups_own_staging(self):
+        copy = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / "demo.replacing"
+        shutil.copytree(self.example, copy)
+        self.assertEqual(harness.add(str(copy)), paths.harness_dir("demo.replacing"))
+
     def test_directory_without_harness_toml_is_refused(self):
         empty = Path(tmphome.mkdtemp(prefix="pplharnesssrc-"))
         with self.assertRaises(PplError) as caught:
