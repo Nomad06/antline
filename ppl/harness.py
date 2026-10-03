@@ -21,6 +21,12 @@ FORMAT = 1
 FORGES = ("gitlab", "github")
 TRACKERS = ("jira",)
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Endings that git and setup keep for their own directories: a source ending in
+# .git is cloned, and setup stages a harness in <name>.replacing and retires the
+# installed one to <name>.replaced, removing both. Compared in lower case because
+# a case-insensitive filesystem makes Demo.Replacing the same directory as
+# demo.replacing.
+RESERVED_SUFFIXES = (".git", ".replacing", ".replaced")
 _MCP_TOOL_RE = re.compile(r"mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+")
 _BARE_TOOL_RE = re.compile(r"[A-Za-z0-9_.-]+")
 # A gate name becomes a file name in the rendered recipe and the evidence
@@ -49,6 +55,18 @@ def _absolute(path):
     """Absolute and normalised but symlinks kept, so a caller that passed a path
     gets the same path back (on macOS a tmp dir sits behind /var -> /private/var)."""
     return Path(os.path.abspath(path))
+
+
+def check_name(name):
+    """Refuse SCHEMA_INVALID unless name is a plain directory name, the whole
+    string and no trailing newline, that does not end in a reserved ending."""
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
+        raise PplError("SCHEMA_INVALID", "harness name %r must be letters, digits, '.', '_' or "
+                       "'-', starting with a letter or digit" % (name,))
+    if name.lower().endswith(RESERVED_SUFFIXES):
+        raise PplError("SCHEMA_INVALID", "harness name %r must not end in %s: git and setup use "
+                       "those endings for their own directories"
+                       % (name, ", ".join(RESERVED_SUFFIXES)))
 
 
 def resolve_dir(name_or_path):
@@ -111,6 +129,9 @@ def validate(doc, source):
     _require(doc, "harness", "name", source)
     _require(doc, "repo", "path", source)
     _require(doc, "repo", "default_branch", source)
+    if "worktrees" in doc["repo"] and not _text(doc["repo"]["worktrees"]):
+        _fail(source, "repo.worktrees must be a non-empty string, the directory the run "
+              "worktrees are made in")
     pattern = _require(doc, "task", "key_pattern", source)
     try:
         re.compile(pattern)
@@ -274,11 +295,16 @@ def derived_name(source):
     return Path(base).name.removesuffix(".git")
 
 
-def add(source, name=None):
+def add(source, name=None, staging=False):
+    """Install a git URL or a local directory as the harness `name`, by default
+    the name derived from the source. The name must pass check_name: only
+    setup, staging a harness in its own <name>.replacing, passes staging."""
     if not name:
         name = derived_name(source)
-    if not _NAME_RE.match(name):
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
         _fail(name, "not a valid harness name")
+    if not staging:
+        check_name(name)
     target = paths.harness_dir(name)
     if target.exists():
         _fail(name, "already exists at %s" % target)

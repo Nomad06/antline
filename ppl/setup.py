@@ -344,7 +344,7 @@ def _install(p, source, name, installed):
     staging = paths.harness_dir("%s.replacing" % name)
     shutil.rmtree(staging, ignore_errors=True)
     try:
-        harness.add(source, name=staging.name)
+        harness.add(source, name=staging.name, staging=True)
         candidate = harness.load(staging.name)
         before = copy.deepcopy(candidate)
         _apply_answers(p, candidate, name)
@@ -375,12 +375,30 @@ def _install(p, source, name, installed):
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def _check_source(source, installed):
+    """Refuse a source that is not an example or installed harness name, a git
+    URL or an absolute path: a relative one would resolve against the working
+    directory of whatever runs setup, ppl serve included."""
+    if source in EXAMPLE_HARNESSES or source in installed or harness.is_git_source(source):
+        return
+    try:
+        absolute = Path(source).expanduser().is_absolute()
+    except RuntimeError:
+        absolute = False
+    if not absolute:
+        raise PplError("SCHEMA_INVALID", "harness source %r must be %s, an installed harness, "
+                       "a git URL or an absolute path" % (source, " or ".join(EXAMPLE_HARNESSES)))
+
+
 def _step_harness(p):
     installed = harness.list_names()
-    source = p.ask("harness_from", "Source (example-generic, example-maven, a directory, or a git URL)",
+    source = p.ask("harness_from",
+                   "Source (example-generic, example-maven, an absolute directory, or a git URL)",
                    _pending_harness() or EXAMPLE_HARNESSES[0])
+    _check_source(source, installed)
     name = p.ask("harness_name", "Name for this harness",
                  Path(source.rstrip("/")).name.removesuffix(".git"))
+    harness.check_name(name)
     if name in installed and _is_installed_source(source, name):
         doc = harness.load(name)
         before = copy.deepcopy(doc)

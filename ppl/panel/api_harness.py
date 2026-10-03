@@ -70,7 +70,7 @@ def one(params, body, query):
 def check(params, body, query):
     _installed(params["name"])
     body = body or {}
-    return drafts.check_private(params["name"], body.get("doc"), body.get("fragments") or {})
+    return drafts.check(params["name"], body.get("doc"), body.get("fragments") or {})
 
 
 def save(params, body, query):

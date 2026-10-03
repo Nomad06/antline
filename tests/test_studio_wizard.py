@@ -10,7 +10,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 import panel_client
-from ppl import config, paths, setup
+from ppl import config, harness, paths, setup
 from ppl.studio import wizard
 
 
@@ -102,6 +102,34 @@ class TestWizardApi(WizardTestCase):
         job = self.run_step("claude", {"hooks": "local"})
         self.assertEqual(job["state"], "failed")
         self.assertEqual(job["error"]["error_code"], "SETUP_INCOMPLETE")
+
+    def test_the_harness_route_refuses_a_name_setup_keeps_so_no_install_deletes_it_later(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        self.run_step("paths")
+        source = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / "x.replacing"
+        shutil.copytree(paths.defaults_dir() / "harnesses" / "example-generic", source)
+        answers = dict(self.answers, harness_from=str(source))
+        del answers["harness_name"]
+        for given in (answers, dict(answers, harness_name="X.Replaced")):
+            with self.subTest(name=given.get("harness_name", "x.replacing")):
+                job = self.run_step("harness", given)
+                self.assertEqual(job["state"], "failed")
+                self.assertEqual(job["error"]["error_code"], "SCHEMA_INVALID")
+        self.assertFalse(paths.harness_dir("x.replacing").exists())
+        job = self.run_step("harness", dict(answers, harness_from="example-generic", harness_name="x"))
+        self.assertEqual(job["result"]["done"], ["harness"])
+        self.assertEqual(harness.list_names(), ["x"])
+
+    def test_the_harness_route_refuses_a_relative_source_before_any_copy(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        self.run_step("paths")
+        elsewhere = self.go_elsewhere()
+        shutil.copytree(paths.defaults_dir() / "harnesses" / "example-generic", elsewhere / "team")
+        job = self.run_step("harness", dict(self.answers, harness_from="team"))
+        self.assertEqual(job["state"], "failed")
+        self.assertEqual(job["error"]["error_code"], "SCHEMA_INVALID")
+        self.assertIn("absolute", job["error"]["message"])
+        self.assertFalse(paths.harnesses_dir().exists() and any(paths.harnesses_dir().iterdir()))
 
     def go_elsewhere(self):
         """Make the server process cwd an empty directory, as `ppl serve` started anywhere else has."""

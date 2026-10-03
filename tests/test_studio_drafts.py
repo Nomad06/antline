@@ -262,25 +262,30 @@ def tree(folder):
             for item in sorted(Path(folder).rglob("*")) if item.is_file()}
 
 
-class TestCheckPrivate(DraftTestCase):
-    def test_a_private_check_gives_the_result_of_check_and_leaves_the_drafts_alone(self):
+class TestCheckIsPrivate(DraftTestCase):
+    def test_a_check_writes_no_directory_per_name_it_is_asked_about(self):
         draft = self.preset()
-        wizard = drafts.write("demo", draft["doc"], draft["fragments"])
-        (wizard / "skill" / "gates.md").write_text("a wizard edit\n", encoding="utf-8")
-        before = tree(drafts.drafts_dir())
-        names = sorted(item.name for item in drafts.drafts_dir().iterdir())
-        self.assertEqual(drafts.check_private("demo", draft["doc"], draft["fragments"]),
-                         {"ok": True, "errors": [], "warnings": [], "flags": []})
-        refused = drafts.check_private("demo", None, draft["fragments"])
+        for name in ("d", "de", "dem", "demo"):
+            with self.subTest(name=name):
+                self.assertTrue(drafts.check(name, draft["doc"], draft["fragments"])["ok"])
+        refused = drafts.check("demo", None, draft["fragments"])
         self.assertFalse(refused["ok"])
-        self.assertEqual(refused["errors"], drafts.check("demo", None, draft["fragments"])["errors"])
-        self.assertEqual(tree(drafts.drafts_dir()), before)
-        self.assertEqual(sorted(item.name for item in drafts.drafts_dir().iterdir()), names)
+        self.assertEqual(list(drafts.drafts_dir().iterdir()), [])
 
-    def test_a_private_check_works_before_any_draft_exists(self):
+    def test_a_check_leaves_a_directory_of_the_same_name_alone(self):
+        draft = self.preset()
+        kept = drafts.write("demo", draft["doc"], draft["fragments"])
+        (kept / "skill" / "gates.md").write_text("an earlier edit\n", encoding="utf-8")
+        before = tree(drafts.drafts_dir())
+        self.assertEqual(drafts.check("demo", draft["doc"], draft["fragments"]),
+                         {"ok": True, "errors": [], "warnings": [], "flags": []})
+        self.assertEqual(tree(drafts.drafts_dir()), before)
+        self.assertEqual(sorted(item.name for item in drafts.drafts_dir().iterdir()), ["demo"])
+
+    def test_a_check_works_before_the_drafts_directory_exists(self):
         draft = self.preset()
         self.assertFalse(drafts.drafts_dir().exists())
-        self.assertTrue(drafts.check_private("demo", draft["doc"], draft["fragments"])["ok"])
+        self.assertTrue(drafts.check("demo", draft["doc"], draft["fragments"])["ok"])
         self.assertEqual(list(drafts.drafts_dir().iterdir()), [])
 
     def test_a_checked_copy_is_written_where_asked_and_verified(self):

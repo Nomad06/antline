@@ -1763,9 +1763,11 @@ With no md file, or when the call
 fails, the draft comes from the preset of the stack the build files name. The review form
 marks three kinds of shape: free arguments that take any token, an interpreter with no pinned
 flag, and a shape with neither a goal nor a flag. The marks are advice: the user's tick
-installs the shape as written. Install validates and installs a private copy of the request's
-draft, so a check running beside it cannot change what lands, and a name ending in `.git`,
-`.replacing` or `.replaced` is refused [R-STUDIO-SAME-VALIDATION].
+installs the shape as written. A check and an install each write the request's draft to a
+private directory of their own, removed after, and install validates and installs that copy, so
+a check running beside it cannot change what lands [R-STUDIO-SAME-VALIDATION]. A name ending in `.git`, `.replacing` or `.replaced` is refused on every path that
+installs a harness, the setup harness step and `ppl harness add` included, and the setup harness
+step refuses a relative harness source before it copies anything [R-STUDIO-SAME-VALIDATION].
 
 **Frontend.** Plain ES modules under `ppl/panel/static/`, with no build step. The only
 third-party file is `vendor/htm-preact.mjs`, the htm 3.1.1 standalone bundle with Preact
@@ -1786,8 +1788,8 @@ file of one save is checked before the first write [R-STUDIO-CHANGED-ON-DISK]. T
 content goes to `~/.ppl/studio/history/<key>/`, with `:` and `/` in the key written as `__`,
 one file per version named by its timestamp, the newest 50 versions per file, and a restore
 goes through the same validation as a save. A harness edit is validated on a private copy of
-the installed harness with exactly the bytes the save will write laid over it, so the check
-leaves a wizard draft of the same name alone. A harness file that is a symlink is written
+the installed harness with exactly the bytes the save will write laid over it, removed after the
+check. A harness file that is a symlink is written
 through to its target, which must stay inside the harness directory [R-STUDIO-NO-RAW-PATHS],
 while `routing.toml` may be a symlink to anywhere. What the studio writes at all is held by its
 routes, not by a check [R-STUDIO-WRITE-SURFACE n/a].

@@ -2,6 +2,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -318,6 +319,51 @@ class TestNonInteractive(SetupTestCase):
         self.assertTrue(any(line.startswith("warning:") and "focused-tests" in line for line in lines),
                         lines)
 
+    def reserved_source(self):
+        source = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / "x.replacing"
+        shutil.copytree(SOURCE / "defaults" / "harnesses" / "example-generic", source)
+        return source
+
+    def test_a_reserved_harness_name_given_or_defaulted_is_refused_before_any_copy(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        setup.run(steps=["paths"], answers=self.answers, non_interactive=True, emit=self.lines.append)
+        defaulted = dict(self.answers, harness_from=str(self.reserved_source()))
+        del defaulted["harness_name"]
+        for answers in (defaulted, dict(self.answers, harness_name="Demo.Replaced"),
+                        dict(self.answers, harness_name="mine.GIT")):
+            with self.subTest(name=answers.get("harness_name", "x.replacing")):
+                with mock.patch.object(harness, "_copy") as copied:
+                    with self.assertRaises(PplError) as caught:
+                        setup.run(steps=["harness"], answers=answers, non_interactive=True,
+                                  emit=self.lines.append)
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                copied.assert_not_called()
+        self.assertFalse(paths.harnesses_dir().exists() and any(paths.harnesses_dir().iterdir()))
+
+    def test_a_relative_harness_source_is_refused_before_any_copy(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        setup.run(steps=["paths"], answers=self.answers, non_interactive=True, emit=self.lines.append)
+        for source in ("defaults/harnesses/example-maven", "./mine", "harnesses"):
+            with self.subTest(source=source):
+                with mock.patch.object(harness, "_copy") as copied:
+                    with self.assertRaises(PplError) as caught:
+                        setup.run(steps=["harness"], answers=dict(self.answers, harness_from=source),
+                                  non_interactive=True, emit=self.lines.append)
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                self.assertIn("absolute", caught.exception.message)
+                copied.assert_not_called()
+        self.assertFalse(paths.harnesses_dir().exists() and any(paths.harnesses_dir().iterdir()))
+
+    def test_a_home_relative_harness_source_is_taken(self):
+        home = Path(tmphome.mkdtemp(prefix="pplfakehome-"))
+        shutil.copytree(SOURCE / "defaults" / "harnesses" / "example-generic", home / "team")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            result = setup.run(steps=["paths", "harness"],
+                               answers=dict(self.answers, harness_from="~/team"),
+                               non_interactive=True, emit=self.lines.append)
+        self.assertEqual(result["done"], ["paths", "harness"])
+        self.assertEqual(harness.list_names(), ["mine"])
+
     def test_a_path_source_onto_an_installed_name_is_refused_non_interactively(self):
         setup.run(steps=["paths", "harness"], answers=self.answers, non_interactive=True,
                   emit=self.lines.append)
@@ -611,7 +657,7 @@ class TestInteractive(SetupTestCase):
             return "q"
         setup.run(answers={}, non_interactive=False, read=read, emit=lambda line: None)
         self.assertTrue(asked[0].startswith("harness: Source (example-generic, example-maven, "
-                                            "a directory, or a git URL) [example-generic]"), asked[0])
+                                            "an absolute directory, or a git URL) [example-generic]"), asked[0])
 
     def test_the_hooks_prompt_carries_one_label(self):
         asked = []
@@ -770,6 +816,21 @@ class TestCli(SetupTestCase):
         code, _, err = self.call("setup", "paths", "--non-interactive", "--answer", "novalue")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+
+    def test_the_harness_step_refuses_a_reserved_name_or_a_relative_source(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        source = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / "x.replacing"
+        shutil.copytree(SOURCE / "defaults" / "harnesses" / "example-generic", source)
+        base = ["setup", "paths", "harness", "--non-interactive",
+                "--answer", "repo=%s" % (self.workspace / "repo")]
+        for extra in (["--answer", "harness_from=%s" % source],
+                      ["--answer", "harness_from=defaults/harnesses/example-generic"]):
+            with self.subTest(extra=extra):
+                code, _, err = self.call(*(base + extra))
+                self.assertEqual(code, 2)
+                self.assertNotIn("Traceback", err)
+                self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertEqual(harness.list_names(), [])
 
 
 if __name__ == "__main__":

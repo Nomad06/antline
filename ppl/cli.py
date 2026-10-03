@@ -1072,7 +1072,8 @@ def build_parser():
     p.add_argument("--tier", action="append", help="tier=model")
     p.add_argument("--no-verify", action="store_true")
     p.add_argument("--skip", action="append", choices=list(setup.STEPS))
-    p.add_argument("--web", action="store_true", help="run the wizard in the browser (ppl serve)")
+    p.add_argument("--web", action="store_true",
+                   help="run the wizard in the browser (ppl serve), it takes only --port")
     p.add_argument("--port", type=int, help="the studio port for --web (default 8787)")
 
     p = sub.add_parser("dispatch")

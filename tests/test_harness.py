@@ -202,6 +202,13 @@ class TestMalformedInputIsRefusedNotATraceback(HarnessTestCase):
         name = self.mutate("example-maven", "format = 1", "format = true")
         self.refused(name, "harness.format")
 
+    def test_a_worktrees_value_that_is_not_a_path_string_is_refused(self):
+        for value in ("1", '["/home/dev/src/project/.worktrees"]', '""', "{ path = \"x\" }"):
+            with self.subTest(value=value):
+                name = self.mutate("example-maven", 'worktrees = "/home/dev/src/project/.worktrees"',
+                                   "worktrees = %s" % value)
+                self.refused(name, "repo.worktrees")
+
     def test_tracker_list_with_a_non_string_is_refused(self):
         name = self.mutate("example-maven", READ_TOOLS_LINE,
                            "read_tools = [1]")
@@ -367,10 +374,34 @@ class TestAddEdges(HarnessTestCase):
                                  ("https://example.invalid/team/harness.git.git", "harness.git")):
             self.assertEqual(harness.derived_name(source), expected, source)
 
-    def test_add_keeps_a_derived_name_the_studio_refuses_for_setups_own_staging(self):
+    def test_add_refuses_a_reserved_name_unless_it_is_setups_own_staging(self):
+        # rule: R-STUDIO-SAME-VALIDATION
         copy = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / "demo.replacing"
         shutil.copytree(self.example, copy)
-        self.assertEqual(harness.add(str(copy)), paths.harness_dir("demo.replacing"))
+        for name in (None, "Demo.Replaced", "x.GIT"):
+            with self.subTest(name=name):
+                with self.assertRaises(PplError) as caught:
+                    harness.add(str(copy), name=name)
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertEqual(harness.list_names(), [])
+        self.assertEqual(harness.add(str(copy), name="demo.replacing", staging=True),
+                         paths.harness_dir("demo.replacing"))
+
+    def test_check_name_takes_a_plain_name_and_refuses_the_reserved_endings_in_any_case(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        self.assertIsNone(harness.check_name("team-harness.v2"))
+        for name in ("x.replacing", "X.Replacing", "x.REPLACED", "x.git", "demo\n", "", "-x",
+                     "../x", "a/b", None, 3):
+            with self.subTest(name=name):
+                with self.assertRaises(PplError) as caught:
+                    harness.check_name(name)
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+
+    def test_add_refuses_a_name_with_a_trailing_newline(self):
+        with self.assertRaises(PplError) as caught:
+            harness.add(str(self.example), name="demo\n")
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertFalse(paths.harnesses_dir().exists() and any(paths.harnesses_dir().iterdir()))
 
     def test_directory_without_harness_toml_is_refused(self):
         empty = Path(tmphome.mkdtemp(prefix="pplharnesssrc-"))
@@ -524,6 +555,29 @@ class TestHarnessCli(HarnessTestCase):
         code, _, err = call("harness", "add", "mine")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+
+    def test_add_refuses_a_name_setup_keeps_for_its_own_directories(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        source = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / "x.replacing"
+        shutil.copytree(fixtures.SOURCE / "defaults" / "harnesses" / "example-generic", source)
+        for argv in (("harness", "add", "--source", str(source)),
+                     ("harness", "add", "X.Replaced", "--source", str(source))):
+            with self.subTest(argv=argv):
+                code, _, err = call(*argv)
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertEqual(harness.list_names(), [])
+
+    def test_apply_refuses_a_worktrees_that_is_not_a_string_without_a_traceback(self):
+        self.mutate("example-maven", 'worktrees = "/home/dev/src/project/.worktrees"', "worktrees = 1")
+        fixtures.install_routing()
+        agents, skills = self.apply_dirs()
+        code, out, err = call("harness", "apply", "example-maven")
+        self.assertEqual(code, 2)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(json.loads(err)["error_code"], "HARNESS_INVALID")
+        self.assertIn("repo.worktrees", json.loads(err)["message"])
+        self.assertEqual(list(agents.iterdir()), [])
 
     def test_validate_and_show_without_a_name_are_refused(self):
         for action in ("validate", "show"):

@@ -95,10 +95,10 @@ class TestJobs(unittest.TestCase):
         release.set()
         self.finish(first)
 
-    def test_an_unknown_job_is_refused(self):
+    def test_an_unknown_job_is_not_found(self):
         with self.assertRaises(PplError) as caught:
             self.jobs.get("nope")
-        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertEqual(caught.exception.code, "NOT_FOUND")
 
     def test_a_result_json_cannot_encode_fails_the_job(self):
         with redirect_stderr(io.StringIO()):
@@ -134,7 +134,7 @@ class TestJobs(unittest.TestCase):
             with self.subTest(look=look.__name__):
                 with self.assertRaises(PplError) as caught:
                     look("nope")
-                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                self.assertEqual(caught.exception.code, "NOT_FOUND")
                 self.assertIn("pruned or lost with a restart", caught.exception.message)
 
     def test_get_returns_a_copy_of_the_log(self):

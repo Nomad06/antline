@@ -77,15 +77,20 @@ class TestCoreRoutes(panel_client.StudioTestCase):
         self.assertEqual(state["state"], "done")
         self.assertEqual(state["result"], {"answer": 42})
 
-    def test_an_unknown_job_is_refused(self):
+    def test_an_unknown_job_is_not_found(self):
         status, payload, _ = panel_client.call("GET", "/api/jobs/nope")
-        self.assertEqual(status, 400)
-        self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error_code"], "NOT_FOUND")
+        self.assertIn("pruned or lost", payload["message"])
 
     def test_an_unknown_route_is_not_found(self):
-        status, payload, _ = panel_client.call("GET", "/api/nothing-here")
-        self.assertEqual(status, 404)
-        self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+        for method, path in (("GET", "/api/nothing-here"), ("POST", "/api/nothing-here"),
+                             ("GET", "/api/jobs/x/extra")):
+            with self.subTest(method=method, path=path):
+                status, payload, _ = panel_client.call(method, path, body={} if method == "POST" else None)
+                self.assertEqual(status, 404)
+                self.assertEqual(payload["error_code"], "NOT_FOUND")
+                self.assertIn("message", payload)
 
     def test_a_method_the_route_does_not_take_is_refused(self):
         status, payload, _ = panel_client.call("PUT", "/api/jobs/x", body={})

@@ -276,7 +276,7 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method, parsed, body):
         fn, params = ROUTES.match(method, parsed.path)
         if fn is None:
-            return self._send(404, {"error_code": "SCHEMA_INVALID", "message": "no such route"})
+            return self._send(404, {"error_code": "NOT_FOUND", "message": "no such route"})
         if fn is False:
             return self._send(405, {"error_code": "SCHEMA_INVALID",
                                     "message": "this route does not take %s" % method})

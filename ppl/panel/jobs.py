@@ -13,7 +13,7 @@ KEEP = 50
 
 
 def _unknown(job_id):
-    return PplError("SCHEMA_INVALID",
+    return PplError("NOT_FOUND",
                     "no job %r here, it was pruned or lost with a restart of ppl serve" % job_id)
 
 
