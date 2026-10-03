@@ -184,6 +184,21 @@ class TestAgentsApi(AgentsTestCase):
         self.assertEqual(worker["tools"], list(routing.BASE_TOOLS["ppl-code-worker"]["tools"]))
         self.assertEqual(data["routing_hash"], files.read("routing")["hash"])
 
+    def test_a_hand_edited_effort_that_would_add_frontmatter_lines_is_refused_by_the_role_route(self):
+        current = files.read("routing")
+        text = current["text"].replace('effort = "xhigh"', 'effort = "high\\ntools: [x]"')
+        self.assertNotEqual(text, current["text"])
+        paths.routing_file().write_text(text, encoding="utf-8")
+        status, payload, _ = panel_client.call("GET", "/api/agents/ppl-verifier")
+        self.assertEqual((status, payload["error_code"]), (400, "SCHEMA_INVALID"))
+
+    def test_a_rule_table_that_is_not_utf8_is_an_error_answer_not_a_crash(self):
+        broken = paths.home() / "rules.toml"
+        broken.write_bytes(b'[[rule]]\nstatement = "caf\xe9"\n')
+        with mock.patch.object(rules, "default_path", return_value=broken):
+            status, payload, _ = panel_client.call("GET", "/api/agents/ppl-verifier")
+        self.assertEqual((status, payload["error_code"]), (400, "SCHEMA_INVALID"))
+
     def test_a_role_and_its_preview_still_refuse_an_invalid_active_harness(self):
         self.break_the_harness()
         status, payload, _ = panel_client.call("GET", "/api/agents/ppl-verifier")

@@ -903,6 +903,13 @@ class TestLoad(PplHomeTestCase):
             rules.load(path)
         self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
 
+    def test_a_table_that_is_not_utf8_is_a_routable_error(self):
+        path = Path(os.environ["PPL_HOME"]) / "latin1.toml"
+        path.write_bytes(b'[[rule]]\nid = "R-X"\nstatement = "caf\xe9"\n')
+        with self.assertRaises(PplError) as caught:
+            rules.load(path)
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+
     def test_the_real_table_loads(self):
         self.assertTrue(rules.load())
 

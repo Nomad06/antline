@@ -236,6 +236,17 @@ def role_params(entry, role_name):
     return params
 
 
+def _effort(entry, role_name):
+    """The effort of a role entry, None when it sets none. It is written into
+    an agent file's frontmatter unescaped, so only a level Claude Code accepts
+    passes."""
+    effort = role_params(entry, role_name).get("effort")
+    if effort is not None and (not isinstance(effort, str) or effort not in EFFORT_LEVELS):
+        raise PplError("SCHEMA_INVALID", "role %r effort %r is not one of %s"
+                       % (role_name, effort, ", ".join(EFFORT_LEVELS)))
+    return effort
+
+
 def validate_config(config):
     """Refuse a routing document ppl cannot route with: a missing role, an
     unknown tier or provider, a by_risk tier that is not declared, params that
@@ -248,10 +259,7 @@ def validate_config(config):
         _entry_and_provider(config, name)
         for level, tier in _by_risk(config, name).items():
             _by_risk_tier(config, name, level, tier)
-        effort = role_params(config["roles"][name], name).get("effort")
-        if effort is not None and effort not in EFFORT_LEVELS:
-            raise PplError("SCHEMA_INVALID", "role %r effort %r is not one of %s"
-                           % (name, effort, ", ".join(EFFORT_LEVELS)))
+        _effort(config["roles"][name], name)
 
 
 def apply_preset(name):
@@ -361,7 +369,7 @@ def render(name, harness_doc, config=None):
              "description: %s" % meta["description"],
              "tools: [%s]" % ", ".join(role_tools(name, harness_doc)),
              "model: %s" % entry["model"]]
-    effort = role_params(entry, name).get("effort")
+    effort = _effort(entry, name)
     if effort:
         lines.append("effort: %s" % effort)
     lines += ["maxTurns: %d" % meta["max_turns"],

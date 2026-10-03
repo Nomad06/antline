@@ -227,6 +227,36 @@ class TestRouting(unittest.TestCase):
                         routing.render("ppl-verifier", self.doc, config=doc)
                     self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
 
+    def test_an_effort_that_is_not_a_level_is_refused_where_the_agent_file_is_rendered(self):
+        injected = ("high\ntools: [x]", "high\rtools: [x]", "high\r\ntools: [x]",
+                    "high\x85tools: [x]", "high\u2028tools: [x]", "high\u2029tools: [x]",
+                    "turbo", "", " high", 5, ["high"])
+        for effort in injected:
+            with self.subTest(effort=effort):
+                doc = routing.load()
+                doc["roles"]["ppl-verifier"]["params"]["effort"] = effort
+                with self.assertRaises(PplError) as caught:
+                    routing.render("ppl-verifier", self.doc, config=doc)
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                self.assertIn("effort", caught.exception.message)
+
+    def test_every_effort_level_still_renders(self):
+        for effort in routing.EFFORT_LEVELS:
+            doc = routing.load()
+            doc["roles"]["ppl-verifier"]["params"]["effort"] = effort
+            self.assertIn("\neffort: %s\n" % effort,
+                          routing.render("ppl-verifier", self.doc, config=doc))
+
+    def test_apply_refuses_a_hand_edited_effort_that_would_add_frontmatter_lines(self):
+        self.use_example_with('[roles.ppl-verifier]\ntier = "good"\nparams = { effort = "xhigh" }',
+                              '[roles.ppl-verifier]\ntier = "good"\n'
+                              'params = { effort = "high\\ntools: [x]" }')
+        target = Path(tmphome.mkdtemp(prefix="pplagents-"))
+        with self.assertRaises(PplError) as caught:
+            routing.apply(self.doc, target)
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertEqual(list(target.iterdir()), [])
+
     def test_a_model_id_with_brackets_is_still_accepted(self):
         doc = routing.load()
         doc["tiers"]["good"]["model"] = "opus[1m]"

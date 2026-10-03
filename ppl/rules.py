@@ -82,7 +82,7 @@ def load(path=None):
         raise PplError("SCHEMA_INVALID", "no rule matrix at %s" % path)
     except OSError as exc:
         raise PplError("SCHEMA_INVALID", "rule matrix at %s could not be read: %s" % (path, exc))
-    except tomllib.TOMLDecodeError as exc:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise PplError("SCHEMA_INVALID",
                        "rule matrix at %s is not valid TOML: %s" % (path, exc))
     return validate(doc, path)
