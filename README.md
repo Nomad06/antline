@@ -59,6 +59,16 @@ and Max quality. The same presets are `ppl routing preset economy|balanced|max`.
 The studio listens on loopback only. Every request needs the session token in the link
 `ppl serve` prints [R-STUDIO-SESSION-TOKEN].
 
+After setup the studio has three more pages. **Agents** sets the model tier and effort per
+role (or a preset for all of them), shows each role's base prompt beside its project notes
+and the agent file apply would write, and lists what the cage enforces for that role
+whatever its prompt says [R-GUARD-NOT-ARMED n/a]. **Harness** edits, adds and creates harnesses, and applies one, which also makes it the
+active harness, as `ppl harness apply` does.
+In Expert mode a raw editor sits beside every form, every save keeps the content it replaced
+in `~/.ppl/studio/history/` with a restore, and **Playground** runs one tool call through the
+real guard hook against a throwaway run. A save that would overwrite a file changed in
+another tab or a terminal since the page loaded it is refused [R-STUDIO-CHANGED-ON-DISK].
+
 ## Hooks
 
 `ppl setup claude` writes these into the workspace's `.claude/settings.local.json`

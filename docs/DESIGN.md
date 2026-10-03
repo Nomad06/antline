@@ -1768,6 +1768,31 @@ third-party file is `vendor/htm-preact.mjs`, the htm 3.1.1 standalone bundle wit
 `tests/test_studio_static.py`, bump the version in this paragraph, refresh both LICENSE files
 beside it and run the suite.
 
+**Saves.** The studio names a file by a key, `routing` or `harness:<installed
+name>:<file>` with the file one of `harness.toml`, the four `skill/` fragments and the six
+`templates/<role>.part` overlays, and a history version by its timestamp. A request cannot
+reach any other path [R-STUDIO-NO-RAW-PATHS]. A save carries the sha256 of the content the
+page loaded, and it is refused when the file changed since: every file of one save is
+checked before the first write [R-STUDIO-CHANGED-ON-DISK]. The replaced content goes to
+`~/.ppl/studio/history/<key>/`, the newest 50 versions per file, and a restore goes through
+the same validation as a save. A harness edit is validated on a private copy of the
+installed harness with exactly the bytes the save will write laid over it, so the check
+never touches a wizard draft of the same name, and a file that is a symlink is written
+through to its target, which must stay inside the harness directory
+[R-STUDIO-NO-RAW-PATHS]. What the studio writes at all is held by its routes, not by a check
+[R-STUDIO-WRITE-SURFACE n/a].
+
+**Agents page.** For each role, the base prompt (`templates/<role>.md.body`) is shown
+read-only beside the harness overlay and the agent file `routing.render` would produce from
+the draft. The blocking rows of the rule table whose scope covers the role are listed with
+them (`ppl/studio/enforced.py`) [R-GUARD-NOT-ARMED n/a].
+
+**Playground.** One tool call goes through the real `hooks/ppl_guard.py` in a subprocess,
+against a fake active run built under a temporary data root: `harness.json` is the draft's
+snapshot and `boundary.json` a default boundary. The draft itself is written inside that
+temporary root, and the directory is deleted when the hook has answered
+[R-STUDIO-PLAYGROUND-SANDBOX n/a].
+
 ## 10. Role adapters and model substitution
 
 ### 10.1 The contract that makes models replaceable
