@@ -1,3 +1,4 @@
+import contextlib
 import os
 import subprocess
 import sys
@@ -9,10 +10,12 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 import panel_client
-from ppl import config, harness, paths, tomlout
+import ppl_guard
+from ppl import config, harness, paths, run, store, tomlout
 from ppl.errors import PplError
-from ppl.studio import playground, project, stacks
+from ppl.studio import drafts, playground, project, stacks
 
 TEST_SOURCE = "source/core/orders/src/test/java/FooTest.java"
 MAIN_SOURCE = "source/core/orders/src/main/java/Foo.java"
@@ -127,6 +130,7 @@ class TestPlayground(PlaygroundTestCase):
         self.assertEqual(playground.tool_input("Write", "/a")["file_path"], "/a")
         self.assertEqual(playground.tool_input("Edit", "/a")["file_path"], "/a")
         self.assertEqual(playground.tool_input("MultiEdit", "/a")["file_path"], "/a")
+        self.assertEqual(playground.tool_input("NotebookEdit", "/a")["notebook_path"], "/a")
         self.assertEqual(playground.tool_input("Grep", "/a")["path"], "/a")
         self.assertEqual(playground.tool_input("Glob", "/a")["path"], "/a")
         self.assertEqual(playground.tool_input("mcp__atlassian__editJiraIssue", "x"), {})
@@ -226,6 +230,141 @@ class TestPlayground(PlaygroundTestCase):
     def test_parse_reports_a_hook_that_answered_something_else(self):
         self.assertEqual(playground.parse(0, "not json", "")["decision"], "error")
         self.assertEqual(playground.parse(0, "[1]", "")["decision"], "error")
+
+    def test_every_tool_the_hook_acts_on_by_path_is_one_the_playground_sends(self):
+        for tool in ppl_guard.WRITE_TOOLS:
+            with self.subTest(tool=tool):
+                self.assertIn(tool, playground.TOOLS)
+                self.assertEqual(ppl_guard.target_path(playground.tool_input(tool, "/a")), "/a")
+        for tool in ppl_guard.READ_TOOLS:
+            with self.subTest(tool=tool):
+                self.assertIn(tool, playground.TOOLS)
+                self.assertEqual(ppl_guard.read_target_path(playground.tool_input(tool, "/a"), {}), "/a")
+        for tool in playground.TOOLS:
+            with self.subTest(tool=tool, relative=True):
+                joined = "/repo/x" if tool in ppl_guard.WRITE_TOOLS else "x"
+                self.assertEqual(playground._as_sent(tool, "x", "/repo"), joined)
+
+    def test_a_notebook_edit_is_checked_like_a_write(self):
+        allowed = self.check("ppl-code-worker", "NotebookEdit", "source/core/orders/analysis.ipynb")
+        self.assertEqual(allowed["decision"], "allow", allowed)
+        denied = self.check("ppl-test-worker", "NotebookEdit", "source/core/orders/analysis.ipynb")
+        self.assertEqual(denied["decision"], "deny", denied)
+        self.assertIn("may only write test sources", denied["reason"])
+
+    def direct_decision(self, role, tool, tool_input):
+        """The hook called as Claude Code calls it, from the repo, with the input
+        exactly as typed and a boundary that lets everything through."""
+        if not paths.run_dir(playground.TASK).exists():
+            scratch = Path(tmphome.mkdtemp(prefix="pplscratch-"))
+            folder = drafts.write("demo", self.draft["doc"], self.draft["fragments"], root=scratch)
+            run.init(playground.TASK, "https://tracker.invalid/x", str(self.repo), isolated=False,
+                     model_check="skipped", harness={"name": "demo"})
+            store.write_json(paths.run_dir(playground.TASK) / "harness.json",
+                             harness.snapshot(harness.load(str(folder))))
+            store.write_json(paths.run_dir(playground.TASK) / "boundary.json",
+                             {"write": ["**"], "forbid": []})
+        previous = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            answer = ppl_guard.decide({"hook_event_name": "PreToolUse", "agent_type": role,
+                                       "tool_name": tool, "tool_input": tool_input,
+                                       "cwd": str(self.repo)})
+        finally:
+            os.chdir(previous)
+        return "allow" if answer is None else "deny"
+
+    def test_a_tilde_write_path_is_not_expanded_because_the_hook_does_not_expand_it(self):
+        literal = "~/x.java"
+        direct = self.direct_decision("ppl-code-worker", "Write",
+                                      {"file_path": literal, "content": ""})
+        shown = self.check("ppl-code-worker", "Write", literal, boundary={"write": ["**"], "forbid": []})
+        self.assertEqual(direct, "allow")
+        self.assertEqual(shown["decision"], direct, shown)
+
+    def test_a_read_path_goes_as_typed_because_the_hook_resolves_it_itself(self):
+        for value, decision in (("~/x.java", "allow"), (MAIN_SOURCE, "deny"),
+                                (str(self.repo / MAIN_SOURCE), "deny")):
+            with self.subTest(value=value):
+                direct = self.direct_decision("ppl-test-worker", "Read", {"file_path": value})
+                shown = self.check("ppl-test-worker", "Read", value)
+                self.assertEqual(direct, decision)
+                self.assertEqual(shown["decision"], direct, shown)
+
+    def test_a_value_naming_a_real_path_is_never_performed(self):
+        outside = Path(tmphome.mkdtemp(prefix="pplscratch-"))
+        inside = self.repo / "source" / "core" / "orders" / "src" / "main" / "java"
+        before = sorted(str(path) for path in self.repo.rglob("*") if ".git" not in path.parts)
+        for role in ("operator", "ppl-code-worker", "ppl-test-worker"):
+            for tool, value in (("Write", str(outside / "written.txt")),
+                                ("Bash", "touch %s" % (outside / "touched.txt")),
+                                ("Bash", "echo x > %s" % (outside / "redirected.txt")),
+                                ("Write", str(inside / "Created.java")),
+                                ("Bash", "touch %s" % (inside / "Touched.java")),
+                                ("Bash", "echo x > %s" % (inside / "Redirected.java")),
+                                ("NotebookEdit", str(inside / "new.ipynb"))):
+                with self.subTest(role=role, tool=tool, value=value):
+                    self.check(role, tool, value)
+        self.assertEqual(os.listdir(outside), [])
+        self.assertEqual(sorted(str(path) for path in self.repo.rglob("*") if ".git" not in path.parts),
+                         before)
+
+    @contextlib.contextmanager
+    def recorded_roots(self):
+        roots = []
+        real = tempfile.TemporaryDirectory
+
+        def make(*args, **kwargs):
+            made = real(*args, **kwargs)
+            roots.append(made.name)
+            return made
+
+        with mock.patch.object(tempfile, "TemporaryDirectory", make):
+            yield roots
+
+    def assert_one_root_made_and_removed(self, roots):
+        self.assertEqual(len(roots), 1, roots)
+        self.assertFalse(os.path.exists(roots[0]), roots[0])
+
+    def test_the_throwaway_root_is_removed_when_the_draft_is_refused(self):
+        with self.recorded_roots() as roots:
+            with self.assertRaises(PplError):
+                playground.check("demo", {}, {}, "operator", "Bash", "ls")
+        self.assert_one_root_made_and_removed(roots)
+
+    def test_the_throwaway_root_is_removed_when_the_run_cannot_be_built(self):
+        def failed(command, **kwargs):
+            return subprocess.CompletedProcess(command, 1, "", "boom")
+
+        with self.recorded_roots() as roots, mock.patch.object(subprocess, "run", failed):
+            with self.assertRaises(PplError):
+                self.check("operator", "Bash", "ls")
+        self.assert_one_root_made_and_removed(roots)
+
+    def test_the_throwaway_root_is_removed_when_the_hook_times_out(self):
+        real_run = subprocess.run
+
+        def stalled(command, **kwargs):
+            if command[-1].endswith("ppl_guard.py"):
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return real_run(command, **kwargs)
+
+        with self.recorded_roots() as roots, mock.patch.object(subprocess, "run", stalled):
+            result = self.check("operator", "Bash", "ls")
+        self.assertEqual(result["decision"], "error", result)
+        self.assert_one_root_made_and_removed(roots)
+
+    def test_the_throwaway_root_is_removed_when_an_exception_is_raised_mid_check(self):
+        with self.recorded_roots() as roots, mock.patch.object(
+                harness, "snapshot", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.check("operator", "Bash", "ls")
+        self.assert_one_root_made_and_removed(roots)
+
+    def test_the_throwaway_root_is_removed_when_the_hook_has_answered(self):
+        with self.recorded_roots() as roots:
+            self.check("operator", "Bash", "ls")
+        self.assert_one_root_made_and_removed(roots)
 
 
 class TestPlaygroundRoute(PlaygroundTestCase):

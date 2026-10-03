@@ -603,7 +603,7 @@ hook_or_check = "ppl/studio/files.py:resolve, ppl/studio/files.py:version_text, 
 deny_test = "tests/test_studio_files.py::TestKeys::test_a_key_naming_a_path_outside_the_harness_files_is_refused, tests/test_studio_files.py::TestKeys::test_a_history_version_that_is_not_a_timestamp_is_refused, tests/test_studio_files.py::TestKeyContainment::test_a_harness_name_that_draft_names_refuse_is_refused, tests/test_studio_files.py::TestKeyContainment::test_a_symlink_leaving_the_harness_directory_is_refused, tests/test_studio_files.py::TestSaveThroughLinks::test_a_target_that_resolves_outside_the_harness_after_the_key_check_is_refused"
 allow_test = "tests/test_studio_files.py::TestKeys::test_the_routing_key_and_a_harness_file_key_resolve"
 owner = "panel"
-residual = "a client sends two paths: the wizard's project path, which is read only (inspected with git and walked for md files, never written), and the harness add source, a git URL that harness.add clones or an absolute local directory it copies with symlinks followed, into the new harness directory only"
+residual = "the client-sent paths are the wizard's project path, workspace and harness source, the harness add source, and the playground's value and draft repo path. The project path is read only (inspected with git and walked for md files, never written), the harness add source is a git URL that harness.add clones or an absolute local directory it copies with symlinks followed, into the new harness directory only, and the playground's value and repo path are resolved and read only, against a throwaway run"
 
 [[rule]]
 id = "R-STUDIO-CHANGED-ON-DISK"
@@ -619,7 +619,7 @@ residual = "the check and the write sit under one lock in the studio process onl
 
 [[rule]]
 id = "R-STUDIO-WRITE-SURFACE"
-statement = "The studio writes config.toml, routing.toml, the harness directories, the agent and skill files apply renders, the workspace directory and its .claude/settings.local.json hook registration that the wizard's claude step writes, and ~/.ppl/studio, and nothing else."
+statement = "The studio writes config.toml, routing.toml, the harness directories, the agent and skill files apply renders, the workspace directory and its .claude/settings.local.json hook registration that the wizard's claude step writes, ~/.ppl/studio, and a temporary directory for each playground check, removed when the hook has answered, and nothing else."
 scope = "panel"
 event = "every studio write route"
 enforcement = "n/a"
@@ -639,7 +639,7 @@ hook_or_check = "none"
 deny_test = ""
 allow_test = ""
 owner = "panel"
-residual = "PROPERTY: playground.check hands the hook a PPL_HOME made by tempfile.TemporaryDirectory and deletes it when the hook has answered, and tests/test_studio_playground.py::TestPlayground::test_the_playground_leaves_no_files_behind shows it; nothing refuses a change that would point the playground at the real data root"
+residual = "PROPERTY: playground.check hands the hook and the child a PPL_HOME made by tempfile.TemporaryDirectory and an environment with no other PPL_ variable but PPL_ROOT, and deletes the directory when the hook has answered, when the check is refused, when the hook times out and when an exception is raised. These tests hold it: tests/test_studio_playground.py::TestPlayground::test_the_playground_leaves_no_files_behind, tests/test_studio_playground.py::TestPlayground::test_the_hook_and_the_child_get_the_throwaway_data_root_and_no_other_ppl_variable, tests/test_studio_playground.py::TestPlayground::test_a_value_naming_a_real_path_is_never_performed, tests/test_studio_playground.py::TestPlayground::test_the_throwaway_root_is_removed_when_the_hook_has_answered, tests/test_studio_playground.py::TestPlayground::test_the_throwaway_root_is_removed_when_the_draft_is_refused, tests/test_studio_playground.py::TestPlayground::test_the_throwaway_root_is_removed_when_the_run_cannot_be_built, tests/test_studio_playground.py::TestPlayground::test_the_throwaway_root_is_removed_when_the_hook_times_out, tests/test_studio_playground.py::TestPlayground::test_the_throwaway_root_is_removed_when_an_exception_is_raised_mid_check. Nothing refuses a change that would point the playground at the real data root other than those tests. The playground answers about the harness and the boundary, not about the whole cage: the throwaway runs directory is not ~/.ppl/runs, so a write to the real run's state reads allow, the fake run sits at admission, so the Jira gate always reads deny, a value over 4096 characters is refused before the hook, and the hook cites no rule ids, so the rules list is usually empty"
 
 # ---------------------------------------------------------------------------
 # Done gate

@@ -14,13 +14,13 @@ from ..errors import PplError
 from . import drafts, files
 
 TASK = "STUDIO-1"
-TOOLS = ("Bash", "Read", "Write", "Edit", "MultiEdit", "Grep", "Glob")
+TOOLS = ("Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Grep", "Glob")
 MAX_INPUT = 4096
 TIMEOUT_SECONDS = 30
 DEFAULT_BOUNDARY = {"write": ["src/**", "lib/**", "source/**"], "forbid": []}
 _MCP_TOOL_RE = re.compile(r"^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+$")
 _RULE_RE = re.compile(r"\bR-[A-Z0-9]+(?:-[A-Z0-9]+)+\b")
-_PATH_TOOLS = ("Read", "Write", "Edit", "MultiEdit", "Grep", "Glob")
+_WRITE_PATH_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 _INTERNAL_ERROR = "ppl_guard internal error"
 
 
@@ -31,6 +31,8 @@ def tool_input(tool, value):
         return {"file_path": value, "content": ""}
     if tool in ("Edit", "MultiEdit"):
         return {"file_path": value, "old_string": "", "new_string": ""}
+    if tool == "NotebookEdit":
+        return {"notebook_path": value, "new_source": ""}
     if tool == "Read":
         return {"file_path": value}
     if tool in ("Grep", "Glob"):
@@ -55,12 +57,14 @@ def _check_inputs(role, tool, value, boundary):
 
 
 def _as_sent(tool, value, repo):
-    """Claude Code gives the hook an absolute path, so a path typed relative
-    is read against the repo."""
-    if tool not in _PATH_TOOLS:
+    """What the hook would resolve. Claude Code gives it an absolute path. The
+    hook reads a write path against its own working directory and never
+    expands a ~, so a write path that is not absolute is joined to the repo
+    and a ~ stays a name. A read path the hook resolves itself against the
+    payload's cwd, expanding ~, so it goes as typed."""
+    if tool not in _WRITE_PATH_TOOLS or os.path.isabs(value):
         return value
-    expanded = os.path.expanduser(value)
-    return expanded if os.path.isabs(expanded) else os.path.join(repo, expanded)
+    return os.path.join(repo, value)
 
 
 def _environment(home):
