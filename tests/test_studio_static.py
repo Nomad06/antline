@@ -55,6 +55,16 @@ class TestStaticFiles(unittest.TestCase):
         self.assertIn("The MIT License",
                       (STATIC / "vendor" / "LICENSE-preact").read_text(encoding="ascii"))
 
+    def test_no_studio_module_writes_markup_from_a_string(self):
+        sinks = ("innerHTML", "outerHTML", "dangerouslySetInnerHTML", "insertAdjacentHTML",
+                 "document.write", "createContextualFragment")
+        for rel in modules():
+            if rel.startswith("vendor/"):
+                continue
+            text = (STATIC / rel).read_text(encoding="utf-8")
+            for sink in sinks:
+                self.assertNotIn(sink, text, (rel, sink))
+
     def test_static_files_are_ascii_lf_and_tab_free(self):
         for rel in api_static.MANIFEST:
             data = (STATIC / rel).read_bytes()

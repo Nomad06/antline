@@ -34,7 +34,7 @@ function rowsProblem(rows) {
   return null;
 }
 
-export function HarnessForm({ draft, extras, mode, saveLabel, onSave }) {
+export function HarnessForm({ draft, extras, mode, saveLabel, onSave, nameLocked }) {
   const [name, setName] = useState(draft.doc.harness.name);
   const [doc, setDoc] = useState(() => {
     const copy = clone(draft.doc);
@@ -122,7 +122,7 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave }) {
     ${dropped.length ? html`<details><summary>${dropped.length} item(s) left out</summary>
       <ul>${dropped.map((item) => html`<li><code>${item.item}</code>: ${item.reason}</li>`)}</ul></details>` : null}
     <div class="grid">
-      <${Field} label="Harness name"><input value=${name} onInput=${(e) => { setName(e.target.value); touch(); }} /><//>
+      <${Field} label="Harness name"><input value=${name} disabled=${nameLocked} onInput=${(e) => { setName(e.target.value); touch(); }} /><//>
       <${Field} label="Default branch" help=${sources["repo.default_branch"] || ""}>
         <input value=${doc.repo.default_branch} onInput=${(e) => update((d) => { d.repo.default_branch = e.target.value; })} /><//>
       <${Field} label="Task key pattern" help="A regex every task key matches, for example ^APP-[0-9]+$">

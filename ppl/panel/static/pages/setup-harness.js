@@ -3,7 +3,7 @@ import { post, runJob } from "../api.js";
 import { Button, Field, Log, Notice } from "../ui/controls.js";
 import { HarnessForm } from "../ui/harness-form.js";
 
-export function HarnessStep({ mode, done }) {
+export function HarnessStep({ mode, done, onInstall }) {
   const [path, setPath] = useState("");
   const [info, setInfo] = useState(null);
   const [chosen, setChosen] = useState([]);
@@ -89,6 +89,10 @@ export function HarnessStep({ mode, done }) {
     }
   };
   const install = async (form) => {
+    if (onInstall) {
+      await onInstall(form);
+      return;
+    }
     setInstalling(true);
     try {
       const result = await runJob(post("/api/harness/draft/install", form), (lines) => setLog((old) => old.concat(lines)));

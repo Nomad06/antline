@@ -1,9 +1,15 @@
 import { html, render, useEffect, useState } from "./vendor/htm-preact.mjs";
 import { HomePage } from "./pages/home.js";
 import { SetupPage } from "./pages/setup.js";
+import { AgentsPage } from "./pages/agents.js";
+import { HarnessPage } from "./pages/harness.js";
+import { PlaygroundPage } from "./pages/playground.js";
 
-const PAGES = { "": HomePage, setup: SetupPage };
-const NAV = [{ route: "", label: "Home" }, { route: "setup", label: "Setup" }];
+const PAGES = { "": HomePage, setup: SetupPage, agents: AgentsPage, harness: HarnessPage,
+                playground: PlaygroundPage };
+const NAV = [{ route: "", label: "Home" }, { route: "setup", label: "Setup" },
+             { route: "agents", label: "Agents" }, { route: "harness", label: "Harness" },
+             { route: "playground", label: "Playground", expert: true }];
 
 function currentRoute() {
   return window.location.hash.replace(/^#\/?/, "").split("?")[0];
@@ -55,7 +61,7 @@ function App() {
     <header class="bar">
       <a class="brand" href="#/">antline studio</a>
       <nav>
-        ${NAV.map((item) => html`<a class=${route === item.route ? "on" : ""} href=${"#/" + item.route}>${item.label}</a>`)}
+        ${NAV.filter((item) => !item.expert || mode === "expert").map((item) => html`<a class=${route === item.route ? "on" : ""} href=${"#/" + item.route}>${item.label}</a>`)}
         <a href="/runs">Runs</a>
       </nav>
       <button onClick=${toggle} aria-pressed=${mode === "expert"} title="Expert mode adds the raw files and the cage playground">
