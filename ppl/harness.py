@@ -129,9 +129,10 @@ def validate(doc, source):
     _require(doc, "harness", "name", source)
     _require(doc, "repo", "path", source)
     _require(doc, "repo", "default_branch", source)
-    if "worktrees" in doc["repo"] and not _text(doc["repo"]["worktrees"]):
-        _fail(source, "repo.worktrees must be a non-empty string, the directory the run "
-              "worktrees are made in")
+    # an empty value means the default directory beside the repo, as _values reads it
+    if "worktrees" in doc["repo"] and not isinstance(doc["repo"]["worktrees"], str):
+        _fail(source, "repo.worktrees must be a string, the directory the run worktrees are "
+              "made in")
     pattern = _require(doc, "task", "key_pattern", source)
     try:
         re.compile(pattern)

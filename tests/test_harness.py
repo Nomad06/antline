@@ -203,11 +203,16 @@ class TestMalformedInputIsRefusedNotATraceback(HarnessTestCase):
         self.refused(name, "harness.format")
 
     def test_a_worktrees_value_that_is_not_a_path_string_is_refused(self):
-        for value in ("1", '["/home/dev/src/project/.worktrees"]', '""', "{ path = \"x\" }"):
+        for value in ("1", '["/home/dev/src/project/.worktrees"]', "{ path = \"x\" }"):
             with self.subTest(value=value):
                 name = self.mutate("example-maven", 'worktrees = "/home/dev/src/project/.worktrees"',
                                    "worktrees = %s" % value)
                 self.refused(name, "repo.worktrees")
+
+    def test_an_empty_worktrees_still_means_the_default_directory(self):
+        name = self.mutate("example-maven", 'worktrees = "/home/dev/src/project/.worktrees"',
+                           'worktrees = ""')
+        self.assertEqual(harness.load(name)["repo"]["worktrees"], "")
 
     def test_tracker_list_with_a_non_string_is_refused(self):
         name = self.mutate("example-maven", READ_TOOLS_LINE,

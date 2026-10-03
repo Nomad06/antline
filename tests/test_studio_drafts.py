@@ -312,6 +312,21 @@ class TestInstall(DraftTestCase):
         self.assertEqual(installed["repo"]["path"], draft["doc"]["repo"]["path"])
         self.assertEqual(config.section("harness").get("pending"), "demo")
 
+    def test_install_hands_setup_an_absolute_draft_path(self):
+        # an older Python returns a relative mkdtemp path for a relative data root
+        relative = Path(os.path.relpath(tmphome.mkdtemp(prefix="pplrel-"), os.getcwd())) / ".install-x"
+        relative.mkdir()
+        seen = {}
+
+        def run_step(step, answers, emit):
+            seen.update(answers)
+            return {"done": [step], "failed": [], "reasons": {}}
+
+        with mock.patch.object(drafts.tempfile, "mkdtemp", return_value=str(relative)), \
+                mock.patch.object(drafts.wizard, "run_step", run_step):
+            self.install(self.preset())
+        self.assertTrue(os.path.isabs(seen["harness_from"]), seen["harness_from"])
+
     def test_installing_a_changed_draft_again_needs_replace(self):
         draft = self.preset()
         self.install(draft)

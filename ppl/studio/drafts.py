@@ -3,6 +3,7 @@ document and fragments into a private directory under ~/.ppl/studio/drafts/,
 removed after, so harness.load, validate, render_skill and the setup harness
 step read a draft exactly the way they read an installed harness, and two
 requests never share a directory."""
+import os
 import re
 import shlex
 import shutil
@@ -233,7 +234,8 @@ def install(name, doc, fragments, replace, emit):
     from another request cannot change what was checked and what is installed."""
     check_name(name)
     drafts_dir().mkdir(parents=True, exist_ok=True)
-    private = Path(tempfile.mkdtemp(dir=drafts_dir(), prefix=".install-"))
+    # absolute, because setup's harness step refuses a relative source
+    private = Path(os.path.abspath(tempfile.mkdtemp(dir=drafts_dir(), prefix=".install-")))
     try:
         target, result = checked_copy(name, doc, fragments, private)
         if not result["ok"]:
