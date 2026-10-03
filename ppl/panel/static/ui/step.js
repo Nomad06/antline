@@ -9,13 +9,17 @@ export function useStepRunner(step, onDone) {
     setBusy(true);
     setError(null);
     setLog([]);
+    const lines = [];
     try {
       const result = await runJob(post("/api/setup/" + step, { answers: answers || {} }),
-        (lines) => setLog((old) => old.concat(lines)));
+        (more) => {
+          lines.push(...more);
+          setLog((old) => old.concat(more));
+        });
       if (result.failed && result.failed.length) {
         setError(result.reasons[step] || "the step did not complete");
       } else if (onDone) {
-        await onDone(result);
+        await onDone(result, lines);
       }
     } catch (e) {
       setError(e.message);

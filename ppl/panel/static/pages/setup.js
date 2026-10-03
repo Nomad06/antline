@@ -20,22 +20,42 @@ function PathsStep({ state, done }) {
   </div>`;
 }
 
-function ClaudeStep({ state, mode, done }) {
-  const step = useStepRunner("claude", done);
+const HOOK_LABELS = {
+  local: "Only in this workspace (recommended): written into its .claude/settings.local.json",
+  global: "In all my Claude Code projects: prints the entries to paste into the global settings file, nothing is registered until you paste them",
+  manual: "Print the entries, I paste them into the settings file I choose: nothing is registered until I do",
+};
+
+// The lines from "add these entries to <file>:" on, the step's own log of what to paste.
+function printedEntries(lines) {
+  const start = lines.findIndex((line) => line.startsWith("add these entries to"));
+  return start < 0 ? null : lines.slice(start);
+}
+
+function HookWarning({ lines }) {
+  return html`<${Notice} kind="warn">The guard hook is not registered: agents run without the cage until the entries are pasted.
+    ${lines ? html`<pre class="log">${lines.join("\n")}</pre>`
+      : html`<br />Run the Claude Code step again to print the entries, or to register them in the workspace.`}<//>`;
+}
+
+function ClaudeStep({ state, mode, done, onHooks }) {
+  const step = useStepRunner("claude", async (result, lines) => {
+    await onHooks(printedEntries(lines));
+    await done();
+  });
   const [binary, setBinary] = useState("claude");
   const [workspace, setWorkspace] = useState(state.workspace || "~/ppl-workspace");
   const [hooks, setHooks] = useState("local");
-  const choices = mode === "expert" ? ["local", "global", "manual"] : ["local", "global"];
-  const labels = { local: "Only in this workspace (recommended)", global: "In all my Claude Code projects",
-                   manual: "Print the entries, I paste them myself" };
+  const chosen = mode === "expert" ? hooks : "local";
   return html`<div>
     <${Field} label="Workspace folder" help="Pipeline sessions start here. Its .claude folder gets the agents, the skill and the hooks.">
       <input value=${workspace} onInput=${(e) => setWorkspace(e.target.value)} /><//>
-    ${mode === "expert" ? html`<${Field} label="Claude Code binary"><input value=${binary} onInput=${(e) => setBinary(e.target.value)} /><//>` : null}
-    <fieldset><legend>Where the guard hooks go</legend>
-      ${choices.map((choice) => html`<label><input type="radio" name="hooks" checked=${hooks === choice} onChange=${() => setHooks(choice)} />${labels[choice]}</label>`)}
-    </fieldset>
-    <${Button} primary busy=${step.busy} disabled=${!workspace.trim()} onClick=${() => step.run({ claude_binary: binary, workspace, hooks })}>Save and register the hooks<//>
+    ${mode === "expert" ? html`<${Field} label="Claude Code binary"><input value=${binary} onInput=${(e) => setBinary(e.target.value)} /><//>
+      <fieldset><legend>Where the guard hooks go</legend>
+        ${Object.keys(HOOK_LABELS).map((choice) => html`<label><input type="radio" name="hooks" checked=${hooks === choice} onChange=${() => setHooks(choice)} />${HOOK_LABELS[choice]}</label>`)}
+      </fieldset>`
+      : html`<p class="help">The guard hooks are registered in the workspace, in its .claude/settings.local.json.</p>`}
+    <${Button} primary busy=${step.busy} disabled=${!workspace.trim()} onClick=${() => step.run({ claude_binary: binary, workspace, hooks: chosen })}>${chosen === "local" ? "Save and register the hooks" : "Save and print the entries"}<//>
     <${Outcome} step=${step} />
   </div>`;
 }
@@ -86,21 +106,35 @@ function ForgeStep({ done }) {
   </div>`;
 }
 
-function DoctorCard({ doctor, workspace }) {
+const REGISTRATION_WORDS = { local: "local", global: "global", both: "local and global",
+                             none: "not registered" };
+
+function hookRuns(doctor) {
+  if (doctor.hook_runs === true) {
+    return "yes";
+  }
+  if (doctor.hook_runs === false) {
+    return "no: " + (doctor.hook_runs_problem || "the registered hook did not run clean");
+  }
+  return "not registered";
+}
+
+function DoctorCard({ doctor, workspace, hookLines }) {
   return html`<div class="card">
     <h3>Ready check</h3>
     <ul>
-      <li>Guard hook runs: ${doctor.hook_runs === true ? "yes" : "no"}${doctor.hook_runs_problem ? ": " + doctor.hook_runs_problem : ""}</li>
-      <li>Hook registration: ${doctor.registration}</li>
+      <li>Guard hook runs: ${hookRuns(doctor)}</li>
+      <li>Hook registration: ${REGISTRATION_WORDS[doctor.registration] || "unknown: a settings file could not be read"}</li>
       <li>Active harness: ${(doctor.harness && doctor.harness.active) || "none"}</li>
     </ul>
+    ${doctor.registration === "none" ? html`<${HookWarning} lines=${hookLines} />` : null}
     <h3>Start your first task</h3>
     <p>Open Claude Code in <code>${workspace || "your workspace"}</code> and type the task's key after the skill name, a tracker link works too:</p>
     <pre>/pipeline KEY-123</pre>
   </div>`;
 }
 
-function ApplyStep({ state, done }) {
+function ApplyStep({ state, done, hooks }) {
   const [doctor, setDoctor] = useState(null);
   const step = useStepRunner("apply", async () => {
     await done();
@@ -110,7 +144,7 @@ function ApplyStep({ state, done }) {
     <p>Writes the six agent files and the orchestrator skill into the workspace and makes the harness active.</p>
     <${Button} primary busy=${step.busy} onClick=${() => step.run({})}>Apply<//>
     <${Outcome} step=${step} />
-    ${doctor ? html`<${DoctorCard} doctor=${doctor} workspace=${state.workspace} />` : null}
+    ${doctor ? html`<${DoctorCard} doctor=${doctor} workspace=${state.workspace} hookLines=${hooks && hooks.lines} />` : null}
   </div>`;
 }
 
@@ -122,12 +156,24 @@ export function SetupPage({ mode }) {
   const [open, setOpen] = useState(null);
   const [error, setError] = useState(null);
   const [problem, setProblem] = useState(null);
+  const [hooks, setHooks] = useState(null);
   const refresh = async () => {
     const fresh = await get("/api/setup");
     setState(fresh);
     setOpen(fresh.next || "apply");
+    return fresh;
   };
-  useEffect(() => { refresh().catch((e) => setError(e.message)); }, []);
+  // the registration as the doctor sees it, with the entries the Claude Code step printed
+  const checkHooks = (lines) => get("/api/doctor").then(
+    (doctor) => setHooks({ registration: doctor.registration, lines: lines || null }),
+    () => setHooks(null));
+  useEffect(() => {
+    refresh().then((fresh) => {
+      if (fresh.steps.some((item) => item.name === "claude" && item.state === "done")) {
+        checkHooks(null);
+      }
+    }).catch((e) => setError(e.message));
+  }, []);
   if (error) {
     return html`<${Notice} kind="error">${error}<//>`;
   }
@@ -148,9 +194,10 @@ export function SetupPage({ mode }) {
         <header onClick=${() => setOpen(item.name)}>
           <h2>${TITLES[item.name]}</h2> <${Badge} kind=${item.state}>${item.state}<//>
         </header>
+        ${item.name === "claude" && hooks && hooks.registration === "none" ? html`<${HookWarning} lines=${hooks.lines} />` : null}
         ${open === item.name ? html`<div class="body">
           <p class="muted">${item.intro}</p>
-          <${View} state=${state} mode=${mode} done=${refresh} />
+          <${View} state=${state} mode=${mode} done=${refresh} hooks=${hooks} onHooks=${checkHooks} />
           ${problem && problem.step === item.name ? html`<${Notice} kind="error">${problem.message}<//>` : null}
           <p class="skip"><a href="#/setup" onClick=${(e) => { e.preventDefault(); skip(item.name); }}>Skip, set this up later</a></p>
         </div>` : null}
