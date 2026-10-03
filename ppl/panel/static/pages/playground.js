@@ -7,7 +7,8 @@ const ROLES = ["ppl-code-worker", "ppl-test-worker", "ppl-briefer", "ppl-brief-c
 const TOOLS = ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Grep", "Glob"];
 
 function examples(doc) {
-  const focused = ((doc && doc.gate) || []).find((gate) => gate.name === "focused-tests");
+  const gates = doc && Array.isArray(doc.gate) ? doc.gate : [];
+  const focused = gates.find((gate) => gate && gate.name === "focused-tests" && typeof gate.command === "string");
   const test = focused ? focused.command.replace("<test_class>", "app.FooTest").replace("<module>", "core") : "make test";
   return [
     { label: "The code writer edits a test", role: "ppl-code-worker", tool: "Write", value: "src/test/FooTest.java" },

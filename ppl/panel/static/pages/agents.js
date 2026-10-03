@@ -7,7 +7,7 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function RoleDetail({ role, routingDoc, mode, onSaved }) {
+function RoleDetail({ role, routingDoc, mode, onDirty }) {
   const [detail, setDetail] = useState(null);
   const [notes, setNotes] = useState("");
   const [rendered, setRendered] = useState("");
@@ -17,13 +17,24 @@ function RoleDetail({ role, routingDoc, mode, onSaved }) {
   const [saved, setSaved] = useState(null);
   const [busy, setBusy] = useState(false);
   const ready = Boolean(detail && detail.harness);
+  const unsaved = Boolean(detail && detail.overlay && notes !== detail.overlay.text);
+  const show = (data) => {
+    setDetail(data);
+    setNotes(data.overlay ? data.overlay.text : "");
+    setRendered(data.rendered || "");
+  };
+  const reload = () => get("/api/agents/" + encodeURIComponent(role)).then((data) => {
+    show(data);
+    setSaved(null);
+    setProblem(null);
+  }, (e) => setProblem(e.message));
   useEffect(() => {
-    get("/api/agents/" + encodeURIComponent(role)).then((data) => {
-      setDetail(data);
-      setNotes(data.overlay ? data.overlay.text : "");
-      setRendered(data.rendered || "");
-    }, (e) => setError(e.message));
+    get("/api/agents/" + encodeURIComponent(role)).then(show, (e) => setError(e.message));
   }, [role]);
+  useEffect(() => {
+    onDirty(unsaved);
+    return () => onDirty(false);
+  }, [unsaved]);
   useEffect(() => {
     if (!ready) {
       return undefined;
@@ -67,7 +78,7 @@ function RoleDetail({ role, routingDoc, mode, onSaved }) {
       <div><h3>Base prompt</h3><p class="help">Part of antline, the same for every project.</p><pre>${detail.base}</pre></div>
       <div><h3>Project notes for this role</h3>
         ${detail.harness ? html`<textarea aria-label="Project notes for this role" value=${notes} onInput=${(e) => edit(e.target.value)}></textarea>
-          <${Button} primary busy=${busy} disabled=${notes === detail.overlay.text} onClick=${save}>Save the notes<//>
+          <${Button} primary busy=${busy} disabled=${!unsaved} onClick=${save}>Save the notes<//>
           ${saved ? html`<${Notice} kind="ok">${saved}<//>` : null}
           ${problem ? html`<${Notice} kind="error">${problem}<//>` : null}`
           : html`<p class="muted">Set up a harness first: the notes live in it.</p>`}
@@ -81,7 +92,7 @@ function RoleDetail({ role, routingDoc, mode, onSaved }) {
         ${mode === "expert" && rule.residual ? html`<br /><span class="muted">Not covered: ${rule.residual}</span>` : null}</li>`)}</ul>
     </details>
     ${mode === "expert" && detail.harness ? html`<h3>History of the notes</h3>
-      <${History} fileKey=${"harness:" + detail.harness + ":templates/" + role + ".part"} stamp=${detail.overlay.hash} onRestored=${onSaved} />` : null}
+      <${History} fileKey=${"harness:" + detail.harness + ":templates/" + role + ".part"} stamp=${detail.overlay.hash} onRestored=${reload} />` : null}
   </div>`;
 }
 
@@ -89,7 +100,7 @@ export function AgentsPage({ mode }) {
   const [data, setData] = useState(null);
   const [doc, setDoc] = useState(null);
   const [open, setOpen] = useState(null);
-  const [notesVersion, setNotesVersion] = useState(0);
+  const [notesDirty, setNotesDirty] = useState(false);
   const [error, setError] = useState(null);
   const [problem, setProblem] = useState(null);
   const [message, setMessage] = useState(null);
@@ -144,6 +155,7 @@ export function AgentsPage({ mode }) {
     done("The agent files and the skill are written.");
   });
   const applyHelp = dirty ? "Save the routing first: apply writes the saved one."
+    : notesDirty ? "Save the project notes first: apply writes the saved ones."
     : data.harness ? "Apply writes the six agent files and the skill from the saved routing and the active harness."
       : data.harness_error ? "Apply is off until the active harness loads."
         : "Apply needs an active harness: set one up on the Harness page.";
@@ -193,7 +205,7 @@ export function AgentsPage({ mode }) {
         </header>
         <p class="muted">${row.description}</p>
         <div class="grid">
-          <${Field} label="Model tier"><select value=${entry.tier || ""} onChange=${(e) => setRole(row.role, (r) => { r.tier = e.target.value; })}>
+          <${Field} label="Model tier"><select value=${entry.tier || ""} onChange=${(e) => setRole(row.role, (r) => { r.tier = e.target.value; delete r.provider; delete r.model; })}>
             ${entry.tier ? null : html`<option value="">${row.model} (named in routing.toml)</option>`}
             ${tiers.map((tier) => html`<option value=${tier}>${tier} (${data.tiers[tier].model})</option>`)}</select><//>
           <${Field} label="Effort"><select value=${params.effort || ""} onChange=${(e) => setRole(row.role, (r) => setEffort(r, e.target.value))}>
@@ -205,12 +217,12 @@ export function AgentsPage({ mode }) {
               ${tiers.map((tier) => html`<option value=${tier}>${tier}</option>`)}</select><//>` : null}
         </div>
         <p class="help">Tools: ${row.tools.join(", ")}</p>
-        ${shown ? html`<${RoleDetail} key=${row.role + ":" + notesVersion} role=${row.role} routingDoc=${doc} mode=${mode} onSaved=${() => setNotesVersion((v) => v + 1)} />` : null}
+        ${shown ? html`<${RoleDetail} key=${row.role} role=${row.role} routingDoc=${doc} mode=${mode} onDirty=${setNotesDirty} />` : null}
       </article>`;
     })}
     <${Button} primary busy=${busy === "save"} disabled=${!dirty || Boolean(busy)} onClick=${save}>Save the routing<//>
     <p class="help">Saving writes routing.toml from this form, so comments in it are dropped. Its history keeps the old file.</p>
-    <${Button} busy=${busy === "apply"} disabled=${!data.harness || dirty || Boolean(busy)} onClick=${apply}>Apply<//>
+    <${Button} busy=${busy === "apply"} disabled=${!data.harness || dirty || notesDirty || Boolean(busy)} onClick=${apply}>Apply<//>
     <p class="help">${applyHelp}</p>
     ${message ? html`<${Notice} kind="ok">${message}<//>` : null}
     ${problem ? html`<${Notice} kind="error">${problem}<//>` : null}

@@ -61,10 +61,23 @@ class TestPlayground(PlaygroundTestCase):
         self.assertEqual(result["decision"], "allow", result)
 
     def test_the_playground_leaves_no_files_behind(self):
-        before = {name for name in os.listdir(tempfile.gettempdir()) if name.startswith("ppl-playground-")}
-        self.check("ppl-code-worker", "Write", TEST_SOURCE)
-        after = {name for name in os.listdir(tempfile.gettempdir()) if name.startswith("ppl-playground-")}
-        self.assertEqual(after, before)
+        # a temp directory of the test's own: another suite or studio sharing the system one
+        # creates and removes its own ppl-playground-* entries while this test runs
+        own = tmphome.mkdtemp(prefix="pplplay-")
+        made = []
+        real = tempfile.mkdtemp
+
+        def spy(*args, **kwargs):
+            path = real(*args, **kwargs)
+            made.append(path)
+            return path
+
+        with mock.patch.object(tempfile, "tempdir", own), mock.patch.object(tempfile, "mkdtemp", spy):
+            self.check("ppl-code-worker", "Write", TEST_SOURCE)
+        built = [path for path in made if os.path.basename(path).startswith("ppl-playground-")]
+        self.assertTrue(built)
+        self.assertTrue(all(os.path.dirname(path) == own for path in built), built)
+        self.assertEqual(os.listdir(own), [])
         self.assertFalse(paths.runs_dir().exists())
 
     def test_a_bad_role_tool_or_input_is_refused(self):
