@@ -3,6 +3,7 @@ import { get, post } from "../api.js";
 import { Badge, Button, Field, Log, Notice } from "../ui/controls.js";
 import { useStepRunner } from "../ui/step.js";
 import { HarnessStep } from "./setup-harness.js";
+import { AntMark } from "../ui/ant.js";
 
 const TITLES = { paths: "Welcome", claude: "Claude Code", models: "Models",
                  harness: "Project and harness", forge: "Forge", apply: "Apply" };
@@ -188,9 +189,10 @@ export function SetupPage({ mode }) {
   return html`<section>
     <h1>Set up antline</h1>
     <p class="muted">Every step can be skipped and run again later. <code>ppl setup</code> in a terminal reads and writes the same state.</p>
-    ${state.steps.map((item) => {
+    <div class="trail">${state.steps.map((item) => {
       const View = VIEWS[item.name];
-      return html`<article class=${"step " + item.state}>
+      return html`<article class=${"step " + item.state + (open === item.name ? " open" : "")}>
+        ${open === item.name ? html`<span class="here"><${AntMark} /></span>` : null}
         <header onClick=${() => setOpen(item.name)}>
           <h2>${TITLES[item.name]}</h2> <${Badge} kind=${item.state}>${item.state}<//>
         </header>
@@ -202,6 +204,6 @@ export function SetupPage({ mode }) {
           <p class="skip"><a href="#/setup" onClick=${(e) => { e.preventDefault(); skip(item.name); }}>Skip, set this up later</a></p>
         </div>` : null}
       </article>`;
-    })}
+    })}</div>
   </section>`;
 }

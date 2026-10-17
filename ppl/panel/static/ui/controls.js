@@ -25,7 +25,7 @@ export function Log({ lines }) {
 }
 
 export function Button({ onClick, busy, primary, disabled, children }) {
-  return html`<button class=${primary ? "primary" : ""} onClick=${onClick} disabled=${disabled || busy}>
+  return html`<button class=${(primary ? "primary" : "") + (busy ? " busy" : "")} onClick=${onClick} disabled=${disabled || busy}>
     ${busy ? "Working..." : children}
   </button>`;
 }

@@ -1,78 +1,183 @@
+/* antline studio. Ant black, amber resin, a cut leaf for done, wood-ant red for a refusal. */
 :root {
-  --bg: #f7f7f5;
+  --paper: #f6f6f3;
   --surface: #ffffff;
-  --text: #1d1d1f;
-  --muted: #6b6b70;
-  --line: #dcdcdf;
-  --accent: #2f6fdb;
-  --accent-text: #ffffff;
-  --ok: #1f7a3a;
-  --warn: #9a6200;
-  --bad: #b3261e;
-  --radius: 8px;
+  --sunk: #f0efea;
+  --ink: #211915;
+  --muted: #6b5f56;
+  --line: #e2ded7;
+  --trail: #b4a89c;
+  --hole: #211915;
+  --amber: #e5a019;
+  --amber-ink: #8a5800;
+  --on-amber: #211915;
+  --leaf: #3d7a2a;
+  --leaf-soft: #e7f1e0;
+  --formica: #b0351c;
+  --formica-soft: #fbebe6;
+  --radius: 10px;
+  --radius-s: 6px;
   --gap: 16px;
+  --display: "Avenir Next", "Avenir", "Segoe UI Variable Display", "Bahnschrift", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #17181a;
-    --surface: #202124;
-    --text: #ececee;
-    --muted: #a0a0a8;
-    --line: #3a3b3f;
-    --accent: #6ea0ff;
-    --accent-text: #0d1117;
-    --ok: #5cc27a;
-    --warn: #e0a84a;
-    --bad: #ff7b72;
+    --paper: #17120e;
+    --surface: #211a15;
+    --sunk: #1b1511;
+    --ink: #f1ebe4;
+    --muted: #b3a698;
+    --line: #3a2f27;
+    --trail: #6e6055;
+    --hole: #0b0806;
+    --amber: #f0b23a;
+    --amber-ink: #f3c260;
+    --on-amber: #1d150f;
+    --leaf: #86c46a;
+    --leaf-soft: #1f2e18;
+    --formica: #ff7f61;
+    --formica-soft: #3a1c15;
     color-scheme: dark;
   }
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.5; }
-.bar { display: flex; align-items: center; gap: var(--gap); padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
-.bar .brand { font-weight: 600; color: var(--text); text-decoration: none; }
-.bar nav { display: flex; gap: 12px; flex: 1; }
-.bar nav a { color: var(--muted); text-decoration: none; padding: 4px 8px; border-radius: var(--radius); }
-.bar nav a.on { color: var(--text); background: var(--bg); }
-main { max-width: 980px; margin: 0 auto; padding: 24px 20px 64px; }
-h1 { font-size: 1.5rem; margin: 0 0 8px; }
-h2 { font-size: 1.15rem; margin: 0; }
-h3 { font-size: 1rem; margin: 16px 0 6px; }
-.muted, .help { color: var(--muted); font-size: 0.9rem; }
+body { margin: 0; background: var(--paper); color: var(--ink); line-height: 1.55; font-size: 15px; }
+a { color: var(--amber-ink); }
+:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+/* The bar sits on the trail: its lower edge is the dotted line the ants walk. */
+.bar { display: flex; align-items: center; gap: var(--gap); padding: 10px 20px 12px; background: var(--surface);
+       border-bottom: 3px dotted var(--trail); }
+.bar .brand { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); text-decoration: none;
+              font-family: var(--display); font-weight: 700; font-size: 1.1rem; letter-spacing: -0.01em; }
+.bar .brand .studio { font-weight: 400; color: var(--muted); }
+.bar nav { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
+.bar nav a { color: var(--muted); text-decoration: none; padding: 4px 10px; border-radius: 999px; }
+.bar nav a:hover { color: var(--ink); }
+.bar nav a.on { color: var(--on-amber); background: var(--amber); }
+
+main { max-width: 980px; margin: 0 auto; padding: 28px 20px 64px; }
+h1, h2, h3 { font-family: var(--display); color: var(--ink); letter-spacing: -0.01em; }
+h1 { font-size: 1.75rem; line-height: 1.2; margin: 0 0 8px; font-weight: 700; }
+h2 { font-size: 1.15rem; margin: 0; font-weight: 650; }
+h3 { font-size: 1rem; margin: 18px 0 6px; font-weight: 650; }
+.muted, .help { color: var(--muted); font-size: 0.92rem; }
+code { font-family: var(--mono); font-size: 0.88em; background: var(--sunk); padding: 1px 5px; border-radius: 4px; }
+
 .card, .step { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--gap); margin: 12px 0; }
 .step header { display: flex; align-items: center; gap: 10px; cursor: pointer; }
 .step .body { margin-top: 12px; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 12px 0; }
 button.card { text-align: left; font: inherit; color: inherit; cursor: pointer; }
-button.card.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
-button, .button { font: inherit; padding: 8px 14px; margin: 4px 6px 4px 0; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); color: var(--text); cursor: pointer; text-decoration: none; display: inline-block; }
-button.primary, .button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-button:disabled { opacity: 0.5; cursor: default; }
+button.card.on { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); background: var(--surface); }
+
+button, .button { font: inherit; padding: 8px 16px; margin: 4px 6px 4px 0; border-radius: 999px; border: 1px solid var(--line);
+                  background: var(--surface); color: var(--ink); cursor: pointer; text-decoration: none; display: inline-block; }
+button:hover:not(:disabled), .button:hover { border-color: var(--trail); }
+button.primary, .button.primary { background: var(--amber); color: var(--on-amber); border-color: var(--amber); font-weight: 600; }
+button.primary:hover:not(:disabled), .button.primary:hover { border-color: var(--ink); }
+button:disabled { opacity: 0.55; cursor: default; }
+button.busy { opacity: 1; }
+
 .field { display: block; margin: 10px 0; }
 .field .label { display: block; font-weight: 600; margin-bottom: 4px; }
-.field .error { display: block; color: var(--bad); font-size: 0.9rem; }
-input, textarea, select { font: inherit; width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); }
-input[type=radio], input[type=checkbox] { width: auto; margin-right: 6px; }
-textarea { min-height: 140px; font-family: ui-monospace, Menlo, monospace; font-size: 0.85rem; }
-fieldset { border: 1px solid var(--line); border-radius: var(--radius); margin: 10px 0; }
+.field .error { display: block; color: var(--formica); font-size: 0.9rem; }
+input, textarea, select { font: inherit; width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--radius-s);
+                          background: var(--sunk); color: var(--ink); }
+input[type=radio], input[type=checkbox] { width: auto; margin-right: 6px; accent-color: var(--amber); }
+textarea { min-height: 140px; font-family: var(--mono); font-size: 0.85rem; }
+fieldset { border: 1px solid var(--line); border-radius: var(--radius-s); margin: 10px 0; }
 fieldset label, label.check { display: block; margin: 4px 0; }
-.badge { display: inline-block; font-size: 0.75rem; padding: 1px 8px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); color: var(--muted); }
-.badge.done { color: var(--ok); border-color: var(--ok); }
-.badge.skipped { color: var(--warn); border-color: var(--warn); }
-.badge.flag { color: var(--bad); border-color: var(--bad); }
-.notice { padding: 10px 12px; border-radius: var(--radius); margin: 10px 0; border: 1px solid var(--line); }
-.notice.error { border-color: var(--bad); color: var(--bad); }
-.notice.warn { border-color: var(--warn); color: var(--warn); }
-.notice.ok { border-color: var(--ok); color: var(--ok); }
-pre, .log { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; overflow-x: auto; font-size: 0.85rem; white-space: pre-wrap; }
+
+.badge { display: inline-block; font-size: 0.78rem; padding: 1px 9px; border-radius: 999px; background: var(--sunk);
+         border: 1px solid var(--line); color: var(--muted); }
+.badge.done { color: var(--leaf); border-color: var(--leaf); background: var(--leaf-soft); }
+.badge.skipped { color: var(--amber-ink); border-color: var(--amber); }
+.badge.flag { color: var(--formica); border-color: var(--formica); background: var(--formica-soft); }
+
+.notice { padding: 10px 12px; border-radius: var(--radius-s); margin: 10px 0; border: 1px solid var(--line); border-left-width: 4px; background: var(--surface); }
+.notice.error { border-color: var(--formica); color: var(--formica); background: var(--formica-soft); }
+.notice.warn { border-color: var(--amber); color: var(--amber-ink); }
+.notice.ok { border-color: var(--leaf); color: var(--leaf); background: var(--leaf-soft); }
+
+pre, .log { background: var(--sunk); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 10px; overflow-x: auto;
+            font-family: var(--mono); font-size: 0.84rem; white-space: pre-wrap; }
+pre code { background: none; padding: 0; }
 .rows .row { display: grid; grid-template-columns: 200px 1fr auto auto; gap: 8px; align-items: center; margin: 6px 0; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px 16px; }
 .panes { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
 .skip { margin-top: 12px; }
 .skip a { color: var(--muted); }
 .lost { text-align: center; padding-top: 80px; }
-code { font-family: ui-monospace, Menlo, monospace; font-size: 0.9em; }
+
+/* The ant. Done ants are solid, the next one amber, the rest outlines. */
+.ant .body { fill: var(--ink); stroke: var(--ink); stroke-width: 0.8; }
+.ant .limbs path { fill: none; stroke: var(--ink); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.ant.next .body { fill: var(--amber); }
+.ant.todo .body, .ant.skipped .body { fill: var(--surface); stroke: var(--trail); stroke-width: 1.1; }
+.ant.todo .limbs path, .ant.skipped .limbs path { stroke: var(--trail); }
+.ant.skipped .body { stroke: var(--amber); stroke-dasharray: 2 1.5; }
+.ant .leaf path { fill: var(--leaf); }
+.ant .leaf .rib { fill: none; stroke: var(--leaf-soft); stroke-width: 0.8; }
+.ant-mark { display: block; }
+
+/* Home: the setup steps as ants on the trail to the nest. */
+.home .lede { font-size: 1.05rem; margin: 0 0 4px; }
+.trail-art { display: block; width: 100%; height: auto; margin: 8px 0 4px; }
+.trail-line { fill: none; stroke: var(--trail); stroke-width: 3; stroke-dasharray: 0.1 9; stroke-linecap: round; }
+.nest { fill: var(--sunk); stroke: var(--trail); stroke-width: 1.5; }
+.nest-door { fill: var(--hole); }
+.trail-label { font-size: 13px; fill: var(--muted); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.trail-label.done { fill: var(--ink); }
+.trail-label.next { fill: var(--amber-ink); font-weight: 600; }
+.walker { animation: walk-in 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes walk-in { from { transform: translateX(-40px); opacity: 0; } }
+.home ol { padding-left: 1.2em; }
+.home li { margin: 4px 0; }
+
+/* Setup: each step is a stop on a dotted trail. */
+.trail { position: relative; padding-left: 34px; }
+.trail::before { content: ""; position: absolute; left: 11px; top: 26px; bottom: 26px; border-left: 3px dotted var(--trail); }
+.trail .step { position: relative; }
+.trail .step::before { content: ""; position: absolute; left: -32px; top: 19px; width: 16px; height: 16px; border-radius: 50%;
+                       background: var(--paper); border: 2px solid var(--trail); }
+.trail .step.done::before { background: var(--leaf); border-color: var(--leaf); }
+.trail .step.skipped::before { border-color: var(--amber); border-style: dashed; }
+.trail .step.open::before { content: none; }
+.trail .here { position: absolute; left: -40px; top: 17px; }
+.trail .here .ant .body { fill: var(--amber); stroke: var(--ink); }
+
+/* Marching ants: the frame of whatever is working right now. */
+.step:has(button.busy), .card:has(button.busy):not(.step .card) {
+  border-color: transparent;
+  background-color: var(--surface);
+  background-image: linear-gradient(90deg, var(--ink) 50%, transparent 50%), linear-gradient(90deg, var(--ink) 50%, transparent 50%),
+                    linear-gradient(0deg, var(--ink) 50%, transparent 50%), linear-gradient(0deg, var(--ink) 50%, transparent 50%);
+  background-repeat: repeat-x, repeat-x, repeat-y, repeat-y;
+  background-size: 12px 2px, 12px 2px, 2px 12px, 2px 12px;
+  background-position: 0 0, 100% 100%, 0 100%, 100% 0;
+  border-radius: 2px;
+  animation: march 0.6s linear infinite;
+}
+@keyframes march { to { background-position: 12px 0, calc(100% - 12px) 100%, 0 calc(100% - 12px), 100% 12px; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .walker, .step:has(button.busy), .card:has(button.busy):not(.step .card) { animation: none; }
+}
+
+@media (max-width: 640px) {
+  .bar { flex-wrap: wrap; padding: 10px 16px 12px; gap: 8px 12px; }
+  .bar > button { margin: 0 0 0 auto; padding: 6px 12px; }
+  .bar nav { order: 3; flex-basis: 100%; }
+  main { padding: 20px 16px 48px; }
+  .trail { padding-left: 28px; }
+  .trail::before { left: 8px; }
+  .trail .step::before { left: -27px; }
+  .trail .here { left: -35px; }
+  .rows .row { grid-template-columns: 1fr; }
+}

@@ -92,7 +92,13 @@ The hook has to be registered first, and until it is, nothing in the cage is enf
 
 ### The studio
 
-Pick a model preset, and each model answers a cheap probe before a run uses it:
+Home shows setup as a trail to the nest: each step is an ant, a done step's ant carries a
+leaf, and the amber ant is the step to do next:
+
+![Studio home: six ants on a dotted trail, two carrying leaves, the third amber](docs/images/studio-home.png)
+
+Each setup step is a stop on the same trail. Pick a model preset, and each model answers a
+cheap probe before a run uses it:
 
 ![Setup wizard, Models step with the Economy, Balanced and Max quality presets](docs/images/studio-models.png)
 

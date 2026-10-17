@@ -4,6 +4,7 @@ import { SetupPage } from "./pages/setup.js";
 import { AgentsPage } from "./pages/agents.js";
 import { HarnessPage } from "./pages/harness.js";
 import { PlaygroundPage } from "./pages/playground.js";
+import { AntMark } from "./ui/ant.js";
 
 const PAGES = { "": HomePage, setup: SetupPage, agents: AgentsPage, harness: HarnessPage,
                 playground: PlaygroundPage };
@@ -59,7 +60,7 @@ function App() {
   };
   return html`
     <header class="bar">
-      <a class="brand" href="#/">antline studio</a>
+      <a class="brand" href="#/"><${AntMark} />antline <span class="studio">studio</span></a>
       <nav>
         ${NAV.filter((item) => !item.expert || mode === "expert").map((item) => html`<a class=${route === item.route ? "on" : ""} href=${"#/" + item.route}>${item.label}</a>`)}
         <a href="/runs">Runs</a>

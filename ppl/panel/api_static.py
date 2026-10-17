@@ -19,6 +19,7 @@ MANIFEST = {
     "ui/step.js": JS,
     "ui/harness-form.js": JS,
     "ui/history.js": JS,
+    "ui/ant.js": JS,
     "pages/home.js": JS,
     "pages/setup.js": JS,
     "pages/setup-harness.js": JS,
