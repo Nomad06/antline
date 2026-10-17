@@ -1521,17 +1521,27 @@ class TestGuard(unittest.TestCase):
     def test_the_cd_and_grouping_walk_stays_linear(self):
         # rule: R-RUNS-BASH-WRITE
         # Leading groups were taken off one token at a time with pop(0), which
-        # is quadratic on spaced `( ( ( `.
-        for command in ("pushd /tmp && popd && " * 9000 + "echo x > y",
-                        "( " * 100000 + "cd /tmp && echo x > y",
-                        "{ " * 100000 + "cd /tmp && echo x > y",
-                        "cd /tmp && echo x > y" + " )" * 100000,
-                        "(cd /tmp && " * 20000 + "echo x > y" + ")" * 20000,
-                        "( cd /tmp && echo x ) > y && " * (200 * 1024 // 29) + "echo x > y"):
-            with self.subTest(command=command[:30]):
+        # is quadratic on spaced `( ( ( `. A wall-clock ceiling flaked on slow CI
+        # runners, so each shape is timed at half size and at full size instead:
+        # a linear walk about doubles, a quadratic one about quadruples.
+        shapes = ((9000, lambda n: "pushd /tmp && popd && " * n + "echo x > y"),
+                  (100000, lambda n: "( " * n + "cd /tmp && echo x > y"),
+                  (100000, lambda n: "{ " * n + "cd /tmp && echo x > y"),
+                  (100000, lambda n: "cd /tmp && echo x > y" + " )" * n),
+                  (20000, lambda n: "(cd /tmp && " * n + "echo x > y" + ")" * n),
+                  (200 * 1024 // 29, lambda n: "( cd /tmp && echo x ) > y && " * n + "echo x > y"))
+
+        def best_of_three(command):
+            times = []
+            for _ in range(3):
                 start = time.perf_counter()
                 self.assertFalse(ppl_guard.bash_write_lands_in_runs(command, "/tmp"))
-                self.assertLess(time.perf_counter() - start, 0.3)
+                times.append(time.perf_counter() - start)
+            return min(times)
+
+        for size, shape in shapes:
+            with self.subTest(command=shape(size)[:30]):
+                self.assertLess(best_of_three(shape(size)), 3 * best_of_three(shape(size // 2)))
 
     def test_a_clobber_redirect_is_a_redirect(self):
         # rule: R-RUNS-BASH-WRITE
