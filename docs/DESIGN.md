@@ -436,11 +436,13 @@ redirect (`< file`) has no
 dedicated handling and happens to deny in every shape checked, which is incidental to the
 classifier rather than a designed protection [R-TEST-WORKER-BASH-READS].
 
-Two channels stay open on purpose. First: `ppl`
-assembles no dispatch payload on the v1 subagent path - the orchestrator composes the prompt
-itself - so nothing stops the orchestrator pasting the implementation diff into that prompt's
-literal text; the two denials above reach only the worker's own tool calls, not what it is
-handed [R-TEST-WORKER-NO-DIFF n/a]. Second, and this is the one that cannot be closed while
+Two channels stay open on purpose. First, `ppl` assembles no dispatch payload on the v1
+subagent path - the orchestrator composes the prompt itself - and the dispatch is checked only
+lexically. The guard hook sees the orchestrator's Agent tool call before the subagent exists
+and denies a `ppl-test-worker` dispatch whose prompt carries patch syntax, or two or more lines
+the implementation added since `base_sha` that the brief does not carry
+[R-TEST-WORKER-DISPATCH-LEAK]. The same content in other words passes
+[R-TEST-WORKER-NO-DIFF n/a]. Second, and this is the one that cannot be closed while
 the worker still has to run its own tests, a compiler error names the offending method, a
 stack trace names classes, a failing assertion prints the actual value, and the build's own
 output carries all of that back through the same Bash call the worker used to invoke it - no
@@ -591,7 +593,7 @@ final period, and a citation of a row that enforces nothing says so in the marke
 
 ```
 ... is denied `BOUNDARY_VIOLATION` [R-UNROLED-REPO-WRITE].
-... the orchestrator's dispatch prompt is not checked [R-TEST-WORKER-NO-DIFF n/a].
+... a paraphrase in the dispatch prompt is not detected [R-TEST-WORKER-NO-DIFF n/a].
 ```
 
 The marker was chosen over matching the row's `statement` text, which would break on any
@@ -640,11 +642,10 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 158 rows: 114 `blocking`, 16 `soft` and 28 `n/a`. Of the
-`n/a` rows, 21 are `GAP:` - a rule this design names and no code performs - and 7 are
+As of this commit the table carries 159 rows: 115 `blocking`, 16 `soft` and 28 `n/a`. Of the
+`n/a` rows, 20 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
-registered at all (README.md "Hooks"), the orchestrator's dispatch prompt for the test worker
-being unchecked (the hook closes the worker's own tool-call reads, not what it is handed), the
+registered at all (README.md "Hooks"), the
 stage 6 preconditions being unchecked before the push, the four isolation-check blind spots of
 5.4, the harness gate recipes of section 11, the three blind spots the matrix has as GAP rows
 of its own, a foreign finding's owner not actually being notified (6.6a), per-lane resources
@@ -1486,6 +1487,8 @@ chooses to, unlike the read isolation the test worker gets in the other directio
 
 `ppl-test-worker` (tier `average`) receives behavior, acceptance criteria, corner cases and
 agreed interfaces - NOT the implementation diff. Writes unit tests and integration tests.
+The guard hook denies a dispatch whose prompt carries patch syntax or verbatim lines the
+implementation added [R-TEST-WORKER-DISPATCH-LEAK].
 
 This is the single most expensive and most valuable property of the design: tests stop
 inheriting the implementation's blind spot. Chapter 6 is explicit that one agent writing
@@ -1890,8 +1893,9 @@ prompt itself. The test worker still holds `Read`, `Grep`, `Glob` and `Bash`, an
 hook denies all four of them when aimed at a main source inside the active run's repo
 [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS] - what remains an instruction in
 `templates/ppl-test-worker.md.body` and nothing structural is narrow: the
-orchestrator's own dispatch prompt is not checked, so nothing stops it pasting the diff into
-that prompt's text directly [R-TEST-WORKER-NO-DIFF n/a], and running the worker's own tests
+orchestrator's own dispatch prompt is checked only lexically, a verbatim diff or added lines
+in it are denied [R-TEST-WORKER-DISPATCH-LEAK] while a paraphrase passes
+[R-TEST-WORKER-NO-DIFF n/a], and running the worker's own tests
 still surfaces the implementation through compiler and assertion output, which no hook can
 filter out of a tool result [R-TEST-WORKER-EXECUTION-CHANNEL n/a].
 
@@ -2123,8 +2127,8 @@ The build is finished when all of these are demonstrably true:
 - **Single model family.** The portfolio is all Claude, so the blind spots of the code
   worker and the test worker are correlated in a way that different vendors would not be.
   Compensation is role isolation, disjoint contexts (the test worker is not supposed to see
-  the diff, but nothing structural stops the orchestrator pasting it into the dispatch
-  prompt [R-TEST-WORKER-NO-DIFF n/a])
+  the diff, the hook denies a dispatch prompt carrying it verbatim
+  [R-TEST-WORKER-DISPATCH-LEAK], and a paraphrase still passes [R-TEST-WORKER-NO-DIFF n/a])
   and deterministic gates between roles. This is a stated limitation, not an oversight.
 - **Worktree is not a sandbox.** It isolates changes. A process can still read credentials
   or write outside the tree if the OS permits. OS-level isolation is not part of v1.

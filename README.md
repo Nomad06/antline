@@ -25,8 +25,9 @@ test suite fails if a blocking row has no test that asserts the refusal.
   until one of them approves.
 - **Tests that can catch the code's mistakes.** The test writer gets the behavior and the
   acceptance criteria, not the implementation, and the guard hook denies its reads of
-  product code [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS]. Its tests do not
-  inherit the implementation's blind spots.
+  product code [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS]. The hook also denies
+  a dispatch whose prompt pastes the diff or the lines the implementation added
+  [R-TEST-WORKER-DISPATCH-LEAK]. Its tests do not inherit the implementation's blind spots.
 - **Hard limits instead of polite prompts.** Every tool call of every agent goes through
   a hook that knows which role made it. The code writer edits only inside the brief's write
   boundary, and the hook refuses a test file from it [R-ROLE-CODE-WORKER-TESTS].

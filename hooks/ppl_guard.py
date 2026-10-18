@@ -23,7 +23,7 @@ if __name__ == "__main__" and ppl_python_floor.refuse_old_python(
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ppl import boundary, control, paths, run, store
+from ppl import boundary, control, gitfacts, paths, run, store
 from ppl import forges as _forges
 from ppl.errors import PplError
 from ppl.trackers import is_mcp_prefix, jira as _jira
@@ -111,6 +111,11 @@ _ALL_DENIED_BASH = tuple(pair for kind in _forges.KINDS
 # (R-TEST-WORKER-READ-TOOLS, in decide) acts on exactly these three.
 READ_TOOLS = ("Read", "Grep", "Glob")
 
+# The tool that starts a subagent, under its current and its older name. Its
+# PreToolUse payload carries the dispatch prompt and the subagent type before the
+# subagent exists, and a deny stops the spawn (R-TEST-WORKER-DISPATCH-LEAK).
+AGENT_TOOLS = ("Agent", "Task")
+
 # Every tool name this cage acts on. `ppl doctor` judges the registered PreToolUse
 # matcher against this list: a name the matcher never passes to the hook is a denial
 # that cannot fire, however correct the code behind it reads [R-GUARD-MATCHER]. The
@@ -127,6 +132,7 @@ GUARDED_TOOL_NAMES = (
             for prefix in JIRA_MCP_PREFIXES
             for operation in JIRA_WRITE_OPERATIONS)
     + READ_TOOLS
+    + AGENT_TOOLS
 )
 
 # Global git flags (-C <dir>, --git-dir=<x>, -c k=v, ...) sit between "git" and the
@@ -1797,6 +1803,91 @@ def in_scope(payload, state):
     return _inside(cwd, state["repo"])
 
 
+# A dispatch prompt line in patch syntax. The test worker never needs one.
+DIFF_SYNTAX_RE = re.compile(r"^(?:diff --git |@@ -\d+(?:,\d+)? \+\d+|(?:\+\+\+|---) [ab]/)")
+# An added line counts as implementation text from this length and alphanumeric
+# content on, after whitespace is collapsed: shorter lines (a brace, `return x`)
+# match ordinary prose by accident.
+LEAK_LINE_MIN_CHARS = 24
+LEAK_LINE_MIN_ALNUM = 12
+# One shared line can be a coincidence or a quoted name, two cannot.
+LEAK_LINES_TO_DENY = 2
+LEAK_GIT_TIMEOUT_SECONDS = 2.0
+_LEAK_EDGE = " \t`>*-+"
+
+
+def _leak_key(line):
+    """A line as the leak check compares it: whitespace collapsed and the
+    markdown a prompt wraps code in (bullets, quotes, backticks) stripped."""
+    return " ".join(line.split()).strip(_LEAK_EDGE)
+
+
+def _significant(key):
+    return (len(key) >= LEAK_LINE_MIN_CHARS
+            and sum(ch.isalnum() for ch in key) >= LEAK_LINE_MIN_ALNUM)
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def dispatches_test_worker(tool, tool_input):
+    return tool in AGENT_TOOLS and tool_input.get("subagent_type") == "ppl-test-worker"
+
+
+def dispatch_leak_deny(prompt, task_id, state):
+    """Deny a ppl-test-worker dispatch whose prompt carries the implementation.
+
+    R-TEST-WORKER-DISPATCH-LEAK: the test worker writes tests from behaviour,
+    and its own reads of main sources are already denied, so the dispatch
+    prompt was the one channel left. Two detectors: patch syntax, and lines the
+    implementation added since base_sha (committed or not, test sources
+    excluded) found verbatim in the prompt. Lines the brief itself carries are
+    the agreed interfaces and stay allowed. It fails closed: a dispatch that
+    cannot be checked is not started.
+    """
+    if not isinstance(prompt, str) or not prompt:
+        return None
+    lines = prompt.splitlines()
+    for line in lines:
+        if DIFF_SYNTAX_RE.match(line.strip()):
+            return deny("BOUNDARY_VIOLATION",
+                        "ppl-test-worker dispatch prompt carries a diff (%r). Pass acceptance "
+                        "criteria, behavior and the brief's interfaces only." % line.strip()[:40])
+    try:
+        added = gitfacts.added_lines(state.get("repo"), state.get("base_sha"),
+                                     timeout=LEAK_GIT_TIMEOUT_SECONDS)
+    except PplError as err:
+        return deny("BOUNDARY_VIOLATION",
+                    "ppl-test-worker dispatch could not be checked for implementation "
+                    "content: %s" % err.message)
+    brief = store.read_json(paths.run_dir(task_id) / "brief.json", {})
+    agreed = {_leak_key(line) for text in _strings(brief) for line in text.splitlines()}
+    in_prompt = {_leak_key(line) for line in lines}
+    hits = {}
+    for rel, added_here in sorted(added.items()):
+        if boundary.path_is_test_scoped(rel):
+            continue
+        for line in added_here:
+            key = _leak_key(line)
+            if _significant(key) and key in in_prompt and key not in agreed:
+                hits.setdefault(key, rel)
+    if len(hits) < LEAK_LINES_TO_DENY:
+        return None
+    first, rel = next(iter(hits.items()))
+    return deny("BOUNDARY_VIOLATION",
+                "ppl-test-worker dispatch prompt carries the implementation: %d added "
+                "line(s), first from %s (%r). Pass acceptance criteria, behavior and the "
+                "brief's interfaces only." % (len(hits), rel, first[:40]))
+
+
 def decide(payload):
     if not isinstance(payload, dict):
         return None
@@ -1860,9 +1951,22 @@ def decide(payload):
                         "run %s state is unreadable, cannot verify write boundary "
                         "or pause status. Repair or restore state.json to continue."
                         % task_id)
+        if task_id and dispatches_test_worker(tool, tool_input):
+            return deny("OWNER_DECISION",
+                        "run %s state is unreadable, cannot check the ppl-test-worker "
+                        "dispatch for implementation content. Repair or restore "
+                        "state.json to continue." % task_id)
         return None
 
     is_role = agent in boundary.ROLE_RULES
+
+    # R-TEST-WORKER-DISPATCH-LEAK. ppl-test-worker is a pipeline role name, so a
+    # dispatch of it is this run's business wherever the dispatching session sits,
+    # and the check runs before any cwd-based scoping.
+    if dispatches_test_worker(tool, tool_input):
+        leak = dispatch_leak_deny(tool_input.get("prompt"), task_id, state)
+        if leak:
+            return leak
 
     if tool == "Bash":
         # R-GUARD-BASH-WRITE-BOUNDARY (whole-branch review, C1): a

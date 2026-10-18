@@ -29,7 +29,10 @@ NOT_A_ROLE = frozenset({
 
 
 def applies(scope, role):
-    if scope in EVERY_ROLE or scope == "active run, agent_type %s" % role:
+    # A rule on the dispatch of a role is enforced on the dispatching session,
+    # and what it protects is that role's isolation, so it belongs on its card.
+    if scope in EVERY_ROLE or scope in ("active run, agent_type %s" % role,
+                                        "active run, dispatch of %s" % role):
         return True
     if role in WRITING:
         return scope in WRITING_SCOPES

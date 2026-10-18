@@ -37,9 +37,10 @@ def make_ppl_home():
 
 
 def make_worktree():
-    """A real git worktree. The guard never reads git itself, but the brief
-    asks for one and a real repo keeps this an honest rehearsal rather than
-    a bare directory standing in for one.
+    """A real git worktree. The guard reads git for one check only, the
+    ppl-test-worker dispatch (R-TEST-WORKER-DISPATCH-LEAK), and a real repo
+    keeps every case an honest rehearsal rather than a bare directory standing
+    in for one.
     """
     tree = Path(tempfile.mkdtemp(prefix="ppl-cage-repo-"))
     run = lambda *args: subprocess.run(  # noqa: E731 - local one-liner helper
@@ -867,6 +868,34 @@ def run_cases(cage):
     cage.check(
         "the genuine pipe-filter case stays allowed",
         cage.payload("ppl-test-worker", "Bash", {"command": "echo hello | grep hello"}, wt),
+        "allow")
+
+    # --- R-TEST-WORKER-DISPATCH-LEAK: the orchestrator's Agent tool call that
+    # starts ppl-test-worker carries the dispatch prompt, and the hook denies
+    # it when that prompt holds lines the implementation added since base. ---
+    head = subprocess.run(["git", "-C", str(cage.worktree), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    state = cage._run.load(cage.task_id)
+    state["base_sha"] = head
+    cage._run.save(state)
+    added = ("    long discount = amountCents * percent / 100;\n"
+             "    return Math.max(0L, amountCents - discount);\n")
+    (cage.worktree / "source" / "Price.java").write_text(
+        "class Price {\n" + added + "}\n", encoding="utf-8")
+
+    def dispatch(prompt):
+        return {"hook_event_name": "PreToolUse", "tool_name": "Agent", "cwd": str(cage.unrelated),
+                "tool_input": {"description": "tests", "prompt": prompt,
+                               "subagent_type": "ppl-test-worker"}}
+
+    cage.check(
+        "a ppl-test-worker dispatch carrying two added implementation lines is denied",
+        dispatch("AC-1: 10 percent off 1000 gives 900.\n" + added),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "a ppl-test-worker dispatch of acceptance criteria only is allowed",
+        dispatch("AC-1: 10 percent off 1000 gives 900.\nAC-2: never below zero."),
         "allow")
 
     failed = [name for name, ok, _ in cage.results if not ok]

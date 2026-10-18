@@ -1,5 +1,6 @@
 import os
 import subprocess
+import time
 
 from .errors import PplError
 
@@ -90,6 +91,60 @@ def is_ancestor(repo, maybe_ancestor, head):
     raise PplError("SCHEMA_INVALID",
                    "cannot compare %s with %s in %s: %s"
                    % (maybe_ancestor, head, repo, result.stderr.strip()))
+
+
+UNTRACKED_FILE_LIMIT = 1024 * 1024
+
+
+def added_lines(repo, base, timeout=2.0):
+    """The lines the working tree adds since base, as {repo-relative path: [lines]}.
+
+    Committed, staged, unstaged and untracked changes all count: a new file the
+    code worker has not added yet is as much the implementation as a committed
+    one. One deadline covers every git call, so a caller on a hook budget gets
+    an answer or an error in bounded time. A missing base is a bad input
+    document (SCHEMA_INVALID, as in changed_paths), a git that fails or runs
+    past the deadline is EXTERNAL_BLOCKED.
+    """
+    if not base:
+        raise PplError("SCHEMA_INVALID", "added_lines needs a base revision, got %r" % (base,))
+    deadline = time.monotonic() + timeout
+
+    def run(*args):
+        try:
+            result = subprocess.run(["git", "-C", str(repo)] + list(args),
+                                    capture_output=True, text=True, errors="replace",
+                                    timeout=max(0.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise PplError("EXTERNAL_BLOCKED",
+                           "git %s in %s took longer than %.1f s" % (args[0], repo, timeout))
+        except OSError as err:
+            raise PplError("EXTERNAL_BLOCKED", "git %s in %s: %s" % (args[0], repo, err))
+        if result.returncode != 0:
+            raise PplError("EXTERNAL_BLOCKED", "git %s failed in %s: %s"
+                           % (args[0], repo, result.stderr.strip()))
+        return result.stdout
+
+    added = {}
+    current = None
+    for line in run("diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames",
+                    str(base), "--").splitlines():
+        if line.startswith("+++ "):
+            current = line[6:] if line.startswith("+++ b/") else None
+        elif line.startswith("+") and current is not None:
+            added.setdefault(current, []).append(line[1:])
+    for rel in run("ls-files", "--others", "--exclude-standard", "-z").split("\0"):
+        if not rel:
+            continue
+        target = os.path.join(str(repo), rel)
+        try:
+            if os.path.getsize(target) > UNTRACKED_FILE_LIMIT:
+                continue
+            with open(target, encoding="utf-8") as handle:
+                added.setdefault(rel, []).extend(handle.read().splitlines())
+        except (OSError, UnicodeDecodeError):
+            continue
+    return added
 
 
 def apply_patch(repo, diff_file):

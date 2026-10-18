@@ -232,14 +232,17 @@ stops this worker from writing outside `allowed_write_paths` except the brief yo
 it with [R-GUARD-NOT-ARMED n/a]; review its diff against the boundary yourself before
 committing. Commit its work.
 
-`ppl stage enter tests`, dispatch `ppl-test-worker` with the acceptance criteria and the
-described behaviour only. Do not pass it the diff - the guard hook denies its own Read, Grep,
-Glob and Bash reads of main sources inside the repo [R-TEST-WORKER-READ-TOOLS]
-[R-TEST-WORKER-BASH-READS], but nothing checks what you type into its dispatch prompt, so
-that is still on you [R-TEST-WORKER-NO-DIFF n/a] **regardless of whether the hook is
-armed** - the dispatch prompt is never something the guard hook can see or filter, doctor
-result or not. The read-isolation denial itself is, like the write boundary above, only
-live when `ppl doctor` reported the hook registered. Do not let one agent do both halves.
+`ppl stage enter tests`, dispatch `ppl-test-worker` with the acceptance criteria, the
+described behaviour, the corner cases and the brief's interfaces only. Do not pass it the diff
+or describe how the code works. The guard hook denies its own Read, Grep, Glob and Bash reads
+of main sources inside the repo [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS], and it
+denies your dispatch when the prompt carries patch syntax or two or more lines the
+implementation added [R-TEST-WORKER-DISPATCH-LEAK]. A denied dispatch names what to remove:
+remove it and dispatch again, never reword the code to get past the check
+[R-TEST-WORKER-NO-DIFF n/a]. A paraphrase is not detected, so that part is on you
+**regardless of whether the hook is armed** [R-TEST-WORKER-NO-DIFF n/a]. All of these denials
+are, like the write boundary above, only live when `ppl doctor` reported the hook registered
+[R-GUARD-NOT-ARMED n/a]. Do not let one agent do both halves.
 
 ## Stage 4 - gates
 

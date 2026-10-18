@@ -229,7 +229,8 @@ class TestMatcher(unittest.TestCase):
         # The registration this pipeline shipped with, and the holes it had:
         # the Jira server under its live prefix, the numbered duplicate of the
         # hand-added prefix, the three read tools the test worker's read
-        # isolation acts on, and the GitHub MCP tools the forge union denies.
+        # isolation acts on, the GitHub MCP tools the forge union denies, and the
+        # Agent tool whose dispatch of ppl-test-worker the leak check reads.
         old = "Edit|Write|MultiEdit|NotebookEdit|Bash|mcp__GitLab-MCP__.*|mcp__atlassian__.*"
         write_settings(self.local_path, matchers=(old,))
         result = self.inspect()
@@ -238,7 +239,7 @@ class TestMatcher(unittest.TestCase):
                     if name.startswith("mcp__claude_ai_Atlassian_Rovo")
                     or name.startswith("mcp__atlassian_2__")
                     or name.startswith("mcp__github__")
-                    or name in ("Read", "Grep", "Glob")]
+                    or name in ("Read", "Grep", "Glob", "Agent", "Task")]
         self.assertGreater(len(expected), 3)
         self.assertEqual(result["local"]["uncovered"], expected)
         for name in ("Read", "Grep", "Glob"):
@@ -277,7 +278,7 @@ class TestMatcher(unittest.TestCase):
         # the editing tools): the hook fires when any one of them matches, so
         # together they cover.
         write_settings(self.local_path,
-                       matchers=(EDITING_TOOLS_ONLY, "Bash|Read|Grep|Glob|mcp__.*"))
+                       matchers=(EDITING_TOOLS_ONLY, "Bash|Read|Grep|Glob|Agent|Task|mcp__.*"))
         result = self.inspect()
         self.assertEqual(result["matcher"], "ok")
         self.assertEqual(result["local"]["uncovered"], [])

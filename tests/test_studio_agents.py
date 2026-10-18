@@ -58,6 +58,11 @@ class TestEnforced(unittest.TestCase):
         for role in routing.REQUIRED_ROLES:
             self.assertTrue({"R-GUARD-PPL-CLI-DENIED", "R-OPERATOR-HALT-HOOK"} <= self.ids(role), role)
 
+    def test_the_dispatch_leak_rule_is_on_the_test_worker_page_only(self):
+        for role in routing.REQUIRED_ROLES:
+            on_page = "R-TEST-WORKER-DISPATCH-LEAK" in self.ids(role)
+            self.assertEqual(on_page, role == "ppl-test-worker", role)
+
     def test_the_read_only_tool_rule_is_on_read_only_role_pages_only(self):
         for role, rule in boundary.ROLE_RULES.items():
             if rule["may_write"]:

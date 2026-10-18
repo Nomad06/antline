@@ -1171,7 +1171,7 @@ residual = ""
 
 [[rule]]
 id = "R-TEST-WORKER-NO-DIFF"
-statement = "Nothing stops the orchestrator pasting the implementation diff into the literal text of the test worker's own dispatch prompt; only the worker's own tool-call reads are denied, not the content of the prompt it is given."
+statement = "A paraphrase or summary of the implementation in the test worker's dispatch prompt is not detected; R-TEST-WORKER-DISPATCH-LEAK denies patch syntax and verbatim added lines, nothing denies the same content in other words."
 scope = "orchestrator, dispatch of ppl-test-worker"
 event = "dispatch of the test worker"
 enforcement = "n/a"
@@ -1179,7 +1179,19 @@ hook_or_check = "none"
 deny_test = ""
 allow_test = ""
 owner = "orchestrator"
-residual = "GAP: ppl assembles no payload on the v1 path - the orchestrator composes the subagent prompt itself, with no adapter boundary a hook could inspect. R-TEST-WORKER-READ-TOOLS and R-TEST-WORKER-BASH-READS now close the worker's OWN reads of main sources through its tools, but neither says anything about what the orchestrator chooses to type into the dispatch prompt - pasting the diff there is still a sentence in templates/ppl-test-worker.md.body (and in the orchestrator's own discipline) and nothing structural"
+residual = "PROPERTY: the dispatch prompt is free text the orchestrator writes, and no lexical check can tell a description of the behaviour from a description of the code that implements it. What stays open is the orchestrator's discipline, stated in SKILL.md and in templates/ppl-test-worker.md.body: pass acceptance criteria, behaviour, corner cases and the brief's interfaces, never an account of how the implementation works"
+
+[[rule]]
+id = "R-TEST-WORKER-DISPATCH-LEAK"
+statement = "A dispatch of ppl-test-worker through the Agent tool (or its older name Task) is denied when its prompt carries a line in patch syntax, or two or more significant lines the implementation added since base_sha - committed, staged, unstaged or untracked, test sources excluded - that the run's brief does not itself carry. A dispatch that cannot be checked (no base_sha, a git error or timeout, unreadable state) is denied too."
+scope = "active run, dispatch of ppl-test-worker"
+event = "PreToolUse on Agent/Task"
+enforcement = "blocking"
+hook_or_check = "hooks/ppl_guard.py:dispatch_leak_deny, hooks/ppl_guard.py:dispatches_test_worker, ppl/gitfacts.py:added_lines"
+deny_test = "tests/test_dispatch_leak.py::TestDispatchLeak::test_a_dispatch_carrying_a_unified_diff_is_denied, tests/test_dispatch_leak.py::TestDispatchLeak::test_a_dispatch_carrying_two_added_lines_is_denied, tests/test_dispatch_leak.py::TestDispatchLeak::test_added_lines_quoted_as_markdown_still_count, tests/test_dispatch_leak.py::TestDispatchLeak::test_the_older_task_tool_name_is_checked_too, tests/test_dispatch_leak.py::TestDispatchLeak::test_an_uncommitted_new_file_counts_as_added, tests/test_dispatch_leak.py::TestDispatchLeak::test_a_non_isolated_run_dispatching_from_elsewhere_is_checked, tests/test_dispatch_leak.py::TestDispatchLeak::test_a_dispatch_without_a_recorded_base_is_denied, tests/test_dispatch_leak.py::TestDispatchLeak::test_a_dispatch_against_unreadable_state_is_denied"
+allow_test = "tests/test_dispatch_leak.py::TestDispatchLeak::test_acceptance_criteria_only_are_allowed, tests/test_dispatch_leak.py::TestDispatchLeak::test_interface_lines_the_brief_agreed_are_allowed, tests/test_dispatch_leak.py::TestDispatchLeak::test_one_added_line_alone_is_allowed, tests/test_dispatch_leak.py::TestDispatchLeak::test_added_lines_in_test_sources_do_not_count, tests/test_dispatch_leak.py::TestDispatchLeak::test_the_same_prompt_to_the_code_worker_is_allowed, tests/test_dispatch_leak.py::TestDispatchLeak::test_without_an_active_run_a_dispatch_is_left_alone"
+owner = "guard-hook"
+residual = "lexical, like every other check in this module: a line counts only when it reappears whole after whitespace and markdown are stripped, so a re-wrapped or partly quoted line passes, and so do added lines shorter than 24 characters or with fewer than 12 alphanumerics, and a single shared line. SendMessage to an already running test worker names a recipient, not a role, and is not checked. Verified against Claude Code 2.1.302: PreToolUse on the Agent tool carries tool_input.prompt and subagent_type, and a deny stops the subagent before SubagentStart"
 
 [[rule]]
 id = "R-TEST-WORKER-EXECUTION-CHANNEL"
