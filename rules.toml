@@ -2027,15 +2027,15 @@ residual = "a project placeholder counts as named once either gates fragment men
 
 [[rule]]
 id = "R-HARNESS-SIZE-CAP"
-statement = "harness.verify refuses HARNESS_INVALID a harness whose rendered SKILL.md is over harness.SKILL_HARD_BYTES or whose rendered agent file is over harness.AGENT_HARD_BYTES, three times the largest the shipped examples rendered when the caps were measured, and warns over 1.5 times. harness.apply refuses on the hard cap before it writes anything, so an oversized harness is never applied."
+statement = "harness.verify refuses HARNESS_INVALID a harness whose rendered SKILL.md is over harness.SKILL_HARD_BYTES, whose rendered skill file under references/ is over harness.REFERENCE_HARD_BYTES or whose rendered agent file is over harness.AGENT_HARD_BYTES, each three times the largest file of its kind the shipped examples rendered when the caps were measured (SKILL_MEASURED_BYTES, REFERENCE_MEASURED_BYTES, AGENT_MEASURED_BYTES), and warns over 1.5 times. harness.apply refuses on the hard cap before it writes anything, so an oversized harness is never applied."
 scope = "ppl CLI and panel"
 event = "ppl harness validate, ppl harness apply, studio draft check and save"
 enforcement = "blocking"
 hook_or_check = "ppl/harness.py:verify, ppl/harness.py:_size_warnings, ppl/harness.py:apply"
-deny_test = "tests/test_harness.py::TestVerify::test_apply_refuses_an_agent_file_over_the_hard_cap_and_writes_nothing, tests/test_harness.py::TestVerify::test_a_skill_over_the_hard_cap_is_refused, tests/test_harness.py::TestHarnessCli::test_validate_refuses_an_agent_file_over_the_hard_cap"
-allow_test = "tests/test_harness.py::TestVerify::test_both_examples_verify_clean, tests/test_harness.py::TestVerify::test_an_agent_file_over_the_soft_cap_is_warned_about"
+deny_test = "tests/test_harness.py::TestVerify::test_apply_refuses_an_agent_file_over_the_hard_cap_and_writes_nothing, tests/test_harness.py::TestVerify::test_a_skill_over_the_hard_cap_is_refused, tests/test_harness.py::TestVerify::test_a_harness_fragment_that_grows_a_reference_over_the_hard_cap_is_refused, tests/test_harness.py::TestHarnessCli::test_validate_refuses_an_agent_file_over_the_hard_cap"
+allow_test = "tests/test_harness.py::TestVerify::test_both_examples_verify_clean, tests/test_harness.py::TestVerify::test_an_agent_file_over_the_soft_cap_is_warned_about, tests/test_harness.py::TestVerify::test_a_reference_over_the_soft_cap_is_warned_about"
 owner = "harness"
-residual = "only the two outputs that are read whole on every run are capped: the rest of the skill (references/) is not, and a harness applied before the caps existed stays applied until its next apply. The SKILL.md cap was measured before each stage's procedure moved to its own references/stage-*.md, and every harness fragment (gates, extra-gates, baseline, tracker-close) now renders into references/ only, so this cap no longer bounds what a harness adds: tests/test_skill_contract.py holds the shipped examples to 14,000 bytes of SKILL.md and 10,000 per stage reference, a harness of the operator's own has no such bound"
+residual = "a cap bounds one rendered file, not the skill as a whole: a harness may spread its growth over several references, each under the cap. A harness applied before the caps existed stays applied until its next apply. SKILL_MEASURED_BYTES was measured before each stage's procedure moved to its own references/stage-*.md, so the SKILL.md cap sits far above what the examples render now and no harness fragment renders into SKILL.md any more: what holds the shipped skill small is tests/test_skill_contract.py, at most 14,000 bytes of SKILL.md and 10,000 per stage reference on both examples"
 
 [[rule]]
 id = "R-DOCTOR-HOOK-SHAPE"

@@ -323,17 +323,23 @@ class TestVerify(HarnessTestCase):
         self.assertEqual(harness.SKILL_HARD_BYTES, harness.SKILL_MEASURED_BYTES * 3)
         self.assertEqual(harness.AGENT_SOFT_BYTES, harness.AGENT_MEASURED_BYTES * 3 // 2)
         self.assertEqual(harness.AGENT_HARD_BYTES, harness.AGENT_MEASURED_BYTES * 3)
-        largest_skill = largest_agent = 0
+        self.assertEqual(harness.REFERENCE_SOFT_BYTES, harness.REFERENCE_MEASURED_BYTES * 3 // 2)
+        self.assertEqual(harness.REFERENCE_HARD_BYTES, harness.REFERENCE_MEASURED_BYTES * 3)
+        largest_skill = largest_agent = largest_reference = 0
         for name in ("example-generic", "example-maven"):
             fixtures.install_harness(name)
             doc = harness.load(name)
-            largest_skill = max(largest_skill,
-                                len(harness.render_skill(doc)["SKILL.md"].encode("utf-8")))
+            rendered = harness.render_skill(doc)
+            largest_skill = max(largest_skill, len(rendered["SKILL.md"].encode("utf-8")))
+            largest_reference = max(largest_reference, *(len(text.encode("utf-8"))
+                                                         for path, text in rendered.items()
+                                                         if path.startswith("references/")))
             largest_agent = max(largest_agent, *(len(text.encode("utf-8"))
                                                  for text in harness.agent_texts(doc).values()))
         # the shipped text may grow a little before the caps are measured again
         self.assertLess(largest_skill, harness.SKILL_SOFT_BYTES)
         self.assertLess(largest_agent, harness.AGENT_SOFT_BYTES)
+        self.assertLess(largest_reference, harness.REFERENCE_SOFT_BYTES)
 
     def test_an_agent_file_over_the_hard_cap_is_refused(self):
         # rule: R-HARNESS-SIZE-CAP
@@ -381,6 +387,36 @@ class TestVerify(HarnessTestCase):
                           skills_dir=self.skills)
         self.assertEqual(caught.exception.message, result["errors"][0])
         self.assertEqual(list(self.skills.iterdir()), [])
+
+    def pad_tracker_close(self, name, size):
+        """The harness fragment a team grows most, rendered into
+        references/stage-8-after-merge.md and nowhere else."""
+        (paths.harness_dir(name) / "skill" / "tracker-close.md").write_text(
+            "word " * (size // 5), encoding="utf-8")
+
+    def test_a_harness_fragment_that_grows_a_reference_over_the_hard_cap_is_refused(self):
+        # rule: R-HARNESS-SIZE-CAP
+        fixtures.install_harness("example-generic")
+        self.pad_tracker_close("example-generic", harness.REFERENCE_HARD_BYTES)
+        result = harness.verify("example-generic", "example-generic")
+        self.assertEqual(len(result["errors"]), 1, result)
+        self.assertIn("references/stage-8-after-merge.md", result["errors"][0])
+        self.assertIn("%d bytes" % harness.REFERENCE_HARD_BYTES, result["errors"][0])
+        fixtures.install_routing()
+        with self.assertRaises(PplError) as caught:
+            harness.apply("example-generic", agents_dir=tmphome.mkdtemp(prefix="pplagents-"),
+                          skills_dir=self.skills)
+        self.assertEqual(caught.exception.message, result["errors"][0])
+        self.assertEqual(list(self.skills.iterdir()), [])
+
+    def test_a_reference_over_the_soft_cap_is_warned_about(self):
+        fixtures.install_harness("example-generic")
+        self.pad_tracker_close("example-generic", harness.REFERENCE_SOFT_BYTES)
+        result = harness.verify("example-generic", "example-generic")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(len(result["warnings"]), 1, result)
+        self.assertIn("references/stage-8-after-merge.md", result["warnings"][0])
+        self.assertIn("%d bytes" % harness.REFERENCE_SOFT_BYTES, result["warnings"][0])
 
     def test_apply_refuses_an_agent_file_over_the_hard_cap_and_writes_nothing(self):
         # rule: R-HARNESS-SIZE-CAP

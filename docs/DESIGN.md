@@ -684,14 +684,15 @@ studio's generated `gates.md` vouches for nothing), and a `templates/*.part` for
 [R-HARNESS-UNKNOWN-KEY]. Any other file under `skill/` or `templates/` is a warning, as is a
 `knowledge.skills` name found neither under the configured skills directory nor under
 `~/.claude/skills`, and a focused-tests command no `[[guard.shape]]` lets the test worker run.
-`harness.verify` and `ppl harness apply` refuse a rendered `SKILL.md` over 114,342 bytes and an
-agent file over 15,939 bytes, three times the largest the shipped examples rendered when the
-caps were measured (38,114 and 5,313 bytes), and `harness.verify` warns over 1.5 times that
-[R-HARNESS-SIZE-CAP]. The `SKILL.md` figure predates the split by stage below: since then
-`SKILL.md` renders at 12,325 bytes for `example-maven` and 12,320 for `example-generic`, the
-largest stage reference (`references/stage-5-verification.md`) at 7,194, and
-`tests/test_skill_contract.py` holds both examples to 14,000 bytes of `SKILL.md` and 10,000 per
-stage reference. Every harness fragment renders into a reference, which the caps do not read.
+`harness.verify` and `ppl harness apply` refuse a rendered `SKILL.md`, a rendered skill file
+under `references/` or an agent file over its hard cap, three times the largest file of its kind
+the shipped examples rendered when the caps were measured (`harness.SKILL_MEASURED_BYTES`,
+`harness.REFERENCE_MEASURED_BYTES`, `harness.AGENT_MEASURED_BYTES`), and `harness.verify` warns
+over 1.5 times that [R-HARNESS-SIZE-CAP]. Every harness fragment renders into a reference, so a
+fragment that grows one past its cap is refused there [R-HARNESS-SIZE-CAP].
+`SKILL_MEASURED_BYTES` predates the split by stage below, and the budgets that keep the shipped
+skill small are tests: on both examples `tests/test_skill_contract.py` holds the rendered
+`SKILL.md` to at most 14,000 bytes and each stage reference to at most 10,000 bytes.
 
 `ppl harness apply <name>` renders the agent files and the orchestrator skill for that harness
 and records it as the active one. The skill is rendered from the `skill/` skeletons plus the

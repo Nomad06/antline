@@ -68,14 +68,19 @@ KNOWN_KEYS = {
 # is a role's whole prompt. Measured 2026-10-18 on the two shipped examples: the
 # largest SKILL.md is example-maven's, the largest agent file ppl-verifier's.
 # SKILL.md was measured before each stage moved to its own reference and renders
-# at about a third of that since. Over the soft cap is a warning, over the hard
-# cap a refusal.
+# at about a third of that since. A file under references/ is read whole when its
+# stage or check needs it, and every harness fragment renders into one: the
+# largest, measured after the split, is example-maven's references/gates.md.
+# Over the soft cap is a warning, over the hard cap a refusal.
 SKILL_MEASURED_BYTES = 38114
 AGENT_MEASURED_BYTES = 5313
+REFERENCE_MEASURED_BYTES = 8119
 SKILL_SOFT_BYTES = SKILL_MEASURED_BYTES * 3 // 2
 SKILL_HARD_BYTES = SKILL_MEASURED_BYTES * 3
 AGENT_SOFT_BYTES = AGENT_MEASURED_BYTES * 3 // 2
 AGENT_HARD_BYTES = AGENT_MEASURED_BYTES * 3
+REFERENCE_SOFT_BYTES = REFERENCE_MEASURED_BYTES * 3 // 2
+REFERENCE_HARD_BYTES = REFERENCE_MEASURED_BYTES * 3
 _ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _CLONE_TIMEOUT_SECONDS = 120
 _KIND_WORDS = {str: "a non-empty string", int: "an integer", list: "a list"}
@@ -681,21 +686,27 @@ def agent_texts(doc):
 
 
 def _size_warnings(skill_files, agents):
-    """Refuse HARNESS_INVALID when the rendered SKILL.md or an agent file is over
-    its hard cap, return a warning for each one over its soft cap."""
+    """Refuse HARNESS_INVALID when the rendered SKILL.md, a rendered file under
+    references/ or an agent file is over its hard cap, return a warning for each
+    one over its soft cap."""
+    every_run = "every byte of it is read on every run"
     outputs = [("the rendered SKILL.md", skill_files["SKILL.md"], SKILL_SOFT_BYTES,
-                SKILL_HARD_BYTES, "skill/ fragments")]
+                SKILL_HARD_BYTES, every_run, "skill/ fragments")]
+    outputs += [("the rendered skill file %s" % path, text, REFERENCE_SOFT_BYTES,
+                 REFERENCE_HARD_BYTES, "it is read whole when its stage or check needs it",
+                 "skill/ fragments") for path, text in sorted(skill_files.items())
+                if path.startswith("references/")]
     outputs += [("the rendered agent file %s.md" % role, text, AGENT_SOFT_BYTES, AGENT_HARD_BYTES,
-                 "templates/%s.part" % role) for role, text in agents.items()]
+                 every_run, "templates/%s.part" % role) for role, text in agents.items()]
     warnings = []
-    for what, text, soft, hard, fix in outputs:
+    for what, text, soft, hard, why, fix in outputs:
         size = len(text.encode("utf-8"))
         if size > hard:
             raise PplError("HARNESS_INVALID", "%s is %d bytes, over the hard cap of %d bytes: "
                            "shorten the %s" % (what, size, hard, fix))
         if size > soft:
-            warnings.append("%s is %d bytes, over the soft cap of %d bytes: every byte of it is "
-                            "read on every run, shorten the %s" % (what, size, soft, fix))
+            warnings.append("%s is %d bytes, over the soft cap of %d bytes: %s, shorten the %s"
+                            % (what, size, soft, why, fix))
     return warnings
 
 
