@@ -87,18 +87,22 @@ class TestStaticFiles(unittest.TestCase):
         copy = scratch / "listfield.mjs"
         copy.write_bytes((STATIC / "ui" / "listfield.js").read_bytes())
         script = """
-import { words, shownText } from "%s";
+import { fieldInput, fieldBlur, idleField, shownText } from "%s";
 const typed = "tests/unit, tests/integration";
+let field = idleField;
 let list = [];
-let raw = null;
 const shown = [];
-for (let i = 1; i <= typed.length; i += 1) {
-  raw = typed.slice(0, i);
-  list = words(raw);
-  shown.push(shownText(raw, list));
+for (const ch of typed) {
+  const next = fieldInput(shownText(field, list) + ch);
+  field = next;
+  list = next.list;
+  shown.push(shownText(field, list));
 }
-const blurred = shownText(null, list);
-console.log(JSON.stringify({ shown, list, blurred, empty: shownText(null, []) }));
+const typedList = list;
+field = fieldBlur();
+const blurred = shownText(field, list);
+const cleared = fieldInput("");
+console.log(JSON.stringify({ shown, typedList, blurred, cleared, clearedShown: shownText(cleared, cleared.list) }));
 """ % copy.as_uri()
         result = subprocess.run(["node", "--input-type=module", "-e", script],
                                 capture_output=True, text=True)
@@ -106,9 +110,20 @@ console.log(JSON.stringify({ shown, list, blurred, empty: shownText(null, []) })
         out = json.loads(result.stdout)
         typed = "tests/unit, tests/integration"
         self.assertEqual(out["shown"], [typed[:i] for i in range(1, len(typed) + 1)])
-        self.assertEqual(out["list"], ["tests/unit", "tests/integration"])
-        self.assertEqual(out["blurred"], "tests/unit, tests/integration")
-        self.assertEqual(out["empty"], "")
+        self.assertEqual(out["typedList"], ["tests/unit", "tests/integration"])
+        self.assertEqual(out["blurred"], typed)
+        self.assertEqual(out["cleared"]["list"], [])
+        self.assertEqual(out["clearedShown"], "")
+
+    def test_the_harness_form_routes_list_inputs_through_the_list_field_rules(self):
+        source = (STATIC / "ui" / "harness-form.js").read_text()
+        self.assertIn('from "./listfield.js"', source)
+        body = source[source.index("function ListInput"):source.index("function withEnv")]
+        for call in ("shownText(field, list)", "fieldInput(e.target.value)", "setField(next)",
+                     "setField(fieldBlur())", "onList(next.list)"):
+            self.assertIn(call, body)
+        self.assertIn("<${ListInput}", source)
+        self.assertNotIn('.join(", ")', source)
 
     def test_the_shell_declares_an_empty_icon_so_the_browser_asks_for_no_favicon(self):
         text = (STATIC / "index.html").read_text(encoding="ascii")

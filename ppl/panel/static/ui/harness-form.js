@@ -1,17 +1,17 @@
 import { html, useEffect, useRef, useState } from "../vendor/htm-preact.mjs";
 import { post } from "../api.js";
 import { Badge, Button, Field, Notice } from "./controls.js";
-import { shownText, words } from "./listfield.js";
+import { fieldBlur, fieldInput, idleField, shownText } from "./listfield.js";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
 function ListInput({ list, onList }) {
-  const [raw, setRaw] = useState(null);
-  return html`<input value=${shownText(raw, list)}
-    onInput=${(e) => { setRaw(e.target.value); onList(words(e.target.value)); }}
-    onBlur=${() => setRaw(null)} />`;
+  const [field, setField] = useState(idleField);
+  return html`<input value=${shownText(field, list)}
+    onInput=${(e) => { const next = fieldInput(e.target.value); setField(next); onList(next.list); }}
+    onBlur=${() => setField(fieldBlur())} />`;
 }
 
 function withEnv(doc, rows) {
