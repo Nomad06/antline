@@ -683,7 +683,7 @@ residual = "checked after fsm.check_lifecycle and before the done gate, so a lif
 
 [[rule]]
 id = "R-CLOSURE-ONLY-WHEN-DONE-PASSES"
-statement = "ppl stage enter closure, a resume from parking or escalation included, is refused with ILLEGAL_TRANSITION naming the done gate's blockers while verdict.done_blockers for the current head is non-empty, so a run enters closure, which leads only to ppl transition done and has no edge back to Stage 3, only when the done gate would pass at that moment. The run stays in review, where rework and evidence repair are still possible."
+statement = "ppl stage enter closure, a resume from parking or escalation included, is refused with ILLEGAL_TRANSITION naming the done gate's blockers while verdict.done_blockers for the current head is non-empty, so a run enters closure, which leads only to ppl transition done and has no edge back to Stage 3, only when the done gate would pass at that moment. The run stays where it was: in review, where rework and evidence repair are still possible, or, on a resume, in parking or escalation, where the evidence can be repaired or OWNER_DECISION escalated."
 scope = "ppl CLI"
 event = "ppl stage enter closure"
 enforcement = "blocking"

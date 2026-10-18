@@ -164,6 +164,7 @@ class TestGuardDenialLogFromMain(unittest.TestCase):
         log = paths.run_dir("DEMO-8813") / "log.jsonl"
         log.unlink()
         os.mkfifo(str(log))
+        self.addCleanup(log.unlink)
         with mock.patch.object(store, "append_log") as append:
             result = ppl_guard.decide(edit(repo + "/src/App.java"))
         self.assertIn("BOUNDARY_VIOLATION",
