@@ -1964,7 +1964,15 @@ def decide(payload):
     # dispatch of it is this run's business wherever the dispatching session sits,
     # and the check runs before any cwd-based scoping.
     if dispatches_test_worker(tool, tool_input):
-        leak = dispatch_leak_deny(tool_input.get("prompt"), task_id, state)
+        try:
+            leak = dispatch_leak_deny(tool_input.get("prompt"), task_id, state)
+        except Exception as err:
+            # main() allows a session with no role on an internal error, which
+            # here would let an unchecked dispatch through. This check fails
+            # closed instead.
+            return deny("BOUNDARY_VIOLATION",
+                        "ppl-test-worker dispatch could not be checked for implementation "
+                        "content: %s: %s" % (type(err).__name__, err))
         if leak:
             return leak
 

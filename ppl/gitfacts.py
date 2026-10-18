@@ -1,4 +1,6 @@
 import os
+import re
+import stat
 import subprocess
 import time
 
@@ -94,6 +96,62 @@ def is_ancestor(repo, maybe_ancestor, head):
 
 
 UNTRACKED_FILE_LIMIT = 1024 * 1024
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _header_path(text):
+    """The path in a +++ header as git prints it: the tab git appends when the
+    path holds a space dropped, and a C-quoted path (a double quote, a
+    backslash, a control character) decoded to its bytes."""
+    text = text.rstrip("\t")
+    if len(text) < 2 or text[0] != '"' or text[-1] != '"':
+        return text
+    body, raw, i = text[1:-1], bytearray(), 0
+    while i < len(body):
+        if body[i] != "\\":
+            raw.extend(body[i].encode("utf-8"))
+            i += 1
+        elif body[i + 1:i + 2] in _C_ESCAPES:
+            raw.append(_C_ESCAPES[body[i + 1]])
+            i += 2
+        elif body[i + 1:i + 2].isdigit():
+            raw.append(int(body[i + 1:i + 4], 8) & 0xFF)
+            i += 4
+        else:
+            raw.extend(body[i + 1:i + 2].encode("utf-8"))
+            i += 2
+    return raw.decode("utf-8", errors="replace")
+
+
+def _added_in_diff(patch):
+    """{path: added lines} from a -U0 patch. Inside a hunk every line is content,
+    whatever it starts with, until the hunk's own old and new line counts run
+    out: an added line "++ x" prints as "+++ x" and must not be read as the
+    next file's header."""
+    added, current, old_left, new_left = {}, None, 0, 0
+    for line in patch.splitlines():
+        if old_left > 0 or new_left > 0:
+            if line.startswith("+"):
+                if current is not None:
+                    added.setdefault(current, []).append(line[1:])
+                new_left -= 1
+            elif line.startswith("-"):
+                old_left -= 1
+            elif line.startswith(" "):
+                old_left -= 1
+                new_left -= 1
+            elif not line.startswith("\\"):
+                old_left = new_left = 0
+            continue
+        hunk = _HUNK_RE.match(line)
+        if hunk:
+            old_left = int(hunk.group(1)) if hunk.group(1) is not None else 1
+            new_left = int(hunk.group(2)) if hunk.group(2) is not None else 1
+        elif line.startswith("+++ "):
+            name = _header_path(line[4:])
+            current = name[2:] if name.startswith("b/") else None
+    return added
 
 
 def added_lines(repo, base, timeout=2.0):
@@ -101,20 +159,29 @@ def added_lines(repo, base, timeout=2.0):
 
     Committed, staged, unstaged and untracked changes all count: a new file the
     code worker has not added yet is as much the implementation as a committed
-    one. One deadline covers every git call, so a caller on a hook budget gets
-    an answer or an error in bounded time. A missing base is a bad input
-    document (SCHEMA_INVALID, as in changed_paths), a git that fails or runs
+    one. One deadline covers every git call and the untracked reads, so a caller
+    on a hook budget gets an answer or an error in bounded time. Only regular
+    files are read, never through a symlink, and at most UNTRACKED_FILE_LIMIT
+    bytes of each. A missing base is a bad input document (SCHEMA_INVALID, as in
+    changed_paths), and a git that fails, a file that cannot be read, or a run
     past the deadline is EXTERNAL_BLOCKED.
     """
     if not base:
         raise PplError("SCHEMA_INVALID", "added_lines needs a base revision, got %r" % (base,))
     deadline = time.monotonic() + timeout
 
+    def left():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PplError("EXTERNAL_BLOCKED",
+                           "reading the changes in %s took longer than %.1f s" % (repo, timeout))
+        return remaining
+
     def run(*args):
         try:
-            result = subprocess.run(["git", "-C", str(repo)] + list(args),
-                                    capture_output=True, text=True, errors="replace",
-                                    timeout=max(0.1, deadline - time.monotonic()))
+            result = subprocess.run(["git", "-C", str(repo), "-c", "core.quotePath=false"]
+                                    + list(args), capture_output=True, text=True,
+                                    errors="replace", timeout=left())
         except subprocess.TimeoutExpired:
             raise PplError("EXTERNAL_BLOCKED",
                            "git %s in %s took longer than %.1f s" % (args[0], repo, timeout))
@@ -125,25 +192,28 @@ def added_lines(repo, base, timeout=2.0):
                            % (args[0], repo, result.stderr.strip()))
         return result.stdout
 
-    added = {}
-    current = None
-    for line in run("diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames",
-                    str(base), "--").splitlines():
-        if line.startswith("+++ "):
-            current = line[6:] if line.startswith("+++ b/") else None
-        elif line.startswith("+") and current is not None:
-            added.setdefault(current, []).append(line[1:])
+    added = _added_in_diff(run("diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames",
+                               str(base), "--"))
     for rel in run("ls-files", "--others", "--exclude-standard", "-z").split("\0"):
         if not rel:
             continue
+        left()
         target = os.path.join(str(repo), rel)
         try:
-            if os.path.getsize(target) > UNTRACKED_FILE_LIMIT:
-                continue
-            with open(target, encoding="utf-8") as handle:
-                added.setdefault(rel, []).extend(handle.read().splitlines())
-        except (OSError, UnicodeDecodeError):
+            info = os.lstat(target)
+        except FileNotFoundError:
             continue
+        except OSError as err:
+            raise PplError("EXTERNAL_BLOCKED", "cannot stat %s: %s" % (rel, err))
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            with os.fdopen(os.open(target, flags), "rb") as handle:
+                data = handle.read(UNTRACKED_FILE_LIMIT)
+        except OSError as err:
+            raise PplError("EXTERNAL_BLOCKED", "cannot read %s: %s" % (rel, err))
+        added.setdefault(rel, []).extend(data.decode("utf-8", errors="replace").splitlines())
     return added
 
 

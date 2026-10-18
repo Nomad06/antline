@@ -1,3 +1,4 @@
+import itertools
 import os
 import subprocess
 import sys
@@ -29,6 +30,7 @@ public class PriceCalculator {
     }
 }
 """ % (SIGNATURE, BODY_ONE, BODY_TWO)
+_TASK_IDS = itertools.count(1)
 ACCEPTANCE = ("AC-1: a 10 percent discount on 1000 cents gives 900 cents.\n"
               "AC-2: the total never goes below zero.")
 
@@ -62,7 +64,7 @@ class TestDispatchLeak(unittest.TestCase):
         git(self.repo, "commit", "-q", "-m", "base")
         self.base = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
                                    check=True, capture_output=True, text=True).stdout.strip()
-        self.task = "LEAK-%d" % (abs(hash(self.id())) % 100000)
+        self.task = "LEAK-%d" % next(_TASK_IDS)
         run.init(self.task, "u", str(self.repo))
         state = run.load(self.task)
         state["base_sha"] = self.base
@@ -115,6 +117,79 @@ class TestDispatchLeak(unittest.TestCase):
         write(self.repo, MAIN, IMPLEMENTATION)
         prompt = BODY_ONE + "\n" + BODY_TWO
         self.assertIn("BOUNDARY_VIOLATION", self.reason(ppl_guard.decide(dispatch(prompt))))
+
+    def commit_file(self, rel):
+        write(self.repo, rel, "class P {\n    %s\n    %s\n}\n" % (BODY_ONE, BODY_TWO))
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-q", "-m", "implementation")
+
+    def test_a_main_file_with_a_non_ascii_name_still_counts(self):
+        # rule: R-TEST-WORKER-DISPATCH-LEAK
+        # git quotes a non-ASCII path in the +++ header unless core.quotepath is off
+        self.commit_file("source/core/orders/Pr\u00e9is.java")
+        reason = self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("Pr\u00e9is.java", reason)
+
+    def test_a_main_file_with_a_quote_in_its_name_still_counts(self):
+        # rule: R-TEST-WORKER-DISPATCH-LEAK
+        # a double quote is C-quoted in the header whatever core.quotepath says
+        self.commit_file('source/core/orders/Odd"Name.java')
+        reason = self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn('Odd"Name.java', reason)
+
+    def test_a_main_file_with_a_space_in_its_name_is_named_plainly(self):
+        # rule: R-TEST-WORKER-DISPATCH-LEAK
+        # git ends a +++ header that holds a space with a tab
+        self.commit_file("source/core/orders/Price Calc.java")
+        reason = self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("from source/core/orders/Price Calc.java (", reason)
+
+    def test_a_renamed_unchanged_file_counts_as_added(self):
+        # rule: R-TEST-WORKER-DISPATCH-LEAK
+        # --no-renames: a moved file is a delete plus an add, so its lines are
+        # implementation text to the check, which the residual states.
+        self.commit_file("source/core/orders/Before.java")
+        state = run.load(self.task)
+        state["base_sha"] = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                           check=True, capture_output=True, text=True).stdout.strip()
+        run.save(state)
+        git(self.repo, "mv", "source/core/orders/Before.java", "source/core/orders/After.java")
+        git(self.repo, "commit", "-q", "-m", "move")
+        reason = self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("After.java", reason)
+
+    def test_an_added_line_that_looks_like_a_header_does_not_hide_the_rest(self):
+        # rule: R-TEST-WORKER-DISPATCH-LEAK
+        # with -U0 an added line "++ x" prints as "+++ x": only the hunk's own
+        # line counts tell it apart from a file header
+        write(self.repo, MAIN, "class P {\n++ looks like a header line\n    %s\n    %s\n}\n"
+              % (BODY_ONE, BODY_TWO))
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-q", "-m", "implementation")
+        self.assertIn("BOUNDARY_VIOLATION",
+                      self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO))))
+
+    def test_an_untracked_symlink_to_an_endless_device_is_not_read(self):
+        # rule: R-TEST-WORKER-DISPATCH-LEAK
+        # only regular files are read, so a link to /dev/zero cannot stall the hook
+        os.symlink("/dev/zero", str(self.repo / "zero.java"))
+        self.commit_implementation()
+        self.assertIn("BOUNDARY_VIOLATION",
+                      self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO))))
+
+    def test_an_unexpected_error_in_the_check_denies(self):
+        # rule: R-TEST-WORKER-DISPATCH-LEAK
+        # a corrupt brief.json must not fall through to main()'s allow-for-the-
+        # orchestrator policy
+        self.commit_implementation()
+        (paths.run_dir(self.task) / "brief.json").write_text("{not json", encoding="utf-8")
+        reason = self.reason(ppl_guard.decide(dispatch(ACCEPTANCE)))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("could not be checked", reason)
 
     def test_a_non_isolated_run_dispatching_from_elsewhere_is_checked(self):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
