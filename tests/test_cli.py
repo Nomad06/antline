@@ -1029,6 +1029,66 @@ class TestDoneOnlyFromClosure(unittest.TestCase):
         self.assertIn("blocked", out)
 
 
+class TestClosureOnlyWhenDonePasses(unittest.TestCase):
+    """closure leads only to `ppl transition done` and has no edge back to rework, so a run
+    whose done gate refused there was stranded. Entering closure now needs the done gate to
+    pass on the current head at that moment."""
+
+    def in_review(self, task_id):
+        """A real repo, a run stamped into review with its baseline at HEAD and no verdict."""
+        from ppl import run
+        repo = make_repo()
+        code, _, err = call("init", task_id, "--tracker-url", "u", "--repo", repo,
+                            "--harness", "example-maven")
+        self.assertEqual(code, 0, err)
+        state = run.load(task_id)
+        state.update(stage="review", status="in_progress", base_sha=head_sha(repo))
+        run.save(state)
+        return head_sha(repo)
+
+    def test_entering_closure_while_the_done_gate_refuses_is_refused_naming_the_blockers(self):
+        # rule: R-CLOSURE-ONLY-WHEN-DONE-PASSES
+        from ppl import run
+        head = self.in_review("DEMO-5830")
+        code, _, err = call("stage", "enter", "closure", "--task", "DEMO-5830")
+        self.assertEqual(code, 2)
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], "ILLEGAL_TRANSITION")
+        self.assertIn("no verdict recorded for candidate %s" % head, payload["message"])
+        self.assertIn("required check focused-tests has no passing receipt", payload["message"])
+        self.assertIn("stays in review", payload["message"])
+        state = run.load("DEMO-5830")
+        self.assertEqual((state["stage"], state["status"]), ("review", "in_progress"))
+
+    def test_a_run_refused_closure_can_still_go_back_to_stage_three(self):
+        # the trap this closes: approved, closure entered, done refused, no legal way back
+        from ppl import run
+        head = self.in_review("DEMO-5831")
+        self.assertEqual(call("review", "approved", "--sha", head, "--task", "DEMO-5831")[0], 0)
+        code, _, err = call("stage", "enter", "closure", "--task", "DEMO-5831")
+        self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
+        code, _, err = call("stage", "enter", "implementation", "--task", "DEMO-5831")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-5831")["stage"], "implementation")
+
+    def test_resuming_into_closure_while_the_done_gate_refuses_is_refused(self):
+        # rule: R-CLOSURE-ONLY-WHEN-DONE-PASSES
+        from ppl import run
+        self.in_review("DEMO-5832")
+        state = run.load("DEMO-5832")
+        state["stage"] = "closure"
+        run.save(state)
+        self.assertEqual(call("escalate", "--code", "OWNER_DECISION", "--question", "stuck",
+                              "--task", "DEMO-5832")[0], 0)
+        code, _, err = call("stage", "enter", "closure", "--task", "DEMO-5832")
+        self.assertEqual(code, 2)
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], "ILLEGAL_TRANSITION")
+        self.assertIn("no verdict recorded for candidate", payload["message"])
+        self.assertIn("stays in parking", payload["message"])
+        self.assertEqual(run.load("DEMO-5832")["stage"], "parking")
+
+
 class TestMergeObserved(unittest.TestCase):
     """`ppl merge observed` records the merge the orchestrator saw on the forge, the fact the
     tracker gate waits for. It is valid in merge_watch only, and only once."""
@@ -1450,6 +1510,18 @@ class TestNameContractSpecRevision(unittest.TestCase):
         repo = make_repo()
         self._to_verified_pass("DEMO-961", repo, {"Foo.bar": "int"})
         code, out, err = call("transition", "done", "--task", "DEMO-961")
+        self.assertEqual(code, 0, err)
+
+    def test_a_run_whose_done_gate_passes_enters_closure_and_closes(self):
+        from ppl import run
+        repo = make_repo()
+        self._to_verified_pass("DEMO-5833", repo, {"Foo.bar": "int"})
+        state = run.load("DEMO-5833")
+        state["stage"] = "review"
+        run.save(state)
+        code, _, err = call("stage", "enter", "closure", "--task", "DEMO-5833")
+        self.assertEqual(code, 0, err)
+        code, _, err = call("transition", "done", "--task", "DEMO-5833")
         self.assertEqual(code, 0, err)
 
     def test_transition_done_stamps_a_current_next_safe_action(self):

@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # tests/ is not a package, so the helper next to this file is imported
 # by path. It must be imported before PPL_HOME is chosen below.
@@ -10,7 +11,7 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import recover, run, store, watchdog
+from ppl import recover, run, store, verdict, watchdog
 from ppl.errors import PplError
 
 
@@ -100,6 +101,12 @@ class TestWatchdogCheck(unittest.TestCase):
                 state = run.load("DEMO-970")
                 state["status"] = "done"
                 run.save(state)
+            if stage == "closure":
+                # closure needs the done gate to pass [R-CLOSURE-ONLY-WHEN-DONE-PASSES], which
+                # needs a real repo and evidence, so it is stubbed for this one step.
+                with mock.patch.object(verdict, "current_blockers", return_value=[]):
+                    run.stage_enter("DEMO-970", stage)
+                continue
             run.stage_enter("DEMO-970", stage)
             if stage == "baseline":
                 # E1, cycle 2 wave E: stage_enter now refuses to leave

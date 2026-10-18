@@ -25,7 +25,12 @@ from `closure` with status `done`, run <!-- include: sequence/close-out-from-don
 forge. `ppl transition done`
 refuses in any stage but `closure` [R-DONE-FROM-CLOSURE], `ppl stage enter merge_watch`
 refuses until the run is done [R-MERGE-WATCH-AFTER-DONE], and `ppl merge observed` refuses
-in any stage but `merge_watch` [R-MERGE-OBSERVED-ONCE]. The tracker gate fires for the orchestrator's own session -
+in any stage but `merge_watch` [R-MERGE-OBSERVED-ONCE]. `ppl stage enter closure` refuses
+while `ppl transition done` would [R-CLOSURE-ONLY-WHEN-DONE-PASSES], so a `ppl transition
+done` refused once the run is in `closure` means something changed after it entered: repair
+that in place - the receipt, the verdict or the finding status on the current head - and
+run `ppl transition done` again, or escalate `OWNER_DECISION`, since `closure` has no way
+back to Stage 3 [R-DONE-FROM-CLOSURE]. The tracker gate fires for the orchestrator's own session -
 which carries no `agent_type` - whenever the run is active and `isolated` is true (the
 default), regardless of the session's cwd; the documented worktree layout in Stage 1 puts
 the worktree beside the orchestrator's session, not under it, so a cwd-only check would not

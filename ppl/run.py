@@ -232,6 +232,23 @@ def stage_enter(task_id, stage):
                            "challenge bound to the current spec_revision - dispatch "
                            "ppl-brief-challenger and run `ppl brief challenge` first "
                            "[R-BRIEF-CHALLENGED-BEFORE-IMPLEMENTATION]")
+    # closure leads only to `ppl transition done` and has no edge back to rework, so a run
+    # whose done gate refused there had no legal way on. It enters closure only when the
+    # gate would pass at that moment, a resume included, and otherwise stays where it is
+    # [R-CLOSURE-ONLY-WHEN-DONE-PASSES].
+    if stage == "closure":
+        from . import verdict
+        blockers = verdict.current_blockers(task_id)
+        if blockers:
+            where = ("review, where rework (ppl stage enter implementation or tests) and "
+                     "evidence repair on the current head are still possible"
+                     if previous == "review" else
+                     "%s: repair the evidence on the current head (receipt, verdict, finding "
+                     "status) before resuming, or escalate OWNER_DECISION" % previous)
+            raise PplError("ILLEGAL_TRANSITION",
+                           "cannot enter closure while `ppl transition done` would refuse: "
+                           "%s. The run stays in %s [R-CLOSURE-ONLY-WHEN-DONE-PASSES]"
+                           % ("; ".join(blockers), where))
     # closure -> merge_watch is a legal edge, but merge_watch has no way back, so a run that
     # took it before `ppl transition done` could never be closed, and the tracker gate would
     # sit one `ppl merge observed` away. A resume into merge_watch is held to the same

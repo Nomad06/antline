@@ -189,22 +189,25 @@ def _argv(step, task_id):
     return shlex.split(re.sub(r"<([^<>]*)>", fill, step))[1:]
 
 
-def walk(steps, stage, status):
+def walk(steps, stage, status, blockers=()):
     """None when the real ppl accepts every step in order on a run that is in `stage` with
     lifecycle `status`, else the first refusal. The stage graph and every stage and status
     precondition are the real ones. Only git and the done gate's evidence checks are
     stubbed, and the run carries a recorded baseline and an accepted brief challenge: what a
-    step needs from the repo or from an artifact is another test's subject."""
-    return _walk(steps, stage, status)[0]
+    step needs from the repo or from an artifact is another test's subject. The evidence
+    checks are verdict.done_blockers, which both `ppl transition done` and the closure entry
+    check read [R-CLOSURE-ONLY-WHEN-DONE-PASSES]: they answer `blockers`, none by default,
+    so a walk models a run whose evidence holds unless a test says otherwise."""
+    return _walk(steps, stage, status, blockers)[0]
 
 
-def _walk(steps, stage, status):
+def _walk(steps, stage, status, blockers=()):
     """(walk's answer, the (stage, status) the run ended in)"""
     task_id = "WALK-%d" % next(_walks)
     with mock.patch.dict(os.environ, {"PPL_HOME": tmphome.mkdtemp(prefix="pplwalk-")}), \
             mock.patch.object(gitfacts, "head_sha", return_value=WALK_SHA), \
             mock.patch.object(gitfacts, "changed_paths", return_value=[]), \
-            mock.patch.object(verdict, "done_blockers", return_value=[]):
+            mock.patch.object(verdict, "done_blockers", return_value=list(blockers)):
         state = run.init(task_id, "u", "/nonexistent/walk-repo")
         state.update(stage=stage, status=status, base_sha=WALK_SHA, spec_revision="walk",
                      brief_challenge={"spec_revision": "walk", "verdict": "ACCEPTED"})
@@ -566,6 +569,17 @@ class TestSequences(unittest.TestCase):
                        "review", "in_progress")
         self.assertIn("`ppl transition done` in stage review", refused)
         self.assertIn("ILLEGAL_TRANSITION", refused)
+
+    def test_the_walk_refuses_closure_while_the_done_gate_would_refuse(self):
+        # rule: R-CLOSURE-ONLY-WHEN-DONE-PASSES
+        blocker = "no verdict recorded for candidate %s" % WALK_SHA
+        refused = walk(("ppl stage enter closure",), "review", "in_progress", blockers=[blocker])
+        self.assertIn("`ppl stage enter closure` in stage review", refused)
+        self.assertIn("ILLEGAL_TRANSITION", refused)
+        self.assertIn(blocker, refused)
+        # and the run, still in review, can go back to Stage 3
+        self.assertIsNone(walk(("ppl stage enter implementation",), "review", "in_progress",
+                               blockers=[blocker]))
 
     def test_the_walk_refuses_merge_watch_straight_from_review(self):
         # rule: R-FSM-STAGE-GRAPH

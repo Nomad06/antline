@@ -679,7 +679,19 @@ hook_or_check = "ppl/cli.py:cmd_transition"
 deny_test = "tests/test_cli.py::TestDoneOnlyFromClosure::test_transition_done_from_review_is_refused_naming_closure, tests/test_cli.py::TestDoneOnlyFromClosure::test_transition_done_before_review_names_no_impossible_step, tests/test_cli.py::TestDoneOnlyFromClosure::test_transition_done_from_merge_watch_is_refused_too, tests/test_skill_contract.py::TestSequences::test_the_walk_refuses_the_two_step_ending_the_review_loop_once_had"
 allow_test = "tests/test_cli.py::TestNameContractSpecRevision::test_transition_done_succeeds_when_the_name_contract_never_changed, tests/test_cli.py::TestDoneOnlyFromClosure::test_other_lifecycle_targets_are_not_tied_to_closure"
 owner = "ppl"
-residual = "checked after fsm.check_lifecycle and before the done gate, so a lifecycle target illegal on its face is still reported first. The refusal names a step legal from the current stage: ppl stage enter closure from review, escalation from merge_watch (which has no way back, see R-MERGE-WATCH-AFTER-DONE), and otherwise that closure follows review. The other lifecycle targets (blocked, failed) are not tied to a stage"
+residual = "checked after fsm.check_lifecycle and before the done gate, so a lifecycle target illegal on its face is still reported first. The refusal names a step legal from the current stage: ppl stage enter closure from review, escalation from merge_watch (which has no way back, see R-MERGE-WATCH-AFTER-DONE), and otherwise that closure follows review. The other lifecycle targets (blocked, failed) are not tied to a stage. A run enters closure only when the done gate passes (R-CLOSURE-ONLY-WHEN-DONE-PASSES), so a done gate that refuses in closure means something changed after the run entered it: closure has no edge back to Stage 3, so the run repairs in place (the receipt, the verdict or the finding status on the current head) and runs ppl transition done again, or escalates OWNER_DECISION"
+
+[[rule]]
+id = "R-CLOSURE-ONLY-WHEN-DONE-PASSES"
+statement = "ppl stage enter closure, a resume from parking or escalation included, is refused with ILLEGAL_TRANSITION naming the done gate's blockers while verdict.done_blockers for the current head is non-empty, so a run enters closure, which leads only to ppl transition done and has no edge back to Stage 3, only when the done gate would pass at that moment. The run stays in review, where rework and evidence repair are still possible."
+scope = "ppl CLI"
+event = "ppl stage enter closure"
+enforcement = "blocking"
+hook_or_check = "ppl/run.py:stage_enter, ppl/verdict.py:current_blockers"
+deny_test = "tests/test_cli.py::TestClosureOnlyWhenDonePasses::test_entering_closure_while_the_done_gate_refuses_is_refused_naming_the_blockers, tests/test_cli.py::TestClosureOnlyWhenDonePasses::test_resuming_into_closure_while_the_done_gate_refuses_is_refused, tests/test_skill_contract.py::TestSequences::test_the_walk_refuses_closure_while_the_done_gate_would_refuse"
+allow_test = "tests/test_cli.py::TestNameContractSpecRevision::test_a_run_whose_done_gate_passes_enters_closure_and_closes, tests/test_cli.py::TestClosureOnlyWhenDonePasses::test_a_run_refused_closure_can_still_go_back_to_stage_three"
+owner = "ppl"
+residual = "checked at entry only, through the same verdict.current_blockers ppl transition done reads: a head, receipt, verdict or finding that changes after the run entered closure is caught by the done gate itself, and the run then repairs in place or escalates OWNER_DECISION (R-DONE-FROM-CLOSURE). A run parked or escalated out of closure resumes there only once the gate passes again, and the evidence commands carry no stage gate, so the repair can happen while it is parked. tests/test_skill_contract.py's walk stubs verdict.done_blockers, which this check and the done gate share, to the blockers a walk passes, none by default, so every walked sequence models a run whose evidence holds, and one walk passes a blocker to show the refusal"
 
 [[rule]]
 id = "R-MERGE-WATCH-AFTER-DONE"

@@ -1,4 +1,4 @@
-from . import boundary, evidence, findings, paths, run, schema, store
+from . import boundary, evidence, findings, gitfacts, paths, run, schema, store
 from .errors import PplError, role_output
 
 REQUIRED_CHECKS = ("focused-tests", "secret-scan")
@@ -180,6 +180,16 @@ def proven_acceptance(task_id, sha):
     if not sha:
         return set()
     return _proven(latest(task_id, sha), evidence.for_sha(task_id, sha))
+
+
+def current_blockers(task_id):
+    """done_blockers for the run's repo as it is now: its head, and the paths changed
+    from base_sha to it. Read by `ppl transition done` and by the closure entry check
+    [R-CLOSURE-ONLY-WHEN-DONE-PASSES]."""
+    state = run.load(task_id)
+    head = gitfacts.head_sha(state["repo"])
+    changed = gitfacts.changed_paths(state["repo"], state["base_sha"], head)
+    return done_blockers(task_id, head, changed)
 
 
 def done_blockers(task_id, head_sha, changed_paths):

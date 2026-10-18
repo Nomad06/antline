@@ -517,9 +517,7 @@ def cmd_transition(args):
             raise PplError("ILLEGAL_TRANSITION",
                            "ppl transition done runs only in stage closure, current stage is %s - %s"
                            % (state["stage"], _closure_hint(state["stage"])))
-        head = gitfacts.head_sha(state["repo"])
-        changed = gitfacts.changed_paths(state["repo"], state["base_sha"], head)
-        blockers = verdict.done_blockers(task_id, head, changed)
+        blockers = verdict.current_blockers(task_id)
         if blockers:
             raise PplError("IMPLEMENTATION_FAILURE",
                            "cannot close task: " + "; ".join(blockers))
