@@ -1,0 +1,38 @@
+# Stage 1 - baseline
+
+`ppl stage enter baseline` first - the FSM has no admission -> briefing edge, only
+admission -> baseline -> briefing, so skipping this call dead-ends the next stage's
+`ppl stage enter briefing` with `ILLEGAL_TRANSITION` [R-FSM-STAGE-GRAPH]. Capture the
+generation it prints, same as any other `stage enter`.
+
+Create the worktree and branch from `<!-- include: harness/default-branch -->`, at the exact
+path you already passed to `ppl init --repo` in Stage 0, with the branch name matching the
+convention `<TASK-ID>-<short-slug>`:
+
+```bash
+cd <!-- include: harness/repo -->
+git fetch origin <!-- include: harness/default-branch -->
+git worktree add <!-- include: harness/worktrees -->/<repo-name>-<TASK-ID> -b <TASK-ID>-<short-slug> origin/<!-- include: harness/default-branch -->
+```
+
+This is where every gate and every dispatched worker runs from now on.
+
+Then record the baseline. <!-- include: harness/baseline -->
+Commands are in `references/gates.md`. Then `ppl baseline record <file>`, with `base_sha`
+set to the worktree's HEAD before any of your own commits. `references/baseline.md` says exactly which field of that document is checked
+(only `base_sha`) and which are a durable note by convention only - read it before assuming
+the rest of the document is validated the way a brief or a verdict is.
+
+Without a baseline, a pre-existing red test and a regression are indistinguishable.
+
+`ppl baseline record` succeeds exactly once per run, and only for a commit HEAD descends
+from, and only while you are still in the baseline stage. It refuses a second call with
+`ILLEGAL_TRANSITION`, a non-ancestor `base_sha` with `SCHEMA_INVALID`, and a call made after
+you have already moved on to `briefing` or later with `ILLEGAL_TRANSITION` too: the
+done-gate proves your diff stays inside the write boundary by diffing `base_sha..HEAD`, so a
+baseline recorded after the work commit would empty that diff and pass the check with
+nothing in it [R-BASELINE-WRITE-ONCE] [R-BASELINE-ANCESTOR] [R-BASELINE-NOT-AT-HEAD]. On a
+freshly cut branch with no commits of your own yet, `base_sha` equal to the worktree's
+current HEAD is correct and expected - that is exactly what "before any of your own
+commits" means when there are none yet. If you believe the baseline is genuinely wrong,
+that is an owner decision - escalate, do not re-record.

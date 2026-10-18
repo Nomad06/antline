@@ -12,8 +12,8 @@ ADVISORY_CHECKS = ("simplification",)
 # E2, cycle 2 wave E: `ppl verdict record` used to leave next_safe_action
 # naming itself ("dispatch ppl-verifier and record its verdict") even after
 # it had just succeeded - repeating it, the only thing the stale text names,
-# errors ILLEGAL_TRANSITION. Restamped here by outcome, mirroring
-# skill/SKILL.md.skeleton Stage 5's own routing table so the two never drift
+# errors ILLEGAL_TRANSITION. Restamped here by outcome, mirroring the routing
+# table of skill/references/stage-5-verification.md so the two never drift
 # apart - see schema.VERDICT_OUTCOMES for the full closed set this keys.
 VERDICT_NEXT_ACTION = {
     "PASS": "verdict is PASS - proceed to Stage 6 (ppl stage enter mr)",

@@ -1333,6 +1333,22 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("generation: 1", out)
 
+    def test_stage_enter_names_the_stage_reference_on_its_last_line(self):
+        call("init", "DEMO-946", "--tracker-url", "u", "--repo", "/tmp/repo",
+             "--harness", "example-maven")
+        code, out, err = call("stage", "enter", "baseline", "--task", "DEMO-946")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.splitlines(), [
+            "stage: baseline", "generation: 1",
+            "Before anything in this stage, read references/stage-1-baseline.md"])
+
+    def test_stage_enter_adds_no_line_for_a_stage_without_a_reference(self):
+        call("init", "DEMO-947", "--tracker-url", "u", "--repo", "/tmp/repo",
+             "--harness", "example-maven")
+        code, out, err = call("stage", "enter", "escalation", "--task", "DEMO-947")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.splitlines(), ["stage: escalation", "generation: 1"])
+
 
 class TestNameContractSpecRevision(unittest.TestCase):
     """R-BRIEF-SPEC-REVISION-STALE end to end through the real CLI: a rebrief

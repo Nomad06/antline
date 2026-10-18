@@ -22,5 +22,5 @@ Everything else about the verdict - what counts as a blocking finding, when to u
 `templates/ppl-verifier.md.body`'s job, not this file's: this table is the schema `ppl
 verdict record` actually checks, not the judgment calls the verifier role makes composing
 it. See `references/gates.md` for the receipts a verdict's `acceptance_evidence` entries
-point at, and Stage 5 of `SKILL.md` for the surrounding sequence (findings first, verdict
-after).
+point at, and `references/stage-5-verification.md` for the surrounding sequence (findings
+first, verdict after).

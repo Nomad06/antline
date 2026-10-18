@@ -67,7 +67,9 @@ KNOWN_KEYS = {
 # The rendered SKILL.md is always in the orchestrator's context and an agent file
 # is a role's whole prompt. Measured 2026-10-18 on the two shipped examples: the
 # largest SKILL.md is example-maven's, the largest agent file ppl-verifier's.
-# Over the soft cap is a warning, over the hard cap a refusal.
+# SKILL.md was measured before each stage moved to its own reference and renders
+# at about a third of that since. Over the soft cap is a warning, over the hard
+# cap a refusal.
 SKILL_MEASURED_BYTES = 38114
 AGENT_MEASURED_BYTES = 5313
 SKILL_SOFT_BYTES = SKILL_MEASURED_BYTES * 3 // 2

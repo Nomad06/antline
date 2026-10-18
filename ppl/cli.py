@@ -223,6 +223,9 @@ def cmd_stage(args):
     # next `ppl recover` call, or until the watchdog bumps it out from under a
     # deadline this attempt overran [R-LEASE-STALE-WRITE].
     print("generation: %d" % state["lease_generation"])
+    reference = run.STAGE_REFERENCES.get(state["stage"])
+    if reference:
+        print("Before anything in this stage, read %s" % reference)
     return 0
 
 
@@ -354,7 +357,7 @@ def cmd_baseline(args):
     # work it is meant to precede always empties the done-gate's diff. That
     # reasoning is right about the DANGER and wrong about WHERE to catch it:
     # on a freshly cut branch with no commits of its own yet - exactly where
-    # SKILL.md Stage 1 tells the orchestrator to record the baseline - HEAD
+    # the skill's Stage 1 tells the orchestrator to record the baseline - HEAD
     # IS the correct base_sha, and there is no other commit to name. The
     # walker driving this skill had to invent HEAD~1 to get past the old
     # refusal, and a branch cut from a fresh tip would have had no way out
@@ -363,7 +366,7 @@ def cmd_baseline(args):
     # this call happens, not by comparing two commits that read identically
     # in git for "fresh branch" and "recorded late" alike.
     #
-    # SKILL.md Stage 1 already sequences `ppl stage enter baseline` before
+    # the skill's Stage 1 already sequences `ppl stage enter baseline` before
     # this command - a run whose stage has moved past "baseline" (implementation,
     # gates, or later) recording one now is exactly the late-repair shape C3
     # named, whatever commit it names. Refused here instead of at the
@@ -653,17 +656,19 @@ def cmd_recover(args):
         # parked (or otherwise left) before Stage 1 ever created its
         # worktree - SCHEMA_INVALID, whose documented remedy ("fix the
         # artifact or the invocation and retry once") is "create the
-        # worktree now, see SKILL.md Stage 1", the same fix Stage 1 already
-        # names. EXTERNAL_BLOCKED, whose remedy is "park, retry on the next
-        # tick", is kept for the other shape: a path that DOES exist but is
-        # not a usable git repository (corrupted, or something else parked
-        # on top of it) - that one really can plausibly clear on its own.
+        # worktree now, see references/stage-1-baseline.md", the same fix
+        # Stage 1 already names. EXTERNAL_BLOCKED, whose remedy is "park,
+        # retry on the next tick", is kept for the other shape: a path that
+        # DOES exist but is not a usable git repository (corrupted, or
+        # something else parked on top of it) - that one really can
+        # plausibly clear on its own.
         repo = result["facts"].get("repo")
         if not repo or not os.path.isdir(repo):
             raise PplError("SCHEMA_INVALID",
                            "recovery cannot verify the run: repo %s does not exist. The run "
                            "exists - do not run `ppl init` again. If its worktree has not "
-                           "been created yet, create it now (see SKILL.md Stage 1) and retry "
+                           "been created yet, create it now (see Stage 1, the skill's "
+                           "references/stage-1-baseline.md) and retry "
                            "`ppl recover`; a worktree that existed and was removed is the "
                            "same fix." % repo)
         raise PplError("EXTERNAL_BLOCKED",

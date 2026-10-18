@@ -176,7 +176,7 @@ def spec_revision(name_contract, acceptance, allowed_write_paths, forbidden_path
     is read anywhere in `done_blockers` - the fingerprint's scope is derived
     from what the gate actually reads, not from "the whole brief" - so a
     re-brief that only corrects prose or fills in `governing_requirements`
-    (the CONTEXT_INSUFFICIENT retry SKILL.md allows once) still leaves this
+    (the CONTEXT_INSUFFICIENT retry the skill's Stage 2 allows once) still leaves this
     value byte-identical and does not force a re-verification nothing
     downstream needed.
 

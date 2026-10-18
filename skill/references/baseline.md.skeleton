@@ -14,5 +14,5 @@ why D2's `base_sha == HEAD` confusion bit as hard as it did).
 branch that has no commits of its own yet - that is exactly what "before any of your own
 commits" means when there are none yet. The command's real defence against a baseline
 recorded too late is the stage check, not the value itself: see `references/gates.md` and
-Stage 1 of `SKILL.md` for the sequence (worktree, then baseline record, before any
-implementation work lands).
+`references/stage-1-baseline.md` for the sequence (worktree, then baseline record, before
+any implementation work lands).

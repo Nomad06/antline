@@ -38,8 +38,9 @@ def set_mr(task_id, iid, url, author=None):
         state["mr"]["author"] = author
     # E2, cycle 2 wave E: same restamp as `ppl baseline record` and `ppl
     # brief set` - see ppl/cli.py:cmd_baseline for why this was missing.
-    # skill/SKILL.md.skeleton Stage 7 calls `ppl mr set` once, after `ppl stage
-    # enter review`, right before the review loop's first tick.
+    # the skill's Stage 7 (references/stage-7-review.md) calls `ppl mr set`
+    # once, after `ppl stage enter review`, right before the review loop's
+    # first tick.
     state["next_safe_action"] = "run the review loop (references/review-loop.md)"
     run.save(state)
     store.append_log(task_id, {"event": "mr", "iid": iid, "url": url, "author": author})

@@ -43,6 +43,6 @@ Each tick:
    not end - and `ppl approval check` must now read `current`. Do not skip `merge_watch` even if
    `ppl doctor` reported the guard hook is not registered - **if it is armed**, it will not
    let you write to Jira until the run's stage is exactly `merge_watch` and the merge is
-   recorded (see "After merge only" below); if it is not armed, nothing stops the write
+   recorded (see `references/stage-8-after-merge.md`); if it is not armed, nothing stops the write
    either way [R-GUARD-NOT-ARMED n/a],
    so entering `merge_watch` first is the only thing that still holds the line.

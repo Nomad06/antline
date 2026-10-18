@@ -229,6 +229,10 @@ class TestSkillContract(unittest.TestCase):
         self.assertTrue(self.skill.exists(), "orchestrator skill is missing")
         self.text = self.skill.read_text(encoding="utf-8")
 
+    def reference(self, name):
+        """references/<name> of the same rendered skill, where each stage's procedure lives."""
+        return (self.skill.parent / "references" / name).read_text(encoding="utf-8")
+
     def test_it_forbids_resolving_threads(self):
         # cycle 2 wave C: "never resolve" was reworded to "do not resolve" -
         # "never" is now a rule-matrix claim keyword, and this sentence is
@@ -264,24 +268,24 @@ class TestSkillContract(unittest.TestCase):
         # findings are no longer SHA-filtered (R-DONE-OPEN-FINDING), so the
         # orchestrator must list what is already open before dispatch rather
         # than let the verifier report the same defect again every round.
-        self.assertIn("ppl findings list", self.text)
-        self.assertIn("genuinely new", self.text)
+        stage5 = self.reference("stage-5-verification.md")
+        self.assertIn("ppl findings list", stage5)
+        self.assertIn("genuinely new", stage5)
 
     def test_stage_seven_names_the_review_ledger_commands(self):
         # ppl review approved is the only writer of state.mr.approved_sha, so a
         # Stage 7 that never names it leaves the skill's own terminal condition
         # unreachable: ppl approval check would print "none" forever.
+        stage7 = self.reference("stage-7-review.md")
         for command in ("references/review-loop.md", "ppl mr set", "--author",
                         "ppl review pending", "ppl review answered",
                         "ppl review approved --sha"):
-            self.assertIn(command, self.text)
-        stage7 = self.text.split("## Stage 7 - review", 1)[1].split("## After merge only", 1)[0]
+            self.assertIn(command, stage7)
         self.assertLess(stage7.index("ppl review approved"), stage7.index("ppl transition done"),
                         "the approval must be recorded before the run is closed")
 
     def _after_merge(self):
-        return " ".join(self.text.split("## After merge only", 1)[1]
-                        .split("## Operator commands", 1)[0].split())
+        return " ".join(self.reference("stage-8-after-merge.md").split())
 
     def test_after_merge_records_the_merge_before_the_tracker_note(self):
         section = self._after_merge()
@@ -300,17 +304,21 @@ class TestSkillContract(unittest.TestCase):
         self.assertNotIn("go back and run `ppl stage enter merge_watch` first", section)
 
     def test_each_role_output_command_names_whose_output_it_records(self):
-        joined = re.sub(r"\\\n\s*", " ", self.text)
-        for command, role in (("ppl brief set", "ppl-briefer"),
-                              ("ppl brief challenge", "ppl-brief-challenger"),
-                              ("ppl verdict record", "ppl-verifier"),
-                              ("ppl findings add", "ppl-verifier"),
-                              ("ppl evidence add", "orchestrator")):
+        self.assertIn("--from <role>", self.text)
+        for stage, command, role in (("stage-2-briefing.md", "ppl brief set", "ppl-briefer"),
+                                     ("stage-2-briefing.md", "ppl brief challenge",
+                                      "ppl-brief-challenger"),
+                                     ("stage-5-verification.md", "ppl verdict record",
+                                      "ppl-verifier"),
+                                     ("stage-5-verification.md", "ppl findings add", "ppl-verifier"),
+                                     ("stage-4-gates.md", "ppl evidence add", "orchestrator")):
+            joined = re.sub(r"\\\n\s*", " ", self.reference(stage))
             self.assertRegex(joined, re.escape(command) + r" [^`]*?--from\s+" + re.escape(role))
 
     def test_it_sends_a_refusal_to_the_one_plus_one_rule(self):
         self.assertIn("FORMAT_RETRY_EXHAUSTED", self.text)
         self.assertNotIn("record it as `REVISE`", self.text)
+        self.assertNotIn("record it as `REVISE`", self.reference("stage-2-briefing.md"))
 
 
 class TestEscalationReference(unittest.TestCase):
@@ -392,15 +400,51 @@ class TestEveryRenderedFile(unittest.TestCase):
     def test_the_close_out_is_rendered_where_stage_seven_and_the_review_loop_state_it(self):
         close_out = sequences.render(sequences.CLOSE_OUT)
         for name, files in RENDERED.items():
-            for path in ("SKILL.md", "references/review-loop.md"):
+            for path in ("references/stage-7-review.md", "references/review-loop.md"):
                 self.assertIn(close_out, " ".join(files[path].split()), "%s %s" % (name, path))
 
     def test_the_after_merge_steps_are_rendered_where_the_skill_states_them(self):
-        section = " ".join(RENDERED["example-maven"]["SKILL.md"]
-                           .split("## After merge only", 1)[1].split("## Operator commands", 1)[0]
-                           .split())
+        section = " ".join(RENDERED["example-maven"]["references/stage-8-after-merge.md"].split())
         self.assertEqual(section.count(sequences.render(sequences.AFTER_MERGE)), 2)
         self.assertIn(sequences.render(sequences.SEQUENCES["close-out-from-closure"][1]), section)
+
+
+SKILL_BUDGET_BYTES = 14000
+STAGE_REFERENCE_BUDGET_BYTES = 10000
+
+
+class TestStageReferences(unittest.TestCase):
+    """SKILL.md is read whole on every invocation and keeps what every stage needs. Each
+    stage's procedure is a reference the orchestrator reads when the run enters that stage,
+    named by `ppl stage enter`, so the budgets hold on both examples."""
+
+    def stage_files(self, files):
+        return sorted(path for path in files if path.startswith("references/stage-"))
+
+    def test_the_rendered_skill_md_stays_within_its_budget(self):
+        for name, files in RENDERED.items():
+            size = len(files["SKILL.md"].encode("utf-8"))
+            self.assertLessEqual(size, SKILL_BUDGET_BYTES, "%s SKILL.md is %d bytes" % (name, size))
+
+    def test_each_stage_reference_stays_within_its_budget(self):
+        for name, files in RENDERED.items():
+            self.assertTrue(self.stage_files(files), "%s renders no stage reference" % name)
+            for path in self.stage_files(files):
+                size = len(files[path].encode("utf-8"))
+                self.assertLessEqual(size, STAGE_REFERENCE_BUDGET_BYTES,
+                                     "%s %s is %d bytes" % (name, path, size))
+
+    def test_the_stage_references_rendered_are_the_ones_ppl_names(self):
+        for name, files in RENDERED.items():
+            self.assertEqual(set(self.stage_files(files)), set(run.STAGE_REFERENCES.values()), name)
+
+    def test_every_stage_but_parking_and_escalation_names_a_reference(self):
+        self.assertEqual(set(fsm.STAGES) - set(run.STAGE_REFERENCES), {"parking", "escalation"})
+
+    def test_the_stage_map_in_skill_md_names_every_stage_reference(self):
+        for name, files in RENDERED.items():
+            for path in sorted(set(run.STAGE_REFERENCES.values())):
+                self.assertIn("`%s`" % path, files["SKILL.md"], name)
 
 
 class TestSequences(unittest.TestCase):

@@ -25,7 +25,7 @@ import tmphome
 
 os.environ.setdefault("PPL_HOME", tmphome.mkdtemp(prefix="pplhome-"))
 
-from ppl import rules
+from ppl import rules, run
 from ppl.errors import PplError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
@@ -828,7 +828,8 @@ class TestTheRuleMatrix(PplHomeTestCase):
         labels = {label for label, _ in SCANNED_DOCS}
         for name in ("example-maven", "example-generic"):
             for path in ("SKILL.md", "references/review-loop.md", "references/escalation.md",
-                         "references/gates.md", "references/brief.md", "references/verdict.md"):
+                         "references/gates.md", "references/brief.md", "references/verdict.md",
+                         "references/guard-hook.md", *run.STAGE_REFERENCES.values()):
                 self.assertIn("%s %s" % (name, path), labels)
 
     def test_an_unmarked_claim_a_forge_fragment_brings_into_a_reference_is_reported(self):

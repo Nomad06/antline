@@ -353,11 +353,24 @@ class TestVerify(HarnessTestCase):
         self.assertIn("ppl-verifier", result["warnings"][0])
         self.assertIn("%d bytes" % harness.AGENT_SOFT_BYTES, result["warnings"][0])
 
+    def pad_skill_skeleton(self, size):
+        """Point PPL_ROOT at a copy of the code root whose SKILL.md skeleton is `size` bytes
+        longer. No harness fragment renders into SKILL.md since each stage moved to its own
+        reference, so the skeleton is what grows it."""
+        root = Path(tmphome.mkdtemp(prefix="pplroot-"))
+        for part in ("defaults", "skill", "templates"):
+            shutil.copytree(fixtures.SOURCE / part, root / part)
+        skeleton = root / "skill" / "SKILL.md.skeleton"
+        skeleton.write_text(skeleton.read_text(encoding="utf-8") + "word " * (size // 5),
+                            encoding="utf-8")
+        patcher = mock.patch.dict(os.environ, {"PPL_ROOT": str(root)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_a_skill_over_the_hard_cap_is_refused(self):
         # rule: R-HARNESS-SIZE-CAP
         fixtures.install_harness("example-generic")
-        (paths.harness_dir("example-generic") / "skill" / "tracker-close.md").write_text(
-            "word " * (harness.SKILL_HARD_BYTES // 5), encoding="utf-8")
+        self.pad_skill_skeleton(harness.SKILL_HARD_BYTES)
         result = harness.verify("example-generic", "example-generic")
         self.assertEqual(len(result["errors"]), 1, result)
         self.assertIn("SKILL.md", result["errors"][0])
@@ -1060,7 +1073,7 @@ class TestRenderSkill(HarnessTestCase):
 
     def test_the_tracker_close_note_defaults_to_a_neutral_comment(self):
         for name in ("example-maven", "example-generic"):
-            text = self.render(name)["SKILL.md"]
+            text = self.render(name)["references/stage-8-after-merge.md"]
             self.assertIn("write to the tracker: %s." % harness.DEFAULT_TRACKER_CLOSE, text, name)
 
     def test_a_tracker_close_fragment_replaces_the_default(self):
@@ -1068,10 +1081,12 @@ class TestRenderSkill(HarnessTestCase):
         (directory / "skill" / "tracker-close.md").write_text(
             "a comment saying what was done,\nplus the custom fields the team tracks\n",
             encoding="utf-8")
-        text = harness.render_skill(harness.load("example-generic"))["SKILL.md"]
+        rendered = harness.render_skill(harness.load("example-generic"))
+        text = rendered["references/stage-8-after-merge.md"]
         self.assertIn("write to the tracker: a comment saying what was done, plus the custom "
                       "fields the team tracks.", text)
-        self.assertNotIn(harness.DEFAULT_TRACKER_CLOSE, text)
+        for relative, text in rendered.items():
+            self.assertNotIn(harness.DEFAULT_TRACKER_CLOSE, text, relative)
 
     def test_fragments_get_the_default_branch_from_the_harness(self):
         name = self.mutate("example-maven", 'default_branch = "master"', 'default_branch = "trunk"')
@@ -1086,20 +1101,22 @@ class TestRenderSkill(HarnessTestCase):
         for relative, text in rendered.items():
             self.assertNotIn("<default-branch>", text, relative)
         self.assertIn("origin/trunk...HEAD | grep -E 'src/test/", rendered["references/gates.md"])
-        self.assertIn("branch trunk here", rendered["references/gates.md"])
-        self.assertGreaterEqual(rendered["SKILL.md"].count("branch trunk here"), 2)
+        for relative in ("references/gates.md", "references/baseline.md",
+                         "references/stage-1-baseline.md", "references/stage-8-after-merge.md"):
+            self.assertIn("branch trunk here", rendered[relative], relative)
 
     def test_rendered_skill_carries_the_notice_and_the_forge_text(self):
-        fixtures.install_harness("example-maven")
-        text = harness.render_skill(harness.load("example-maven"))["SKILL.md"]
-        self.assertTrue(text.startswith("---\n"))
-        self.assertIn(harness.SKILL_NOTICE, text)
-        self.assertIn("GitLab MCP", text)
-        self.assertNotIn("pull request", text.lower())
-        fixtures.install_harness("example-generic")
-        text = harness.render_skill(harness.load("example-generic"))["SKILL.md"]
-        self.assertIn("gh pr create", text)
-        self.assertNotIn("merge request", text.lower())
+        forge_files = ("SKILL.md", "references/stage-6-mr.md", "references/stage-7-review.md")
+        maven = self.render("example-maven")
+        self.assertTrue(maven["SKILL.md"].startswith("---\n"))
+        self.assertIn(harness.SKILL_NOTICE, maven["SKILL.md"])
+        self.assertIn("GitLab MCP", maven["references/stage-6-mr.md"])
+        for relative in forge_files:
+            self.assertNotIn("pull request", maven[relative].lower(), relative)
+        generic = self.render("example-generic")
+        self.assertIn("gh pr create", generic["references/stage-6-mr.md"])
+        for relative in forge_files:
+            self.assertNotIn("merge request", generic[relative].lower(), relative)
 
     def test_gate_recipes_render_with_rc_files_and_evidence_lines(self):
         fixtures.install_harness("example-maven")
@@ -1160,16 +1177,18 @@ class TestRenderSkill(HarnessTestCase):
         self.assertNotIn(harness.SKILL_NOTICE, rendered["references/gates.md"])
 
     def test_harness_values_land_in_the_skill(self):
-        text = self.render("example-maven")["SKILL.md"]
-        self.assertIn("--harness example-maven", text)
-        self.assertIn("cd /home/dev/src/project\n", text)
-        self.assertIn("git fetch origin master\n", text)
+        maven = self.render("example-maven")
+        self.assertIn("--harness example-maven", maven["references/stage-0-admission.md"])
+        baseline = maven["references/stage-1-baseline.md"]
+        self.assertIn("cd /home/dev/src/project\n", baseline)
+        self.assertIn("git fetch origin master\n", baseline)
         self.assertIn("git worktree add /home/dev/src/project/.worktrees/<repo-name>-<TASK-ID> "
-                      "-b <TASK-ID>-<short-slug> origin/master\n", text)
-        self.assertIn("the names of tests that already fail on the base revision", text)
-        self.assertIn("(no knowledge skills are configured for this harness)", text)
+                      "-b <TASK-ID>-<short-slug> origin/master\n", baseline)
+        self.assertIn("the names of tests that already fail on the base revision", baseline)
+        self.assertIn("(no knowledge skills are configured for this harness)",
+                      maven["references/stage-2-briefing.md"])
         generic = self.render("example-generic")
-        self.assertIn("git fetch origin main\n", generic["SKILL.md"])
+        self.assertIn("git fetch origin main\n", generic["references/stage-1-baseline.md"])
         self.assertIn("diff origin/main...HEAD", generic["references/gates.md"])
         self.assertIn("make test TEST=<test_class> > /tmp/ppl-<TASK-ID>/focused-tests.log 2>&1",
                       generic["references/gates.md"])
@@ -1177,9 +1196,10 @@ class TestRenderSkill(HarnessTestCase):
     def test_the_harness_name_in_the_skill_is_the_installed_directory(self):
         # The document inside "mine" still says name = "example-maven", and
         # ppl init --harness resolves a directory name.
-        text = self.render("example-maven", installed="mine")["SKILL.md"]
-        self.assertIn("--harness mine", text)
-        self.assertNotIn("--harness example-maven", text)
+        rendered = self.render("example-maven", installed="mine")
+        self.assertIn("--harness mine", rendered["references/stage-0-admission.md"])
+        for relative, text in rendered.items():
+            self.assertNotIn("--harness example-maven", text, relative)
 
     def test_the_baseline_fragment_stays_on_its_table_row(self):
         baseline = self.render("example-maven")["references/baseline.md"]
@@ -1189,7 +1209,7 @@ class TestRenderSkill(HarnessTestCase):
 
     def test_knowledge_skills_are_named(self):
         self.mutate("example-maven", "skills = []", 'skills = ["kb-core", "kb-build"]')
-        text = harness.render_skill(harness.load("example-maven"))["SKILL.md"]
+        text = harness.render_skill(harness.load("example-maven"))["references/stage-2-briefing.md"]
         self.assertIn("(`kb-core`, `kb-build`)", text)
 
     def test_every_include_value_is_used_by_a_skeleton_or_a_forge_fragment(self):

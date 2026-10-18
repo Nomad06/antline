@@ -1,0 +1,50 @@
+# Stage 2 - briefing
+
+`ppl stage enter briefing`, then dispatch `ppl-briefer` with the Jira content, the linked
+specs and the relevant knowledge skill (<!-- include: knowledge/skills -->).
+It has no write tool and no shell of its own: it returns the brief as the JSON body of its
+final message and nothing else. Save that message to a scratch file yourself, then run
+`ppl brief set <file> --from ppl-briefer`, which validates the schema, derives the boundary, and binds `spec_revision` to a fingerprint of `name_contract`,
+`acceptance` and the write/forbid boundary together
+[R-BRIEF-SPEC-REVISION-STALE] - the printed value is the exact string you
+must hand the verifier verbatim in Stage 5. Note it down.
+
+The schema is ten required fields with type constraints (`references/brief.md`) - read it
+before saving the briefer's output, not after `ppl brief set` rejects it [R-BRIEF-SCHEMA]. In
+particular, `acceptance` must be a non-empty list of non-empty strings, not a list of
+objects; an entry like `{"id": "AC1", "text": "..."}` reads as the obvious shape for
+"acceptance criteria" and is refused `SCHEMA_INVALID` at this step precisely so it does not
+surface five stages later at the done gate instead [R-BRIEF-SCHEMA].
+
+The brief is then challenged before anything is implemented. Spend `ppl budget spend dispatch`
+and dispatch `ppl-brief-challenger` with the spec text (Jira, tech analysis), the accepted
+brief and its `spec_revision`; it answers three fixed questions and nothing else: which new
+classes in `name_contract` duplicate an existing owner, which wire shapes differ from the
+spec's own wording, and what each open decision costs to close now. Save its JSON to a
+scratch file and run `ppl brief challenge <file> --generation <n> --from ppl-brief-challenger`.
+An `ACCEPTED` report
+bound to the current `spec_revision` is what lets `ppl stage enter implementation` proceed,
+and `ppl transition done` re-reads the same binding, so a re-brief after the challenge means
+a re-challenge [R-BRIEF-CHALLENGED-BEFORE-IMPLEMENTATION]. A report that still lists an
+unjustified class, an off-spec shape or a cheap parked gap cannot be `ACCEPTED`: `ppl brief
+challenge` refuses it `SCHEMA_INVALID` [R-BRIEF-CHALLENGE-SELF-CONSISTENT]. Like any role
+output that fails its schema, it goes back to the challenger once with the refusal quoted, not
+edited by you (see "Whose output" in `SKILL.md`), and its `REVISE` report then means re-brief
+with its findings and challenge again. The report schema is `references/challenge.md`.
+
+`open_decisions` in the brief are objects `{"question", "cost_to_close_files", "decision"}`
+with `decision` one of `in_scope`, `parked`, `owner` (bare strings are still accepted for
+old briefs). A `parked` decision whose `cost_to_close_files` is five or fewer is refused at
+`ppl brief set` and at `ppl brief challenge`: a gap that small goes in scope, or to the
+owner through `ppl escalate --code OWNER_DECISION` [R-BRIEF-OPEN-DECISION-NOT-PARKED-CHEAP].
+A three-file gap parked this way has been closed by a parallel implementation of the same
+task before: this check surfaces such a gap before the code worker runs.
+
+If the briefer's JSON carries `"error_code": "SPEC_GAP"`, escalate with that question. If
+`"error_code": "CONTEXT_INSUFFICIENT"`, enrich its prompt with the exact thing it could not
+find and re-brief exactly once, then treat a second miss as `SPEC_GAP`. A re-brief that
+changes `name_contract`, `acceptance`, or the write/forbid boundary rebinds `spec_revision`
+to a new value (as does `ppl boundary set` run on its own, once a brief has already bound
+one) - any verdict already
+recorded against the old one is refused as stale at `ppl verdict record` and at `ppl
+transition done` alike [R-BRIEF-SPEC-REVISION-STALE].

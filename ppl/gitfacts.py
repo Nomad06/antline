@@ -25,7 +25,8 @@ def _git(repo, *args):
     if not os.path.isdir(str(repo)):
         raise PplError("SCHEMA_INVALID",
                        "repo %s does not exist. If this run's worktree has not been "
-                       "created yet, create it now (see SKILL.md Stage 1) and retry - "
+                       "created yet, create it now (see Stage 1, the skill's "
+                       "references/stage-1-baseline.md) and retry - "
                        "this is not something to wait out." % repo)
     result = subprocess.run(["git", "-C", str(repo)] + list(args),
                             capture_output=True, text=True)

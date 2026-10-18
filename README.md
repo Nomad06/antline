@@ -280,7 +280,7 @@ placeholder the orchestrator does not fill and your `skill/gates.md` or
 `skill/extra-gates.md` does not name (a copy of the command itself does not
 count), and a `templates/<role>.part` for an unknown
 role [R-HARNESS-UNKNOWN-KEY]. It refuses a rendered `SKILL.md` or agent file over
-three times the size the examples render and warns over 1.5 times
+three times the size the examples rendered when the caps were measured and warns over 1.5 times
 [R-HARNESS-SIZE-CAP]. It also warns about a file under `skill/` or `templates/`
 that nothing reads, a `knowledge.skills` name missing from the skills
 directories, and a focused-tests command no `[[guard.shape]]` lets the test

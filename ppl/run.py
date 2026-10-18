@@ -389,6 +389,23 @@ STAGE_NEXT_ACTION = {
     # and the escalation branch below.
 }
 
+# The skill file holding each stage's procedure, which `ppl stage enter` names
+# as its last line. Parking and escalation have none: references/escalation.md
+# is read by error code, not by stage.
+STAGE_REFERENCES = {
+    "admission": "references/stage-0-admission.md",
+    "baseline": "references/stage-1-baseline.md",
+    "briefing": "references/stage-2-briefing.md",
+    "implementation": "references/stage-3-implementation.md",
+    "tests": "references/stage-3-tests.md",
+    "gates": "references/stage-4-gates.md",
+    "verification": "references/stage-5-verification.md",
+    "mr": "references/stage-6-mr.md",
+    "review": "references/stage-7-review.md",
+    "closure": "references/stage-8-after-merge.md",
+    "merge_watch": "references/stage-8-after-merge.md",
+}
+
 
 BLOCKER_CODES = ("SPEC_GAP", "CONTEXT_INSUFFICIENT", "IMPLEMENTATION_FAILURE",
                  "TEST_FAILURE", "BASELINE_FAILURE", "BOUNDARY_VIOLATION",
