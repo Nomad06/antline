@@ -393,10 +393,10 @@ STAGE_NEXT_ACTION = {
 BLOCKER_CODES = ("SPEC_GAP", "CONTEXT_INSUFFICIENT", "IMPLEMENTATION_FAILURE",
                  "TEST_FAILURE", "BASELINE_FAILURE", "BOUNDARY_VIOLATION",
                  "BUDGET_EXHAUSTED", "OWNER_DECISION", "EXTERNAL_BLOCKED", "TIMED_OUT",
-                 "VERIFICATION_UNAVAILABLE")
+                 "VERIFICATION_UNAVAILABLE", "FORMAT_RETRY_EXHAUSTED")
 
 
-def park(task_id, blocker, safe_next, unsafe_to_repeat):
+def park(task_id, blocker, safe_next, unsafe_to_repeat, refusals=None):
     if blocker not in BLOCKER_CODES:
         raise PplError("SCHEMA_INVALID",
                        "blocker must be one of: %s" % ", ".join(BLOCKER_CODES))
@@ -422,6 +422,8 @@ def park(task_id, blocker, safe_next, unsafe_to_repeat):
         "unsafe_to_repeat": list(unsafe_to_repeat or []),
         "at": store.now(),
     }
+    if refusals:
+        record["refusals"] = list(refusals)
     store.write_json(paths.run_dir(task_id) / "parking.json", record)
     state["stage"] = "parking"
     if state["status"] == "in_progress":

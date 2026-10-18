@@ -5,8 +5,8 @@ import re
 import sys
 
 from . import (boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
-               harness, metrics, models, paths, recover, review, routing, run, schema, setup,
-               status, store, verdict, watchdog)
+               harness, metrics, models, paths, recover, refusals, review, routing, run, schema,
+               setup, status, store, verdict, watchdog)
 from .errors import PplError
 
 
@@ -48,6 +48,18 @@ def require_current_generation(task_id, generation):
     # attempt's refused write must not extend the deadline the current
     # attempt is racing (R-WATCHDOG-DEADLINE).
     run.refresh_deadline(task_id)
+
+
+def role_output_command(args):
+    """`<command> <action>` when this call records a role's output, else None."""
+    name = "%s %s" % (args.command, getattr(args, "action", None))
+    return name if name in refusals.COMMANDS else None
+
+
+def require_retry_left(task_id, args):
+    """Checked after the run's own gates and before the input is read, so a spent key is
+    refused whatever the input [R-REFUSAL-RETRY-CAP]."""
+    refusals.require_retry_left(task_id, role_output_command(args), args.from_role)
 
 
 def load_json_arg(path, what, kind=dict):
@@ -211,11 +223,13 @@ def cmd_brief(args):
     control.enforce(task_id)
     if args.action == "challenge":
         require_current_generation(task_id, args.generation)
+        require_retry_left(task_id, args)
         doc = load_json_arg(args.file, "challenge")
         state = run.record_challenge(task_id, doc)
         print("challenge %s bound to spec_revision %s"
               % (doc["verdict"], state["brief_challenge"]["spec_revision"]))
         return 0
+    require_retry_left(task_id, args)
     doc = load_json_arg(args.file, "brief")
     schema.validate_brief(doc)
     store.write_json(paths.run_dir(task_id) / "brief.json", doc)
@@ -378,6 +392,7 @@ def cmd_baseline(args):
 def cmd_evidence(args):
     task_id = resolve_task(args)
     require_current_generation(task_id, args.generation)
+    require_retry_left(task_id, args)
     producer = parse_json_arg(args.producer, "--producer") if args.producer else {
         "provider": "claude-code-subagent", "model": "unknown", "params_hash": ""}
     # The receipt's binding SHA comes from git rather than from the caller by
@@ -393,6 +408,7 @@ def cmd_evidence(args):
 def cmd_verdict(args):
     task_id = resolve_task(args)
     require_current_generation(task_id, args.generation)
+    require_retry_left(task_id, args)
     state = run.load(task_id)
     head = gitfacts.head_sha(state["repo"])
     # verdict.record itself sets state["candidate_sha"] once the verdict is
@@ -407,6 +423,7 @@ def cmd_findings(args):
     task_id = resolve_task(args)
     if args.action == "add":
         require_current_generation(task_id, args.generation)
+        require_retry_left(task_id, args)
         record = findings.add(task_id, args.severity, args.evidence, args.affected_sha,
                               args.affected_path, owner=args.owner, fix_link=args.fix_link)
         print("finding %s recorded: track=%s severity=%s status=%s"
@@ -886,6 +903,12 @@ class JsonArgumentParser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
+def add_from(parser):
+    # The role whose output the call records, so a refusal is counted against it
+    # [R-REFUSAL-RETRY-CAP].
+    parser.add_argument("--from", dest="from_role", choices=list(refusals.ROLES))
+
+
 def build_parser():
     parser = JsonArgumentParser(prog="ppl")
     # --task belongs to each subparser only. A parent-level copy would be silently
@@ -930,6 +953,7 @@ def build_parser():
     p.add_argument("--task")
     # challenge is a lease-fenced write like verdict record, set is not
     p.add_argument("--generation", type=int)
+    add_from(p)
 
     p = sub.add_parser("boundary")
     p.add_argument("action", choices=["set"])
@@ -961,6 +985,7 @@ def build_parser():
     # control.enforce genuinely does run first and argparse-required would
     # misreport a paused run.)
     p.add_argument("--generation", type=int)
+    add_from(p)
     p.add_argument("--task")
 
     p = sub.add_parser("verdict")
@@ -970,6 +995,7 @@ def build_parser():
     # control.enforce call either, so this is not about preserving ordering
     # against one.
     p.add_argument("--generation", type=int)
+    add_from(p)
     p.add_argument("--task")
 
     p = sub.add_parser("findings")
@@ -981,6 +1007,7 @@ def build_parser():
     p.add_argument("--affected-path", dest="affected_path")
     p.add_argument("--owner")
     p.add_argument("--fix-link", dest="fix_link")
+    add_from(p)
     # status / delete
     p.add_argument("--finding-id", dest="finding_id")
     p.add_argument("--status", choices=list(findings.STATUSES))
@@ -1149,5 +1176,26 @@ def main(argv=None):
     try:
         return COMMANDS[args.command](args)
     except PplError as err:
-        sys.stderr.write(json.dumps(err.as_dict(), sort_keys=True) + "\n")
+        error = err.as_dict()
+        if err.code == "SCHEMA_INVALID":
+            note = count_refusal(args, err.message)
+            if note:
+                error["message"] = "%s - %s" % (err.message, note)
+        sys.stderr.write(json.dumps(error, sort_keys=True) + "\n")
         return 2
+
+
+def count_refusal(args, message):
+    """Log a refused role output in its run and park the run on the second refusal for
+    the same key (refusals.record_refusal). Returns the sentence to add to the message."""
+    command = role_output_command(args)
+    task_id = getattr(args, "task", None) or run.active()
+    if command is None or not task_id:
+        return None
+    # The refusal stands and is printed whatever fails here, so exit 2 keeps its JSON.
+    try:
+        if not run.state_path(task_id).exists():
+            return None
+        return refusals.record_refusal(task_id, command, args.from_role, message)
+    except Exception:
+        return None

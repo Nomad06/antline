@@ -164,6 +164,40 @@ class TestSkillContract(unittest.TestCase):
         self.assertEqual(order, sorted(order))
         self.assertNotIn("go back and run `ppl stage enter merge_watch` first", section)
 
+    def test_each_role_output_command_names_whose_output_it_records(self):
+        joined = re.sub(r"\\\n\s*", " ", self.text)
+        for command, role in (("ppl brief set", "ppl-briefer"),
+                              ("ppl brief challenge", "ppl-brief-challenger"),
+                              ("ppl verdict record", "ppl-verifier"),
+                              ("ppl findings add", "ppl-verifier"),
+                              ("ppl evidence add", "orchestrator")):
+            self.assertRegex(joined, re.escape(command) + r" [^`]*?--from\s+" + re.escape(role))
+
+    def test_it_sends_a_refusal_to_the_one_plus_one_rule(self):
+        self.assertIn("FORMAT_RETRY_EXHAUSTED", self.text)
+        self.assertNotIn("record it as `REVISE`", self.text)
+
+
+class TestEscalationReference(unittest.TestCase):
+    text = (SKILL.parent / "references" / "escalation.md").read_text(encoding="utf-8")
+
+    def test_its_table_names_exactly_the_park_blocker_codes(self):
+        from ppl import run
+        codes = set()
+        for line in self.text.splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if line.startswith("| ") and re.fullmatch(r"[A-Z_]+", cells[0]):
+                codes.add(cells[0])
+        self.assertEqual(codes, set(run.BLOCKER_CODES))
+
+    def test_it_states_the_one_plus_one_rule_once(self):
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("redispatch the same role once"), 1)
+        self.assertEqual(flat.count("ppl refused your output:"), 1)
+        for stale in ("three format failures", "retry once"):
+            self.assertNotIn(stale, flat)
+        self.assertIn("FORMAT_RETRY_EXHAUSTED", flat)
+
 
 class TestBothForgesRender(unittest.TestCase):
     def test_generic_github_skill_satisfies_the_same_contract(self):

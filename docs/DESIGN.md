@@ -90,6 +90,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     harness.py                   harness load, validate, add, apply, and the run snapshot (5.6)
     tomlout.py                   the TOML writer for the files setup rewrites
     schema.py                    brief and verdict field/shape checks (Python, not JSON Schema files)
+    refusals.py                  refused role output: the refusal count and its park (6.6)
     forges/                      gitlab.py github.py: denied tools, role tools, skill fragments
     trackers/                    jira.py: tracker read and write tool names per MCP prefix
     panel/server.py              stdlib HTTP server, `ppl serve`
@@ -644,20 +645,20 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 163 rows: 118 `blocking`, 17 `soft` and 28 `n/a`. Of the
-`n/a` rows, 20 are `GAP:` - a rule this design names and no code performs - and 8 are
+As of this commit the table carries 163 rows: 119 `blocking`, 17 `soft` and 27 `n/a`. Of the
+`n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
 stage 6 preconditions being unchecked before the push, the four isolation-check blind spots of
 5.4, the harness gate recipes of section 11, the three blind spots the matrix has as GAP rows
 of its own, a foreign finding's owner not actually being notified (6.6a), per-lane resources
 (test databases, ports, temp directories, queues, object storage) having no isolation at all
-beyond the worktree's own files (5.4), and eight rules only prose or a convention holds: the
+beyond the worktree's own files (5.4), and seven rules only prose or a convention holds: the
 content of a tracker write, the panel's own state writes, the studio's write surface,
-write/forbid disjointness at `ppl boundary set`, the USD spend coming before a dispatch, a
-per-role count of format violations, the briefer returning `SPEC_GAP` instead of inventing,
-and the keys inside a provider's `params`. These counts are read back out of `rules.toml`
-by the suite, so this paragraph cannot drift from the table it describes [R-DOC-RULE-IDS].
+write/forbid disjointness at `ppl boundary set`, the USD spend coming before a dispatch, the
+briefer returning `SPEC_GAP` instead of inventing, and the keys inside a provider's `params`.
+These counts are read back out of `rules.toml` by the suite, so this paragraph cannot drift
+from the table it describes [R-DOC-RULE-IDS].
 
 ### 5.6 Harness
 
@@ -808,17 +809,22 @@ ppl init <TASK_ID> --repo <worktree-path> --tracker-url <url> --harness <name> [
 ppl status                       # founder status card, human language
 ppl show --json                  # full state, machine readable
 ppl stage enter <stage>          # validates legal transition and budget
-ppl brief set <file>             # schema-validated, binds spec_revision
+ppl brief set <file> [--from <role>]
+                                 # schema-validated, binds spec_revision. --from names the
+                                 # role whose output a call records, on brief set|challenge,
+                                 # verdict record, findings add and evidence add: a role from
+                                 # routing or orchestrator, counted for refusals (6.6)
 ppl boundary set <file>          # write/forbid lists; write must be non-empty and must not
                                  # contain "**" [R-BOUNDARY-SET-NO-WILDCARD]. Disjointness
                                  # with forbid is NOT enforced here - see R-BOUNDARY-SET-DISJOINT
 ppl baseline record <file>       # base_sha + known failures
 ppl evidence add --check <name> --result pass|fail [--sha <sha>] --log <path> --rc <file>
-                                  --generation <n>
+                                  --generation <n> [--from <role>]
                                  # --sha defaults to git rev-parse HEAD in the run's repo;
                                  # --generation is the lease generation the caller captured
                                  # from `ppl stage enter` or `ppl recover` (6.2)
-ppl verdict record <file> --generation <n>  # must carry candidate_sha and acceptance map
+ppl verdict record <file> --generation <n> [--from <role>]
+                                 # must carry candidate_sha and acceptance map
 ppl transition <done|blocked|failed>   # done only in stage closure
 ppl park --blocker <CODE> --safe-next "<action>" [--unsafe-to-repeat "<action>"]
 ppl escalate --code <CODE> --question "<text>"
@@ -1072,6 +1078,18 @@ run (an operator stop landing on top of an existing park, concretely) preserves 
 park's `resume_stage` rather than overwriting it with `"parking"` itself, which is what
 naively re-reading the run's current stage would produce once it is already parked
 [R-PARK-PRESERVES-RESUME-STAGE].
+
+Refusals (`log.jsonl`) - a `SCHEMA_INVALID` from `ppl brief set`, `brief challenge`,
+`verdict record`, `findings add` or `evidence add` appends a `refusal` event: `command`,
+`code`, `message` as `ppl` printed it (without the park note the second one carries), `role`
+(the `--from` value, `unknown` when the call gave none) and the run's `lease_generation`.
+The role gets the refusal once, quoted, and redispatches (the skill's escalation reference).
+The second refusal for the same command, role and generation is still printed as
+`SCHEMA_INVALID`, `ppl` parks the run with blocker `FORMAT_RETRY_EXHAUSTED` and both
+refusals in `parking.json` under `refusals`, and a later call for that key is refused
+`FORMAT_RETRY_EXHAUSTED` before its input is read [R-REFUSAL-RETRY-CAP]. The count is read back from the log since the run last resumed from
+parking, so a resume clears it like any park, and `ppl recover` moves the generation, which
+starts a fresh one. Same pattern as `VERIFICATION_UNAVAILABLE` (6.10).
 
 Review ledger (`threads.json`) - `{thread_id: {sha: {classification, at, last_note_id}}}`.
 This is what makes `ppl review pending` (section 8) safe to call every tick without ever
@@ -2019,8 +2037,10 @@ Only the exit-code rule has code behind it, the rest are recipes rendered into t
   orchestrator calls before a dispatch rather than after - an ordering no code checks
   [R-BUDGET-USD-BEFORE-DISPATCH n/a]. Zero means unlimited only for subscription providers, which have no dollar
   meter.
-- format violations: three schema failures from the same role and its output is discarded
-  as unusable, with the routing recorded as a signal.
+- format violations: a role's output refused `SCHEMA_INVALID` goes back to the role once
+  with the refusal quoted, and the second refusal for the same command in one lease
+  generation parks the run with `FORMAT_RETRY_EXHAUSTED` - a third attempt is refused
+  [R-REFUSAL-RETRY-CAP]. Every refusal is a `refusal` event in `log.jsonl` (6.6).
 - context: on approaching the limit, the orchestrator parks with an exact handoff rather
   than compacting through a transition.
 
@@ -2079,6 +2099,7 @@ Free text does not route. Closed dictionary:
 | `HARNESS_INVALID` | a harness file fails validation | fix it, then `ppl harness validate <name>` |
 | `TIMED_OUT` | no `ppl` activity was recorded since the run's inactivity deadline (6.9) | `ppl recover`, inspect the stuck attempt, then resume or re-brief |
 | `VERIFICATION_UNAVAILABLE` | `ppl verdict record` parks the run [R-VERIFICATION-UNAVAILABLE-PARK]: the second consecutive INCONCLUSIVE/ERROR/CANCELLED/TIMEOUT verdict on the same `candidate_sha` (6.10) | inspect why the verifier keeps failing to reach a result on this sha, never just redispatch a third time |
+| `FORMAT_RETRY_EXHAUSTED` | a role's output was refused `SCHEMA_INVALID` twice for the same command in one generation [R-REFUSAL-RETRY-CAP] | inspect both refusals, fix the role prompt or the schema, then resume, never just redispatch a third time |
 
 A gap is not closed silently in code. Closing it in code merely means the next model sees
 the same empty space and could statistically pick different behavior. The gap is closed by

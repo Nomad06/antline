@@ -37,7 +37,8 @@ beyond "is a JSON object".
 git -C <worktree> diff origin/<!-- include: harness/default-branch -->...HEAD | grep -in -e password -e secret -e token -e 'BEGIN [A-Z ]*PRIVATE KEY' \
   > /tmp/ppl-<TASK-ID>/secrets.log 2>&1; test ! -s /tmp/ppl-<TASK-ID>/secrets.log; echo $? > /tmp/ppl-<TASK-ID>/secrets.rc
 ppl evidence add --check secret-scan --result <pass|fail from secrets.rc> --sha <SHA> \
-  --log /tmp/ppl-<TASK-ID>/secrets.log --rc /tmp/ppl-<TASK-ID>/secrets.rc --generation <GENERATION>
+  --log /tmp/ppl-<TASK-ID>/secrets.log --rc /tmp/ppl-<TASK-ID>/secrets.rc --generation <GENERATION> \
+  --from orchestrator
 ```
 
 Baseline delta is what matters, not colour. A failure present at the base SHA is

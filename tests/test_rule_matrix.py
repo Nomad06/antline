@@ -454,7 +454,8 @@ REFUSAL_SHAPES = (
     re.compile(r"\bassertIsNotNone\(\s*(?:ppl_guard\.)?decide|\bassertIsNotNone\(\s*result"),
     # a code from the closed failure vocabulary, or an HTTP refusal status
     re.compile(r"\b(?:BOUNDARY_VIOLATION|OWNER_DECISION|SCHEMA_INVALID|ILLEGAL_TRANSITION"
-               r"|BUDGET_EXHAUSTED|IMPLEMENTATION_FAILURE|EXTERNAL_BLOCKED)\b"),
+               r"|BUDGET_EXHAUSTED|IMPLEMENTATION_FAILURE|EXTERNAL_BLOCKED"
+               r"|FORMAT_RETRY_EXHAUSTED)\b"),
     re.compile(r"assert\w+\(\s*b?['\"]?40[0-9]"),
     # the checker under test handed back a list of problems
     re.compile(r"\b(?:blockers|reasons|problems|offenders|unknown)\b|\bfound\["),

@@ -6,4 +6,5 @@ git -C <worktree> diff --name-only origin/<default-branch>...HEAD | grep -E 'src
   | while read -r f; do LC_ALL=C grep -n '[^ -~]' <worktree>/"$f" && echo "non-ascii, tab or CRLF in $f"; done \
   > /tmp/ppl-<TASK-ID>/testlint.log 2>&1; test ! -s /tmp/ppl-<TASK-ID>/testlint.log; echo $? > /tmp/ppl-<TASK-ID>/testlint.rc
 ppl evidence add --check test-lint --result <pass|fail from testlint.rc> --sha <SHA> \
-  --log /tmp/ppl-<TASK-ID>/testlint.log --rc /tmp/ppl-<TASK-ID>/testlint.rc --generation <GENERATION>
+  --log /tmp/ppl-<TASK-ID>/testlint.log --rc /tmp/ppl-<TASK-ID>/testlint.rc --generation <GENERATION> \
+  --from orchestrator

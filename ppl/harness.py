@@ -370,7 +370,8 @@ _INCLUDE_OPEN = "<!-- include:"
 _SKELETON_SUFFIX = ".skeleton"
 _RC_IDIOM = "%s > /tmp/ppl-<TASK-ID>/%s.log 2>&1; echo $? > /tmp/ppl-<TASK-ID>/%s.rc"
 _EVIDENCE = ("ppl evidence add --check %s --result <pass|fail from %s.rc> --sha <SHA> \\\n"
-             "  --log /tmp/ppl-<TASK-ID>/%s.log --rc /tmp/ppl-<TASK-ID>/%s.rc --generation <GENERATION>")
+             "  --log /tmp/ppl-<TASK-ID>/%s.log --rc /tmp/ppl-<TASK-ID>/%s.rc --generation <GENERATION> \\\n"
+             "  --from orchestrator")
 _DEFAULT_BASELINE = ("Record what was true before you touched anything: the build, the tests "
                      "and the failures already present on the base revision.")
 # What the orchestrator writes to the tracker once the merge is observed. A team

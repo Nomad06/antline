@@ -18,8 +18,24 @@ asked `ppl` for something it does not accept, not that the task needs an owner d
 | EXTERNAL_BLOCKED | the forge, the tracker or CI is unavailable, or a worktree that once existed is no longer usable | park, retry on the next tick, do not fabricate the missing fact |
 | TIMED_OUT | no `ppl` activity was recorded on this run since its inactivity deadline - `ppl` parked it itself and bumped the lease generation | run `ppl recover`, inspect what the stuck attempt last wrote and whether it is still running, then resume with a fresh dispatch or re-brief; never just retry into the same stage |
 | VERIFICATION_UNAVAILABLE | ppl verdict record itself refused: this is the second consecutive INCONCLUSIVE/ERROR/CANCELLED/TIMEOUT verdict recorded for the same candidate_sha, and it parked the run rather than let a broken verifier masquerade as an undecided candidate forever | run ppl recover, inspect why the verifier keeps failing to reach a result on this sha (not the code), then resume with a different verification approach or an owner decision - never just redispatch the same check a third time |
+| FORMAT_RETRY_EXHAUSTED | a role's output was refused `SCHEMA_INVALID` twice for the same command in one lease generation: `ppl` parked the run itself on the second refusal, with both messages in `parking.json`, and refuses that command for that role with this code until the run resumes or the generation changes | inspect both refusals, fix the role prompt or the schema, then resume, never just redispatch a third time |
 | ILLEGAL_TRANSITION (self-inflicted) | you asked for a stage or lifecycle transition the state machine does not allow from where it actually is | you are lost, run `ppl recover` and re-read the state before trying again |
-| SCHEMA_INVALID (self-inflicted) | an artifact, argument, or command line does not match its contract - includes a bad `ppl` invocation itself, a run whose repo does not exist as a directory at all (its worktree was never created), leaving the baseline stage with no baseline ever recorded, or routing.toml naming a provider kind `ppl` has no adapter for, all of which report this same code | fix the artifact or the invocation and retry once; a missing worktree is fixed by creating it (Stage 1), not by waiting, and a missing adapter is fixed by routing the role elsewhere, not by waiting either; three format failures from one role means its output is discarded and the role is redispatched with the exact mismatch named |
+| SCHEMA_INVALID (self-inflicted) | an artifact, argument, or command line does not match its contract - includes a role's output refused at `ppl brief set`, `ppl brief challenge`, `ppl verdict record`, `ppl findings add` or `ppl evidence add`, a bad `ppl` invocation itself, a run whose repo does not exist as a directory at all (its worktree was never created), leaving the baseline stage with no baseline ever recorded, or routing.toml naming a provider kind `ppl` has no adapter for, all of which report this same code | a role's output follows the role output rule below. Anything else is yours to fix: correct the invocation and run it again, a missing worktree is fixed by creating it (Stage 1), not by waiting, and a missing adapter is fixed by routing the role elsewhere, not by waiting either |
+
+## The role output rule
+
+One rule for every role output `ppl` refuses `SCHEMA_INVALID`. Pass `--from <role>` on
+`ppl brief set`, `ppl brief challenge`, `ppl verdict record`, `ppl findings add` and
+`ppl evidence add` (`orchestrator` for what you wrote yourself), so each refusal is counted
+against the role whose output it was:
+
+1. Do not edit the content. You may only fix the envelope you added: a wrapper, a code
+   fence, a file path.
+2. Then redispatch the same role once, with the original dispatch and the refusal quoted as
+   data: "ppl refused your output: <message>. Return the same content with that fixed."
+3. A second `SCHEMA_INVALID` for the same command from the same role in the same lease
+   generation parks the run with `FORMAT_RETRY_EXHAUSTED`. `ppl` does that itself, you report
+   it and stop. There is no third attempt.
 
 Silence from the owner is never consent. A parked task with a clear question is a better
 outcome than a green screen with an invented answer.

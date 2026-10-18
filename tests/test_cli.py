@@ -2721,5 +2721,188 @@ class TestSetupInTheBrowser(unittest.TestCase):
         serve.assert_not_called()
 
 
+def good_brief(task_id):
+    return write_json_file({
+        "task_id": task_id, "purpose": "p", "success_outcome": "s",
+        "governing_requirements": [], "acceptance": ["AC-1"],
+        "allowed_write_paths": ["src/**"], "forbidden_paths": [],
+        "verification": ["focused-tests"], "open_decisions": [],
+        "name_contract": {"Foo.bar": "int"},
+    })
+
+
+def refusals_of(task_id):
+    from ppl import store
+    return [e for e in store.read_log(task_id) if e.get("event") == "refusal"]
+
+
+class TestRefusalRetryCap(unittest.TestCase):
+    """A role's output refused SCHEMA_INVALID goes back to the role once, and the second
+    refusal for the same command, role and lease generation parks the run."""
+
+    def init(self, task_id, repo="/tmp/repo"):
+        code, _, err = call("init", task_id, "--tracker-url", "u", "--repo", repo,
+                            "--harness", "example-maven")
+        self.assertEqual(code, 0, err)
+
+    def brief_set(self, task_id, path, *extra):
+        return call("brief", "set", path, "--task", task_id, *extra)
+
+    def refuse_twice(self, task_id):
+        first = self.brief_set(task_id, write_json_file({"purpose": "p"}), "--from", "ppl-briefer")
+        second = self.brief_set(task_id, write_text_file("not json"), "--from", "ppl-briefer")
+        return json.loads(first[2]), json.loads(second[2])
+
+    def test_a_refused_role_output_is_logged_as_one_refusal_event(self):
+        from ppl import run
+        self.init("DEMO-1801")
+        code, _, err = self.brief_set("DEMO-1801", write_json_file({"purpose": "p"}),
+                                      "--from", "ppl-briefer")
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "SCHEMA_INVALID")
+        events = refusals_of("DEMO-1801")
+        self.assertEqual(len(events), 1)
+        self.assertEqual({key: events[0][key] for key in
+                          ("command", "code", "message", "role", "lease_generation")},
+                         {"command": "brief set", "code": "SCHEMA_INVALID",
+                          "message": error["message"], "role": "ppl-briefer",
+                          "lease_generation": 1})
+        self.assertNotEqual(run.load("DEMO-1801")["stage"], "parking")
+
+    def test_the_second_refusal_parks_the_run_with_both_messages(self):
+        # rule: R-REFUSAL-RETRY-CAP
+        from ppl import paths, run, store
+        self.init("DEMO-1802")
+        first, second = self.refuse_twice("DEMO-1802")
+        self.assertEqual(second["error_code"], "SCHEMA_INVALID")
+        self.assertIn("FORMAT_RETRY_EXHAUSTED", second["message"])
+        self.assertEqual(run.load("DEMO-1802")["stage"], "parking")
+        parking = store.read_json(paths.run_dir("DEMO-1802") / "parking.json")
+        self.assertEqual(parking["blocker"], "FORMAT_RETRY_EXHAUSTED")
+        logged = [event["message"] for event in refusals_of("DEMO-1802")]
+        self.assertEqual([item["message"] for item in parking["refusals"]], logged)
+        self.assertEqual(logged[0], first["message"])
+        self.assertTrue(second["message"].startswith(logged[1]))
+        self.assertIn("not valid JSON", logged[1])
+
+    def test_a_later_call_is_refused_before_its_input_is_validated(self):
+        # rule: R-REFUSAL-RETRY-CAP
+        from ppl import paths
+        self.init("DEMO-1803")
+        self.refuse_twice("DEMO-1803")
+        code, _, err = self.brief_set("DEMO-1803", good_brief("DEMO-1803"),
+                                      "--from", "ppl-briefer")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "FORMAT_RETRY_EXHAUSTED")
+        self.assertFalse((paths.run_dir("DEMO-1803") / "brief.json").exists())
+
+    def test_another_role_or_command_has_its_own_count(self):
+        from ppl import run
+        self.init("DEMO-1804")
+        self.brief_set("DEMO-1804", write_text_file("not json"), "--from", "ppl-briefer")
+        self.brief_set("DEMO-1804", write_text_file("not json"), "--from", "orchestrator")
+        code, _, err = call("brief", "challenge", write_text_file("not json"), "--generation", "1",
+                            "--from", "ppl-briefer", "--task", "DEMO-1804")
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertNotEqual(run.load("DEMO-1804")["stage"], "parking")
+        self.assertEqual(self.brief_set("DEMO-1804", good_brief("DEMO-1804"),
+                                        "--from", "orchestrator")[0], 0)
+
+    def test_a_new_lease_generation_starts_a_fresh_count(self):
+        from ppl import run
+        self.init("DEMO-1805", make_repo())
+        self.refuse_twice("DEMO-1805")
+        self.assertEqual(call("recover", "--task", "DEMO-1805")[0], 0)
+        code, _, err = self.brief_set("DEMO-1805", write_text_file("not json"),
+                                      "--from", "ppl-briefer")
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertEqual(refusals_of("DEMO-1805")[-1]["lease_generation"], 2)
+        code, _, err = self.brief_set("DEMO-1805", good_brief("DEMO-1805"), "--from", "ppl-briefer")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-1805")["lease_generation"], 2)
+
+    def test_a_resume_after_the_park_allows_the_command_again(self):
+        from ppl import run
+        self.init("DEMO-1806")
+        self.assertEqual(call("stage", "enter", "baseline", "--task", "DEMO-1806")[0], 0)
+        state = run.load("DEMO-1806")
+        state["base_sha"] = "a" * 40
+        run.save(state)
+        self.assertEqual(call("stage", "enter", "briefing", "--task", "DEMO-1806")[0], 0)
+        self.refuse_twice("DEMO-1806")
+        code, _, err = call("stage", "enter", "briefing", "--task", "DEMO-1806")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-1806")["lease_generation"], 1)
+        code, _, err = self.brief_set("DEMO-1806", write_text_file("not json"),
+                                      "--from", "ppl-briefer")
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertEqual(run.load("DEMO-1806")["stage"], "briefing")
+        code, _, err = self.brief_set("DEMO-1806", good_brief("DEMO-1806"), "--from", "ppl-briefer")
+        self.assertEqual(code, 0, err)
+
+    def test_a_call_without_from_is_counted_as_an_unknown_role(self):
+        # rule: R-REFUSAL-RETRY-CAP
+        from ppl import run
+        self.init("DEMO-1807")
+        self.brief_set("DEMO-1807", write_text_file("not json"))
+        self.brief_set("DEMO-1807", write_text_file("not json"))
+        self.assertEqual([e["role"] for e in refusals_of("DEMO-1807")], ["unknown", "unknown"])
+        self.assertEqual(run.load("DEMO-1807")["stage"], "parking")
+        code, _, err = self.brief_set("DEMO-1807", good_brief("DEMO-1807"))
+        self.assertEqual(json.loads(err)["error_code"], "FORMAT_RETRY_EXHAUSTED")
+
+    def test_from_takes_only_a_known_role_or_the_orchestrator(self):
+        self.init("DEMO-1808")
+        code, _, err = self.brief_set("DEMO-1808", good_brief("DEMO-1808"), "--from", "someone")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertEqual(refusals_of("DEMO-1808"), [])
+
+    def test_every_role_output_command_logs_its_refusal(self):
+        self.init("DEMO-1809", make_repo())
+        bad = write_text_file("not json")
+        calls = {
+            "brief challenge": ("brief", "challenge", bad, "--generation", "1"),
+            "verdict record": ("verdict", "record", bad, "--generation", "1"),
+            "findings add": ("findings", "add", "--severity", "minor", "--evidence", " ",
+                             "--affected-sha", "a" * 40, "--affected-path", "a.txt",
+                             "--generation", "1"),
+            "evidence add": ("evidence", "add", "--check", "", "--result", "pass",
+                             "--log", "/tmp/log.txt", "--rc", "/tmp/rc", "--generation", "1"),
+        }
+        for command, argv in calls.items():
+            with self.subTest(command=command):
+                code, _, err = call(*argv, "--from", "ppl-verifier", "--task", "DEMO-1809")
+                self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+                self.assertEqual(refusals_of("DEMO-1809")[-1]["command"], command)
+        self.assertEqual(len(refusals_of("DEMO-1809")), 4)
+
+    def test_other_commands_and_other_codes_are_not_counted(self):
+        self.init("DEMO-1810", make_repo())
+        call("recover", "--task", "DEMO-1810")
+        call("boundary", "set", write_text_file("not json"), "--task", "DEMO-1810")
+        code, _, err = call("verdict", "record", write_text_file("not json"), "--generation", "1",
+                            "--from", "ppl-verifier", "--task", "DEMO-1810")
+        self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
+        self.assertEqual(refusals_of("DEMO-1810"), [])
+
+    def test_a_refusal_for_a_task_with_no_run_writes_nothing(self):
+        from ppl import paths
+        code, _, err = self.brief_set("DEMO-1811", write_text_file("not json"),
+                                      "--from", "ppl-briefer")
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertFalse(paths.run_dir("DEMO-1811").exists())
+
+    def test_a_refusal_that_cannot_be_logged_still_exits_two_with_its_code(self):
+        from ppl import store
+        self.init("DEMO-1812")
+        with mock.patch.object(store, "append_log", side_effect=OSError("disk full")):
+            code, _, err = self.brief_set("DEMO-1812", write_text_file("not json"),
+                                          "--from", "ppl-briefer")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+
+
 if __name__ == "__main__":
     unittest.main()

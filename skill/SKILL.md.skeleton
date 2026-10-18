@@ -71,6 +71,16 @@ Pass it back unchanged. Only `ppl recover` and the watchdog parking a run for `T
 reports a new number, use that new number from then on - a write made with the old one is
 refused as a stale attempt [R-LEASE-STALE-WRITE].
 
+**Whose output.** `ppl brief set`, `ppl brief challenge`, `ppl verdict record`, `ppl findings
+add` and `ppl evidence add` record a role's output: pass `--from <role>` on every one of
+them, naming the role that wrote it (`orchestrator` for a gate receipt you wrote yourself).
+When one of them exits 2 with `SCHEMA_INVALID`, follow "The role output rule" in
+`references/escalation.md`: do not edit the content, redispatch that role once with the
+refusal quoted, and report a second refusal instead of trying a third time. `ppl` counts the
+refusals per command, role and lease generation, parks the run with `FORMAT_RETRY_EXHAUSTED`
+on the second and refuses a third call with that code before reading its input
+[R-REFUSAL-RETRY-CAP].
+
 **Run `ppl doctor` here too, before you lean on anything below that talks about a hook
 stopping a tool call.** The guard hook is a `PreToolUse` hook registration in Claude Code
 settings, and registering it is a decision the owner makes separately from anything `ppl`
@@ -177,7 +187,7 @@ that is an owner decision - escalate, do not re-record.
 specs and the relevant knowledge skill (<!-- include: knowledge/skills -->).
 It has no write tool and no shell of its own: it returns the brief as the JSON body of its
 final message and nothing else. Save that message to a scratch file yourself, then run
-`ppl brief set <file>`, which validates the schema, derives the boundary, and binds `spec_revision` to a fingerprint of `name_contract`,
+`ppl brief set <file> --from ppl-briefer`, which validates the schema, derives the boundary, and binds `spec_revision` to a fingerprint of `name_contract`,
 `acceptance` and the write/forbid boundary together
 [R-BRIEF-SPEC-REVISION-STALE] - the printed value is the exact string you
 must hand the verifier verbatim in Stage 5. Note it down.
@@ -194,13 +204,16 @@ and dispatch `ppl-brief-challenger` with the spec text (Jira, tech analysis), th
 brief and its `spec_revision`; it answers three fixed questions and nothing else: which new
 classes in `name_contract` duplicate an existing owner, which wire shapes differ from the
 spec's own wording, and what each open decision costs to close now. Save its JSON to a
-scratch file and run `ppl brief challenge <file> --generation <n>`. An `ACCEPTED` report
+scratch file and run `ppl brief challenge <file> --generation <n> --from ppl-brief-challenger`.
+An `ACCEPTED` report
 bound to the current `spec_revision` is what lets `ppl stage enter implementation` proceed,
 and `ppl transition done` re-reads the same binding, so a re-brief after the challenge means
 a re-challenge [R-BRIEF-CHALLENGED-BEFORE-IMPLEMENTATION]. A report that still lists an
 unjustified class, an off-spec shape or a cheap parked gap cannot be `ACCEPTED`: `ppl brief
-challenge` refuses it, you record it as `REVISE`, re-brief with its findings and challenge
-again [R-BRIEF-CHALLENGE-SELF-CONSISTENT]. The report schema is `references/challenge.md`.
+challenge` refuses it `SCHEMA_INVALID` [R-BRIEF-CHALLENGE-SELF-CONSISTENT]. Like any role
+output that fails its schema, it goes back to the challenger once with the refusal quoted, not
+edited by you (see "Whose output" above), and its `REVISE` report then means re-brief with
+its findings and challenge again. The report schema is `references/challenge.md`.
 
 `open_decisions` in the brief are objects `{"question", "cost_to_close_files", "decision"}`
 with `decision` one of `in_scope`, `parked`, `owner` (bare strings are still accepted for
@@ -253,9 +266,9 @@ because two of them are load-bearing:
 
 ```bash
 ppl evidence add --check focused-tests --result pass --sha $SHA --log <log> --rc <rc file> \
-  --generation $GENERATION
+  --generation $GENERATION --from orchestrator
 ppl evidence add --check secret-scan --result pass --sha $SHA --log <log> --rc <rc file> \
-  --generation $GENERATION
+  --generation $GENERATION --from orchestrator
 ```
 
 `focused-tests` and `secret-scan` are the two checks `ppl transition done` refuses to close
@@ -313,8 +326,8 @@ a separate `findings` array (severity, evidence, affected_sha, affected_path, ow
 can name one) alongside the empty-by-contract verdict JSON. For each entry, before
 recording the verdict, run `ppl findings add --severity <blocking|important|minor>
 --evidence "<...>" --affected-sha <candidate_sha> --affected-path <path> [--owner <name>]
-[--fix-link <url>] --generation $GENERATION` - your own generation, not anything the
-verifier claims, since it holds no lease. `ppl findings add` decides the routing itself,
+[--fix-link <url>] --generation $GENERATION --from ppl-verifier` - your own generation, not
+anything the verifier claims, since it holds no lease. `ppl findings add` decides the routing itself,
 from the real base-to-candidate diff, never from what is asked of it: a finding whose
 `--affected-path` is inside the candidate's own diff is `own_diff` (fixed now, as REWORK
 below); a finding whose path the candidate never touched is `foreign` (batch-escalated to
@@ -328,8 +341,9 @@ would pile up duplicate blockers instead of the one real finding closing once it
 actually fixed. That is why you list open findings before dispatch and hand them to the
 verifier: only add what it reports as genuinely new.
 
-Record the verdict with `ppl verdict record <file> --generation $GENERATION`. It refuses a
-verdict produced for a different SHA than the current head [R-DONE-SHA-BINDING].
+Record the verdict with `ppl verdict record <file> --generation $GENERATION --from
+ppl-verifier`. It refuses a verdict produced for a different SHA than the current head
+[R-DONE-SHA-BINDING].
 
 The verdict's own `verdict` field (`PASS | REWORK | BLOCKED | OWNER_DECISION | INCONCLUSIVE
 | ERROR | CANCELLED | TIMEOUT`, written by the verifier) is a different, smaller vocabulary

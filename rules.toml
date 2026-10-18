@@ -1106,16 +1106,16 @@ owner = "orchestrator"
 residual = "GAP: routing.dispatch never calls budget.spend, so the ordering is a convention the caller has to keep; with the only v1 provider being a subagent there is no dollar meter to spend against yet"
 
 [[rule]]
-id = "R-BUDGET-FORMAT-VIOLATIONS"
-statement = "Three schema failures from the same role discard its output as unusable and record the routing as a signal."
-scope = "orchestrator"
-event = "repeated schema-invalid role output"
-enforcement = "n/a"
-hook_or_check = "none"
-deny_test = ""
-allow_test = ""
-owner = "orchestrator"
-residual = "GAP: nothing counts schema failures per role anywhere; each ppl call refuses its own malformed input and forgets it"
+id = "R-REFUSAL-RETRY-CAP"
+statement = "A role's output refused SCHEMA_INVALID at ppl brief set, brief challenge, verdict record, findings add or evidence add is logged to log.jsonl as a refusal event (command, code, message, --from role, lease generation). The second refusal for the same command, role and lease generation parks the run with blocker FORMAT_RETRY_EXHAUSTED and both messages in parking.json, and a later call for that key is refused FORMAT_RETRY_EXHAUSTED before its input is read, until the run resumes from parking or the lease generation changes."
+scope = "ppl CLI"
+event = "ppl brief set/brief challenge/verdict record/findings add/evidence add refused SCHEMA_INVALID"
+enforcement = "blocking"
+hook_or_check = "ppl/refusals.py:require_retry_left, ppl/refusals.py:record_refusal, ppl/cli.py:count_refusal"
+deny_test = "tests/test_cli.py::TestRefusalRetryCap::test_the_second_refusal_parks_the_run_with_both_messages, tests/test_cli.py::TestRefusalRetryCap::test_a_later_call_is_refused_before_its_input_is_validated, tests/test_cli.py::TestRefusalRetryCap::test_a_call_without_from_is_counted_as_an_unknown_role"
+allow_test = "tests/test_cli.py::TestRefusalRetryCap::test_another_role_or_command_has_its_own_count, tests/test_cli.py::TestRefusalRetryCap::test_a_new_lease_generation_starts_a_fresh_count, tests/test_cli.py::TestRefusalRetryCap::test_a_resume_after_the_park_allows_the_command_again"
+owner = "ppl"
+residual = "the count is read from log.jsonl, so only the CLI keeps it (a direct Python caller of the validators logs nothing) and an append that fails loses one refusal. Every SCHEMA_INVALID of those five commands counts, an envelope mistake (a wrong file path, a missing --generation) included, and two refusals in one generation add up even with an accepted call between them. A call without --from counts under the role unknown. That the orchestrator does not edit the content between the two attempts is discipline: no code compares them"
 
 # ---------------------------------------------------------------------------
 # Dispatch, adapters and context isolation

@@ -406,6 +406,22 @@ class TestDeadline(unittest.TestCase):
         state = run.park("DEMO-762", "TIMED_OUT", "inspect the stuck attempt", [])
         self.assertEqual(state["stage"], "parking")
 
+    def test_format_retry_exhausted_joins_the_blocker_codes(self):
+        self.assertIn("FORMAT_RETRY_EXHAUSTED", run.BLOCKER_CODES)
+
+    def test_park_keeps_the_refusals_it_is_given_in_the_parking_record(self):
+        from ppl import paths, store
+        run.init("DEMO-763", "https://j/DEMO-763", "/tmp/repo")
+        refusals = [{"command": "brief set", "role": "ppl-briefer", "message": "one"},
+                    {"command": "brief set", "role": "ppl-briefer", "message": "two"}]
+        run.park("DEMO-763", "FORMAT_RETRY_EXHAUSTED", "inspect both refusals", [],
+                 refusals=refusals)
+        record = store.read_json(paths.run_dir("DEMO-763") / "parking.json")
+        self.assertEqual(record["blocker"], "FORMAT_RETRY_EXHAUSTED")
+        self.assertEqual(record["refusals"], refusals)
+        run.park("DEMO-763", "OWNER_DECISION", "operator stop", [])
+        self.assertNotIn("refusals", store.read_json(paths.run_dir("DEMO-763") / "parking.json"))
+
 
 class TestResumeFromParking(unittest.TestCase):
     """W3, cycle 2 wave B: a parked run's lifecycle status is `blocked`
