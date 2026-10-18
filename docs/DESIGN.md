@@ -766,12 +766,16 @@ longer than 4096 characters is denied before any pattern runs, so a padded comma
 outlast the hook's timeout [R-GUARD-ROLE-COMMAND-LENGTH]. While a run is active, every deny the guard returns is
 also appended to the run's `log.jsonl` as a `deny` event with the role, the tool, the code and
 the first 200 characters of the target, best effort, so a failed append never changes the
-decision [R-GUARD-DENIAL-LOGGED]. Both hooks need Python 3.11, and
+decision [R-GUARD-DENIAL-LOGGED]. The hook writes and flushes the decision before it appends,
+skips a `log.jsonl` that is there but is not a regular file (a FIFO would block the append
+until a reader appeared), and does not log the deny of the doctor's own probe below
+[R-GUARD-DENIAL-LOGGED]. Both hooks need Python 3.11, and
 `ppl setup claude` writes the interpreter that ran it into both hook entries. Under an older
 interpreter each hook reads the payload before importing anything from `ppl`, denies a call
 whose `agent_type` starts with `ppl-`, writes one stderr line naming the version it found and
 exits 0, where it used to die on import and leave every call allowed [R-GUARD-PYTHON-FLOOR].
-`ppl doctor` runs every registered guard command once on an unroled Read of `/dev/null` and
+`ppl doctor` runs every registered guard command once on an unroled Read of `/dev/null`,
+marked with the session_id `ppl-doctor-hook-probe`, and
 reports `hook_runs: false`, with the first stderr line and the remedy `ppl setup claude`, when
 one does not exit 0 with an empty stderr. Before it runs a guard command it asks that command's interpreter for its version and
 reports one older than 3.11 the same way (past `env` and its options to the program it runs). Per settings file it also reports `dispatch_hook:

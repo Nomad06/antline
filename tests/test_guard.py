@@ -3142,7 +3142,7 @@ class TestGuard(unittest.TestCase):
         for agent in ("ppl-code-worker", None, ["ppl-code-worker"]):
             stdout, stderr = io.StringIO(), io.StringIO()
             stdin = io.StringIO(json.dumps(payload(agent, "Bash", {"command": "ls"})))
-            with mock.patch.object(ppl_guard, "decide", broken), \
+            with mock.patch.object(ppl_guard, "_decide", broken), \
                     mock.patch.object(sys, "stdin", stdin), \
                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 self.assertEqual(ppl_guard.main(), 0)
@@ -3165,7 +3165,7 @@ class TestGuard(unittest.TestCase):
         for agent in routing.REQUIRED_ROLES:
             stdout = io.StringIO()
             stdin = io.StringIO(json.dumps(payload(agent, "Read", {"file_path": "/tmp/x"})))
-            with self.subTest(agent=agent), mock.patch.object(ppl_guard, "decide", broken), \
+            with self.subTest(agent=agent), mock.patch.object(ppl_guard, "_decide", broken), \
                     mock.patch.object(sys, "stdin", stdin), \
                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(ppl_guard.main(), 0)
@@ -3189,7 +3189,7 @@ class TestGuard(unittest.TestCase):
 
         stdout = io.StringIO()
         stdin = io.StringIO(json.dumps(payload("ppl-code-worker", "Bash", {"command": "ls"})))
-        with mock.patch.object(ppl_guard, "decide", broken), \
+        with mock.patch.object(ppl_guard, "_decide", broken), \
                 mock.patch.object(sys, "stdin", stdin), \
                 mock.patch.object(sys, "stderr", BrokenStream()), \
                 contextlib.redirect_stdout(stdout):

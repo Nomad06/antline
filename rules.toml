@@ -2087,12 +2087,12 @@ residual = "a test, not a hook: it catches a string at test time, not at commit 
 
 [[rule]]
 id = "R-GUARD-DENIAL-LOGGED"
-statement = "Every deny the guard returns while a run is active appends a deny event (role, tool, code, target cut to 200 characters) to that run's log.jsonl through store.append_log, so a stopped call leaves a trace."
+statement = "Every deny the guard returns while a run is active appends a deny event (role, tool, code, target cut to 200 characters) to that run's log.jsonl through store.append_log, so a stopped call leaves a trace. main() writes and flushes the decision before it appends, a log.jsonl that is there but not a regular file is skipped rather than opened, and the doctor's hook_runs probe (session_id ppl-doctor-hook-probe on an unroled Read of /dev/null) is not logged."
 scope = "guard hook"
 event = "any PreToolUse call the guard denies"
 enforcement = "soft"
-hook_or_check = "hooks/ppl_guard.py:log_denial"
+hook_or_check = "hooks/ppl_guard.py:log_denial, hooks/ppl_guard.py:main"
 deny_test = ""
-allow_test = "tests/test_guard_denial_log.py::TestGuardDenialLog::test_a_denied_code_worker_edit_logs_one_deny_event, tests/test_guard_denial_log.py::TestGuardDenialLog::test_an_allowed_call_writes_nothing"
+allow_test = "tests/test_guard_denial_log.py::TestGuardDenialLog::test_a_denied_code_worker_edit_logs_one_deny_event, tests/test_guard_denial_log.py::TestGuardDenialLog::test_an_allowed_call_writes_nothing, tests/test_guard_denial_log.py::TestGuardDenialLogFromMain::test_main_writes_and_flushes_the_decision_before_it_logs_the_deny, tests/test_guard_denial_log.py::TestGuardDenialLogFromMain::test_the_internal_error_branch_logs_the_role_deny_it_returns, tests/test_guard_denial_log.py::TestGuardDenialLogFromMain::test_a_log_that_is_not_a_regular_file_is_skipped_not_opened, tests/test_guard_denial_log.py::TestGuardDenialLogFromMain::test_the_doctor_probe_is_denied_under_a_paused_run_but_not_logged_against_it, tests/test_guard_denial_log.py::TestGuardDenialLogFromMain::test_only_the_whole_probe_shape_skips_the_log"
 owner = "ppl"
 residual = "PROPERTY: an append that fails is lost, the decision stands. A deny with no active run is not logged, and the guard is antline's own code, not a role, so this write does not weaken R-RUNS-BASH-WRITE"

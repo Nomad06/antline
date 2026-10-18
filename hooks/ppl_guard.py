@@ -2109,13 +2109,32 @@ def _decide(payload):
     return None
 
 
+# The session_id `ppl doctor` puts on its hook_runs probe, an unroled Read of
+# /dev/null (ppl/doctor.py:_run_problem).
+DOCTOR_PROBE_SESSION_ID = "ppl-doctor-hook-probe"
+
+
+def _is_doctor_probe(payload):
+    return (payload.get("session_id") == DOCTOR_PROBE_SESSION_ID
+            and payload.get("agent_type") is None and payload.get("tool_name") == "Read"
+            and payload.get("tool_input") == {"file_path": "/dev/null"})
+
+
 def log_denial(payload, result):
     """Append one deny event to the active run's log. Best effort: whatever goes
-    wrong here, the decision already made stands [R-GUARD-DENIAL-LOGGED]."""
+    wrong here, the decision already made stands [R-GUARD-DENIAL-LOGGED]. The
+    doctor's probe is not logged: it is not a call any session made. A log.jsonl
+    that is there but not a regular file is skipped, since opening a FIFO for
+    append blocks until a reader appears."""
     try:
+        if _is_doctor_probe(payload):
+            return
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
         task_id = run.active()
         if not task_id:
+            return
+        log = paths.run_dir(task_id) / "log.jsonl"
+        if os.path.lexists(log) and not os.path.isfile(log):
             return
         tool_input = payload.get("tool_input")
         if not isinstance(tool_input, dict):
@@ -2145,7 +2164,7 @@ def main():
     except Exception:
         return 0
     try:
-        result = decide(payload)
+        result = _decide(payload)
     except Exception as err:
         # Claude Code reads exit 0 with no output as allow. A ppl-* role is
         # refused instead, an unroled session keeps the allow so a hook defect
@@ -2167,7 +2186,11 @@ def main():
             pass
         return 0
     if result:
+        # The decision goes out before the log is touched, as in the branch above.
         sys.stdout.write(json.dumps(result))
+        sys.stdout.flush()
+        if isinstance(payload, dict):
+            log_denial(payload, result)
     return 0
 
 

@@ -612,8 +612,11 @@ class TestHookRuns(unittest.TestCase):
         workspace = tmphome.mkdtemp(prefix="pplworkspace-")
         self.assertTrue(doctor.hook_runs(cwd=self.local_dir, workspace=workspace)["ok"])
         seen = json.loads((where / "seen.json").read_text(encoding="utf-8"))
+        # the session_id marks the probe, so the guard does not log its deny against a run
         self.assertEqual(seen["payload"], {"tool_name": "Read", "tool_input": {"file_path": "/dev/null"},
-                                           "cwd": workspace})
+                                           "cwd": workspace,
+                                           "session_id": doctor.guard_probe_session_id()})
+        self.assertEqual(doctor.guard_probe_session_id(), "ppl-doctor-hook-probe")
         self.assertEqual(os.path.realpath(seen["cwd"]), os.path.realpath(workspace))
 
     def test_a_guard_that_fails_reports_false_with_its_first_stderr_line_and_the_remedy(self):

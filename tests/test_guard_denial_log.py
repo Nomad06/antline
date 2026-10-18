@@ -1,8 +1,11 @@
+import io
+import json
 import os
 import stat
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
@@ -10,7 +13,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 
-from ppl import paths, run, store
+from ppl import control, paths, run, store
 import ppl_guard
 
 
@@ -85,6 +88,115 @@ class TestGuardDenialLog(unittest.TestCase):
         ppl_guard.decide({"tool_name": "Task", "agent_type": "ppl-code-worker",
                           "tool_input": {}})
         self.assertEqual(total(), before)
+
+
+class OrderedStdout(io.StringIO):
+    def __init__(self, order):
+        super().__init__()
+        self.order = order
+
+    def write(self, text):
+        self.order.append("write")
+        return super().write(text)
+
+    def flush(self):
+        self.order.append("flush")
+        return super().flush()
+
+
+def run_main(hook_payload, stdout):
+    with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook_payload))), \
+            mock.patch.object(sys, "stdout", stdout), \
+            mock.patch.object(sys, "stderr", io.StringIO()):
+        return ppl_guard.main()
+
+
+class TestGuardDenialLogFromMain(unittest.TestCase):
+    """main() is what Claude Code runs: the decision goes out before the log is touched,
+    so a log that is slow or blocks cannot hold the decision back."""
+
+    def setUp(self):
+        active = paths.active_file()
+        if active.exists():
+            active.unlink()
+
+    def active_run(self, task_id, isolated=True):
+        repo = tmphome.mkdtemp(prefix="repo-")
+        run.init(task_id, "u", repo, isolated=isolated)
+        run.set_active(task_id)
+        return repo
+
+    def test_main_writes_and_flushes_the_decision_before_it_logs_the_deny(self):
+        repo = self.active_run("DEMO-8810")
+        order = []
+        stdout = OrderedStdout(order)
+        with mock.patch.object(ppl_guard, "log_denial",
+                               side_effect=lambda _payload, _result: order.append("log")):
+            self.assertEqual(run_main(edit(repo + "/src/App.java"), stdout), 0)
+        self.assertIn("BOUNDARY_VIOLATION", stdout.getvalue())
+        self.assertEqual(order[-1], "log")
+        self.assertIn("flush", order[:-1])
+        self.assertEqual(order[0], "write")
+
+    def test_main_still_logs_one_deny_event(self):
+        repo = self.active_run("DEMO-8811")
+        stdout = io.StringIO()
+        self.assertEqual(run_main(edit(repo + "/src/App.java"), stdout), 0)
+        self.assertIn("BOUNDARY_VIOLATION", stdout.getvalue())
+        events = denies("DEMO-8811")
+        self.assertEqual([(e["role"], e["code"]) for e in events],
+                         [("ppl-code-worker", "BOUNDARY_VIOLATION")])
+
+    def test_the_internal_error_branch_logs_the_role_deny_it_returns(self):
+        repo = self.active_run("DEMO-8812")
+        stdout = io.StringIO()
+        with mock.patch.object(ppl_guard, "_decide", side_effect=RuntimeError("boom")):
+            self.assertEqual(run_main(edit(repo + "/src/App.java"), stdout), 0)
+        self.assertIn("BOUNDARY_VIOLATION", stdout.getvalue())
+        events = denies("DEMO-8812")
+        self.assertEqual([(e["role"], e["tool"], e["code"], e["target"]) for e in events],
+                         [("ppl-code-worker", "Edit", "BOUNDARY_VIOLATION",
+                           repo + "/src/App.java")])
+
+    def test_a_log_that_is_not_a_regular_file_is_skipped_not_opened(self):
+        # a FIFO opened for append blocks until a reader appears, and the hook would hang
+        repo = self.active_run("DEMO-8813")
+        log = paths.run_dir("DEMO-8813") / "log.jsonl"
+        log.unlink()
+        os.mkfifo(str(log))
+        with mock.patch.object(store, "append_log") as append:
+            result = ppl_guard.decide(edit(repo + "/src/App.java"))
+        self.assertIn("BOUNDARY_VIOLATION",
+                      result["hookSpecificOutput"]["permissionDecisionReason"])
+        append.assert_not_called()
+
+    def test_a_log_that_does_not_exist_yet_is_still_created(self):
+        repo = self.active_run("DEMO-8814")
+        (paths.run_dir("DEMO-8814") / "log.jsonl").unlink()
+        ppl_guard.decide(edit(repo + "/src/App.java"))
+        self.assertEqual(len(denies("DEMO-8814")), 1)
+
+    def doctor_probe(self, workspace, **extra):
+        probe = {"tool_name": "Read", "tool_input": {"file_path": "/dev/null"}, "cwd": workspace,
+                 "session_id": ppl_guard.DOCTOR_PROBE_SESSION_ID}
+        probe.update(extra)
+        return probe
+
+    def test_the_doctor_probe_is_denied_under_a_paused_run_but_not_logged_against_it(self):
+        workspace = self.active_run("DEMO-8815")
+        control.set_command("DEMO-8815", "pause")
+        result = ppl_guard.decide(self.doctor_probe(workspace))
+        self.assertIn("OWNER_DECISION", result["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertEqual(denies("DEMO-8815"), [])
+
+    def test_only_the_whole_probe_shape_skips_the_log(self):
+        workspace = self.active_run("DEMO-8816")
+        control.set_command("DEMO-8816", "pause")
+        for changed in ({"session_id": "a-real-session"},
+                        {"tool_input": {"file_path": workspace + "/a.txt"}},
+                        {"tool_name": "Write"}):
+            ppl_guard.decide(self.doctor_probe(workspace, **changed))
+        self.assertEqual(len(denies("DEMO-8816")), 3)
 
 
 if __name__ == "__main__":

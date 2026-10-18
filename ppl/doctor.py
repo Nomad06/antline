@@ -133,11 +133,19 @@ def registered_guard_commands(cwd=None):
     return commands
 
 
+def guard_probe_session_id():
+    """The session_id that marks the probe below, read from the hook file so the two
+    cannot drift: the guard does not log a deny of it against the active run."""
+    _hooks_on_path()
+    import ppl_guard
+    return ppl_guard.DOCTOR_PROBE_SESSION_ID
+
+
 def _run_problem(command, workspace):
     """None when `command` takes the synthetic payload to exit 0 with no stderr,
     else what went wrong, with the first stderr line."""
     payload = json.dumps({"tool_name": "Read", "tool_input": {"file_path": "/dev/null"},
-                          "cwd": workspace})
+                          "cwd": workspace, "session_id": guard_probe_session_id()})
     try:
         # The command is the settings file's own hook string, which Claude Code
         # also runs through a shell, so it is run the same way.
