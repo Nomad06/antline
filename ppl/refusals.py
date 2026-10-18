@@ -39,14 +39,36 @@ def _generation(task_id):
     return run.load(task_id).get("lease_generation", 1)
 
 
+class CountUnreadable(Exception):
+    """The log the count is read from could not be read, so the cap cannot be applied."""
+
+
+def _park(task_id, counted):
+    run.park(task_id, "FORMAT_RETRY_EXHAUSTED",
+             "inspect both refusals in parking.json, fix the role prompt or the schema, then "
+             "resume - never just redispatch a third time", [],
+             refusals=[{key: event.get(key) for key in ("command", "role", "message", "at")}
+                       for event in counted])
+
+
 def require_retry_left(task_id, command, role):
-    generation = _generation(task_id)
-    if len(_counted(task_id, command, role, generation)) >= CAP:
-        raise PplError("FORMAT_RETRY_EXHAUSTED",
-                       "`ppl %s` from %s was refused SCHEMA_INVALID twice in lease generation "
-                       "%d and the run is parked, see parking.json. Fix the role prompt or the "
-                       "schema, then resume: a third attempt is refused [R-REFUSAL-RETRY-CAP]"
-                       % (command, role, generation))
+    """Refuse a spent key, parking the run first when the park that spent it never
+    happened. Raises CountUnreadable when the log cannot be read."""
+    state = run.load(task_id)
+    generation = state.get("lease_generation", 1)
+    try:
+        counted = _counted(task_id, command, role, generation)
+    except OSError as exc:
+        raise CountUnreadable(str(exc) or type(exc).__name__) from exc
+    if len(counted) < CAP:
+        return
+    if state.get("stage") != "parking":
+        _park(task_id, counted)
+    raise PplError("FORMAT_RETRY_EXHAUSTED",
+                   "`ppl %s` from %s was refused SCHEMA_INVALID twice in lease generation "
+                   "%d and the run is parked, see parking.json. Fix the role prompt or the "
+                   "schema, then resume: a third attempt is refused [R-REFUSAL-RETRY-CAP]"
+                   % (command, role, generation))
 
 
 def record_refusal(task_id, command, role, message, of_role_output):
@@ -60,16 +82,12 @@ def record_refusal(task_id, command, role, message, of_role_output):
     if not of_role_output:
         return None
     counted = _counted(task_id, command, role, generation)
-    if len(counted) != CAP:
+    if len(counted) < CAP:
         return None
-    run.park(task_id, "FORMAT_RETRY_EXHAUSTED",
-             "inspect both refusals in parking.json, fix the role prompt or the schema, then "
-             "resume - never just redispatch a third time", [],
-             refusals=[{key: event.get(key) for key in ("command", "role", "message", "at")}
-                       for event in counted])
-    return ("the run is now parked with FORMAT_RETRY_EXHAUSTED: this is the second refusal of "
+    _park(task_id, counted)
+    return ("the run is now parked with FORMAT_RETRY_EXHAUSTED: this is refusal %d in a row of "
             "`ppl %s` from %s in lease generation %d, see parking.json"
-            % (command, role, generation))
+            % (len(counted), command, role, generation))
 
 
 def record_acceptance(task_id, command, role):

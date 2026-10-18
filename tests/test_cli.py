@@ -3057,6 +3057,70 @@ class TestRefusalRetryCap(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "FORMAT_RETRY_EXHAUSTED")
         self.assertFalse((paths.run_dir("DEMO-1803") / "brief.json").exists())
 
+    def seed_counted_refusals(self, task_id, count):
+        """Counted refusals in the log with no park behind them, the trace a park that
+        failed after its refusal was logged leaves."""
+        from ppl import store
+        for number in range(count):
+            store.append_log(task_id, {"event": "refusal", "command": "brief set",
+                                       "code": "SCHEMA_INVALID", "message": "bad %d" % number,
+                                       "role": "ppl-briefer", "lease_generation": 1,
+                                       "counted": True})
+
+    def test_a_spent_key_on_a_run_that_is_not_parked_parks_it_before_refusing(self):
+        # rule: R-REFUSAL-RETRY-CAP
+        from ppl import paths, run, store
+        self.init("DEMO-1840")
+        self.seed_counted_refusals("DEMO-1840", 2)
+        self.assertNotEqual(run.load("DEMO-1840")["stage"], "parking")
+        code, _, err = self.brief_set("DEMO-1840", good_brief("DEMO-1840"), "--from", "ppl-briefer")
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "FORMAT_RETRY_EXHAUSTED")
+        self.assertIn("the run is parked", error["message"])
+        self.assertEqual(run.load("DEMO-1840")["stage"], "parking")
+        parking = store.read_json(paths.run_dir("DEMO-1840") / "parking.json")
+        self.assertEqual(parking["blocker"], "FORMAT_RETRY_EXHAUSTED")
+        self.assertEqual([item["message"] for item in parking["refusals"]], ["bad 0", "bad 1"])
+        self.assertFalse((paths.run_dir("DEMO-1840") / "brief.json").exists())
+
+    def test_a_spent_key_on_a_parked_run_keeps_its_parking_record(self):
+        from ppl import paths, store
+        self.init("DEMO-1841")
+        self.refuse_twice("DEMO-1841")
+        before = store.read_json(paths.run_dir("DEMO-1841") / "parking.json")
+        code, _, err = self.brief_set("DEMO-1841", good_brief("DEMO-1841"), "--from", "ppl-briefer")
+        self.assertEqual(json.loads(err)["error_code"], "FORMAT_RETRY_EXHAUSTED")
+        self.assertEqual(store.read_json(paths.run_dir("DEMO-1841") / "parking.json"), before)
+
+    def test_a_counted_refusal_past_the_cap_still_parks_the_run(self):
+        # rule: R-REFUSAL-RETRY-CAP
+        from ppl import paths, refusals, run, store
+        self.init("DEMO-1842")
+        self.seed_counted_refusals("DEMO-1842", 2)
+        note = refusals.record_refusal("DEMO-1842", "brief set", "ppl-briefer", "bad 2", True)
+        self.assertIn("FORMAT_RETRY_EXHAUSTED", note)
+        self.assertEqual(run.load("DEMO-1842")["stage"], "parking")
+        parking = store.read_json(paths.run_dir("DEMO-1842") / "parking.json")
+        self.assertEqual(parking["blocker"], "FORMAT_RETRY_EXHAUSTED")
+
+    def test_a_log_that_cannot_be_read_before_validation_warns_and_lets_validation_run(self):
+        from ppl import paths, store
+        self.init("DEMO-1843")
+        with mock.patch.object(store, "read_log", side_effect=PermissionError("log unreadable")):
+            code, _, err = self.brief_set("DEMO-1843", good_brief("DEMO-1843"),
+                                          "--from", "ppl-briefer")
+            self.assertEqual(code, 0, err)
+            self.assertIn("warning: refusal count not updated: log unreadable", err)
+            self.assertNotIn("Traceback", err)
+            self.assertTrue((paths.run_dir("DEMO-1843") / "brief.json").exists())
+            code, _, err = self.brief_set("DEMO-1843", write_text_file("not json"),
+                                          "--from", "ppl-briefer")
+        self.assertEqual(code, 2)
+        lines = err.strip().splitlines()
+        self.assertEqual(lines[0], "warning: refusal count not updated: log unreadable")
+        self.assertEqual(json.loads(lines[-1])["error_code"], "SCHEMA_INVALID")
+
     def test_another_role_or_command_has_its_own_count(self):
         from ppl import run
         self.init("DEMO-1804")

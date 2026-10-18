@@ -59,7 +59,8 @@ def role_output_command(args):
 def require_retry_left(task_id, args):
     """Checked after the run's own gates and before the input is read: the call has to
     name whose output it records, and a spent key is refused whatever the input
-    [R-REFUSAL-RETRY-CAP]."""
+    [R-REFUSAL-RETRY-CAP]. A log that cannot be read is a bookkeeping failure like the
+    ones count_refusal reports, and the input is validated as usual."""
     command = role_output_command(args)
     if args.from_role not in refusals.ROLES:
         given = "needs" if args.from_role is None else "got --from %s, it needs" % args.from_role
@@ -68,7 +69,10 @@ def require_retry_left(task_id, args):
                        "--from %s for that role's output, or another of %s"
                        % (command, given, refusals.EXPECTED_ROLE[command],
                           ", ".join(refusals.ROLES)))
-    refusals.require_retry_left(task_id, command, args.from_role)
+    try:
+        refusals.require_retry_left(task_id, command, args.from_role)
+    except refusals.CountUnreadable as exc:
+        bookkeeping_failed(task_id, command, args.from_role, exc)
 
 
 def load_json_arg(path, what, kind=dict):

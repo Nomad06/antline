@@ -1164,14 +1164,17 @@ redispatches (the skill's escalation reference). The second
 counted refusal in a row for the same command, role and generation is still printed as
 `SCHEMA_INVALID`, `ppl` parks the run with blocker `FORMAT_RETRY_EXHAUSTED` and both
 refusals in `parking.json` under `refusals`, and a later call for that key is refused
-`FORMAT_RETRY_EXHAUSTED` before its input is read [R-REFUSAL-RETRY-CAP]. The count is read
+`FORMAT_RETRY_EXHAUSTED` before its input is read, parking the run first when it finds it
+not parked (a park that failed after its refusal was logged) [R-REFUSAL-RETRY-CAP]. The count is read
 back from the log: an accepted call for the key ends it (a `role_output_accepted` event,
 written only when a count was open), a resume from parking clears it like any park, and
 `ppl recover` moves the generation, which starts a fresh one. Same pattern as
 `VERIFICATION_UNAVAILABLE`, which also counts the second failure in a row (6.10). When
 `ppl` fails to read or write the count, the command's own outcome stays as it is, `ppl`
 prints `warning: refusal count not updated: <reason>` to stderr ahead of the JSON line, and
-logs a `refusal_bookkeeping_error` event when the log takes it.
+logs a `refusal_bookkeeping_error` event when the log takes it. A count that cannot be read
+before the input is validated is the same warning, and the input is validated as usual
+[R-REFUSAL-RETRY-CAP].
 
 Review ledger (`threads.json`) - `{thread_id: {sha: {classification, at, last_note_id}}}`.
 This is what makes `ppl review pending` (section 8) safe to call every tick without ever
