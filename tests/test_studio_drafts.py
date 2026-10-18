@@ -1,8 +1,11 @@
 import copy
+import io
+import json
 import os
 import sys
 import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -10,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
-from ppl import config, harness
+from ppl import cli, config, harness
 from ppl.errors import PplError
 from ppl.studio import drafts, project, stacks
 
@@ -298,6 +301,55 @@ class TestCheckIsPrivate(DraftTestCase):
         refused, result = drafts.checked_copy("demo.git", draft["doc"], draft["fragments"], root)
         self.assertIsNone(refused)
         self.assertFalse(result["ok"])
+
+
+def cli_validate(target):
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        cli.main(["harness", "validate", str(target), "--json"])
+    return json.loads(out.getvalue())
+
+
+class TestSameAnswerAsTheCli(DraftTestCase):
+    def drafts(self):
+        clean = self.preset()
+        warned = self.preset("node")
+        for gate in warned["doc"]["gate"]:
+            if gate["name"] == harness.FOCUSED_TESTS_GATE:
+                gate["command"] = "npx jest <test_class>"
+        unfocused = self.preset()
+        unfocused["doc"]["gate"] = [gate for gate in unfocused["doc"]["gate"]
+                                    if gate["name"] != harness.FOCUSED_TESTS_GATE]
+        misspelt = self.preset()
+        misspelt["doc"]["guard"]["shapes"] = misspelt["doc"]["guard"].pop("shape")
+        relative = self.preset()
+        relative["doc"]["repo"]["path"] = "relative/repo"
+        oversized = self.preset()
+        oversized["fragments"]["templates/ppl-verifier.part"] = "x" * harness.AGENT_HARD_BYTES
+        return {"clean": clean, "warned": warned, "unfocused": unfocused, "misspelt": misspelt,
+                "relative": relative, "oversized": oversized}
+
+    def test_the_cli_and_the_studio_return_the_same_errors_and_warnings(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        for label, draft in self.drafts().items():
+            with self.subTest(draft=label):
+                root = Path(tmphome.mkdtemp(prefix="pplsame-"))
+                target = drafts.write("demo", draft["doc"], draft["fragments"], root)
+                studio = drafts.verify(target, "demo")
+                cli_result = cli_validate(target)
+                self.assertEqual(cli_result, {"errors": studio["errors"],
+                                              "warnings": studio["warnings"]})
+                self.assertEqual(studio["ok"], not studio["errors"])
+
+    def test_a_draft_the_cli_refuses_is_refused_in_the_studio(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        for label in ("unfocused", "misspelt", "relative", "oversized"):
+            draft = self.drafts()[label]
+            with self.subTest(draft=label):
+                result = drafts.check("demo", draft["doc"], draft["fragments"])
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(len(result["errors"]), 1, result)
+                self.assertEqual(result["flags"], [])
 
 
 class TestInstall(DraftTestCase):

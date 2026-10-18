@@ -685,5 +685,122 @@ class TestHookRuns(unittest.TestCase):
         self.assertEqual(doctor.hook_runs(cwd=self.local_dir), {"ok": True, "problem": None})
 
 
+class TestHookShape(unittest.TestCase):
+    """A hook entry of the wrong shape is a hook that never fires, or fires with
+    nothing to bound it: doctor reports the shape of the guard and dispatch
+    entries per settings file, and whether the dispatch hook is there at all."""
+
+    def setUp(self):
+        self.local_dir = Path(tmphome.mkdtemp(prefix="ppllocaldir-"))
+        self.local_path = self.local_dir / ".claude" / "settings.local.json"
+        self.global_path = doctor.global_settings_path()
+        for p in (self.local_path, self.global_path):
+            if p.exists():
+                p.unlink()
+        self.addCleanup(lambda: self.global_path.exists() and self.global_path.unlink())
+
+    def write(self, guard=None, dispatch=None, path=None):
+        """Settings with setup's own entries, each hook dict updated by `guard`
+        and `dispatch` (None drops that entry, a None value drops that key)."""
+        entries = setup.hook_entries(fixtures.SOURCE)
+        doc = {"hooks": {}}
+        for event, change in (("PreToolUse", guard), ("SubagentStart", dispatch)):
+            if change is None:
+                continue
+            entry = json.loads(json.dumps(entries[event]))
+            entry["hooks"][0].update(change)
+            entry["hooks"][0] = {k: v for k, v in entry["hooks"][0].items() if v is not None}
+            doc["hooks"][event] = [entry]
+        target = path or self.local_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(doc), encoding="utf-8")
+
+    def local(self):
+        return doctor.inspect(cwd=self.local_dir)["local"]
+
+    def fake_python(self, version):
+        script = Path(tmphome.mkdtemp(prefix="pplfakepython-")) / "python3"
+        script.write_text("#!/bin/sh\necho %s\n" % version, encoding="utf-8")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_the_entries_setup_writes_are_well_shaped_and_register_the_dispatch_hook(self):
+        self.write(guard={}, dispatch={})
+        local = self.local()
+        self.assertEqual((local["hook_shape"], local["dispatch_hook"]), ("ok", "registered"))
+        self.assertIsNone(doctor.guard_shape_problem(cwd=self.local_dir))
+        self.assertIsNone(doctor.dispatch_warning(cwd=self.local_dir))
+
+    def test_a_guard_entry_without_type_command_is_reported(self):
+        self.write(guard={"type": "prompt"}, dispatch={})
+        self.assertIn("type 'prompt'", self.local()["hook_shape"])
+        problem = doctor.guard_shape_problem(cwd=self.local_dir)
+        self.assertIn(str(self.local_path), problem)
+        self.assertIn("ppl setup claude", problem)
+
+    def test_a_guard_entry_without_a_timeout_is_reported(self):
+        self.write(guard={"timeout": None}, dispatch={})
+        self.assertIn("no timeout", self.local()["hook_shape"])
+        self.assertIn("no timeout", doctor.guard_shape_problem(cwd=self.local_dir))
+
+    def test_a_guard_under_an_interpreter_older_than_the_floor_is_reported(self):
+        old = self.fake_python("3.9.6")
+        hook = str(fixtures.SOURCE / "hooks" / "ppl_guard.py")
+        self.write(guard={"command": "%s %s" % (shlex.quote(old), shlex.quote(hook))}, dispatch={})
+        self.assertIn("Python 3.9.6", self.local()["hook_shape"])
+        self.assertIn("3.11", doctor.guard_shape_problem(cwd=self.local_dir))
+
+    def test_a_guard_whose_interpreter_cannot_start_is_reported(self):
+        self.write(guard={"command": "/nonexistent/python3 /x/hooks/ppl_guard.py"}, dispatch={})
+        self.assertIn("/nonexistent/python3", self.local()["hook_shape"])
+        self.assertIsNotNone(doctor.guard_shape_problem(cwd=self.local_dir))
+
+    def test_a_guard_run_as_a_bare_script_is_reported(self):
+        self.write(guard={"command": "/x/hooks/ppl_guard.py"}, dispatch={})
+        self.assertIn("shebang", self.local()["hook_shape"])
+
+    def test_a_missing_dispatch_hook_is_reported(self):
+        self.write(guard={})
+        local = self.local()
+        self.assertEqual((local["hook_shape"], local["dispatch_hook"]), ("ok", "missing"))
+        warning = doctor.dispatch_warning(cwd=self.local_dir)
+        self.assertIn("ppl_dispatch.py", warning)
+        self.assertIn("ppl setup claude", warning)
+
+    def test_a_dispatch_hook_in_the_global_file_counts_for_a_local_guard(self):
+        self.write(guard={})
+        self.write(dispatch={}, path=self.global_path)
+        self.assertEqual(doctor.inspect(cwd=self.local_dir)["global"]["dispatch_hook"], "registered")
+        self.assertIsNone(doctor.dispatch_warning(cwd=self.local_dir))
+
+    def test_a_malformed_dispatch_entry_is_a_warning_not_a_guard_problem(self):
+        self.write(guard={}, dispatch={"type": "prompt"})
+        self.assertIn("ppl_dispatch.py", self.local()["hook_shape"])
+        self.assertIsNone(doctor.guard_shape_problem(cwd=self.local_dir))
+        self.assertIn("type 'prompt'", doctor.dispatch_warning(cwd=self.local_dir))
+
+    def test_no_hooks_at_all_is_neither_a_shape_problem_nor_a_dispatch_warning(self):
+        inspected = doctor.inspect(cwd=self.local_dir)
+        self.assertEqual(inspected["local"]["dispatch_hook"], "missing")
+        self.assertIsNone(inspected["local"]["hook_shape"])
+        self.assertIsNone(doctor.guard_shape_problem(cwd=self.local_dir))
+        self.assertIsNone(doctor.dispatch_warning(cwd=self.local_dir))
+
+    def test_an_unreadable_file_reports_neither(self):
+        self.local_path.parent.mkdir(parents=True, exist_ok=True)
+        self.local_path.write_text("not json", encoding="utf-8")
+        local = self.local()
+        self.assertIsNone(local["dispatch_hook"])
+        self.assertIsNone(local["hook_shape"])
+
+    def test_the_report_carries_both_per_settings_file(self):
+        self.write(guard={"timeout": None})
+        with mock.patch.object(doctor, "hook_runs", return_value={"ok": True, "problem": None}):
+            result = doctor.report(cwd=self.local_dir)
+        self.assertEqual(result["local"]["dispatch_hook"], "missing")
+        self.assertIn("no timeout", result["local"]["hook_shape"])
+        self.assertEqual(result["global"]["dispatch_hook"], "missing")
+
+
 if __name__ == "__main__":
     unittest.main()

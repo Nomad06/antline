@@ -125,7 +125,8 @@ def cmd_init(args):
     # is refused too (doctor.matcher_problem): a denial the hook cannot see is
     # a denial that cannot fire, and the run would start believing otherwise.
     inspected = doctor.inspect()
-    problem = doctor.mismatch(args.isolated, inspected) or doctor.matcher_problem(inspected)
+    problem = (doctor.mismatch(args.isolated, inspected) or doctor.matcher_problem(inspected)
+               or doctor.guard_shape_problem())
     if problem:
         raise PplError("SCHEMA_INVALID", problem)
     # Setup is checked before the model gate so a missing models step is told as
@@ -161,6 +162,10 @@ def cmd_init(args):
     state = run.init(args.task_id, args.tracker_url, args.repo, isolated=args.isolated,
                      risk=args.risk, model_check=model_check, harness=harness_record)
     store.write_json(paths.run_dir(args.task_id) / "harness.json", snapshot)
+    # after the run exists, so a refusal's stderr stays the one JSON line it is
+    warning = doctor.dispatch_warning()
+    if warning:
+        sys.stderr.write("warning: %s\n" % warning)
     print(status.card(state["task_id"]))
     return 0
 
@@ -173,6 +178,9 @@ def cmd_doctor(args):
     problem = doctor.matcher_problem(result)
     if problem:
         print(problem)
+    for line in (doctor.guard_shape_problem(), doctor.dispatch_warning()):
+        if line:
+            print(line)
     if result.get("hook_runs_problem"):
         print(result["hook_runs_problem"])
     return 0
@@ -770,13 +778,20 @@ def cmd_harness(args):
             print("warning: models not verified: %s (run ppl models verify)"
                   % ", ".join("%s (%s)" % (row["model"], row["state"]) for row in unverified))
         return 0
-    doc = harness.load(args.name)
     if args.action == "validate":
-        for warning in harness.validate(doc, args.name):
-            print("warning: %s" % warning)
-        print("harness %s is valid" % doc["harness"]["name"])
-    else:
-        print(json.dumps(doc, indent=2, sort_keys=True, default=str))
+        # the studio's check, so a harness passes or fails the same way in both
+        result = harness.verify(args.name, args.name)
+        if args.json:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            for warning in result["warnings"]:
+                print("warning: %s" % warning)
+        if result["errors"]:
+            raise PplError("HARNESS_INVALID", result["errors"][0])
+        if not args.json:
+            print("harness %s is valid" % harness.load(args.name)["harness"]["name"])
+        return 0
+    print(json.dumps(harness.load(args.name), indent=2, sort_keys=True, default=str))
     return 0
 
 
@@ -1142,6 +1157,8 @@ def build_parser():
     p.add_argument("action", choices=["validate", "list", "show", "add", "apply"])
     p.add_argument("name", nargs="?")
     p.add_argument("--source")
+    p.add_argument("--json", action="store_true",
+                   help="validate: print {errors, warnings} as the studio shows them")
 
     p = sub.add_parser("setup")
     # No choices= here: argparse before 3.12 checks the empty list against

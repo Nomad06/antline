@@ -33,6 +33,8 @@ guard hook at a different path would be read as this one's.
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +42,10 @@ from pathlib import Path
 from .errors import PplError
 
 GUARD_MARKER = "ppl_guard.py"
+DISPATCH_MARKER = "ppl_dispatch.py"
+HOOK_EVENTS = (("PreToolUse", GUARD_MARKER), ("SubagentStart", DISPATCH_MARKER))
+_VERSION_PROBE = "import sys; print('%d.%d.%d' % sys.version_info[:3])"
+_VERSIONS = {}
 
 # The matcher README.md "Hooks" registers the guard on: match everything, let the hook
 # decide. An explicit tool list is fragile (a tracker prefix it does not name, a read
@@ -173,15 +179,157 @@ def hook_runs(cwd=None, workspace=None):
     return {"ok": True, "problem": None}
 
 
-def guarded_tool_names():
-    """Every tool name the guard hook acts on, read from the hook file itself
-    (hooks/ppl_guard.py:GUARDED_TOOL_NAMES) so this check cannot drift from the cage."""
+def _hooks_on_path():
     hooks_dir = str(Path(__file__).resolve().parents[1] / "hooks")
     if hooks_dir not in sys.path:
         # Appended, not inserted: the hooks directory must never shadow a ppl module.
         sys.path.append(hooks_dir)
+
+
+def guarded_tool_names():
+    """Every tool name the guard hook acts on, read from the hook file itself
+    (hooks/ppl_guard.py:GUARDED_TOOL_NAMES) so this check cannot drift from the cage."""
+    _hooks_on_path()
     import ppl_guard
     return tuple(ppl_guard.GUARDED_TOOL_NAMES)
+
+
+def _python_floor():
+    _hooks_on_path()
+    import ppl_python_floor
+    return tuple(ppl_python_floor.MINIMUM)
+
+
+def _hooks_of(doc, event, marker):
+    """Every hook under `event` in a parsed settings document whose command
+    names `marker`, in order."""
+    hooks = doc.get("hooks") if isinstance(doc, dict) else None
+    entries = hooks.get(event) if isinstance(hooks, dict) else None
+    found = []
+    for entry in entries if isinstance(entries, list) else []:
+        inner = entry.get("hooks") if isinstance(entry, dict) else None
+        for hook in inner if isinstance(inner, list) else []:
+            if isinstance(hook, dict) and marker in str(hook.get("command", "")):
+                found.append(hook)
+    return found
+
+
+def _python_version(interpreter):
+    """(version, None) of `interpreter`, or (None, why it gave none). An answer
+    is kept per interpreter file and its mtime: one ppl init judges the same
+    entries in inspect, guard_shape_problem and dispatch_warning."""
+    found = shutil.which(interpreter)
+    try:
+        key = (interpreter, found, os.stat(found).st_mtime_ns) if found else None
+    except OSError:
+        key = None
+    if key in _VERSIONS:
+        return _VERSIONS[key]
+    try:
+        result = subprocess.run([interpreter, "-I", "-c", _VERSION_PROBE], capture_output=True,
+                                text=True, stdin=subprocess.DEVNULL,
+                                timeout=HOOK_RUN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return None, "which did not answer in %d seconds" % HOOK_RUN_TIMEOUT_SECONDS
+    except OSError as exc:
+        return None, "which could not be started: %s" % exc
+    version = result.stdout.strip()
+    answer = (version, None)
+    if result.returncode != 0 or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        answer = (None, "which did not answer as a Python interpreter")
+    if key:
+        _VERSIONS[key] = answer
+    return answer
+
+
+def _interpreter_problem(command):
+    """None when the first word of a hook command answers as a Python that
+    meets the hooks' floor, else what is wrong with it. The interpreter is
+    asked, the hook is not run."""
+    floor = _python_floor()
+    shown = "%d.%d" % floor
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return "has a command that does not split into words"
+    first = words[0] if words else ""
+    if first.endswith((GUARD_MARKER, DISPATCH_MARKER)):
+        return ("runs the script itself, so its shebang picks the interpreter: name a Python "
+                "%s or newer first" % shown)
+    version, why = _python_version(first)
+    if version is None:
+        return "runs under %s, %s" % (first, why)
+    if tuple(int(part) for part in version.split(".")[:2]) < floor:
+        return "runs under %s, Python %s, older than the %s the hooks need" % (first, version, shown)
+    return None
+
+
+def _shape_problems(doc, path):
+    """(marker, problem) for every guard and dispatch hook in a parsed settings
+    document that Claude Code would not run as a bounded command under a Python
+    that meets the floor."""
+    problems = []
+    for event, marker in HOOK_EVENTS:
+        for hook in _hooks_of(doc, event, marker):
+            found = []
+            if hook.get("type") != "command":
+                found.append('has type %r, not "command", so Claude Code never runs it'
+                             % (hook.get("type"),))
+            timeout = hook.get("timeout")
+            if timeout is None:
+                found.append("has no timeout")
+            elif isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+                found.append("has timeout %r, not a positive number of seconds" % (timeout,))
+            interpreter = _interpreter_problem(str(hook.get("command", "")))
+            if interpreter:
+                found.append(interpreter)
+            problems += [(marker, "%s: the %s hook %s" % (path, marker, text)) for text in found]
+    return problems
+
+
+def _readable_settings(cwd):
+    """(path, parsed document) of each settings file that exists and parses
+    into an object. `inspect` reports the others."""
+    found = []
+    for path in (local_settings_path(cwd), global_settings_path()):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict):
+            found.append((path, doc))
+    return found
+
+
+def guard_shape_problem(cwd=None):
+    """None when every guard entry in the two settings files is a command with
+    a timeout run by a Python that meets the floor, else the message `ppl
+    init` refuses with: an entry of another shape never fires, or fires
+    unbounded, or denies every role call."""
+    problems = [text for path, doc in _readable_settings(cwd)
+                for marker, text in _shape_problems(doc, path) if marker == GUARD_MARKER]
+    if not problems:
+        return None
+    return ("%s. Run `ppl setup claude` to write the hook entries again (README.md \"Hooks\")."
+            % "; ".join(problems))
+
+
+def dispatch_warning(cwd=None):
+    """None unless a guard is registered while the SubagentStart dispatch hook
+    is in no settings file, or is there in the wrong shape: the dispatch cap
+    then counts only the dispatches recorded by hand. `ppl init` warns."""
+    settings = _readable_settings(cwd)
+    if not any(_hooks_of(doc, "PreToolUse", GUARD_MARKER) for _, doc in settings):
+        return None
+    problems = [text for path, doc in settings
+                for marker, text in _shape_problems(doc, path) if marker == DISPATCH_MARKER]
+    if not any(_hooks_of(doc, "SubagentStart", DISPATCH_MARKER) for _, doc in settings):
+        problems.append("the SubagentStart dispatch hook (%s) is registered in neither %s nor %s"
+                        % (DISPATCH_MARKER, local_settings_path(cwd), global_settings_path()))
+    if not problems:
+        return None
+    return ("%s. The dispatch cap counts only the dispatches recorded by hand until it fires: run "
+            "`ppl setup claude` to write the hook entries again." % "; ".join(problems))
 
 
 def matcher_covers(matcher, tool_name):
@@ -228,12 +376,18 @@ def _location(path):
     "uncovered" is the list of guarded tool names the file's guard matchers
     never pass to the hook - empty for a complete registration, None whenever
     the state is not a confirmed yes, since there is no matcher to judge.
+
+    "dispatch_hook" is "registered" or "missing" for the SubagentStart
+    dispatch hook, and "hook_shape" is "ok" or the problems of the guard and
+    dispatch entries (`_shape_problems`), None when the file holds neither.
+    Both are None for a file that could not be read.
     """
-    def result(state, detail=None, uncovered=None):
-        return {"state": state, "detail": detail, "uncovered": uncovered}
+    def result(state, detail=None, uncovered=None, dispatch_hook=None, hook_shape=None):
+        return {"state": state, "detail": detail, "uncovered": uncovered,
+                "dispatch_hook": dispatch_hook, "hook_shape": hook_shape}
 
     if not path.exists():
-        return result("no")
+        return result("no", dispatch_hook="missing")
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -244,10 +398,15 @@ def _location(path):
         return result("unknown", "%s is not valid JSON: %s" % (path, exc))
     if not isinstance(doc, dict):
         return result("unknown", "%s does not contain a JSON object" % path)
+    hooks = {"dispatch_hook": "missing", "hook_shape": None}
+    if _hooks_of(doc, "SubagentStart", DISPATCH_MARKER):
+        hooks["dispatch_hook"] = "registered"
+    if any(_hooks_of(doc, event, marker) for event, marker in HOOK_EVENTS):
+        hooks["hook_shape"] = "; ".join(text for _, text in _shape_problems(doc, path)) or "ok"
     matchers = _guard_matchers(doc)
     if not matchers:
-        return result("no")
-    return result("yes", uncovered=uncovered_by(matchers))
+        return result("no", **hooks)
+    return result("yes", uncovered=uncovered_by(matchers), **hooks)
 
 
 def _location_state(path):

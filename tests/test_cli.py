@@ -2041,6 +2041,79 @@ class TestInitVerifiesTheGuardMatcher(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
 
+class TestInitChecksTheHookShape(unittest.TestCase):
+    """A guard entry of the wrong shape never fires or fires unbounded, so ppl
+    init refuses it. A missing dispatch hook leaves the dispatch cap counting
+    only the spends recorded by hand, which is worth a warning, not a refusal."""
+
+    def setUp(self):
+        self.global_path = doctor.global_settings_path()
+        if self.global_path.exists():
+            self.global_path.unlink()
+        self.local_dir = tmphome.mkdtemp(prefix="ppllocaldir-")
+        patcher = mock.patch.dict(os.environ, {"PPL_LOCAL_SETTINGS_DIR": self.local_dir})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, guard_changes, dispatch=True):
+        entries = setup.hook_entries(fixtures.SOURCE)
+        guard = entries["PreToolUse"]
+        guard["hooks"][0].update(guard_changes)
+        guard["hooks"][0] = {k: v for k, v in guard["hooks"][0].items() if v is not None}
+        doc = {"hooks": {"PreToolUse": [guard]}}
+        if dispatch:
+            doc["hooks"]["SubagentStart"] = [entries["SubagentStart"]]
+        path = Path(self.local_dir) / ".claude" / "settings.local.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+    def init(self, task_id):
+        return call("init", task_id, "--tracker-url", "u", "--repo", "/tmp/repo",
+                    "--harness", "example-maven")
+
+    def test_init_refuses_a_guard_entry_that_is_not_a_command(self):
+        # rule: R-DOCTOR-HOOK-SHAPE
+        self.write({"type": "prompt"})
+        code, _, err = self.init("DEMO-9920")
+        self.assertEqual(code, 2)
+        doc = json.loads(err)
+        self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
+        self.assertIn("type 'prompt'", doc["message"])
+        self.assertIn("ppl setup claude", doc["message"])
+
+    def test_init_refuses_a_guard_entry_without_a_timeout(self):
+        # rule: R-DOCTOR-HOOK-SHAPE
+        self.write({"timeout": None})
+        code, _, err = self.init("DEMO-9921")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertIn("no timeout", json.loads(err)["message"])
+
+    def test_init_refuses_a_guard_under_an_interpreter_older_than_the_floor(self):
+        # rule: R-DOCTOR-HOOK-SHAPE
+        old = Path(tmphome.mkdtemp(prefix="pplfakepython-")) / "python3"
+        old.write_text("#!/bin/sh\necho 3.9.6\n", encoding="utf-8")
+        old.chmod(0o755)
+        hook = fixtures.SOURCE / "hooks" / "ppl_guard.py"
+        self.write({"command": "%s %s" % (old, hook)})
+        code, _, err = self.init("DEMO-9924")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertIn("Python 3.9.6", json.loads(err)["message"])
+
+    def test_init_warns_when_the_dispatch_hook_is_missing(self):
+        self.write({}, dispatch=False)
+        code, _, err = self.init("DEMO-9922")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: ", err)
+        self.assertIn("ppl_dispatch.py", err)
+
+    def test_init_is_quiet_when_both_entries_are_the_ones_setup_writes(self):
+        self.write({})
+        code, _, err = self.init("DEMO-9923")
+        self.assertEqual((code, err), (0, ""))
+
+
 class TestInitVerifiesTheGuardHookRegistration(unittest.TestCase):
     """Finding 1(b): isolated=true asserts a fact - that the guard hook is
     registered only where an isolated run assumes it is - that nothing

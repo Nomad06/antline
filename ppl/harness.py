@@ -5,6 +5,7 @@ and `ppl harness apply`, never at hook time: `ppl init --harness` freezes the
 slice the guard enforces into runs/<task>/harness.json (see snapshot) and the
 hook reads that file."""
 import copy
+import difflib
 import os
 import re
 import shlex
@@ -35,6 +36,45 @@ _GATE_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # verdict.REQUIRED_CHECKS names it, the done gate wants a pass receipt for it.
 FOCUSED_TESTS_GATE = "focused-tests"
+TEST_CLASS_PLACEHOLDER = "<test_class>"
+# What the orchestrator fills in a gate command at run time: the focused test's
+# name and the placeholders of the rendered recipe (_RC_IDIOM, _EVIDENCE and the
+# `git -C <worktree>` line). A project placeholder such as example-maven's
+# <module> is accepted when skill/gates.md or skill/extra-gates.md names it,
+# since those fragments are where the orchestrator reads what to put there.
+RUN_TIME_PLACEHOLDERS = (TEST_CLASS_PLACEHOLDER, "<worktree>", "<TASK-ID>", "<SHA>",
+                         "<GENERATION>")
+_PLACEHOLDER_RE = re.compile(r"<[A-Za-z_][A-Za-z0-9_-]*>")
+_PLACEHOLDER_FRAGMENTS = ("skill/gates.md", "skill/extra-gates.md")
+SKILL_FRAGMENTS = ("skill/gates.md", "skill/baseline.md", "skill/extra-gates.md",
+                   "skill/tracker-close.md")
+FRAGMENTS = SKILL_FRAGMENTS + tuple("templates/%s.part" % role for role in routing.REQUIRED_ROLES)
+# Every table and key harness.toml may hold, listed once: validate refuses any
+# other and names the nearest of these. [env] (None) takes any shell variable
+# name, and a key starting with _ is ppl's own (load adds _dir).
+KNOWN_KEYS = {
+    "harness": ("name", "format"),
+    "repo": ("path", "default_branch", "worktrees"),
+    "task": ("key_pattern", "url_template"),
+    "tracker": ("kind", "mcp_prefixes", "write_operations", "read_tools"),
+    "forge": ("kind", "mcp_server"),
+    "knowledge": ("skills", "extra_tools"),
+    "env": None,
+    "gate": ("name", "command"),
+    "guard": ("shape",),
+    "guard.shape": ("argv0", "env_prefix", "required_flags", "one_goal_of", "free_args"),
+}
+# The rendered SKILL.md is always in the orchestrator's context and an agent file
+# is a role's whole prompt. Measured 2026-10-18 on the two shipped examples: the
+# largest SKILL.md is example-maven's, the largest agent file ppl-verifier's.
+# Over the soft cap is a warning, over the hard cap a refusal.
+SKILL_MEASURED_BYTES = 38114
+AGENT_MEASURED_BYTES = 5313
+SKILL_SOFT_BYTES = SKILL_MEASURED_BYTES * 3 // 2
+SKILL_HARD_BYTES = SKILL_MEASURED_BYTES * 3
+AGENT_SOFT_BYTES = AGENT_MEASURED_BYTES * 3 // 2
+AGENT_HARD_BYTES = AGENT_MEASURED_BYTES * 3
+_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _CLONE_TIMEOUT_SECONDS = 120
 _KIND_WORDS = {str: "a non-empty string", int: "an integer", list: "a list"}
 
@@ -120,9 +160,102 @@ def _check_granted_tools(doc, knowledge, source):
                   "no role may hold one" % (index, tool))
 
 
-def validate(doc, source):
-    """Raise HARNESS_INVALID on a structural error, return a list of warnings."""
+def _nearest(word, known):
+    return difflib.get_close_matches(word, list(known), n=1, cutoff=0.0)[0]
+
+
+def _check_row_keys(row, where, known, source):
+    for key in row:
+        if key not in known:
+            _fail(source, "unknown key %s%s, the nearest known key is %s%s"
+                  % (where, key, where, _nearest(key, known)))
+
+
+def _check_known_keys(doc, source):
+    """Refuse a table or key ppl never reads: a typo such as [[gates]] or
+    [[guard.shapes]] would otherwise drop what it holds without a word."""
+    tables = [name for name in KNOWN_KEYS if "." not in name]
+    for key, value in doc.items():
+        if key.startswith("_") or key in tables:
+            continue
+        what = "table [%s]" % key if isinstance(value, (dict, list)) else "key %s" % key
+        _fail(source, "unknown %s, the nearest known table is [%s]" % (what, _nearest(key, tables)))
+    for table in tables:
+        value = doc.get(table)
+        if KNOWN_KEYS[table] is None:
+            continue
+        if isinstance(value, dict):
+            _check_row_keys(value, "%s." % table, KNOWN_KEYS[table], source)
+        elif table == "gate" and isinstance(value, list):
+            for index, row in enumerate(value):
+                if isinstance(row, dict):
+                    _check_row_keys(row, "gate[%d]." % index, KNOWN_KEYS["gate"], source)
+    shapes = (doc.get("guard") or {}).get("shape") if isinstance(doc.get("guard"), dict) else None
+    for index, row in enumerate(shapes if isinstance(shapes, list) else []):
+        if isinstance(row, dict):
+            _check_row_keys(row, "guard.shape[%d]." % index, KNOWN_KEYS["guard.shape"], source)
+
+
+def _fragment_text(doc, rel):
+    path = Path(doc["_dir"]) / rel
+    return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+
+
+def _check_gate_commands(doc, gates, source):
+    """Refuse a harness no run can close: a focused-tests gate is what `ppl
+    transition done` wants a pass receipt for, and it runs one named test. Refuse
+    a placeholder the orchestrator would leave in the command as written."""
+    focused = [index for index, gate in enumerate(gates) if gate["name"] == FOCUSED_TESTS_GATE]
+    if not focused:
+        _fail(source, "no [[gate]] is named %s: ppl transition done requires a pass receipt under "
+              "that exact name, so a run with this harness could never close" % FOCUSED_TESTS_GATE)
+    for index in focused:
+        if TEST_CLASS_PLACEHOLDER not in gates[index]["command"]:
+            _fail(source, "gate[%d] (%s) command must carry %s, the one test the test writer "
+                  "names for the task" % (index, FOCUSED_TESTS_GATE, TEST_CLASS_PLACEHOLDER))
+    named = set()
+    if doc.get("_dir"):
+        for rel in _PLACEHOLDER_FRAGMENTS:
+            named.update(_PLACEHOLDER_RE.findall(_fragment_text(doc, rel)))
+    for index, gate in enumerate(gates):
+        for placeholder in _PLACEHOLDER_RE.findall(gate["command"]):
+            if placeholder not in RUN_TIME_PLACEHOLDERS and placeholder not in named:
+                _fail(source, "gate[%d].command uses %s, which the orchestrator would run as "
+                      "written: it fills only %s, and a project placeholder must be named in %s "
+                      "to say what goes there" % (index, placeholder, ", ".join(RUN_TIME_PLACEHOLDERS),
+                                                   " or ".join(_PLACEHOLDER_FRAGMENTS)))
+
+
+def _check_files(doc, source):
+    """Refuse a role overlay for no role, warn about any other file under skill/
+    or templates/ that nothing reads. Dot files are left alone."""
     warnings = []
+    root = Path(doc["_dir"])
+    for folder in ("skill", "templates"):
+        if not (root / folder).is_dir():
+            continue
+        for path in sorted((root / folder).rglob("*")):
+            rel = path.relative_to(root)
+            if any(part.startswith(".") for part in rel.parts) or not path.is_file():
+                continue
+            rel = rel.as_posix()
+            if rel in FRAGMENTS:
+                continue
+            if folder == "templates" and path.parent == root / folder and path.suffix == ".part":
+                _fail(source, "%s is an overlay for no role, so it never renders: name it after "
+                      "one of %s" % (rel, ", ".join(routing.REQUIRED_ROLES)))
+            known = SKILL_FRAGMENTS if folder == "skill" else FRAGMENTS[len(SKILL_FRAGMENTS):]
+            warnings.append("%s is never read, delete it or rename it to one of: %s"
+                            % (rel, ", ".join(known)))
+    return warnings
+
+
+def validate(doc, source):
+    """Raise HARNESS_INVALID on a structural error, return a list of warnings.
+    The checks of the harness directory run when the document carries its _dir,
+    as one from load does."""
+    warnings = []
+    _check_known_keys(doc, source)
     fmt = _require(doc, "harness", "format", source, kind=int)
     if fmt != FORMAT:
         _fail(source, "harness.format %s is not supported, this ppl reads format %s" % (fmt, FORMAT))
@@ -183,9 +316,9 @@ def validate(doc, source):
                   "'-' only), it names the gate's log and rc files" % (index, gate["name"]))
         if not _text(gate.get("command")):
             _fail(source, "gate[%d].command is required" % index)
-    if not any(gate["name"] == FOCUSED_TESTS_GATE for gate in gates):
-        warnings.append("no [[gate]] is named %s: ppl transition done requires a pass receipt "
-                        "under that exact name" % FOCUSED_TESTS_GATE)
+    _check_gate_commands(doc, gates, source)
+    if doc.get("_dir"):
+        warnings.extend(_check_files(doc, source))
     for index, row in enumerate(shape_rows(doc, source)):
         if not row["required_flags"] and not row["one_goal_of"]:
             warnings.append("guard.shape[%d] (%s) has no required_flags and no one_goal_of: "
@@ -249,8 +382,8 @@ def load(name_or_path):
             doc = tomllib.load(handle)
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         _fail(str(path), "not valid TOML: %s" % exc)
-    validate(doc, str(path))
     doc["_dir"] = str(directory)
+    validate(doc, str(path))
     return doc
 
 
@@ -513,9 +646,131 @@ def apply(name, agents_dir=None, skills_dir=None):
               "by name" % doc["_dir"])
     config.active_harness()
     skill_files = render_skill(doc)
+    _size_warnings(skill_files, {role: routing.render(role, doc) for role in routing.REQUIRED_ROLES})
     skill_target = (Path(skills_dir) if skills_dir is not None else config.skills_dir()) / "pipeline"
     agents = routing.apply(doc, agents_dir)
     skill = _write_files(skill_files, skill_target)
     active = installed_name(doc)
     config.set_active_harness(active)
     return {"agents": agents, "skill": skill, "active": active}
+
+
+def agent_texts(doc):
+    """role -> the agent file apply would write, rendered with the shipped
+    routing.example.toml so the size check does not depend on routing.toml."""
+    example = routing.loads((paths.defaults_dir() / "routing.example.toml")
+                            .read_text(encoding="utf-8"))
+    return {role: routing.render(role, doc, example) for role in routing.REQUIRED_ROLES}
+
+
+def _size_warnings(skill_files, agents):
+    """Refuse HARNESS_INVALID when the rendered SKILL.md or an agent file is over
+    its hard cap, return a warning for each one over its soft cap."""
+    outputs = [("the rendered SKILL.md", skill_files["SKILL.md"], SKILL_SOFT_BYTES,
+                SKILL_HARD_BYTES, "skill/ fragments")]
+    outputs += [("the rendered agent file %s.md" % role, text, AGENT_SOFT_BYTES, AGENT_HARD_BYTES,
+                 "templates/%s.part" % role) for role, text in agents.items()]
+    warnings = []
+    for what, text, soft, hard, fix in outputs:
+        size = len(text.encode("utf-8"))
+        if size > hard:
+            raise PplError("HARNESS_INVALID", "%s is %d bytes, over the hard cap of %d bytes: "
+                           "shorten the %s" % (what, size, hard, fix))
+        if size > soft:
+            warnings.append("%s is %d bytes, over the soft cap of %d bytes: every byte of it is "
+                            "read on every run, shorten the %s" % (what, size, soft, fix))
+    return warnings
+
+
+def require_absolute_repo(doc):
+    path = doc["repo"]["path"]
+    try:
+        absolute = Path(path).expanduser().is_absolute()
+    except RuntimeError:
+        absolute = False
+    if not absolute:
+        raise PplError("HARNESS_INVALID", "repo.path %r must be an absolute path or start with "
+                       "~/: setup would resolve a relative one against the working directory "
+                       "of whatever runs it, ppl serve included" % path)
+
+
+def _assignments_and_program(command):
+    """(count of leading NAME=value words, program) of a command split as the
+    guard splits one. A command shlex cannot split gives (None, its first word)."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = None
+    if words is None:
+        raw = command.split()
+        return None, raw[0] if raw else ""
+    count = 0
+    while count < len(words) and _ASSIGNMENT_RE.match(words[count]):
+        count += 1
+    return count, words[count] if count < len(words) else ""
+
+
+def unrunnable_focused_tests(doc):
+    """A warning when the test writer's shell would refuse the focused-tests
+    command, the one gate the skill hands the test worker: the guard takes
+    leading NAME=value words only for a shape with env_prefix on, and the
+    program must be the argv0 of a shape."""
+    rows = shape_rows(doc)
+    for gate in doc.get("gate") or []:
+        if gate["name"] == FOCUSED_TESTS_GATE:
+            count, program = _assignments_and_program(gate["command"])
+            if not program:
+                return []
+            named = [row for row in rows if row["argv0"] == program]
+            if count is not None and any(row["env_prefix"] or not count for row in named):
+                return []
+            text = ("the test writer cannot run the focused-tests command: no command shape "
+                    "starts with %s" % program)
+            if count and named:
+                text += " that takes an environment prefix"
+            return [text]
+    return []
+
+
+def _missing_skills(doc):
+    """A warning per knowledge skill found in neither the configured skills
+    directory nor ~/.claude/skills. Only a warning: a plugin skill lives elsewhere."""
+    from . import config, doctor
+    roots = []
+    try:
+        roots.append(config.skills_dir())
+    except PplError:
+        pass
+    if doctor.claude_home() / "skills" not in roots:
+        roots.append(doctor.claude_home() / "skills")
+    warnings = []
+    for name in (doc.get("knowledge") or {}).get("skills") or []:
+        if not any((root / name / "SKILL.md").is_file() for root in roots):
+            warnings.append("knowledge.skills names %s, which is not under %s: the briefer is "
+                            "told to load a skill it may not find (fine for a plugin skill)"
+                            % (name, " or ".join(str(root) for root in roots)))
+    return warnings
+
+
+def verify(name_or_path, source):
+    """{"errors": [...], "warnings": [...]} for the harness at `name_or_path`,
+    what `ppl harness validate` prints and the studio shows for a draft or a
+    file it saves: loaded and validated, repo.path absolute, the skill and
+    every agent file rendered, each held to its size cap. A problem comes
+    back as the one error, never a raise."""
+    try:
+        doc = load(str(name_or_path))
+        warnings = validate(doc, source)
+        require_absolute_repo(doc)
+        warnings += _size_warnings(render_skill(doc), agent_texts(doc))
+        warnings += unrunnable_focused_tests(doc)
+        warnings += _missing_skills(doc)
+    except PplError as exc:
+        return {"errors": [exc.message], "warnings": []}
+    except UnicodeDecodeError as exc:
+        return {"errors": ["harness %s: a harness file is not UTF-8 text: %s" % (source, exc)],
+                "warnings": []}
+    except (TypeError, ValueError) as exc:
+        return {"errors": ["harness %s: a value has the wrong type and cannot be rendered: %s"
+                           % (source, exc)], "warnings": []}
+    return {"errors": [], "warnings": warnings}

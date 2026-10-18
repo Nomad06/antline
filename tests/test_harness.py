@@ -126,11 +126,24 @@ class TestLoadAndValidate(HarnessTestCase):
             warnings = harness.validate(harness.load(name), name)
             self.assertFalse(any("tracker.mcp_prefixes" in w for w in warnings), warnings)
 
-    def test_no_focused_tests_gate_warns(self):
+    def test_no_focused_tests_gate_is_refused(self):
+        # rule: R-HARNESS-FOCUSED-TESTS-REQUIRED
         name = self.mutate("example-generic", 'name = "focused-tests"', 'name = "unit-tests"')
-        warnings = harness.validate(harness.load(name), name)
-        self.assertTrue(any("focused-tests" in w and "ppl transition done" in w for w in warnings),
-                        warnings)
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("focused-tests", caught.exception.message)
+        self.assertIn("ppl transition done", caught.exception.message)
+
+    def test_a_focused_tests_command_without_the_test_class_placeholder_is_refused(self):
+        # rule: R-HARNESS-FOCUSED-TESTS-REQUIRED
+        name = self.mutate("example-generic", 'command = "make test TEST=<test_class>"',
+                           'command = "make test"')
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("<test_class>", caught.exception.message)
+        self.assertIn("gate[2]", caught.exception.message)
 
     def test_gate_name_that_is_not_a_plain_word_is_refused(self):
         for bad in ("my gate", "../build", "a;b", "$(x)", "lint\\n"):
@@ -147,6 +160,245 @@ class TestLoadAndValidate(HarnessTestCase):
                 harness.load(name)
             self.assertEqual(caught.exception.code, "HARNESS_INVALID", bad)
             self.assertIn("[env]", caught.exception.message, bad)
+
+
+class TestStrictValidation(HarnessTestCase):
+    def refused(self, name):
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        return caught.exception.message
+
+    def write(self, name, rel, text="note\n"):
+        path = paths.harness_dir(name) / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_a_gate_placeholder_the_orchestrator_cannot_fill_is_refused(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        name = self.mutate("example-generic", 'command = "make build"',
+                           'command = "make build TARGET=<target>"')
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("gate[0].command", caught.exception.message)
+        self.assertIn("<target>", caught.exception.message)
+        self.assertIn("<test_class>", caught.exception.message)
+
+    def test_a_misspelt_test_class_placeholder_is_refused(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        name = self.mutate("example-generic", 'command = "make test TEST=<test_class>"',
+                           'command = "make test TEST=<test_class> ONLY=<testclass>"')
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertIn("<testclass>", caught.exception.message)
+
+    def test_the_run_time_placeholders_are_accepted_in_any_gate(self):
+        name = self.mutate("example-generic", 'command = "make build"',
+                           'command = "make build DIR=<worktree> T=<TASK-ID> S=<SHA> G=<GENERATION>"')
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
+    def test_a_placeholder_the_harness_gates_fragment_names_is_accepted(self):
+        # example-maven's gates.md says what <module> stands for
+        fixtures.install_harness("example-maven")
+        doc = harness.load("example-maven")
+        self.assertIn("<module>", doc["gate"][0]["command"])
+        self.assertEqual(harness.validate(doc, "example-maven"), [])
+        (paths.harness_dir("example-maven") / "skill" / "gates.md").unlink()
+        self.assertIn("<module>", self.refused("example-maven"))
+
+    def test_an_overlay_for_an_unknown_role_is_refused(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        fixtures.install_harness("example-generic")
+        self.write("example-generic", "templates/ppl-codeworker.part")
+        with self.assertRaises(PplError) as caught:
+            harness.load("example-generic")
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("templates/ppl-codeworker.part", caught.exception.message)
+        self.assertIn("ppl-code-worker", caught.exception.message)
+
+    def test_an_unknown_table_is_refused_naming_the_nearest_known_one(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        name = self.mutate("example-generic", "[[gate]]", "[[gates]]")
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("unknown table [gates]", caught.exception.message)
+        self.assertIn("[gate]", caught.exception.message)
+
+    def test_an_unknown_key_is_refused_naming_the_nearest_known_one(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        cases = (("[[guard.shape]]", "[[guard.shapes]]", "guard.shapes", "guard.shape"),
+                 ('command = "make lint"', 'comand = "make lint"', "gate[1].comand",
+                  "gate[1].command"),
+                 ("one_goal_of = [", "one_goals_of = [", "guard.shape[0].one_goals_of",
+                  "guard.shape[0].one_goal_of"),
+                 ('default_branch = "main"', 'default_brench = "main"', "repo.default_brench",
+                  "repo.default_branch"))
+        for old, new, unknown, nearest in cases:
+            with self.subTest(unknown=unknown):
+                name = self.mutate("example-generic", old, new)
+                with self.assertRaises(PplError) as caught:
+                    harness.load(name)
+                self.assertIn("unknown key %s" % unknown, caught.exception.message)
+                self.assertIn(nearest, caught.exception.message)
+
+    def test_a_top_level_key_outside_any_table_is_refused(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        name = self.mutate("example-generic", "[harness]", 'nmae = "x"\n[harness]')
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertIn("unknown key nmae", caught.exception.message)
+
+    def test_env_keys_stay_free(self):
+        name = self.mutate("example-maven", 'JAVA_HOME = "/opt/jdk"',
+                           'JAVA_HOME = "/opt/jdk"\nMAVEN_OPTS = "-Xmx2g"\nANY_NAME_AT_ALL = "x"')
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
+    def test_a_file_under_skill_that_is_no_fragment_is_warned_about(self):
+        fixtures.install_harness("example-generic")
+        self.write("example-generic", "skill/gate.md")
+        self.write("example-generic", "skill/notes/more.md")
+        warnings = harness.validate(harness.load("example-generic"), "example-generic")
+        for rel in ("skill/gate.md", "skill/notes/more.md"):
+            self.assertTrue(any(rel in w and "never read" in w and "skill/gates.md" in w
+                                for w in warnings), (rel, warnings))
+
+    def test_a_file_under_templates_that_is_not_a_part_is_warned_about(self):
+        fixtures.install_harness("example-generic")
+        self.write("example-generic", "templates/ppl-code-worker.md")
+        warnings = harness.validate(harness.load("example-generic"), "example-generic")
+        self.assertTrue(any("templates/ppl-code-worker.md" in w and "never read" in w
+                            and "templates/ppl-code-worker.part" in w for w in warnings), warnings)
+
+    def test_dot_files_are_not_warned_about(self):
+        fixtures.install_harness("example-generic")
+        self.write("example-generic", "skill/.gitkeep")
+        self.write("example-generic", "templates/.DS_Store")
+        self.assertEqual(harness.validate(harness.load("example-generic"), "example-generic"), [])
+
+
+class TestVerify(HarnessTestCase):
+    def setUp(self):
+        super().setUp()
+        claude_home = tmphome.mkdtemp(prefix="pplclaudehome-")
+        self.skills = Path(tmphome.mkdtemp(prefix="pplskills-"))
+        patcher = mock.patch.dict(os.environ, {"PPL_CLAUDE_HOME": claude_home,
+                                               "PPL_SKILLS_DIR": str(self.skills)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.claude_skills = Path(claude_home) / "skills"
+
+    def overlay(self, name, role, size):
+        path = paths.harness_dir(name) / "templates" / ("%s.part" % role)
+        path.write_text("x" * size + "\n", encoding="utf-8")
+
+    def test_both_examples_verify_clean(self):
+        for name in ("example-generic", "example-maven"):
+            fixtures.install_harness(name)
+            self.assertEqual(harness.verify(name, name), {"errors": [], "warnings": []}, name)
+
+    def test_the_caps_are_one_and_a_half_and_three_times_the_largest_example(self):
+        self.assertEqual(harness.SKILL_SOFT_BYTES, harness.SKILL_MEASURED_BYTES * 3 // 2)
+        self.assertEqual(harness.SKILL_HARD_BYTES, harness.SKILL_MEASURED_BYTES * 3)
+        self.assertEqual(harness.AGENT_SOFT_BYTES, harness.AGENT_MEASURED_BYTES * 3 // 2)
+        self.assertEqual(harness.AGENT_HARD_BYTES, harness.AGENT_MEASURED_BYTES * 3)
+        largest_skill = largest_agent = 0
+        for name in ("example-generic", "example-maven"):
+            fixtures.install_harness(name)
+            doc = harness.load(name)
+            largest_skill = max(largest_skill,
+                                len(harness.render_skill(doc)["SKILL.md"].encode("utf-8")))
+            largest_agent = max(largest_agent, *(len(text.encode("utf-8"))
+                                                 for text in harness.agent_texts(doc).values()))
+        # the shipped text may grow a little before the caps are measured again
+        self.assertLess(largest_skill, harness.SKILL_SOFT_BYTES)
+        self.assertLess(largest_agent, harness.AGENT_SOFT_BYTES)
+
+    def test_an_agent_file_over_the_hard_cap_is_refused(self):
+        # rule: R-HARNESS-SIZE-CAP
+        fixtures.install_harness("example-generic")
+        self.overlay("example-generic", "ppl-verifier", harness.AGENT_HARD_BYTES)
+        result = harness.verify("example-generic", "example-generic")
+        self.assertEqual(len(result["errors"]), 1, result)
+        self.assertIn("ppl-verifier", result["errors"][0])
+        self.assertIn("%d bytes" % harness.AGENT_HARD_BYTES, result["errors"][0])
+
+    def test_an_agent_file_over_the_soft_cap_is_warned_about(self):
+        fixtures.install_harness("example-generic")
+        self.overlay("example-generic", "ppl-verifier", harness.AGENT_SOFT_BYTES)
+        result = harness.verify("example-generic", "example-generic")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(len(result["warnings"]), 1, result)
+        self.assertIn("ppl-verifier", result["warnings"][0])
+        self.assertIn("%d bytes" % harness.AGENT_SOFT_BYTES, result["warnings"][0])
+
+    def test_a_skill_over_the_hard_cap_is_refused(self):
+        # rule: R-HARNESS-SIZE-CAP
+        fixtures.install_harness("example-generic")
+        (paths.harness_dir("example-generic") / "skill" / "tracker-close.md").write_text(
+            "word " * (harness.SKILL_HARD_BYTES // 5), encoding="utf-8")
+        result = harness.verify("example-generic", "example-generic")
+        self.assertEqual(len(result["errors"]), 1, result)
+        self.assertIn("SKILL.md", result["errors"][0])
+        self.assertIn("%d bytes" % harness.SKILL_HARD_BYTES, result["errors"][0])
+        fixtures.install_routing()
+        with self.assertRaises(PplError) as caught:
+            harness.apply("example-generic", agents_dir=tmphome.mkdtemp(prefix="pplagents-"),
+                          skills_dir=self.skills)
+        self.assertEqual(caught.exception.message, result["errors"][0])
+        self.assertEqual(list(self.skills.iterdir()), [])
+
+    def test_apply_refuses_an_agent_file_over_the_hard_cap_and_writes_nothing(self):
+        # rule: R-HARNESS-SIZE-CAP
+        fixtures.install_harness("example-generic")
+        fixtures.install_routing()
+        self.overlay("example-generic", "ppl-code-worker", harness.AGENT_HARD_BYTES)
+        agents = Path(tmphome.mkdtemp(prefix="pplagents-"))
+        with self.assertRaises(PplError) as caught:
+            harness.apply("example-generic", agents_dir=agents, skills_dir=self.skills)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("ppl-code-worker", caught.exception.message)
+        self.assertEqual(list(agents.iterdir()), [])
+        self.assertEqual(list(self.skills.iterdir()), [])
+        self.assertIsNone(config.active_harness())
+
+    def test_a_knowledge_skill_found_nowhere_is_warned_about(self):
+        name = self.mutate("example-generic", "skills = []", 'skills = ["team-kb"]')
+        result = harness.verify(name, name)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(len(result["warnings"]), 1, result)
+        self.assertIn("team-kb", result["warnings"][0])
+        self.assertIn(str(self.skills), result["warnings"][0])
+
+    def test_a_knowledge_skill_in_either_skills_directory_is_not_warned_about(self):
+        name = self.mutate("example-generic", "skills = []", 'skills = ["team-kb", "lang-kb"]')
+        (self.skills / "team-kb").mkdir()
+        (self.skills / "team-kb" / "SKILL.md").write_text("x\n", encoding="utf-8")
+        (self.claude_skills / "lang-kb").mkdir(parents=True)
+        (self.claude_skills / "lang-kb" / "SKILL.md").write_text("x\n", encoding="utf-8")
+        self.assertEqual(harness.verify(name, name), {"errors": [], "warnings": []})
+
+    def test_a_focused_tests_command_no_shape_lets_the_test_worker_run_is_warned_about(self):
+        name = self.mutate("example-generic", 'command = "make test TEST=<test_class>"',
+                           'command = "pytest -q <test_class>"')
+        self.assertEqual(harness.verify(name, name)["warnings"], [
+            "the test writer cannot run the focused-tests command: no command shape starts "
+            "with pytest"])
+
+    def test_a_relative_repo_path_is_refused(self):
+        name = self.mutate("example-generic", 'path = "/home/dev/src/project"',
+                           'path = "src/project"')
+        result = harness.verify(name, name)
+        self.assertIn("absolute", result["errors"][0])
+
+    def test_a_structural_error_comes_back_as_the_only_error(self):
+        name = self.mutate("example-generic", 'kind = "github"', 'kind = "bitbucket"')
+        result = harness.verify(name, name)
+        self.assertEqual(result["warnings"], [])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("forge.kind", result["errors"][0])
 
 
 class TestListAndAdd(HarnessTestCase):
@@ -539,6 +791,41 @@ class TestHarnessCli(HarnessTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "HARNESS_INVALID")
         self.assertIn("forge.kind", json.loads(err)["message"])
+
+    def test_validate_json_prints_errors_and_warnings(self):
+        self.mutate("example-generic", 'one_goal_of = ["build", "lint", "test", "integration"]',
+                    "one_goal_of = []")
+        code, out, err = call("harness", "validate", "example-generic", "--json")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out), harness.verify("example-generic", "example-generic"))
+        self.assertEqual(json.loads(out)["errors"], [])
+        self.assertIn("no required_flags and no one_goal_of", json.loads(out)["warnings"][0])
+
+    def test_validate_json_of_an_invalid_harness_prints_the_error_and_exits_2(self):
+        self.mutate("example-maven", 'kind = "gitlab"', 'kind = "bitbucket"')
+        code, out, err = call("harness", "validate", "example-maven", "--json")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "HARNESS_INVALID")
+        result = json.loads(out)
+        self.assertEqual(result["warnings"], [])
+        self.assertIn("forge.kind", result["errors"][0])
+
+    def test_validate_runs_the_checks_the_studio_runs(self):
+        self.mutate("example-generic", 'path = "/home/dev/src/project"', 'path = "src/project"')
+        code, _, err = call("harness", "validate", "example-generic")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "HARNESS_INVALID")
+        self.assertIn("absolute", json.loads(err)["message"])
+
+    def test_validate_refuses_an_agent_file_over_the_hard_cap(self):
+        # rule: R-HARNESS-SIZE-CAP
+        target = fixtures.install_harness("example-generic")
+        (target / "templates" / "ppl-briefer.part").write_text(
+            "x" * harness.AGENT_HARD_BYTES, encoding="utf-8")
+        code, _, err = call("harness", "validate", "example-generic")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "HARNESS_INVALID")
+        self.assertIn("ppl-briefer", json.loads(err)["message"])
 
     def test_show_prints_the_parsed_document(self):
         fixtures.install_harness("example-maven")

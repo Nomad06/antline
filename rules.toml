@@ -595,13 +595,13 @@ residual = "the md files are untrusted text a model reads: the item checks drop 
 
 [[rule]]
 id = "R-STUDIO-SAME-VALIDATION"
-statement = "A harness draft the studio checks or installs is refused by the same harness.validate and role-tool composition the CLI runs, so a draft that grants a role a tracker write tool or a joined tool list is refused in the browser as it is on the command line. Install writes the request's draft to a private directory, validates that copy and hands it to the setup harness step, and a draft name ending, in any letter case, in .git, .replacing or .replaced is refused before anything is written. The same name rule, harness.check_name, holds on every path that installs a harness: the setup harness step from the browser and the terminal, for a given or a defaulted name, ppl harness add, and the studio's add and create. The setup harness step also refuses a harness source that is not an example or installed harness name, a git URL or an absolute path, before it copies anything."
+statement = "A harness draft the studio checks or installs, and a harness file it saves, is refused by the same harness.verify that ppl harness validate runs (validation, an absolute repo.path, the skill and every agent file rendered with role-tool composition, the size caps), and both return the same errors and warnings for the same harness, so a draft that grants a role a tracker write tool or a joined tool list is refused in the browser as it is on the command line. Install writes the request's draft to a private directory, validates that copy and hands it to the setup harness step, and a draft name ending, in any letter case, in .git, .replacing or .replaced is refused before anything is written. The same name rule, harness.check_name, holds on every path that installs a harness: the setup harness step from the browser and the terminal, for a given or a defaulted name, ppl harness add, and the studio's add and create. The setup harness step also refuses a harness source that is not an example or installed harness name, a git URL or an absolute path, before it copies anything."
 scope = "panel"
 event = "POST /api/harness/draft/check, POST /api/harness/draft/install, POST /api/setup/harness, ppl setup harness, ppl harness add"
 enforcement = "blocking"
-hook_or_check = "ppl/studio/drafts.py:check, ppl/studio/drafts.py:install, ppl/harness.py:validate, ppl/routing.py:role_tools, ppl/studio/drafts.py:check_name, ppl/harness.py:check_name, ppl/harness.py:add, ppl/setup.py:_check_source"
-deny_test = "tests/test_studio_drafts.py::TestCheck::test_a_draft_granting_a_tracker_write_tool_is_refused, tests/test_studio_drafts.py::TestCheck::test_a_draft_granting_a_joined_tool_list_is_refused, tests/test_studio_drafts.py::TestInstall::test_install_refuses_an_invalid_draft_before_setup_runs, tests/test_studio_drafts.py::TestCheck::test_a_joined_forge_server_name_is_refused_by_role_tool_composition, tests/test_studio_drafts.py::TestCheck::test_the_names_setup_keeps_for_its_own_directories_are_refused, tests/test_studio_drafts.py::TestCheck::test_the_reserved_endings_are_refused_in_any_letter_case, tests/test_studio_drafts.py::TestInstall::test_install_refuses_a_reserved_name_before_it_writes_anything, tests/test_studio_drafts.py::TestDraftRoutes::test_the_install_route_refuses_a_reserved_name_at_once, tests/test_harness.py::TestAddEdges::test_check_name_takes_a_plain_name_and_refuses_the_reserved_endings_in_any_case, tests/test_harness.py::TestAddEdges::test_add_refuses_a_reserved_name_unless_it_is_setups_own_staging, tests/test_harness.py::TestHarnessCli::test_add_refuses_a_name_setup_keeps_for_its_own_directories, tests/test_setup.py::TestNonInteractive::test_a_reserved_harness_name_given_or_defaulted_is_refused_before_any_copy, tests/test_setup.py::TestNonInteractive::test_a_relative_harness_source_is_refused_before_any_copy, tests/test_setup.py::TestCli::test_the_harness_step_refuses_a_reserved_name_or_a_relative_source, tests/test_studio_wizard.py::TestWizardApi::test_the_harness_route_refuses_a_name_setup_keeps_so_no_install_deletes_it_later, tests/test_studio_wizard.py::TestWizardApi::test_the_harness_route_refuses_a_relative_source_before_any_copy"
-allow_test = "tests/test_studio_drafts.py::TestCheck::test_a_preset_draft_checks_clean, tests/test_studio_drafts.py::TestInstall::test_a_concurrent_check_does_not_change_what_install_installs, tests/test_setup.py::TestNonInteractive::test_a_home_relative_harness_source_is_taken"
+hook_or_check = "ppl/studio/drafts.py:check, ppl/studio/drafts.py:install, ppl/harness.py:verify, ppl/studio/drafts.py:verify, ppl/studio/files.py:check_harness, ppl/cli.py:cmd_harness, ppl/harness.py:validate, ppl/routing.py:role_tools, ppl/studio/drafts.py:check_name, ppl/harness.py:check_name, ppl/harness.py:add, ppl/setup.py:_check_source"
+deny_test = "tests/test_studio_drafts.py::TestCheck::test_a_draft_granting_a_tracker_write_tool_is_refused, tests/test_studio_drafts.py::TestCheck::test_a_draft_granting_a_joined_tool_list_is_refused, tests/test_studio_drafts.py::TestInstall::test_install_refuses_an_invalid_draft_before_setup_runs, tests/test_studio_drafts.py::TestCheck::test_a_joined_forge_server_name_is_refused_by_role_tool_composition, tests/test_studio_drafts.py::TestCheck::test_the_names_setup_keeps_for_its_own_directories_are_refused, tests/test_studio_drafts.py::TestCheck::test_the_reserved_endings_are_refused_in_any_letter_case, tests/test_studio_drafts.py::TestInstall::test_install_refuses_a_reserved_name_before_it_writes_anything, tests/test_studio_drafts.py::TestDraftRoutes::test_the_install_route_refuses_a_reserved_name_at_once, tests/test_harness.py::TestAddEdges::test_check_name_takes_a_plain_name_and_refuses_the_reserved_endings_in_any_case, tests/test_harness.py::TestAddEdges::test_add_refuses_a_reserved_name_unless_it_is_setups_own_staging, tests/test_harness.py::TestHarnessCli::test_add_refuses_a_name_setup_keeps_for_its_own_directories, tests/test_setup.py::TestNonInteractive::test_a_reserved_harness_name_given_or_defaulted_is_refused_before_any_copy, tests/test_setup.py::TestNonInteractive::test_a_relative_harness_source_is_refused_before_any_copy, tests/test_setup.py::TestCli::test_the_harness_step_refuses_a_reserved_name_or_a_relative_source, tests/test_studio_wizard.py::TestWizardApi::test_the_harness_route_refuses_a_name_setup_keeps_so_no_install_deletes_it_later, tests/test_studio_wizard.py::TestWizardApi::test_the_harness_route_refuses_a_relative_source_before_any_copy, tests/test_studio_drafts.py::TestSameAnswerAsTheCli::test_a_draft_the_cli_refuses_is_refused_in_the_studio, tests/test_studio_files.py::TestCheckHarness::test_a_file_ppl_never_reads_gets_the_answer_the_cli_gives"
+allow_test = "tests/test_studio_drafts.py::TestCheck::test_a_preset_draft_checks_clean, tests/test_studio_drafts.py::TestSameAnswerAsTheCli::test_the_cli_and_the_studio_return_the_same_errors_and_warnings, tests/test_studio_drafts.py::TestInstall::test_a_concurrent_check_does_not_change_what_install_installs, tests/test_setup.py::TestNonInteractive::test_a_home_relative_harness_source_is_taken"
 owner = "panel"
 residual = "the flags the form shows for a permissive shape are advice, not a refusal: a user who ticks them installs the shape, and the guard enforces it as written"
 
@@ -2000,6 +2000,54 @@ deny_test = "tests/test_cli.py::TestInitHarness::test_init_refuses_a_task_id_out
 allow_test = "tests/test_cli.py::TestInitHarness::test_init_with_harness_writes_the_snapshot"
 owner = "ppl"
 residual = ""
+
+[[rule]]
+id = "R-HARNESS-FOCUSED-TESTS-REQUIRED"
+statement = "harness.validate refuses HARNESS_INVALID a harness with no [[gate]] named focused-tests, or one whose focused-tests command does not carry <test_class>: ppl transition done wants a pass receipt under that name, so a run with such a harness could never close. Every harness load runs it, so ppl harness validate, apply, add, the setup harness step, the studio and ppl init all refuse it."
+scope = "ppl CLI and panel"
+event = "harness.load, ppl harness validate, ppl harness apply, ppl init, studio draft check"
+enforcement = "blocking"
+hook_or_check = "ppl/harness.py:validate, ppl/harness.py:_check_gate_commands"
+deny_test = "tests/test_harness.py::TestLoadAndValidate::test_no_focused_tests_gate_is_refused, tests/test_harness.py::TestLoadAndValidate::test_a_focused_tests_command_without_the_test_class_placeholder_is_refused"
+allow_test = "tests/test_harness.py::TestLoadAndValidate::test_both_examples_load_clean"
+owner = "harness"
+residual = "the check reads the gate's name and the placeholder only: a focused-tests command that runs every test, or ignores the name it is given, passes"
+
+[[rule]]
+id = "R-HARNESS-UNKNOWN-KEY"
+statement = "harness.validate refuses HARNESS_INVALID a harness that names something ppl never reads: a table or key outside harness.KNOWN_KEYS ([env] keys stay free), with the nearest known key in the message, a gate placeholder outside <test_class>, <worktree>, <TASK-ID>, <SHA> and <GENERATION> that neither skill/gates.md nor skill/extra-gates.md names, and a templates/*.part whose role is not one of the six. A file under skill/ or templates/ that is no fragment is a warning."
+scope = "ppl CLI and panel"
+event = "harness.load, ppl harness validate, ppl harness apply, ppl init, studio draft check"
+enforcement = "blocking"
+hook_or_check = "ppl/harness.py:validate, ppl/harness.py:_check_known_keys, ppl/harness.py:_check_gate_commands, ppl/harness.py:_check_files"
+deny_test = "tests/test_harness.py::TestStrictValidation::test_an_unknown_table_is_refused_naming_the_nearest_known_one, tests/test_harness.py::TestStrictValidation::test_an_unknown_key_is_refused_naming_the_nearest_known_one, tests/test_harness.py::TestStrictValidation::test_a_top_level_key_outside_any_table_is_refused, tests/test_harness.py::TestStrictValidation::test_a_gate_placeholder_the_orchestrator_cannot_fill_is_refused, tests/test_harness.py::TestStrictValidation::test_a_misspelt_test_class_placeholder_is_refused, tests/test_harness.py::TestStrictValidation::test_an_overlay_for_an_unknown_role_is_refused"
+allow_test = "tests/test_harness.py::TestStrictValidation::test_env_keys_stay_free, tests/test_harness.py::TestStrictValidation::test_the_run_time_placeholders_are_accepted_in_any_gate, tests/test_harness.py::TestStrictValidation::test_a_placeholder_the_harness_gates_fragment_names_is_accepted, tests/test_harness.py::TestStrictValidation::test_a_file_under_skill_that_is_no_fragment_is_warned_about"
+owner = "harness"
+residual = "a project placeholder counts as named once either gates fragment mentions it anywhere, whatever the fragment says about it, and a placeholder in a skill fragment itself is not checked"
+
+[[rule]]
+id = "R-HARNESS-SIZE-CAP"
+statement = "harness.verify refuses HARNESS_INVALID a harness whose rendered SKILL.md is over harness.SKILL_HARD_BYTES or whose rendered agent file is over harness.AGENT_HARD_BYTES, three times the largest the shipped examples render, and warns over 1.5 times. harness.apply refuses on the hard cap before it writes anything, so an oversized harness is never applied."
+scope = "ppl CLI and panel"
+event = "ppl harness validate, ppl harness apply, studio draft check and save"
+enforcement = "blocking"
+hook_or_check = "ppl/harness.py:verify, ppl/harness.py:_size_warnings, ppl/harness.py:apply"
+deny_test = "tests/test_harness.py::TestVerify::test_apply_refuses_an_agent_file_over_the_hard_cap_and_writes_nothing, tests/test_harness.py::TestVerify::test_a_skill_over_the_hard_cap_is_refused, tests/test_harness.py::TestHarnessCli::test_validate_refuses_an_agent_file_over_the_hard_cap"
+allow_test = "tests/test_harness.py::TestVerify::test_both_examples_verify_clean, tests/test_harness.py::TestVerify::test_an_agent_file_over_the_soft_cap_is_warned_about"
+owner = "harness"
+residual = "only the two outputs that are read whole on every run are capped: the rest of the skill (references/) is not, and a harness applied before the caps existed stays applied until its next apply"
+
+[[rule]]
+id = "R-DOCTOR-HOOK-SHAPE"
+statement = "ppl doctor reports per settings file dispatch_hook (registered or missing) and hook_shape (ok or the problems of the guard and dispatch entries: type not command, no timeout, an interpreter that does not answer as Python 3.11 or newer). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook is not, or has such a problem."
+scope = "hook registration"
+event = "ppl doctor, ppl init"
+enforcement = "blocking"
+hook_or_check = "ppl/doctor.py:_shape_problems, ppl/doctor.py:guard_shape_problem, ppl/doctor.py:dispatch_warning, ppl/cli.py:cmd_init"
+deny_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_entry_that_is_not_a_command, tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_entry_without_a_timeout, tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_under_an_interpreter_older_than_the_floor"
+allow_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_is_quiet_when_both_entries_are_the_ones_setup_writes, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_the_dispatch_hook_is_missing, tests/test_doctor.py::TestHookShape::test_the_entries_setup_writes_are_well_shaped_and_register_the_dispatch_hook"
+owner = "ppl"
+residual = "judged on the two settings files ppl reads, at doctor and init time, with the interpreter looked up on ppl's own PATH, which may differ from the PATH Claude Code spawns hooks with. A missing dispatch hook is only a warning: SubagentStart cannot block anyway (R-DISPATCH-HOOK-CANNOT-BLOCK)"
 
 [[rule]]
 id = "R-SKILL-GENERATED"

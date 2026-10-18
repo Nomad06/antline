@@ -645,7 +645,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 163 rows: 119 `blocking`, 17 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 167 rows: 123 `blocking`, 17 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -669,6 +669,22 @@ recipes and the `[[guard.shape]]` command shapes), `skill/` fragments and `templ
 overlays. Two examples ship in `defaults/harnesses/`: `example-maven` (GitLab, Maven gates) and
 `example-generic` (GitHub, make gates). `ppl harness add` installs one from a directory or a
 git URL, `ppl harness validate` checks it.
+
+`ppl harness validate [--json]` runs `harness.verify`, the check the studio runs on a draft or a
+saved harness file, and prints its `{errors, warnings}` [R-STUDIO-SAME-VALIDATION]. Every load of
+a harness refuses `HARNESS_INVALID` one with no `[[gate]]` named `focused-tests`, or whose
+`focused-tests` command does not carry `<test_class>`, since `ppl transition done` wants a pass
+receipt under that name [R-HARNESS-FOCUSED-TESTS-REQUIRED]. It also refuses a table or key
+`harness.KNOWN_KEYS` does not list (`[env]` keys stay free), naming the nearest known one, a gate
+placeholder other than `<test_class>`, `<worktree>`, `<TASK-ID>`, `<SHA>` and `<GENERATION>`
+that neither `skill/gates.md` nor `skill/extra-gates.md` names (example-maven's `<module>` is
+named in its `gates.md`), and a `templates/*.part` for a role that is not one of the six
+[R-HARNESS-UNKNOWN-KEY]. Any other file under `skill/` or `templates/` is a warning, as is a
+`knowledge.skills` name found neither under the configured skills directory nor under
+`~/.claude/skills`, and a focused-tests command no `[[guard.shape]]` lets the test worker run.
+`harness.verify` and `ppl harness apply` refuse a rendered `SKILL.md` over 114,342 bytes and an
+agent file over 15,939 bytes, three times the largest the shipped examples render (38,114 and
+5,313 bytes), and `harness.verify` warns over 1.5 times that [R-HARNESS-SIZE-CAP].
 
 `ppl harness apply <name>` renders the agent files and the orchestrator skill for that harness
 and records it as the active one. The skill is rendered from the `skill/` skeletons plus the
@@ -717,7 +733,13 @@ whose `agent_type` starts with `ppl-`, writes one stderr line naming the version
 exits 0, where it used to die on import and leave every call allowed [R-GUARD-PYTHON-FLOOR].
 `ppl doctor` runs every registered guard command once on an unroled Read of `/dev/null` and
 reports `hook_runs: false`, with the first stderr line and the remedy `ppl setup claude`, when
-one does not exit 0 with an empty stderr.
+one does not exit 0 with an empty stderr. Per settings file it also reports `dispatch_hook:
+registered|missing` and `hook_shape: ok|<problem>` for the guard and dispatch entries: `type`
+must be `"command"`, a `timeout` must be there, and the command's first word must answer as
+Python 3.11 or newer. `ppl init` refuses `SCHEMA_INVALID` while a guard entry has such a problem
+(of another type it never fires), and warns when a guard is registered but the dispatch hook is
+missing or malformed, since the dispatch cap then counts only the spends recorded by hand
+[R-DOCTOR-HOOK-SHAPE].
 
 ## 6. State machine
 
@@ -796,8 +818,9 @@ timed-out worker still carries what it had), not a gap in it.
 ```
 ppl setup [<step> ...]           # the onboarding wizard: paths, claude, models, harness, forge,
                                  # apply - every step skippable and re-runnable
-ppl harness validate|list|show|add|apply [<name>] [--source <directory or git url>]
-                                 # apply renders the agent files and the skill, sets the active one
+ppl harness validate|list|show|add|apply [<name>] [--source <directory or git url>] [--json]
+                                 # apply renders the agent files and the skill, sets the active one,
+                                 # validate --json prints {errors, warnings} as the studio shows them
 ppl models verify|status         # probe the tier models, show what is verified and when
 ppl init <TASK_ID> --repo <worktree-path> --tracker-url <url> --harness <name> [--isolated | --no-isolated]
          [--risk low|normal|high] [--skip-model-check]
@@ -1784,12 +1807,12 @@ CLI calls: a setup step runs through `setup.run` non-interactively, a preset thr
 `routing.preset_document`, the document `ppl routing preset` writes, saved as the edits below
 are saved, a harness draft through the setup harness step with `harness_from=<draft directory>`,
 and the last wizard screen shows `doctor.report()`, which `ppl doctor` prints. A draft is
-refused by the same `harness.validate` and role-tool composition the CLI runs
-[R-STUDIO-SAME-VALIDATION]. A file the studio edits in place
+refused by the same `harness.verify` that `ppl harness validate` runs, and the two return the
+same errors and warnings for the same harness [R-STUDIO-SAME-VALIDATION]. A file the studio edits in place
 (`routing.toml`, a harness file, a role's notes) has no CLI command of its own: `files.save_many`
 writes it, and only after the check ppl makes of it, `routing.validate_config` for `routing.toml`
-and, for a harness file or a role's notes, `harness.validate`, the skill render and the role-tool
-composition of the harness with that content laid in.
+and, for a harness file or a role's notes, `harness.verify` of the harness with that content
+laid in, any other file of the harness's `skill/` and `templates/` laid in by name.
 
 **Slow actions are jobs.** A model probe, the extraction or an apply runs in a worker
 thread: the route returns a job id and the page polls `/api/jobs/<id>`. One job of a kind runs
