@@ -106,6 +106,22 @@ class TestSchema(unittest.TestCase):
             })
         self.assertIn("name_contract", ctx.exception.message)
 
+    def test_brief_rejects_a_field_of_the_wrong_type(self):
+        # rule: R-BRIEF-SCHEMA
+        complete = {
+            "task_id": "DEMO-1", "purpose": "p", "success_outcome": "s",
+            "governing_requirements": [], "acceptance": ["AC-1"],
+            "allowed_write_paths": ["src/**"], "forbidden_paths": [],
+            "verification": ["focused-tests"], "open_decisions": [],
+            "name_contract": {"Foo.bar": "int"},
+        }
+        for field, wrong in (("allowed_write_paths", "src/**"), ("name_contract", ["Foo.bar"]),
+                             ("purpose", 7)):
+            with self.subTest(field=field), self.assertRaises(PplError) as ctx:
+                schema.validate_brief(dict(complete, **{field: wrong}))
+            self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+            self.assertIn("field %r must be" % field, ctx.exception.message)
+
     def test_brief_rejects_a_dict_shaped_acceptance_entry(self):
         # rule: R-BRIEF-SCHEMA (E1 CRITICAL, cycle 2 wave B). Only presence
         # (a non-empty list) was ever checked - the elements' shape was not.

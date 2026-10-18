@@ -1101,7 +1101,8 @@ Task state (`state.json`):
               "retry_used": 0, "retry_max": 3,
               "usd_used": 0.0, "usd_max": 0.0},
   "orchestrator": {"pid": 41233, "started_at": "2026-08-31T11:58:02Z"},
-  "mr": {"iid": null, "url": null, "approved_sha": null},
+  "mr": {"iid": null, "url": null, "approved_sha": null,
+         "merged_sha": null, "merged_url": null},
   "last_durable_fact": "focused tests passed on abc123",
   "next_safe_action": "run module suite",
   "unsafe_to_repeat": []

@@ -55,14 +55,15 @@ def set_approval(task_id, sha):
     return state
 
 
-_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+# 7 to 64 hex digits: an abbreviated sha up to a full SHA-256 one
+_HEX_RE = re.compile(r"[0-9a-fA-F]{7,64}")
 
 
 def record_merge(task_id, sha, url=None):
     """Record the merge the orchestrator observed on the forge. Valid only in merge_watch and
     only once [R-MERGE-OBSERVED-ONCE]. The tracker gate opens on merged_sha [R-JIRA-GATE]."""
-    if not sha or not _HEX_RE.match(sha):
-        raise PplError("SCHEMA_INVALID", "--sha must be a hexadecimal commit sha, got %r" % sha)
+    if not sha or not _HEX_RE.fullmatch(sha):
+        raise PplError("SCHEMA_INVALID", "--sha must be a commit sha of 7 to 64 hexadecimal digits, got %r" % sha)
     state = run.load(task_id)
     if state["stage"] != "merge_watch":
         raise PplError("ILLEGAL_TRANSITION",

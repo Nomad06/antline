@@ -75,8 +75,7 @@ refused as a stale attempt [R-LEASE-STALE-WRITE].
 add` and `ppl evidence add` record a role's output: pass `--from <role>` on every one of
 them, naming the role that wrote it (`orchestrator` for a gate receipt you wrote yourself).
 The first four refuse a call without a known one `SCHEMA_INVALID`, naming the value to pass,
-and
-`ppl evidence add` defaults to `orchestrator` [R-REFUSAL-RETRY-CAP].
+and `ppl evidence add` defaults to `orchestrator` [R-REFUSAL-RETRY-CAP].
 When one of them exits 2 with `SCHEMA_INVALID`, follow "The role output rule" in
 `references/escalation.md`: do not edit the content, redispatch that role once with the
 refusal quoted, and report a second refusal instead of trying a third time. `ppl` counts the
@@ -133,8 +132,8 @@ the reference of the stage `ppl show --json` reports.
 ## Operator commands
 
 The panel writes `control.json`. `ppl` checks it at `stage enter`, `brief set`,
-`baseline record`, `boundary set`, `mr set`, `merge observed`, `review approved`,
-`budget spend`, `transition` and `recover`, and refuses to move a paused, stopped or destroyed run - read-only commands
+`baseline record`, `boundary set`, `mr set`, `merge observed`, `review answered`,
+`review approved`, `budget spend`, `transition` and `recover`, and refuses to move a paused, stopped or destroyed run - read-only commands
 like `status`, `show` and `control get` keep working, so a paused run is still observable,
 and `control set resume` keeps working too, so the operator can lift their own halt [R-OPERATOR-HALT-CLI].
 `ppl park` and `ppl escalate` also stay available while paused - an operator halt must not

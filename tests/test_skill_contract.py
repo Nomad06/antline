@@ -259,6 +259,15 @@ class TestSkillContract(unittest.TestCase):
     def test_it_starts_with_recovery(self):
         self.assertIn("ppl recover", self.text)
 
+    def test_the_operator_commands_name_every_command_an_operator_halt_refuses(self):
+        # the eleven of R-OPERATOR-HALT-CLI, each a control.enforce call site in ppl/cli.py
+        section = self.text[self.text.index("## Operator commands"):self.text.index("## Hard rules")]
+        section = " ".join(section.split())
+        for command in ("stage enter", "brief set", "baseline record", "boundary set", "mr set",
+                        "merge observed", "review answered", "review approved", "budget spend",
+                        "transition", "recover"):
+            self.assertIn("`%s`" % command, section)
+
     def test_it_names_every_role(self):
         for role in ("ppl-briefer", "ppl-code-worker", "ppl-test-worker",
                      "ppl-verifier", "ppl-review-responder"):
@@ -400,6 +409,13 @@ class TestEveryRenderedFile(unittest.TestCase):
     def test_every_stage_enter_names_a_stage_of_the_state_machine(self):
         for name, files in RENDERED.items():
             self.assertEqual(unknown_stages(files), [], name)
+
+    def test_no_line_of_prose_is_a_lone_connective_left_by_a_rewrap(self):
+        stranded = ["%s %s:%d" % (name, path, number)
+                    for name, files in RENDERED.items() for path, text in sorted(files.items())
+                    for number, line in enumerate(text.splitlines(), start=1)
+                    if line.strip() in ("and", "or", "but", "then")]
+        self.assertEqual(stranded, [])
 
     def test_every_recovery_instruction_is_legal_from_the_stage_it_names(self):
         for name, files in RENDERED.items():

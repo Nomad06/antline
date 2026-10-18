@@ -1082,6 +1082,22 @@ class TestMergeObserved(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
+    def test_merge_observed_refuses_a_sha_too_short_to_name_a_commit(self):
+        from ppl import run
+        init_at_stage("DEMO-5815", "merge_watch", status="done")
+        code, _, err = call("merge", "observed", "--sha", "a", "--task", "DEMO-5815")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertIsNone(run.load("DEMO-5815")["mr"]["merged_sha"])
+
+    def test_merge_observed_refuses_a_sha_with_a_trailing_newline(self):
+        from ppl import run
+        init_at_stage("DEMO-5816", "merge_watch", status="done")
+        code, _, err = call("merge", "observed", "--sha", "a" * 40 + "\n", "--task", "DEMO-5816")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertIsNone(run.load("DEMO-5816")["mr"]["merged_sha"])
+
     def test_merge_observed_is_refused_while_paused(self):
         # rule: R-OPERATOR-HALT-CLI
         from ppl import control, run
