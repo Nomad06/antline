@@ -19,14 +19,15 @@ identically otherwise - and that is exactly how a real hole passes for a
 normal exception. `GAP:` is the second one and is counted. `PROPERTY:` is a
 stated fact with nothing for this code to enforce.
 
-The table is found next to this package rather than under `paths.home()`:
-it ships with the code it describes, and the suite redirects `PPL_HOME` to a
-temporary directory, where the table it needs to read would not be.
+The table is found under `paths.root()` rather than `paths.home()`: it ships
+with the code it describes, and the suite redirects `PPL_HOME` to a temporary
+directory, where the table it needs to read would not be.
 """
 import re
 import tomllib
 from pathlib import Path
 
+from . import paths
 from .errors import PplError
 
 FIELDS = ("id", "statement", "scope", "event", "enforcement", "hook_or_check",
@@ -70,7 +71,7 @@ NO_CHECK = "none"
 
 
 def default_path():
-    return Path(__file__).resolve().parents[1] / "rules.toml"
+    return paths.root() / "rules.toml"
 
 
 def load(path=None):

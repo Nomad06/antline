@@ -1,5 +1,6 @@
 import itertools
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -354,3 +355,14 @@ class TestArchivedRunsAreVisible(IsolatedFleet):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMetricsDocumentation(unittest.TestCase):
+    def test_the_docstring_lists_exactly_the_metrics_entry_returns(self):
+        listed = set()
+        for line in metrics.__doc__.splitlines():
+            if line.startswith("- **"):
+                listed.update(name.replace(" ", "_").lower()
+                              for name in re.findall(r"\*\*([A-Za-z ]+)\*\*", line))
+        returned = set(key.removesuffix("_seconds") for key in metrics._entry([], [], None))
+        self.assertEqual(listed, returned)

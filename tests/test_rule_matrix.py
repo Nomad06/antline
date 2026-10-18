@@ -16,6 +16,7 @@ import sys
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # tests/ is not a package, so the helper next to this file is imported by
 # path. It must be imported before PPL_HOME is chosen below.
@@ -912,6 +913,16 @@ class TestLoad(PplHomeTestCase):
 
     def test_the_real_table_loads(self):
         self.assertTrue(rules.load())
+
+    def test_the_default_table_follows_ppl_root(self):
+        real = rules.load()
+        checkout = Path(tmphome.mkdtemp(prefix="pplroot-"))
+        (checkout / "defaults").mkdir()
+        head, last = (REPO / "rules.toml").read_text(encoding="utf-8").rsplit("[[rule]]", 1)
+        (checkout / "rules.toml").write_text(head, encoding="utf-8")
+        with mock.patch.dict(os.environ, {"PPL_ROOT": str(checkout)}):
+            self.assertEqual(rules.default_path(), checkout / "rules.toml")
+            self.assertEqual(len(rules.load()), len(real) - 1)
 
 
 if __name__ == "__main__":

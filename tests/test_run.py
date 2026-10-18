@@ -743,3 +743,24 @@ class TestOpenDecisionsSchema(unittest.TestCase):
             schema.validate_brief(self.brief([{"question": "a", "cost_to_close_files": 1}]))
         self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
 
+
+
+class TestAttemptFieldRetired(unittest.TestCase):
+    def test_a_new_run_state_has_no_attempt_key(self):
+        run.init("DEMO-1301", "u", "/tmp/repo")
+        self.assertNotIn("attempt", run.load("DEMO-1301"))
+
+    def test_an_old_state_carrying_attempt_still_loads_and_shows(self):
+        import contextlib
+        import io
+        from ppl import cli
+        run.init("DEMO-1302", "u", "/tmp/repo")
+        state = run.load("DEMO-1302")
+        state["attempt"] = 1
+        run.save(state)
+        self.assertEqual(run.load("DEMO-1302")["attempt"], 1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["show", "--task", "DEMO-1302"]), 0)
+            self.assertEqual(cli.main(["show", "--task", "DEMO-1302", "--json"]), 0)
+        self.assertIn("DEMO-1302", out.getvalue())

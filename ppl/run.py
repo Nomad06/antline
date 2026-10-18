@@ -81,7 +81,6 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "candidate_sha": None,
         "spec_revision": None,
         "acceptance": [],
-        "attempt": 1,
         "attempt_id": None,
         "lease_generation": 1,
         "deadline": store.deadline_in(INACTIVITY_TIMEOUT_SECONDS),

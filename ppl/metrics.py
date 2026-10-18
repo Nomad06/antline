@@ -1,9 +1,9 @@
 """Fleet metrics and human labels.
 
 `ppl metrics` reads every run's `log.jsonl` and `verdicts/*.json` and computes
-six numbers, sliced by `producer`: defect escape rate, false FAIL rate,
-incomplete check rate, cost per accepted task, time to acceptance, human
-minutes.
+seven numbers, sliced by `producer`: defect escape rate, outcompeted rate,
+false FAIL rate, incomplete check rate, cost per accepted task, time to
+acceptance, human minutes.
 
 The one rule this module exists to hold: **a metric with no data prints that
 it is undefined, and never prints zero.** Zero is a claim ("we shipped no
@@ -15,8 +15,8 @@ never a bare 0. This is deliberately the same shape whether the absence is
 temporary (no labels filed yet) or structural (this pipeline has no data
 source for it at all):
 
-- **defect escape rate** and **false FAIL rate** need a human label
-  (`ppl label`) on top of a verdict - undefined until at least one exists
+- **defect escape rate**, **outcompeted rate** and **false FAIL rate** need a
+  human label (`ppl label`) on top of a verdict - undefined until at least one exists
   [R-METRIC-LABEL-DEPENDENT-UNDEFINED].
 - **incomplete check rate** and **time to acceptance** need at least one
   verdict, respectively one completed (`done`) task - undefined on an empty

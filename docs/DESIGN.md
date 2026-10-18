@@ -1008,7 +1008,6 @@ Task state (`state.json`):
   "candidate_sha": "abc123",
   "spec_revision": "sha256:...",
   "acceptance": ["AC-1", "AC-2"],
-  "attempt": 1,
   "budgets": {"dispatch_used": 9, "dispatch_norm": 21, "dispatch_hard": 34,
               "retry_used": 0, "retry_max": 3,
               "usd_used": 0.0, "usd_max": 0.0},
@@ -1319,7 +1318,7 @@ not the code's fault, which is the whole reason these outcomes exist. The routin
 ### 6.11 Metrics and labels
 
 `ppl metrics` reads every run's `log.jsonl` and `verdicts/*.json` under `PPL_HOME` and
-reports six numbers, sliced by `producer` (`provider:model`) and once more as `overall`.
+reports seven numbers, sliced by `producer` (`provider:model`) and once more as `overall`.
 **Every reader scans `runs/_archive/` as well as the live runs under `runs/`**
 [R-METRIC-SCANS-ARCHIVE], because defect escape and false FAIL are only knowable after a
 task has actually merged - which in the normal flow (`done -> merge_watch ->
@@ -1337,6 +1336,8 @@ itself contain a hyphen).
 
 - **defect escape rate** - of the accepted (`PASS`) verdicts a human has since labelled,
   the fraction labelled `defective`
+- **outcompeted rate** - of the accepted (`PASS`) verdicts a human has since labelled, the
+  fraction labelled `outcompeted` (a parallel implementation replaced the accepted candidate)
 - **false FAIL rate** - of the declined (`REWORK`/`BLOCKED`) verdicts a human has since
   labelled, the fraction labelled `correct`
 - **incomplete check rate** - of every verdict recorded, the fraction whose outcome is one
@@ -1355,7 +1356,7 @@ which one applies - deliberately kept as four and not folded together, because "
 build" and "needed and not built" are different states that should not read as the same
 thing, the same principle the rule matrix itself holds `n/a` rows to (5.5):
 
-- Defect escape rate and false FAIL rate need a human label on top of a verdict
+- Defect escape rate, outcompeted rate and false FAIL rate need a human label on top of a verdict
   (`ppl label`, below); undefined until at least one exists for a verdict of the matching
   kind [R-METRIC-LABEL-DEPENDENT-UNDEFINED]. Two causes are told apart, because
   conflating them prints a false reason with advice nobody can follow ("run `ppl label`"
