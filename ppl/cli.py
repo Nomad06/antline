@@ -7,7 +7,7 @@ import sys
 from . import (boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
                harness, metrics, models, paths, recover, refusals, review, routing, run, schema,
                setup, status, store, verdict, watchdog)
-from .errors import PplError
+from .errors import PplError, role_output
 
 
 def resolve_task(args):
@@ -70,11 +70,26 @@ def load_json_arg(path, what, kind=dict):
     AttributeError, exit 1, outside the documented 0/1/2 contract - and after
     the command had already written part of the run.
     """
+    return parse_json_doc(read_arg(path, what), path, what, kind)
+
+
+def load_role_output(path, what):
+    """load_json_arg for a role's output: a file that cannot be read is how the command
+    was called, a body that is not a JSON object is what the role returned."""
+    text = read_arg(path, what)
+    with role_output():
+        return parse_json_doc(text, path, what, dict)
+
+
+def read_arg(path, what):
     try:
         with open(path, "r", encoding="utf-8") as handle:
-            text = handle.read()
+            return handle.read()
     except OSError as exc:
         raise PplError("SCHEMA_INVALID", "%s file %s could not be read: %s" % (what, path, exc))
+
+
+def parse_json_doc(text, path, what, kind):
     doc = parse_json_arg(text, "%s file %s" % (what, path))
     if kind is not None and not isinstance(doc, kind):
         raise PplError("SCHEMA_INVALID",
@@ -224,14 +239,15 @@ def cmd_brief(args):
     if args.action == "challenge":
         require_current_generation(task_id, args.generation)
         require_retry_left(task_id, args)
-        doc = load_json_arg(args.file, "challenge")
+        doc = load_role_output(args.file, "challenge")
         state = run.record_challenge(task_id, doc)
         print("challenge %s bound to spec_revision %s"
               % (doc["verdict"], state["brief_challenge"]["spec_revision"]))
         return 0
     require_retry_left(task_id, args)
-    doc = load_json_arg(args.file, "brief")
-    schema.validate_brief(doc)
+    doc = load_role_output(args.file, "brief")
+    with role_output():
+        schema.validate_brief(doc)
     store.write_json(paths.run_dir(task_id) / "brief.json", doc)
     bound = {"write": doc["allowed_write_paths"], "forbid": doc["forbidden_paths"]}
     store.write_json(paths.run_dir(task_id) / "boundary.json", bound)
@@ -414,7 +430,7 @@ def cmd_verdict(args):
     # verdict.record itself sets state["candidate_sha"] once the verdict is
     # durably written, so it happens even when the second-consecutive-
     # incomplete park below raises after that write (R-VERIFICATION-UNAVAILABLE-PARK).
-    doc = verdict.record(task_id, load_json_arg(args.file, "verdict"), head)
+    doc = verdict.record(task_id, load_role_output(args.file, "verdict"), head)
     print("verdict %s recorded on %s" % (doc["verdict"], head))
     return 0
 
@@ -1174,28 +1190,50 @@ def main(argv=None):
     if args.command == "budget":
         args.amount = int(args.amount) if args.kind != "usd" else float(args.amount)
     try:
-        return COMMANDS[args.command](args)
+        code = COMMANDS[args.command](args)
     except PplError as err:
         error = err.as_dict()
         if err.code == "SCHEMA_INVALID":
-            note = count_refusal(args, err.message)
+            note = count_refusal(args, err)
             if note:
                 error["message"] = "%s - %s" % (err.message, note)
         sys.stderr.write(json.dumps(error, sort_keys=True) + "\n")
         return 2
+    if code == 0:
+        note_acceptance(args)
+    return code
 
 
-def count_refusal(args, message):
-    """Log a refused role output in its run and park the run on the second refusal for
-    the same key (refusals.record_refusal). Returns the sentence to add to the message."""
+def _role_output_run(args):
+    """(task_id, command) when this call records a role's output in a run that exists."""
     command = role_output_command(args)
     task_id = getattr(args, "task", None) or run.active()
-    if command is None or not task_id:
-        return None
-    # The refusal stands and is printed whatever fails here, so exit 2 keeps its JSON.
+    if command is None or not task_id or not run.state_path(task_id).exists():
+        return None, None
+    return task_id, command
+
+
+# Both helpers below are best effort: the command's own outcome stands and is printed
+# whatever fails here, so exit 2 keeps its JSON and exit 0 stays 0.
+def count_refusal(args, err):
+    """Log a refused role output in its run and park the run on the second refusal of
+    its content in a row (refusals.record_refusal). Returns the sentence to add to the
+    message."""
     try:
-        if not run.state_path(task_id).exists():
+        task_id, command = _role_output_run(args)
+        if task_id is None:
             return None
-        return refusals.record_refusal(task_id, command, args.from_role, message)
+        return refusals.record_refusal(task_id, command, args.from_role, err.message,
+                                       err.of_role_output)
     except Exception:
         return None
+
+
+def note_acceptance(args):
+    """An accepted call ends the run of refusals for its command and role."""
+    try:
+        task_id, command = _role_output_run(args)
+        if task_id is not None:
+            refusals.record_acceptance(task_id, command, args.from_role)
+    except Exception:
+        pass

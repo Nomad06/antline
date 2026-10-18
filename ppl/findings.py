@@ -37,7 +37,7 @@ import re
 import uuid
 
 from . import gitfacts, paths, run, store
-from .errors import PplError
+from .errors import PplError, role_output
 
 SEVERITIES = ("blocking", "important", "minor")
 
@@ -106,10 +106,11 @@ def add(task_id, severity, evidence, affected_sha, affected_path, owner=None, fi
     now, by default); `fix_link` is optional at creation and normally set
     later, once a fix exists, via `set_status`.
     """
-    _validate_severity(severity)
-    _validate_evidence(evidence)
-    _validate_sha(affected_sha)
-    _validate_path(affected_path)
+    with role_output():
+        _validate_severity(severity)
+        _validate_evidence(evidence)
+        _validate_sha(affected_sha)
+        _validate_path(affected_path)
     state = run.load(task_id)
     if not state.get("base_sha"):
         raise PplError("SCHEMA_INVALID",
@@ -117,11 +118,13 @@ def add(task_id, severity, evidence, affected_sha, affected_path, owner=None, fi
                        "so a finding's track can be derived against something" % task_id)
     track = _derive_track(state["repo"], state["base_sha"], affected_sha, affected_path)
     if track == TRACK_FOREIGN:
-        if not owner or not str(owner).strip():
-            raise PplError("SCHEMA_INVALID",
-                           "a finding outside the candidate's own diff (track=foreign) must "
-                           "record an owner to batch-escalate to - affected_path %r was not "
-                           "touched between base_sha and affected_sha" % affected_path)
+        with role_output():
+            if not owner or not str(owner).strip():
+                raise PplError("SCHEMA_INVALID",
+                               "a finding outside the candidate's own diff (track=foreign) "
+                               "must record an owner to batch-escalate to - affected_path %r "
+                               "was not touched between base_sha and affected_sha"
+                               % affected_path)
         status = "escalated"
     else:
         owner = owner or task_id

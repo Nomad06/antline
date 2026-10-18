@@ -1,5 +1,5 @@
 from . import boundary, evidence, findings, paths, run, schema, store
-from .errors import PplError
+from .errors import PplError, role_output
 
 REQUIRED_CHECKS = ("focused-tests", "secret-scan")
 
@@ -74,11 +74,12 @@ def _previous_verdict_outcome(task_id, sha):
 
 
 def record(task_id, doc, head_sha):
-    schema.validate_verdict(doc)
-    if doc["candidate_sha"] != head_sha:
-        raise PplError("SCHEMA_INVALID",
-                       "verdict is stale: it was produced for %s but head is %s"
-                       % (doc["candidate_sha"], head_sha))
+    with role_output():
+        schema.validate_verdict(doc)
+        if doc["candidate_sha"] != head_sha:
+            raise PplError("SCHEMA_INVALID",
+                           "verdict is stale: it was produced for %s but head is %s"
+                           % (doc["candidate_sha"], head_sha))
     # The same discipline as the SHA check just above, applied to the brief's
     # gate-relevant fields instead of the git head: `state["spec_revision"]`
     # is only ever rebound by `ppl brief set` or `ppl boundary set`
@@ -96,13 +97,14 @@ def record(task_id, doc, head_sha):
     # at the one place a run actually needs to be stopped, regardless of what
     # got recorded here along the way [R-BRIEF-SPEC-REVISION-STALE].
     bound_revision = run.load(task_id).get("spec_revision")
-    if bound_revision is not None and doc["spec_revision"] != bound_revision:
-        raise PplError("SCHEMA_INVALID",
-                       "verdict is stale: it was produced against spec_revision %s but the "
-                       "run is now bound to %s - the brief's name_contract, acceptance or "
-                       "write boundary changed (ppl brief set or ppl boundary set was called "
-                       "again) after this verdict was dispatched against it"
-                       % (doc["spec_revision"], bound_revision))
+    with role_output():
+        if bound_revision is not None and doc["spec_revision"] != bound_revision:
+            raise PplError("SCHEMA_INVALID",
+                           "verdict is stale: it was produced against spec_revision %s but the "
+                           "run is now bound to %s - the brief's name_contract, acceptance or "
+                           "write boundary changed (ppl brief set or ppl boundary set was "
+                           "called again) after this verdict was dispatched against it"
+                           % (doc["spec_revision"], bound_revision))
     # Read before the append below records this very call - see
     # _previous_verdict_outcome's own docstring for why.
     previous = _previous_verdict_outcome(task_id, head_sha)

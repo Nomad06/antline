@@ -1082,14 +1082,20 @@ naively re-reading the run's current stage would produce once it is already park
 Refusals (`log.jsonl`) - a `SCHEMA_INVALID` from `ppl brief set`, `brief challenge`,
 `verdict record`, `findings add` or `evidence add` appends a `refusal` event: `command`,
 `code`, `message` as `ppl` printed it (without the park note the second one carries), `role`
-(the `--from` value, `unknown` when the call gave none) and the run's `lease_generation`.
-The role gets the refusal once, quoted, and redispatches (the skill's escalation reference).
-The second refusal for the same command, role and generation is still printed as
+(the `--from` value, `unknown` when the call gave none), the run's `lease_generation` and
+`counted`. Only a refusal of the output itself is counted: an error raised inside
+`errors.role_output`, which wraps the document's parse and its schema and consistency checks
+in each of the five commands. An unreadable file, a missing `--generation` or a run with no
+brief yet is how the command was called, logged with `counted` false. The role gets
+the refusal once, quoted, and redispatches (the skill's escalation reference). The second
+counted refusal in a row for the same command, role and generation is still printed as
 `SCHEMA_INVALID`, `ppl` parks the run with blocker `FORMAT_RETRY_EXHAUSTED` and both
 refusals in `parking.json` under `refusals`, and a later call for that key is refused
-`FORMAT_RETRY_EXHAUSTED` before its input is read [R-REFUSAL-RETRY-CAP]. The count is read back from the log since the run last resumed from
-parking, so a resume clears it like any park, and `ppl recover` moves the generation, which
-starts a fresh one. Same pattern as `VERIFICATION_UNAVAILABLE` (6.10).
+`FORMAT_RETRY_EXHAUSTED` before its input is read [R-REFUSAL-RETRY-CAP]. The count is read
+back from the log: an accepted call for the key ends it (a `role_output_accepted` event,
+written only when a count was open), a resume from parking clears it like any park, and
+`ppl recover` moves the generation, which starts a fresh one. Same pattern as
+`VERIFICATION_UNAVAILABLE`, which also counts the second failure in a row (6.10).
 
 Review ledger (`threads.json`) - `{thread_id: {sha: {classification, at, last_note_id}}}`.
 This is what makes `ppl review pending` (section 8) safe to call every tick without ever
@@ -2043,9 +2049,9 @@ Only the exit-code rule has code behind it, the rest are recipes rendered into t
   [R-BUDGET-USD-BEFORE-DISPATCH n/a]. Zero means unlimited only for subscription providers, which have no dollar
   meter.
 - format violations: a role's output refused `SCHEMA_INVALID` goes back to the role once
-  with the refusal quoted, and the second refusal for the same command in one lease
-  generation parks the run with `FORMAT_RETRY_EXHAUSTED` - a third attempt is refused
-  [R-REFUSAL-RETRY-CAP]. Every refusal is a `refusal` event in `log.jsonl` (6.6).
+  with the refusal quoted, and the second refusal of that output in a row for the same
+  command in one lease generation parks the run with `FORMAT_RETRY_EXHAUSTED` - a third
+  attempt is refused [R-REFUSAL-RETRY-CAP]. Every refusal is a `refusal` event in `log.jsonl` (6.6).
 - context: on approaching the limit, the orchestrator parks with an exact handoff rather
   than compacting through a transition.
 
@@ -2104,7 +2110,7 @@ Free text does not route. Closed dictionary:
 | `HARNESS_INVALID` | a harness file fails validation | fix it, then `ppl harness validate <name>` |
 | `TIMED_OUT` | no `ppl` activity was recorded since the run's inactivity deadline (6.9) | `ppl recover`, inspect the stuck attempt, then resume or re-brief |
 | `VERIFICATION_UNAVAILABLE` | `ppl verdict record` parks the run [R-VERIFICATION-UNAVAILABLE-PARK]: the second consecutive INCONCLUSIVE/ERROR/CANCELLED/TIMEOUT verdict on the same `candidate_sha` (6.10) | inspect why the verifier keeps failing to reach a result on this sha, never just redispatch a third time |
-| `FORMAT_RETRY_EXHAUSTED` | a role's output was refused `SCHEMA_INVALID` twice for the same command in one generation [R-REFUSAL-RETRY-CAP] | inspect both refusals, fix the role prompt or the schema, then resume, never just redispatch a third time |
+| `FORMAT_RETRY_EXHAUSTED` | a role's output was refused `SCHEMA_INVALID` twice in a row for the same command in one generation [R-REFUSAL-RETRY-CAP] | inspect both refusals, fix the role prompt or the schema, then resume, never just redispatch a third time |
 
 A gap is not closed silently in code. Closing it in code merely means the next model sees
 the same empty space and could statistically pick different behavior. The gap is closed by

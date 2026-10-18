@@ -77,9 +77,10 @@ them, naming the role that wrote it (`orchestrator` for a gate receipt you wrote
 When one of them exits 2 with `SCHEMA_INVALID`, follow "The role output rule" in
 `references/escalation.md`: do not edit the content, redispatch that role once with the
 refusal quoted, and report a second refusal instead of trying a third time. `ppl` counts the
-refusals per command, role and lease generation, parks the run with `FORMAT_RETRY_EXHAUSTED`
-on the second and refuses a third call with that code before reading its input
-[R-REFUSAL-RETRY-CAP].
+refusals of the output itself in a row, per command, role and lease generation (an accepted
+call ends the count, a mistake in how you called the command is logged and not counted),
+parks the run with `FORMAT_RETRY_EXHAUSTED` on the second and refuses a third call with that
+code before reading its input [R-REFUSAL-RETRY-CAP].
 
 **Run `ppl doctor` here too, before you lean on anything below that talks about a hook
 stopping a tool call.** The guard hook is a `PreToolUse` hook registration in Claude Code

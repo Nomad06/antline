@@ -2764,11 +2764,85 @@ class TestRefusalRetryCap(unittest.TestCase):
         events = refusals_of("DEMO-1801")
         self.assertEqual(len(events), 1)
         self.assertEqual({key: events[0][key] for key in
-                          ("command", "code", "message", "role", "lease_generation")},
+                          ("command", "code", "message", "role", "lease_generation", "counted")},
                          {"command": "brief set", "code": "SCHEMA_INVALID",
                           "message": error["message"], "role": "ppl-briefer",
-                          "lease_generation": 1})
+                          "lease_generation": 1, "counted": True})
         self.assertNotEqual(run.load("DEMO-1801")["stage"], "parking")
+
+    def test_an_accepted_call_between_two_refusals_resets_the_count(self):
+        from ppl import run
+        self.init("DEMO-1813")
+        bad = write_text_file("not json")
+        self.brief_set("DEMO-1813", bad, "--from", "ppl-briefer")
+        self.assertEqual(self.brief_set("DEMO-1813", good_brief("DEMO-1813"),
+                                        "--from", "ppl-briefer")[0], 0)
+        code, _, err = self.brief_set("DEMO-1813", bad, "--from", "ppl-briefer")
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertNotEqual(run.load("DEMO-1813")["stage"], "parking")
+        self.brief_set("DEMO-1813", bad, "--from", "ppl-briefer")
+        self.assertEqual(run.load("DEMO-1813")["stage"], "parking")
+
+    def test_an_accepted_call_of_another_role_does_not_reset_the_count(self):
+        from ppl import run
+        self.init("DEMO-1814")
+        bad = write_text_file("not json")
+        self.brief_set("DEMO-1814", bad, "--from", "ppl-briefer")
+        self.assertEqual(self.brief_set("DEMO-1814", good_brief("DEMO-1814"),
+                                        "--from", "orchestrator")[0], 0)
+        self.brief_set("DEMO-1814", bad, "--from", "ppl-briefer")
+        self.assertEqual(run.load("DEMO-1814")["stage"], "parking")
+
+    def test_refusals_of_how_the_command_was_called_are_logged_but_not_counted(self):
+        from ppl import run
+        self.init("DEMO-1815", make_repo())
+        calls = (("brief", "set", "/no/such/brief.json"),
+                 ("brief", "set", "/no/such/brief.json"),
+                 ("brief", "challenge", write_text_file("not json")),
+                 ("brief", "challenge", write_text_file("not json")),
+                 ("evidence", "add", "--check", "focused-tests", "--result", "pass",
+                  "--log", "/tmp/log.txt", "--rc", "/no/such/rc", "--generation", "1"),
+                 ("evidence", "add", "--check", "focused-tests", "--result", "pass",
+                  "--log", "/tmp/log.txt", "--rc", "/no/such/rc", "--generation", "1"))
+        for argv in calls:
+            code, _, err = call(*argv, "--from", "ppl-briefer", "--task", "DEMO-1815")
+            self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        events = refusals_of("DEMO-1815")
+        self.assertEqual(len(events), 6)
+        self.assertEqual({event["counted"] for event in events}, {False})
+        self.assertNotEqual(run.load("DEMO-1815")["stage"], "parking")
+        self.assertEqual(self.brief_set("DEMO-1815", good_brief("DEMO-1815"),
+                                        "--from", "ppl-briefer")[0], 0)
+
+    def test_two_content_refusals_in_a_row_park_on_every_role_output_command(self):
+        # rule: R-REFUSAL-RETRY-CAP
+        from ppl import paths, run, store
+        stale = {"task_id": "x", "candidate_sha": "b" * 40, "spec_revision": "sha256:x",
+                 "verdict": "PASS", "acceptance_evidence": {}, "findings": [],
+                 "producer": {"role": "verifier"}}
+        calls = {
+            "brief challenge": ("brief", "challenge", write_json_file({"verdict": "ACCEPTED"}),
+                                "--generation", "1"),
+            "verdict record": ("verdict", "record", write_json_file(stale), "--generation", "1"),
+            "findings add": ("findings", "add", "--severity", "minor", "--evidence", " ",
+                             "--affected-sha", "a" * 40, "--affected-path", "a.txt",
+                             "--generation", "1"),
+            "evidence add": ("evidence", "add", "--check", "focused-tests", "--result", "pass",
+                             "--log", "/tmp/log.txt", "--rc", write_text_file("1"),
+                             "--generation", "1"),
+        }
+        for number, (command, argv) in enumerate(calls.items()):
+            task_id = "DEMO-182%d" % number
+            with self.subTest(command=command):
+                self.init(task_id, make_repo())
+                self.assertEqual(self.brief_set(task_id, good_brief(task_id))[0], 0)
+                for _ in range(2):
+                    code, _, err = call(*argv, "--from", "ppl-verifier", "--task", task_id)
+                    self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+                self.assertEqual([e["counted"] for e in refusals_of(task_id)], [True, True])
+                self.assertEqual(run.load(task_id)["stage"], "parking")
+                parking = store.read_json(paths.run_dir(task_id) / "parking.json")
+                self.assertEqual(parking["blocker"], "FORMAT_RETRY_EXHAUSTED")
 
     def test_the_second_refusal_parks_the_run_with_both_messages(self):
         # rule: R-REFUSAL-RETRY-CAP

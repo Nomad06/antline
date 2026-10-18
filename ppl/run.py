@@ -4,7 +4,7 @@ import subprocess
 import uuid
 
 from . import fsm, paths, store
-from .errors import PplError
+from .errors import PplError, role_output
 
 DEFAULT_BUDGETS = {
     "dispatch_used": 0, "dispatch_norm": 21, "dispatch_hard": 34,
@@ -509,16 +509,18 @@ def record_challenge(task_id, doc):
     against a spec_revision the run no longer carries."""
     from . import schema
     state = load(task_id)
-    schema.validate_challenge(doc)
+    with role_output():
+        schema.validate_challenge(doc)
     if state.get("spec_revision") is None:
         raise PplError("SCHEMA_INVALID",
                        "no spec_revision bound for %s - run ppl brief set before ppl brief "
                        "challenge" % task_id)
-    if doc["spec_revision"] != state["spec_revision"]:
-        raise PplError("SCHEMA_INVALID",
-                       "challenge was written against spec_revision %s but the run is bound to "
-                       "%s - the brief changed since the challenger read it, dispatch it again"
-                       % (doc["spec_revision"], state["spec_revision"]))
+    with role_output():
+        if doc["spec_revision"] != state["spec_revision"]:
+            raise PplError("SCHEMA_INVALID",
+                           "challenge was written against spec_revision %s but the run is "
+                           "bound to %s - the brief changed since the challenger read it, "
+                           "dispatch it again" % (doc["spec_revision"], state["spec_revision"]))
     store.write_json(paths.run_dir(task_id) / "challenge.json", doc)
     state["brief_challenge"] = {"spec_revision": doc["spec_revision"],
                                 "verdict": doc["verdict"], "at": store.now()}
