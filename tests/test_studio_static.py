@@ -81,6 +81,35 @@ class TestStaticFiles(unittest.TestCase):
             result = subprocess.run(["node", "--check", str(copy)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, (rel, result.stderr))
 
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, the list field check needs it")
+    def test_a_comma_list_field_keeps_what_is_typed_until_blur(self):
+        scratch = Path(tmphome.mkdtemp(prefix="pplnode-"))
+        copy = scratch / "listfield.mjs"
+        copy.write_bytes((STATIC / "ui" / "listfield.js").read_bytes())
+        script = """
+import { words, shownText } from "%s";
+const typed = "tests/unit, tests/integration";
+let list = [];
+let raw = null;
+const shown = [];
+for (let i = 1; i <= typed.length; i += 1) {
+  raw = typed.slice(0, i);
+  list = words(raw);
+  shown.push(shownText(raw, list));
+}
+const blurred = shownText(null, list);
+console.log(JSON.stringify({ shown, list, blurred, empty: shownText(null, []) }));
+""" % copy.as_uri()
+        result = subprocess.run(["node", "--input-type=module", "-e", script],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout)
+        typed = "tests/unit, tests/integration"
+        self.assertEqual(out["shown"], [typed[:i] for i in range(1, len(typed) + 1)])
+        self.assertEqual(out["list"], ["tests/unit", "tests/integration"])
+        self.assertEqual(out["blurred"], "tests/unit, tests/integration")
+        self.assertEqual(out["empty"], "")
+
     def test_the_shell_declares_an_empty_icon_so_the_browser_asks_for_no_favicon(self):
         text = (STATIC / "index.html").read_text(encoding="ascii")
         self.assertIn('<link rel="icon" href="data:,">', text)
