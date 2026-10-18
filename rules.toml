@@ -929,6 +929,18 @@ allow_test = "tests/test_cli.py::TestBaselineGuards::test_base_sha_equal_to_head
 owner = "ppl"
 residual = "D2, cycle 2 wave D, correcting C3 (cycle 2 wave B). C3 refused base_sha == HEAD outright; that is wrong on a freshly cut branch with no commits of its own yet, where HEAD IS the correct base_sha and there is no other commit to name - the wave-B fix made the documented Stage 1 flow (record the baseline right after cutting the branch) impossible to complete without inventing a commit (HEAD~1) that may not exist. The real hazard is recording a baseline AFTER work has landed, so this rule catches WHEN the call happens (has the run's stage moved past baseline) rather than WHICH commit it names. Accepted gap: a commit made DURING the baseline stage, before this call, still passes, because nothing here inspects the branch's own history - only when the call happens. Closing that fully would need a merge-base check against the target branch, which the run's state does not currently carry enough to perform."
 
+[[rule]]
+id = "R-BASELINE-RECORDED-BEFORE-LEAVING"
+statement = "ppl stage enter refuses to leave the baseline stage for any stage but escalation with ILLEGAL_TRANSITION while the run has no recorded base_sha, naming ppl baseline record as the remedy."
+scope = "ppl CLI"
+event = "ppl stage enter, leaving baseline"
+enforcement = "blocking"
+hook_or_check = "ppl/run.py:stage_enter"
+deny_test = "tests/test_cli.py::TestBaselineGuards::test_leaving_baseline_without_recording_one_is_refused"
+allow_test = "tests/test_cli.py::TestBaselineGuards::test_escalating_out_of_baseline_without_a_baseline_is_still_legal"
+owner = "ppl"
+residual = "escalation is exempt: R-PARK-RESUME-EXACT sends a run that escalates out of baseline back into baseline on resume, so nothing is skipped. Only presence is checked here, what base_sha names is R-BASELINE-ANCESTOR and R-BASELINE-NOT-AT-HEAD"
+
 # ---------------------------------------------------------------------------
 # State machine
 # ---------------------------------------------------------------------------

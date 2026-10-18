@@ -338,6 +338,17 @@ class TestEscalationReference(unittest.TestCase):
                 codes.add(cells[0])
         self.assertEqual(codes, set(run.BLOCKER_CODES))
 
+    def row(self, code):
+        return next(line for line in self.text.splitlines() if line.startswith("| %s " % code))
+
+    def test_leaving_baseline_without_one_is_routed_as_the_illegal_transition_it_raises(self):
+        # ppl/run.py:stage_enter raises ILLEGAL_TRANSITION for it, not SCHEMA_INVALID
+        self.assertNotIn("baseline", self.row("SCHEMA_INVALID"))
+        illegal = self.row("ILLEGAL_TRANSITION")
+        self.assertIn("leaving the baseline stage", illegal)
+        self.assertIn("`ppl baseline record`", illegal)
+        self.assertIn("[R-BASELINE-RECORDED-BEFORE-LEAVING]", illegal)
+
     def test_it_states_the_one_plus_one_rule_once(self):
         flat = " ".join(self.text.split())
         self.assertEqual(flat.count("redispatch the same role once"), 1)
