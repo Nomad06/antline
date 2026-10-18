@@ -1080,15 +1080,19 @@ park's `resume_stage` rather than overwriting it with `"parking"` itself, which 
 naively re-reading the run's current stage would produce once it is already parked
 [R-PARK-PRESERVES-RESUME-STAGE].
 
-Refusals (`log.jsonl`) - a `SCHEMA_INVALID` from `ppl brief set`, `brief challenge`,
-`verdict record`, `findings add` or `evidence add` appends a `refusal` event: `command`,
-`code`, `message` as `ppl` printed it (without the park note the second one carries), `role`
-(the `--from` value, null when a call left out the flag it needs), the run's
-`lease_generation` and `counted`. Only a refusal of the output itself is counted: an error raised inside
-`errors.role_output`, which wraps the document's parse and its schema and consistency checks
-in each of the five commands. An unreadable file, a missing `--generation` or `--from`, or
-a run with no brief yet is how the command was called, logged with `counted` false. The role gets
-the refusal once, quoted, and redispatches (the skill's escalation reference). The second
+Refusals (`log.jsonl`) - a `SCHEMA_INVALID` that `ppl brief set`, `brief challenge`,
+`verdict record`, `findings add` or `evidence add` raises after its arguments parse appends a
+`refusal` event: `command`, `code`, `message` as `ppl` printed it (without the park note the
+second one carries), `role` (the `--from` value, null when a call left out the flag it
+needs), the run's `lease_generation` and `counted`. argparse's own syntax errors (an unknown
+flag, a missing required one, a non-integer) exit 2 before any run is read and are not
+logged. Only a refusal of the output itself is counted: an error raised inside
+`errors.role_output`, which wraps the document's parse and its schema and self-consistency
+checks in each of the five commands. An unreadable file, a missing `--generation`, a missing
+or unknown `--from`, or a run with no brief yet is how the command was called, and a verdict
+or challenge written for an old head or brief is stale and needs a new dispatch, not a
+format fix: both are logged with `counted` false. The role gets the refusal once, quoted, and
+redispatches (the skill's escalation reference). The second
 counted refusal in a row for the same command, role and generation is still printed as
 `SCHEMA_INVALID`, `ppl` parks the run with blocker `FORMAT_RETRY_EXHAUSTED` and both
 refusals in `parking.json` under `refusals`, and a later call for that key is refused
@@ -2055,7 +2059,8 @@ Only the exit-code rule has code behind it, the rest are recipes rendered into t
 - format violations: a role's output refused `SCHEMA_INVALID` goes back to the role once
   with the refusal quoted, and the second refusal of that output in a row for the same
   command in one lease generation parks the run with `FORMAT_RETRY_EXHAUSTED` - a third
-  attempt is refused [R-REFUSAL-RETRY-CAP]. Every refusal is a `refusal` event in `log.jsonl` (6.6).
+  attempt is refused [R-REFUSAL-RETRY-CAP]. Every refusal raised after the arguments parse is
+  a `refusal` event in `log.jsonl` (6.6), an argument syntax error argparse rejects is not.
 - context: on approaching the limit, the orchestrator parks with an exact handoff rather
   than compacting through a transition.
 

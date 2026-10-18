@@ -515,12 +515,12 @@ def record_challenge(task_id, doc):
         raise PplError("SCHEMA_INVALID",
                        "no spec_revision bound for %s - run ppl brief set before ppl brief "
                        "challenge" % task_id)
-    with role_output():
-        if doc["spec_revision"] != state["spec_revision"]:
-            raise PplError("SCHEMA_INVALID",
-                           "challenge was written against spec_revision %s but the run is "
-                           "bound to %s - the brief changed since the challenger read it, "
-                           "dispatch it again" % (doc["spec_revision"], state["spec_revision"]))
+    # stale, not malformed: logged, not counted toward the retry cap
+    if doc["spec_revision"] != state["spec_revision"]:
+        raise PplError("SCHEMA_INVALID",
+                       "challenge was written against spec_revision %s but the run is bound to "
+                       "%s - the brief changed since the challenger read it, dispatch it again"
+                       % (doc["spec_revision"], state["spec_revision"]))
     store.write_json(paths.run_dir(task_id) / "challenge.json", doc)
     state["brief_challenge"] = {"spec_revision": doc["spec_revision"],
                                 "verdict": doc["verdict"], "at": store.now()}

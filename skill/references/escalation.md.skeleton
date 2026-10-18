@@ -27,9 +27,11 @@ asked `ppl` for something it does not accept, not that the task needs an owner d
 One rule for every role output `ppl` refuses `SCHEMA_INVALID`. `--from <role>` names whose
 output a call records: `ppl brief set`, `ppl brief challenge`, `ppl verdict record` and
 `ppl findings add` take it every time, and `ppl evidence add` defaults to `orchestrator`, the
-gate receipts you write yourself. Each refusal of an output is counted against that role. A refusal of how you called the command (a
-file path that cannot be read, a missing `--generation`) is logged but not counted: fix the
-call and run it again.
+gate receipts you write yourself. Each refusal of an output is counted against that role.
+A refusal of how you called the command (a file path that cannot be read, a missing
+`--generation`, a missing or unknown `--from`) is logged but not counted: fix the call and
+run it again. A verdict or challenge refused as stale (written for an old head or brief) is
+not counted either: dispatch the role again against the current head and brief.
 
 1. Do not edit the content. You may only fix the envelope you added: a wrapper, a code
    fence, a file path.

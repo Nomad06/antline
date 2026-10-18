@@ -61,11 +61,13 @@ def require_retry_left(task_id, args):
     name whose output it records, and a spent key is refused whatever the input
     [R-REFUSAL-RETRY-CAP]."""
     command = role_output_command(args)
-    if args.from_role is None:
+    if args.from_role not in refusals.ROLES:
+        given = "needs" if args.from_role is None else "got --from %s, it needs" % args.from_role
         raise PplError("SCHEMA_INVALID",
-                       "ppl %s needs --from <role>, the role whose output it records: pass "
+                       "ppl %s %s --from <role>, the role whose output it records: pass "
                        "--from %s for that role's output, or another of %s"
-                       % (command, refusals.EXPECTED_ROLE[command], ", ".join(refusals.ROLES)))
+                       % (command, given, refusals.EXPECTED_ROLE[command],
+                          ", ".join(refusals.ROLES)))
     refusals.require_retry_left(task_id, command, args.from_role)
 
 
@@ -928,10 +930,9 @@ class JsonArgumentParser(argparse.ArgumentParser):
 
 def add_from(parser, default=None):
     # The role whose output the call records, so a refusal is counted against it
-    # [R-REFUSAL-RETRY-CAP]. Required in effect (require_retry_left) unless a default
-    # is given, so a missing one is a logged refusal rather than an argparse error.
-    parser.add_argument("--from", dest="from_role", choices=list(refusals.ROLES),
-                        default=default)
+    # [R-REFUSAL-RETRY-CAP]. Checked in require_retry_left, not by argparse choices, so
+    # a missing or unknown one is a logged refusal rather than an argparse error.
+    parser.add_argument("--from", dest="from_role", default=default)
 
 
 def build_parser():
@@ -1027,7 +1028,8 @@ def build_parser():
     p = sub.add_parser("findings")
     p.add_argument("action", choices=["add", "status", "delete", "list"])
     # add
-    p.add_argument("--severity", choices=list(findings.SEVERITIES))
+    # findings.add checks it, so a wrong one counts as the role's output
+    p.add_argument("--severity")
     p.add_argument("--evidence")
     p.add_argument("--affected-sha", dest="affected_sha")
     p.add_argument("--affected-path", dest="affected_path")
