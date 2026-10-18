@@ -38,10 +38,9 @@ Each tick:
    `ppl review answered --thread <id> --sha <sha> --classification <c> --last-note-id <id> --generation $GENERATION`,
    so the next tick does not name the same thread again unless a newer note lands on it.
 6. Terminal condition: the MR is approved on the current head SHA. Then, in this order:
-   `ppl review approved --sha <sha>` (the only writer of the approved SHA - without it
-   `ppl approval check` prints `none` forever, and the run does not end),
-   `ppl approval check` to confirm it now reads `current`, `ppl stage enter closure`,
-   `ppl transition done`, `ppl stage enter merge_watch`. Do not skip `merge_watch` even if
+   <!-- include: sequence/close-out -->. `ppl review approved` is the only writer of the
+   approved SHA - without it `ppl approval check` prints `none` forever, and the run does
+   not end - and `ppl approval check` must now read `current`. Do not skip `merge_watch` even if
    `ppl doctor` reported the guard hook is not registered - **if it is armed**, it will not
    let you write to Jira until the run's stage is exactly `merge_watch` and the merge is
    recorded (see "After merge only" below); if it is not armed, nothing stops the write

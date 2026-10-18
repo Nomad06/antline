@@ -985,7 +985,7 @@ def build_parser():
 
     p = sub.add_parser("stage")
     p.add_argument("action", choices=["enter"])
-    p.add_argument("stage")
+    p.add_argument("stage", choices=fsm.STAGES)
     p.add_argument("--task")
 
     p = sub.add_parser("brief")

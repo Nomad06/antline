@@ -183,6 +183,21 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "OWNER_DECISION")
 
+    def test_stage_enter_takes_only_a_stage_of_the_state_machine(self):
+        # rule: R-FSM-STAGE-GRAPH
+        from ppl import fsm
+        commands = next(a for a in cli.build_parser()._actions
+                        if isinstance(a, argparse._SubParsersAction))
+        stage = next(a for a in commands.choices["stage"]._actions if a.dest == "stage")
+        self.assertEqual(tuple(stage.choices), fsm.STAGES)
+        call("init", "DEMO-6070", "--tracker-url", "u", "--repo", "/tmp/repo",
+             "--harness", "example-maven")
+        code, _, err = call("stage", "enter", "basline", "--task", "DEMO-6070")
+        self.assertEqual(code, 2)
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+        self.assertIn("invalid choice: 'basline'", payload["message"])
+
     def test_a_run_can_walk_from_init_to_a_lifecycle_transition(self):
         from ppl import run as run_module
         call("init", "DEMO-605", "--tracker-url", "u", "--repo", "/tmp/repo",

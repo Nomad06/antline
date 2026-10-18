@@ -15,7 +15,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import cli, config, harness, models, paths
+from ppl import cli, config, forges, harness, models, paths
 from ppl.errors import PplError
 from ppl.trackers import jira
 
@@ -1191,6 +1191,27 @@ class TestRenderSkill(HarnessTestCase):
         self.mutate("example-maven", "skills = []", 'skills = ["kb-core", "kb-build"]')
         text = harness.render_skill(harness.load("example-maven"))["SKILL.md"]
         self.assertIn("(`kb-core`, `kb-build`)", text)
+
+    def test_every_include_value_is_used_by_a_skeleton_or_a_forge_fragment(self):
+        fixtures.install_harness("example-maven")
+        offered = set(harness._values(harness.load("example-maven")))
+        sources = list((fixtures.SOURCE / "skill").rglob("*.skeleton"))
+        sources += list((fixtures.SOURCE / "ppl" / "forges" / "fragments").rglob("*.md"))
+        used = set()
+        for path in sources:
+            used.update(harness._INCLUDE_RE.findall(path.read_text(encoding="utf-8")))
+        self.assertEqual(offered - used, set())
+
+    def test_a_forge_fragment_may_include_a_sequence_and_nothing_else(self):
+        # rule: R-SKILL-GENERATED
+        fixtures.install_harness("example-maven")
+        doc = harness.load("example-maven")
+        gitlab = forges.get("gitlab")
+        with mock.patch.object(gitlab, "fragment", lambda name: "<!-- include: vocab/noun -->"):
+            with self.assertRaises(PplError) as caught:
+                harness.render_skill(doc)
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("forge/stage6: unknown include marker vocab/noun", caught.exception.message)
 
     def test_an_unknown_marker_is_refused(self):
         # rule: R-SKILL-GENERATED

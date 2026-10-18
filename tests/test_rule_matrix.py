@@ -33,17 +33,25 @@ import ppl_guard
 
 REPO = Path(__file__).resolve().parents[1]
 
-# The documents whose claims have to name a row. SKILL.md is the one the
-# orchestrator reads at runtime, so a false claim there does more damage than
-# one in DESIGN.md, which only people read - and the cycle-1 Jira-gate claim
-# lived in it. The skill on disk is rendered from skill/ skeletons plus the
-# forge and harness fragments, so the scanned copy is a rendered one: a claim
-# a fragment brings in is checked the same as one written in the skeleton.
+# The documents whose claims have to name a row, as (label, text). The skill is
+# the one the orchestrator reads at runtime, so a false claim there does more
+# damage than one in DESIGN.md, which only people read - and the cycle-1
+# Jira-gate claim lived in it. The skill on disk is rendered from skill/
+# skeletons plus the forge and harness fragments, so the scanned copy is a
+# rendered one: a claim a fragment brings in is checked the same as one
+# written in the skeleton. Every file of both example skills is scanned,
+# references/* included, since the orchestrator reads those on demand.
 import fixtures
 
-RENDERED = Path(tmphome.mkdtemp(prefix="pplmatrix-"))
-fixtures.render_skill_to(RENDERED, "example-maven")
-SCANNED_DOCS = (REPO / "docs" / "DESIGN.md", RENDERED / "pipeline" / "SKILL.md", REPO / "README.md")
+
+def skill_docs(name, files):
+    return [("%s %s" % (name, path), text) for path, text in sorted(files.items())]
+
+
+SCANNED_DOCS = [("DESIGN.md", (REPO / "docs" / "DESIGN.md").read_text(encoding="utf-8")),
+                ("README.md", (REPO / "README.md").read_text(encoding="utf-8"))]
+for _example in ("example-maven", "example-generic"):
+    SCANNED_DOCS += skill_docs(_example, fixtures.skill_files(_example))
 
 GOOD_ROW = {
     "id": "R-EXAMPLE",
@@ -343,6 +351,14 @@ def unmapped(text, rows):
             problem = _citation_problem(rule_id, disclosed, rows)
             if problem:
                 problems.append((number, sentence, problem))
+    return problems
+
+
+def unmapped_claims(docs, rows):
+    problems = []
+    for label, text in docs:
+        problems += ["%s:%d %s -- %s" % (label, number, problem, sentence)
+                     for number, sentence, problem in unmapped(text, rows)]
     return problems
 
 
@@ -796,11 +812,7 @@ class TestTheRuleMatrix(PplHomeTestCase):
         # dispatch-cap claim mechanically. SKILL.md is scanned too, and matters
         # more than DESIGN.md: the orchestrator reads it at runtime, where the
         # cycle-1 Jira-gate claim ("enforced, not just a convention") lived.
-        problems = []
-        for path in SCANNED_DOCS:
-            text = path.read_text(encoding="utf-8")
-            problems += ["%s:%d %s -- %s" % (path.name, number, problem, sentence)
-                         for number, sentence, problem in unmapped(text, self.ids)]
+        problems = unmapped_claims(SCANNED_DOCS, self.ids)
         self.assertEqual(problems, [], "\n".join(problems))
 
     def test_every_marker_in_the_documents_resolves_to_a_row(self):
@@ -808,10 +820,29 @@ class TestTheRuleMatrix(PplHomeTestCase):
         # marker in a table cell survived the deletion of its row with the
         # suite green. Every marker, wherever it sits, is resolved here.
         problems = []
-        for path in SCANNED_DOCS:
-            text = path.read_text(encoding="utf-8")
-            problems += ["%s: %s" % (path.name, problem) for _, problem in dangling(text, self.ids)]
+        for label, text in SCANNED_DOCS:
+            problems += ["%s: %s" % (label, problem) for _, problem in dangling(text, self.ids)]
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_both_example_skills_are_scanned_file_by_file(self):
+        labels = {label for label, _ in SCANNED_DOCS}
+        for name in ("example-maven", "example-generic"):
+            for path in ("SKILL.md", "references/review-loop.md", "references/escalation.md",
+                         "references/gates.md", "references/brief.md", "references/verdict.md"):
+                self.assertIn("%s %s" % (name, path), labels)
+
+    def test_an_unmarked_claim_a_forge_fragment_brings_into_a_reference_is_reported(self):
+        # rule: R-DOC-RULE-IDS
+        # The fixture skill carries the old review-loop wording in the fragment the
+        # rendered references/review-loop.md comes from.
+        from ppl import forges
+        seeded = forges.get("gitlab").fragment("review-loop") + "\n**Never resolve the thread.**\n"
+        docs = skill_docs("fixture", fixtures.skill_files("example-maven",
+                                                          fragments={"review-loop": seeded}))
+        problems = unmapped_claims(docs, self.ids)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("fixture references/review-loop.md:", problems[0])
+        self.assertIn("names no rule id -- Never resolve the thread.", problems[0])
 
     def test_every_enforced_row_names_a_check_that_exists(self):
         # Assertion 4. Assertion 3 only fires on sentences carrying one of the

@@ -42,6 +42,29 @@ def render_skill_to(directory, name="example-maven"):
     return Path(directory) / "pipeline"
 
 
+def skill_files(name="example-maven", fragments=None):
+    """relative path -> text of every file of the skill rendered for an example harness,
+    nothing written. `fragments` maps a forge fragment name to the text rendered in its
+    place, so a drift can be seeded where the real text comes from."""
+    from unittest import mock
+    from ppl import forges, harness
+    saved = os.environ.get("PPL_HOME")
+    os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplrender-")
+    try:
+        install_harness(name)
+        doc = harness.load(name)
+        module = forges.get(doc["forge"]["kind"])
+        real = module.fragment
+        seeded = dict(fragments or {})
+        with mock.patch.object(module, "fragment", lambda part: seeded.get(part) or real(part)):
+            return harness.render_skill(doc)
+    finally:
+        if saved is None:
+            os.environ.pop("PPL_HOME", None)
+        else:
+            os.environ["PPL_HOME"] = saved
+
+
 # The interpreter the version floor is proven against: the stock macOS python3
 # is 3.9. Elsewhere there is usually no older python3 at this path, and the
 # tests that need one skip.

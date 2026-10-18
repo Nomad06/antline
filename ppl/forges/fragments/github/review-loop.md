@@ -2,7 +2,7 @@
 
 Started with `/loop` in dynamic mode. The loop schedules its own next wake-up: 1200 to 1800
 seconds while idle, tighter while a CI pipeline is running. Every tick is stateless and
-reads durable state plus live GitHub, never chat history.
+reads durable state plus live GitHub, not chat history.
 
 Before the first tick: run `gh api user --jq .login` once and run
 `ppl mr set --iid <number> --url <url> --author <login>` with the result. The authorship
@@ -38,7 +38,7 @@ Each tick, in this order:
    thread the lookup does not return counts as unresolved.
 3. `ppl approval check` - the last line of stdout is a single JSON object,
    `{"approval": "current"|"stale"|"none", "approved_sha": ..., "head_sha": ...}`; parse that
-   line and branch on `approval`, never on the human-readable line above it. If it says
+   line and branch on `approval`, not on the human-readable line above it. If it says
    `stale`, previous approvals do not count - say so in the tick summary rather than quietly
    proceeding. Approval on GitHub is judged by the latest review of each reviewer: a later
    `CHANGES_REQUESTED`, or a dismissal, supersedes an earlier `APPROVED` from the same
@@ -70,13 +70,13 @@ Each tick, in this order:
    and the generation captured in step 1, so the next tick's
    `ppl review pending` does not name this thread again - unless and until a newer note
    lands on it.
-7. **Never resolve the thread.** Only the person who wrote the remark may resolve it.
+7. **Do not resolve the thread** - only the person who wrote the remark may resolve it
+   [R-FORGE-GH-NO-APPROVE-MERGE].
 8. Red CI on the candidate: classify against the baseline first. A pre-existing failure is
-   `BASELINE_FAILURE`, a new one is rework. Never a bare retry.
+   `BASELINE_FAILURE`, a new one is rework. Do not just run it again.
 9. Terminal: approval bound to the current head SHA. Close out in this order:
-   `ppl review approved --sha <sha>`, `ppl approval check` (must read `current`),
-   `ppl stage enter closure`, `ppl transition done`, `ppl stage enter merge_watch`, then
-   tell the owner.
+   <!-- include: sequence/close-out -->, then tell the owner. `ppl approval check` must
+   read `current` before you go on.
 
 Wake-up discipline: do not poll for work the harness will notify you about. Use a long
 fallback interval and let notifications do the fast path.

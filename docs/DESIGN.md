@@ -579,9 +579,10 @@ that does not know which rule it proves, is the same family of lie as a document
 check nothing performs. An `allow_test` is only checked to exist - it is not required to name
 its rule.
 
-Three documents are scanned: this one, `SKILL.md` (rendered from the `skill/` skeletons for
-the `example-maven` harness, forge and harness fragments included, and the one that matters
-most, since the orchestrator reads it at runtime), and `README.md`.
+The scanned documents are this one, `README.md` and every file of the skill rendered for
+both example harnesses, `example-maven` and `example-generic`: `SKILL.md`, the one that
+matters most since the orchestrator reads it at runtime, and every `references/*` file it
+reads on demand, forge and harness fragments included as rendered.
 
 A claim sentence is one containing any of these words, matched case-insensitively:
 
@@ -695,7 +696,24 @@ include marker is unresolved [R-SKILL-GENERATED]. The harness fragments are `ski
 note the orchestrator writes to the tracker after the merge (default: a short comment saying
 what was done and how to check it). A fragment's `<default-branch>` is replaced with
 `repo.default_branch` at render time, and `<worktree>`, `<TASK-ID>`, `<SHA>` and
-`<GENERATION>` stay as written for the orchestrator to fill in at run time. `ppl init` refuses `SETUP_INCOMPLETE` while
+`<GENERATION>` stay as written for the orchestrator to fill in at run time.
+
+A command sequence the skill states in more than one place is data in `ppl/sequences.py`: the
+stage 7 close-out (`ppl review approved --sha <SHA>`, `ppl approval check`, `ppl stage enter
+closure`, `ppl transition done`, `ppl stage enter merge_watch`), what is left of it from
+`closure`, and the after-merge record (`ppl merge observed`). A `<!-- include:
+sequence/<name> -->` marker renders one in a skeleton or in a forge fragment, and a forge
+fragment may carry no other marker [R-SKILL-GENERATED], so stage 7 and the review loop state
+the same close-out. `tests/test_skill_contract.py` walks every sequence through the real CLI
+from the stage and lifecycle status it starts in, with git and the done gate's evidence
+checks stubbed, so a step the stage graph or a status precondition refuses fails the suite
+[R-FSM-STAGE-GRAPH] [R-DONE-FROM-CLOSURE] [R-MERGE-WATCH-AFTER-DONE]. The same module reads
+every rendered file of both example skills and fails on a `ppl` command or subcommand word
+the parser does not have, on a `ppl stage enter <s>` naming no stage of `fsm.STAGES`, and on
+a "from `<stage>`, run ..." instruction whose commands the real CLI refuses from that stage
+[R-FSM-STAGE-GRAPH].
+
+`ppl init` refuses `SETUP_INCOMPLETE` while
 `ppl setup` has not recorded the models step (waived by `--skip-model-check`), the harness step
 and the apply step as done, or when no `--harness` is passed [R-INIT-SETUP-COMPLETE]. A
 harness added and applied by hand does not count as done, and the refusal names the `ppl
@@ -834,7 +852,8 @@ ppl init <TASK_ID> --repo <worktree-path> --tracker-url <url> --harness <name> [
                                  # unless --skip-model-check [R-INIT-MODELS-VERIFIED]
 ppl status                       # founder status card, human language
 ppl show --json                  # full state, machine readable
-ppl stage enter <stage>          # validates legal transition and budget
+ppl stage enter <stage>          # validates legal transition and budget, the parser takes
+                                 # only a stage of fsm.STAGES
 ppl brief set <file> --from <role>
                                  # schema-validated, binds spec_revision. --from names the
                                  # role whose output a call records: a role from routing or

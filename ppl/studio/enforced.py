@@ -23,7 +23,7 @@ NOT_A_ROLE = frozenset({
     "ppl CLI", "ppl CLI and panel", "ppl CLI and panel stop", "ppl CLI, panel, hook",
     "ppl CLI, the eleven call sites in cli.py", "ppl CLI, this directory plus the Claude home",
     "panel", "hook registration", "active run, session with no agent_type",
-    "docs/DESIGN.md, README.md, the rendered SKILL.md and this table",
+    "docs/DESIGN.md, README.md, every rendered file of both example skills and this table",
     "this table and hooks/ppl_guard.py",
 })
 

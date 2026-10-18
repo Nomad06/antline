@@ -14,7 +14,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from . import forges, paths, routing, trackers
+from . import forges, paths, routing, sequences, trackers
 from .errors import PplError
 from .trackers import is_mcp_prefix
 
@@ -551,13 +551,21 @@ def _values(doc):
     forge = forges.get(doc["forge"]["kind"])
     skills = (doc.get("knowledge") or {}).get("skills") or []
     repo = doc["repo"]
+    sequence_values = {("sequence", name): sequences.render(sequence[1])
+                       for name, sequence in sequences.SEQUENCES.items()}
+
+    # A forge fragment may include a sequence, so stage 7 and the review loop
+    # state the one close-out. Any other marker in it is refused.
+    def fragment(name):
+        return _render_text(forge.fragment(name).strip(), sequence_values, "forge/%s" % name)
+
     return {
+        **sequence_values,
         ("vocab", "noun"): forge.VOCABULARY["noun"],
         ("vocab", "short"): forge.VOCABULARY["short"],
-        ("forge", "stage6"): forge.fragment("stage6").strip(),
-        ("forge", "stage7"): forge.fragment("stage7").strip(),
-        ("forge", "review-loop"): forge.fragment("review-loop").strip(),
-        ("forge", "author-lookup"): forge.author_lookup(),
+        ("forge", "stage6"): fragment("stage6"),
+        ("forge", "stage7"): fragment("stage7"),
+        ("forge", "review-loop"): fragment("review-loop"),
         # ppl init --harness resolves a directory name, so the skill names the
         # installed directory, not the document's own name.
         ("harness", "name"): installed_name(doc),

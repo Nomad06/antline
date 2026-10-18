@@ -407,8 +407,8 @@ telling you to pick one from its stated finding. Route all eight:
 
 The pipeline ends at approval, not at merge. `merge_watch` is a low-frequency tail: keep
 watching the <!-- include: vocab/short -->. Once the merge is actually observed on the forge,
-first record it: `ppl merge observed --sha <merged sha> --url <url> --task <TASK-ID>`, once
-per run - a second call is refused [R-MERGE-OBSERVED-ONCE]. Then write to the tracker: <!-- include: harness/tracker-close -->.
+first record it: <!-- include: sequence/after-merge -->, once per run - a second call is
+refused [R-MERGE-OBSERVED-ONCE]. Then write to the tracker: <!-- include: harness/tracker-close -->.
 Only after the merge is observed and recorded, and always in plain informal English, not a formal template.
 
 **This is enforced, not just a convention, only when `ppl doctor` reports the guard hook
@@ -421,10 +421,11 @@ through, and `OWNER_DECISION` has nothing to print because nothing ran a check t
 [R-GUARD-NOT-ARMED n/a]. Check `ppl doctor` before trusting either reading rather than
 assuming the more comfortable one. When it IS armed, a tracker write before that point is
 denied outright (its reason starts with `OWNER_DECISION`) - do not try the write again
-hoping the hook missed it [R-JIRA-GATE]. Finish the close-out instead: from `review`, run
-`ppl stage enter closure`, `ppl transition done`, then `ppl stage enter merge_watch`; from
-`closure`, run `ppl transition done`, then `ppl stage enter merge_watch`; in `merge_watch`,
-run `ppl merge observed` as above once the merge is on the forge. `ppl transition done`
+hoping the hook missed it [R-JIRA-GATE]. Finish the close-out instead, once the
+<!-- include: vocab/short --> is approved on the current head SHA: from `review`, run
+<!-- include: sequence/close-out -->; from `closure`, run
+<!-- include: sequence/close-out-from-closure -->; in `merge_watch`, run
+<!-- include: sequence/after-merge --> as above once the merge is on the forge. `ppl transition done`
 refuses in any stage but `closure` [R-DONE-FROM-CLOSURE], `ppl stage enter merge_watch`
 refuses until the run is done [R-MERGE-WATCH-AFTER-DONE], and `ppl merge observed` refuses
 in any stage but `merge_watch` [R-MERGE-OBSERVED-ONCE]. The tracker gate fires for the orchestrator's own session -
