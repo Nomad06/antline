@@ -687,3 +687,72 @@ class TestDoneGateSimplificationReceipt(unittest.TestCase):
         reasons = verdict.done_blockers(self.task, "abc", ["src/ok/X.java"])
         self.assertTrue(any("brief challenge" in r for r in reasons), reasons)
 
+
+
+class TestVerdictHistory(unittest.TestCase):
+    """Re-recording on one SHA used to overwrite the earlier verdict, losing
+    its findings, evidence and producer: each record now also lands in
+    `verdicts/<sha>/<n>.json` and `verdicts/<sha>.json` stays the latest."""
+
+    _ids = itertools.count(8301)
+
+    def setUp(self):
+        self.task = "DEMO-%d" % next(self._ids)
+        run.init(self.task, "https://j/" + self.task, "/tmp/repo")
+        state = run.load(self.task)
+        state["spec_revision"] = "sha256:spec"
+        state["acceptance"] = ["AC-1"]
+        state["brief_challenge"] = {"spec_revision": "sha256:spec", "verdict": "ACCEPTED",
+                                    "at": "2026-01-01T00:00:00+00:00"}
+        run.save(state)
+        self.folder = paths.run_dir(self.task) / "verdicts"
+
+    def _record(self, outcome):
+        doc = good_verdict(self.task, "abc")
+        doc["verdict"] = outcome
+        verdict.record(self.task, doc, "abc")
+
+    def test_two_records_on_one_sha_keep_both_and_the_latest_is_the_second(self):
+        self._record("INCONCLUSIVE")
+        self._record("PASS")
+        first = store.read_json(self.folder / "abc" / "1.json")
+        second = store.read_json(self.folder / "abc" / "2.json")
+        self.assertEqual(first["verdict"], "INCONCLUSIVE")
+        self.assertEqual(second["verdict"], "PASS")
+        self.assertEqual(store.read_json(self.folder / "abc.json"), second)
+        self.assertEqual(verdict.latest(self.task, "abc"), second)
+
+    def test_history_lists_every_record_in_order(self):
+        self._record("INCONCLUSIVE")
+        self._record("PASS")
+        self.assertEqual([d["verdict"] for d in verdict.history(self.task, "abc")],
+                         ["INCONCLUSIVE", "PASS"])
+
+    def test_history_numbers_past_nine_numerically(self):
+        for _ in range(10):
+            self._record("REWORK")
+        self._record("PASS")
+        docs = verdict.history(self.task, "abc")
+        self.assertEqual(len(docs), 11)
+        self.assertEqual(docs[-1]["verdict"], "PASS")
+
+    def test_the_done_gate_reads_the_latest_verdict(self):
+        self._record("INCONCLUSIVE")
+        self._record("PASS")
+        evidence.add(self.task, "focused-tests", "pass", "abc", "/tmp/l", rc_zero(), PRODUCER)
+        evidence.add(self.task, "secret-scan", "pass", "abc", "/tmp/l", rc_zero(), PRODUCER)
+        evidence.add(self.task, "simplification", "skip", "abc", "/tmp/l", rc_zero(), PRODUCER)
+        store.write_json(paths.run_dir(self.task) / "boundary.json",
+                         {"write": ["src/ok/**"], "forbid": []})
+        self.assertEqual(verdict.done_blockers(self.task, "abc", ["src/ok/X.java"]), [])
+
+    def test_a_run_with_only_the_latest_file_still_reads(self):
+        store.write_json(self.folder / "old.json", good_verdict(self.task, "old"))
+        self.assertEqual(verdict.latest(self.task, "old")["verdict"], "PASS")
+        self.assertEqual(len(verdict.history(self.task, "old")), 1)
+
+    def test_recording_on_a_run_that_has_only_the_latest_file_starts_the_history_after_it(self):
+        store.write_json(self.folder / "abc.json", good_verdict(self.task, "abc"))
+        self._record("REWORK")
+        self.assertEqual([d["verdict"] for d in verdict.history(self.task, "abc")],
+                         ["PASS", "REWORK"])

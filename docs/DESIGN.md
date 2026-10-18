@@ -121,7 +121,8 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     threads.json                 review-remark ledger: thread id -> sha -> {classification, last_note_id} (8, 6.6)
     remote_cleanup.json          (only when a full destroy is queued, 9.3)
     evidence/<sha>/<check>.json
-    verdicts/<sha>.json
+    verdicts/<sha>.json          the latest verdict on that sha
+    verdicts/<sha>/<n>.json      every verdict recorded on it, n = 1, 2, ... (6.6)
     findings/<finding_id>.json   the findings registry (6.6a)
     parking.json                 (only when parked)
     log.jsonl                    append-only transition log
@@ -1044,7 +1045,10 @@ in this pipeline can prove that without executing both sides against each other
 [R-NAME-CONTRACT-STRUCTURAL-ONLY n/a]. It reduces the drift the split risks; it does not
 close it.
 
-Verdict (`verdicts/<sha>.json`) - `task_id`, `candidate_sha`, `spec_revision`, per-check
+Verdict (`verdicts/<sha>.json`, with every record on that sha kept as `verdicts/<sha>/<n>.json`,
+n = 1, 2, ...; `<sha>.json` is the latest, so the done gate and the panel read it unchanged,
+and `ppl metrics` reads the numbered history for the incomplete check rate; a run from before
+the history has `<sha>.json` alone, which stays readable) - `task_id`, `candidate_sha`, `spec_revision`, per-check
 results, acceptance-to-evidence map, `verdict`, `findings` (must be an empty list - see
 6.6a; `ppl verdict record` refuses a non-empty one [R-FINDINGS-VERDICT-FIELD-RETIRED]).
 
@@ -1302,10 +1306,10 @@ not the code's fault, which is the whole reason these outcomes exist. The routin
   a broken verifier masquerade as an undecided candidate forever. This is enforced inside
   `ppl verdict record` itself, not left to orchestrator prose to notice the pattern and stop
   on its own [R-VERIFICATION-UNAVAILABLE-PARK]: the recurrence is derivable at record time
-  from `log.jsonl`'s append-only trail of past "verdict" events for this sha - `verdicts/
-  <sha>.json` itself is overwritten on every call and cannot answer "what was the previous
-  outcome for this sha", but the log line `record` appends on every call, before this check
-  runs, never has been. `ppl verdict record` still writes the verdict durably before parking
+  from `log.jsonl`'s append-only trail of past "verdict" events for this sha, read before
+  the log line `record` appends on every call, because `verdicts/<sha>.json` holds the
+  latest verdict alone.
+  `ppl verdict record` still writes the verdict durably before parking
   - the verifier's report is not discarded, only the run is stopped from repeating the same
   non-answer a third time. The blocker is `VERIFICATION_UNAVAILABLE` (13), a new code rather
   than a reuse of `EXTERNAL_BLOCKED` or `BASELINE_FAILURE` (which mean other things) or

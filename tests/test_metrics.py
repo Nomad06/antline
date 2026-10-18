@@ -34,6 +34,17 @@ def write_verdict(task, sha, outcome, producer):
     })
 
 
+def write_verdict_history(task, sha, outcomes, producer):
+    for n, outcome in enumerate(outcomes, 1):
+        doc = {
+            "task_id": task, "candidate_sha": sha, "spec_revision": "sha256:x",
+            "verdict": outcome, "acceptance_evidence": {}, "findings": [],
+            "producer": producer,
+        }
+        store.write_json(paths.run_dir(task) / "verdicts" / sha / ("%d.json" % n), doc)
+        store.write_json(paths.run_dir(task) / "verdicts" / ("%s.json" % sha), doc)
+
+
 def mark_done(task, sha):
     state = run.load(task)
     state["candidate_sha"] = sha
@@ -106,6 +117,28 @@ class TestIncompleteCheckRate(IsolatedFleet):
         entry = report["producers"]["claude-code-subagent:opus"]["incomplete_check_rate"]
         self.assertTrue(entry["defined"])
         self.assertAlmostEqual(entry["value"], 0.5)
+
+
+class TestVerdictHistoryFeedsTheIncompleteRate(IsolatedFleet):
+    def test_an_earlier_inconclusive_on_the_same_sha_still_counts(self):
+        task = new_task()
+        write_verdict_history(task, "a1", ["INCONCLUSIVE", "PASS"], PRODUCER_A)
+        entry = metrics.compute()["overall"]["incomplete_check_rate"]
+        self.assertAlmostEqual(entry["value"], 0.5)
+
+    def test_the_other_rates_use_only_the_latest_verdict_per_sha(self):
+        task = new_task()
+        write_verdict_history(task, "a1", ["REWORK", "PASS"], PRODUCER_A)
+        metrics.record_label(task, "a1", "correct")
+        report = metrics.compute()["overall"]
+        self.assertFalse(report["false_fail_rate"]["defined"])
+        self.assertEqual(report["defect_escape_rate"]["value"], 0.0)
+
+    def test_the_history_is_sliced_by_each_records_own_producer(self):
+        task = new_task()
+        write_verdict_history(task, "a1", ["TIMEOUT", "PASS"], PRODUCER_A)
+        entry = metrics.compute()["producers"]["claude-code-subagent:opus"]
+        self.assertAlmostEqual(entry["incomplete_check_rate"]["value"], 0.5)
 
 
 class TestLabelDependentRates(IsolatedFleet):

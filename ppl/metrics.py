@@ -1,6 +1,7 @@
 """Fleet metrics and human labels.
 
-`ppl metrics` reads every run's `log.jsonl` and `verdicts/*.json` and computes
+`ppl metrics` reads every run's `log.jsonl` and `verdicts/` (the latest verdict per
+SHA, and for the incomplete check rate every recorded one) and computes
 seven numbers, sliced by `producer`: defect escape rate, outcompeted rate,
 false FAIL rate, incomplete check rate, cost per accepted task, time to
 acceptance, human minutes.
@@ -202,6 +203,23 @@ def _verdicts(directory):
     return docs
 
 
+def _verdict_history(directory):
+    """Every recorded verdict, earlier ones on a re-recorded SHA included.
+
+    A SHA with no `verdicts/<sha>/` folder (a run from before the history)
+    contributes its single latest file.
+    """
+    docs = []
+    for doc in _verdicts(directory):
+        folder = directory / "verdicts" / str(doc.get("candidate_sha"))
+        numbered = sorted((p for p in folder.glob("*.json") if p.stem.isdigit()),
+                          key=lambda p: int(p.stem)) if folder.is_dir() else []
+        entries = [store.read_json(p) for p in numbered]
+        entries = [d for d in entries if isinstance(d, dict)]
+        docs.extend(entries or [doc])
+    return docs
+
+
 def _labels(task_id):
     folder = _label_dir(task_id)
     if not folder.is_dir():
@@ -221,13 +239,14 @@ def _producer_key(producer):
     return "%s:%s" % (provider, model)
 
 
-def _gather(run_records):
+def _gather(run_records, history=False):
     """One record per verdict, across every run live or archived, with its
-    labelled ground truth (if any) attached."""
+    labelled ground truth (if any) attached. The latest verdict per SHA by
+    default, every recorded one with `history`."""
     records = []
     for task_id, directory in run_records:
         labels = _labels(task_id)
-        for doc in _verdicts(directory):
+        for doc in (_verdict_history(directory) if history else _verdicts(directory)):
             sha = doc.get("candidate_sha")
             records.append({
                 "task_id": task_id,
@@ -375,12 +394,12 @@ def _time_to_acceptance(run_records, producer_key):
     return _metric(sum(matching_durations) / len(matching_durations))
 
 
-def _entry(records, run_records, producer_key):
+def _entry(records, run_records, producer_key, history=None):
     return {
         "defect_escape_rate": _defect_escape_rate(records),
         "outcompeted_rate": _outcompeted_rate(records),
         "false_fail_rate": _false_fail_rate(records),
-        "incomplete_check_rate": _incomplete_check_rate(records),
+        "incomplete_check_rate": _incomplete_check_rate(records if history is None else history),
         "cost_per_accepted_task": _cost_per_accepted_task(),
         "time_to_acceptance_seconds": _time_to_acceptance(run_records, producer_key),
         "human_minutes": _human_minutes(),
@@ -390,9 +409,11 @@ def _entry(records, run_records, producer_key):
 def compute():
     run_records = _run_records()
     records = _gather(run_records)
-    producers = sorted(set(r["producer"] for r in records))
-    result = {"overall": _entry(records, run_records, None), "producers": {}}
+    history = _gather(run_records, history=True)
+    producers = sorted(set(r["producer"] for r in history))
+    result = {"overall": _entry(records, run_records, None, history), "producers": {}}
     for key in producers:
         sliced = [r for r in records if r["producer"] == key]
-        result["producers"][key] = _entry(sliced, run_records, key)
+        sliced_history = [r for r in history if r["producer"] == key]
+        result["producers"][key] = _entry(sliced, run_records, key, sliced_history)
     return result
