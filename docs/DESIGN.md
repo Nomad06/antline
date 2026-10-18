@@ -644,7 +644,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 162 rows: 118 `blocking`, 16 `soft` and 28 `n/a`. Of the
+As of this commit the table carries 163 rows: 118 `blocking`, 17 `soft` and 28 `n/a`. Of the
 `n/a` rows, 20 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -706,7 +706,10 @@ denied for any role in `boundary.ROLE_RULES` (all six generated roles) and allow
 unroled session, so a hook defect cannot lock
 the operator out of unrelated work [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A role's Bash command
 longer than 4096 characters is denied before any pattern runs, so a padded command cannot
-outlast the hook's timeout [R-GUARD-ROLE-COMMAND-LENGTH]. Both hooks need Python 3.11, and
+outlast the hook's timeout [R-GUARD-ROLE-COMMAND-LENGTH]. While a run is active, every deny the guard returns is
+also appended to the run's `log.jsonl` as a `deny` event with the role, the tool, the code and
+the first 200 characters of the target, best effort, so a failed append never changes the
+decision [R-GUARD-DENIAL-LOGGED]. Both hooks need Python 3.11, and
 `ppl setup claude` writes the interpreter that ran it into both hook entries. Under an older
 interpreter each hook reads the payload before importing anything from `ppl`, denies a call
 whose `agent_type` starts with `ppl-`, writes one stderr line naming the version it found and

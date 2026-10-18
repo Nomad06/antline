@@ -1888,7 +1888,7 @@ def dispatch_leak_deny(prompt, task_id, state):
                 "brief's interfaces only." % (len(hits), rel, first[:40]))
 
 
-def decide(payload):
+def _decide(payload):
     if not isinstance(payload, dict):
         return None
     tool = payload.get("tool_name", "")
@@ -2109,6 +2109,36 @@ def decide(payload):
     return None
 
 
+def log_denial(payload, result):
+    """Append one deny event to the active run's log. Best effort: whatever goes
+    wrong here, the decision already made stands [R-GUARD-DENIAL-LOGGED]."""
+    try:
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        task_id = run.active()
+        if not task_id:
+            return
+        tool_input = payload.get("tool_input")
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        target = tool_input.get("command") or target_path(tool_input)
+        agent = payload.get("agent_type")
+        store.append_log(task_id, {
+            "event": "deny",
+            "role": agent if isinstance(agent, str) else None,
+            "tool": payload.get("tool_name"),
+            "code": reason.split(" ", 1)[0],
+            "target": str(target)[:200] if target else None})
+    except Exception:
+        pass
+
+
+def decide(payload):
+    result = _decide(payload)
+    if result and isinstance(payload, dict):
+        log_denial(payload, result)
+    return result
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -2125,9 +2155,12 @@ def main():
         # would not block the call either.
         agent = payload.get("agent_type") if isinstance(payload, dict) else None
         if isinstance(agent, str) and agent in boundary.ROLE_RULES:
-            sys.stdout.write(json.dumps(deny(
+            refusal = deny(
                 "BOUNDARY_VIOLATION",
-                "guard internal error, role call refused: %s" % type(err).__name__)))
+                "guard internal error, role call refused: %s" % type(err).__name__)
+            sys.stdout.write(json.dumps(refusal))
+            sys.stdout.flush()
+            log_denial(payload, refusal)
         try:
             sys.stderr.write("ppl_guard internal error: %s\n" % err)
         except Exception:
