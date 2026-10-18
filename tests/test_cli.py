@@ -928,6 +928,7 @@ class TestNextSafeActionAfterArtifactCommands(unittest.TestCase):
         next_action = json.loads(out)["next_safe_action"]
         self.assertNotIn("dispatch ppl-verifier", next_action)
         self.assertIn("retry", next_action)
+        self.assertIn("ppl stage enter implementation", next_action)
 
     def test_mr_set_advances_next_safe_action(self):
         call("init", "DEMO-6304", "--tracker-url", "u", "--repo", "/tmp/repo",

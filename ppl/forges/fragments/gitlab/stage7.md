@@ -30,7 +30,10 @@ Each tick:
    that account), so a thread that identity merely opened is a review remark and stays
    pending; only a multi-note thread whose newest note is by the identity counts as the
    pipeline's own reply - which is why `last_author` and `note_count` are required above.
-4. `NEEDS_CODE_CHANGE` re-enters Stage 3 with the remark as an added constraint.
+4. `NEEDS_CODE_CHANGE` re-enters Stage 3 with the remark as an added constraint:
+   `ppl stage enter implementation` (it names `references/stage-3-implementation.md`), or
+   `ppl stage enter tests` (`references/stage-3-tests.md`) when the remark is about the tests,
+   before the fresh worker.
    `NEEDS_REPLY_ONLY` gets its draft posted. `DISAGREE` and `NEEDS_OWNER` go to the owner -
    do not argue in the thread yourself.
 5. Post replies through the GitLab MCP. **You do not resolve a thread** - only the person

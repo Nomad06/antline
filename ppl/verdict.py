@@ -17,7 +17,10 @@ ADVISORY_CHECKS = ("simplification",)
 # apart - see schema.VERDICT_OUTCOMES for the full closed set this keys.
 VERDICT_NEXT_ACTION = {
     "PASS": "verdict is PASS - proceed to Stage 6 (ppl stage enter mr)",
-    "REWORK": "ppl budget spend retry, then dispatch a fresh worker with the finding",
+    "REWORK": "ppl budget spend retry, then ppl stage enter implementation "
+              "(references/stage-3-implementation.md), or ppl stage enter tests "
+              "(references/stage-3-tests.md) when the finding is the tests', and dispatch "
+              "a fresh worker with the finding",
     "BLOCKED": "map the finding to an error_code and ppl park --blocker <code> "
               "--safe-next \"...\"",
     "OWNER_DECISION": "ppl escalate --code OWNER_DECISION --question \"<the verifier's "

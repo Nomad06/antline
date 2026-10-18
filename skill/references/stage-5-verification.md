@@ -59,7 +59,10 @@ telling you to pick one from its stated finding. Route all eight:
 - **PASS** - forward to Stage 6.
 - **REWORK** - `ppl budget spend retry` first. This is the only place the retry budget is
   ever spent, so skipping it makes the three-cycle limit below unenforced prose, not a real
-  limit. Then dispatch a fresh worker with the finding, which produces a new SHA and
+  limit. Then re-enter Stage 3 with `ppl stage enter implementation` and read
+  `references/stage-3-implementation.md`, the model to pass and the boundary review included,
+  or `ppl stage enter tests` and `references/stage-3-tests.md` when the finding is the
+  tests'. Dispatch a fresh worker with the finding there, which produces a new SHA and
   restarts Stage 4 in full. If `ppl budget spend retry` itself exits 2 with
   `BUDGET_EXHAUSTED`, stop rework immediately and park; do not dispatch the worker it was
   gating. Three rework cycles is the limit either way; past that the problem has changed

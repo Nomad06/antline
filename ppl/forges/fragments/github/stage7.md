@@ -29,7 +29,10 @@ Each tick:
    accepts and is safe for the orchestrator too.
 3. `ppl review pending --threads <file> --sha <sha>` is the dispatch filter. Dispatch exactly
    the threads it names to `ppl-review-responder`.
-4. `NEEDS_CODE_CHANGE` re-enters Stage 3 with the remark as an added constraint.
+4. `NEEDS_CODE_CHANGE` re-enters Stage 3 with the remark as an added constraint:
+   `ppl stage enter implementation` (it names `references/stage-3-implementation.md`), or
+   `ppl stage enter tests` (`references/stage-3-tests.md`) when the remark is about the tests,
+   before the fresh worker.
    `NEEDS_REPLY_ONLY` gets its draft posted. `DISAGREE` and `NEEDS_OWNER` go to the owner.
 5. Post replies with `gh api repos/<owner>/<repo>/pulls/<number>/comments/<id>/replies -f body=<text>`.
    **You do not resolve a thread**, you do not `gh pr review --approve`, you do not

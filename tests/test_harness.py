@@ -1142,7 +1142,8 @@ class TestRenderSkill(HarnessTestCase):
             self.assertIn("branch trunk here", rendered[relative], relative)
 
     def test_rendered_skill_carries_the_notice_and_the_forge_text(self):
-        forge_files = ("SKILL.md", "references/stage-6-mr.md", "references/stage-7-review.md")
+        forge_files = ("SKILL.md", "references/stage-6-mr.md", "references/stage-7-review.md",
+                       "references/stage-8-after-merge.md")
         maven = self.render("example-maven")
         self.assertTrue(maven["SKILL.md"].startswith("---\n"))
         self.assertIn(harness.SKILL_NOTICE, maven["SKILL.md"])

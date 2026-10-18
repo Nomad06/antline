@@ -249,7 +249,12 @@ class TestSkillContract(unittest.TestCase):
         # the close-out note comes from the harness/tracker-close fragment, and
         # the shipped default asks for a comment only
         # one bracketed letter per phrase keeps this file out of the scrub's pattern
-        self.assertIsNone(re.search(r"ai-usag[e]|progress fiel[d]", self.text, re.IGNORECASE))
+        files = {path.relative_to(self.skill.parent).as_posix(): path
+                 for path in self.skill.parent.rglob("*.md")}
+        self.assertIn("references/stage-8-after-merge.md", files)
+        for relative, path in sorted(files.items()):
+            self.assertIsNone(re.search(r"ai-usag[e]|progress fiel[d]",
+                                        path.read_text(encoding="utf-8"), re.IGNORECASE), relative)
 
     def test_it_starts_with_recovery(self):
         self.assertIn("ppl recover", self.text)
@@ -407,6 +412,42 @@ class TestEveryRenderedFile(unittest.TestCase):
         section = " ".join(RENDERED["example-maven"]["references/stage-8-after-merge.md"].split())
         self.assertEqual(section.count(sequences.render(sequences.AFTER_MERGE)), 2)
         self.assertIn(sequences.render(sequences.SEQUENCES["close-out-from-closure"][1]), section)
+
+
+# Rework dispatches a fresh worker, and only the stage 3 references say which model to pass
+# and when to review the diff against the boundary yourself. Every place that sends a run
+# back to rework names the re-entry that prints them: (file, start of the passage, its end).
+REWORK_TRIGGERS = (
+    ("references/stage-4-gates.md", "A gate that fails inside the boundary", "\n\n"),
+    ("references/stage-5-verification.md", "- **REWORK**", "- **BLOCKED**"),
+    ("references/stage-7-review.md", "4. `NEEDS_CODE_CHANGE`", "\n5. "),
+    ("references/review-loop.md", "- `NEEDS_CODE_CHANGE`", "- `NEEDS_REPLY_ONLY`"),
+    ("references/review-loop.md", "8. Red CI on the candidate", "\n9. "),
+)
+REWORK_REENTRY = ("`ppl stage enter implementation`", "`references/stage-3-implementation.md`",
+                  "`ppl stage enter tests`", "`references/stage-3-tests.md`")
+
+
+class TestReworkReentersStageThree(unittest.TestCase):
+    def test_every_rework_trigger_names_the_stage_three_reentry(self):
+        problems = []
+        for name, files in RENDERED.items():
+            for path, start, end in REWORK_TRIGGERS:
+                text = files[path]
+                passage = text[text.index(start):]
+                passage = " ".join(passage[:passage.index(end, len(start))].split())
+                problems += ["%s %s: %s missing" % (name, path, needed)
+                             for needed in REWORK_REENTRY if needed not in passage]
+        self.assertEqual(problems, [])
+
+    def test_the_rework_next_action_names_reentries_legal_from_verification(self):
+        action = verdict.VERDICT_NEXT_ACTION["REWORK"]
+        stages = re.findall(r"\bppl stage enter (\w+)", action)
+        self.assertEqual(sorted(stages), ["implementation", "tests"], action)
+        for stage in stages:
+            self.assertIsNone(walk(("ppl stage enter %s" % stage,), "verification", "in_progress"))
+        self.assertLess(action.index("ppl budget spend retry"),
+                        action.index("ppl stage enter implementation"))
 
 
 SKILL_BUDGET_BYTES = 14000

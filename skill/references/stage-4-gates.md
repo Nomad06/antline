@@ -18,8 +18,10 @@ satisfy them [R-DONE-SECRET-SCAN]. Record the rest of the gates the same way und
 `references/gates.md`); every acceptance ID also needs its own passing receipt, referenced
 later by the verifier as `evidence:<check-name>`.
 
-A gate that fails inside the boundary routes to rework. A gate that fails outside the
-boundary is `BASELINE_FAILURE`: park it, escalate with provenance, and do not edit a test to
+A gate that fails inside the boundary routes to rework: re-enter Stage 3 with `ppl stage enter
+implementation`, which names `references/stage-3-implementation.md`, or `ppl stage enter
+tests` and `references/stage-3-tests.md` when a test is at fault, and dispatch a fresh worker
+there. A gate that fails outside the boundary is `BASELINE_FAILURE`: park it, escalate with provenance, and do not edit a test to
 make it green.
 
 Once the gates are green, run the simplification pass before verification: spend a dispatch
