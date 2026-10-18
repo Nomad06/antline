@@ -1,10 +1,10 @@
 # The brief schema
 
-`ppl brief set <file>` validates a JSON document against `schema.BRIEF_FIELDS` before
+`ppl brief set <file> --from ppl-briefer` validates a JSON document against `schema.BRIEF_FIELDS` before
 writing `brief.json` and deriving `boundary.json` from it. Every field below is required -
 `ppl brief set` refuses `SCHEMA_INVALID` on the first one missing or of the wrong type, not
 on all of them at once, so composing the brief without this table costs one round trip per
-mistake.
+mistake, and the second mistake in a row parks the run with `FORMAT_RETRY_EXHAUSTED`.
 
 | Field | Type | Shape |
 |---|---|---|

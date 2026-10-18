@@ -24,10 +24,10 @@ asked `ppl` for something it does not accept, not that the task needs an owner d
 
 ## The role output rule
 
-One rule for every role output `ppl` refuses `SCHEMA_INVALID`. Pass `--from <role>` on
-`ppl brief set`, `ppl brief challenge`, `ppl verdict record`, `ppl findings add` and
-`ppl evidence add` (`orchestrator` for what you wrote yourself), so each refusal of an output
-is counted against the role whose output it was. A refusal of how you called the command (a
+One rule for every role output `ppl` refuses `SCHEMA_INVALID`. `--from <role>` names whose
+output a call records: `ppl brief set`, `ppl brief challenge`, `ppl verdict record` and
+`ppl findings add` take it every time, and `ppl evidence add` defaults to `orchestrator`, the
+gate receipts you write yourself. Each refusal of an output is counted against that role. A refusal of how you called the command (a
 file path that cannot be read, a missing `--generation`) is logged but not counted: fix the
 call and run it again.
 

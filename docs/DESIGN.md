@@ -809,11 +809,12 @@ ppl init <TASK_ID> --repo <worktree-path> --tracker-url <url> --harness <name> [
 ppl status                       # founder status card, human language
 ppl show --json                  # full state, machine readable
 ppl stage enter <stage>          # validates legal transition and budget
-ppl brief set <file> [--from <role>]
+ppl brief set <file> --from <role>
                                  # schema-validated, binds spec_revision. --from names the
-                                 # role whose output a call records, on brief set|challenge,
-                                 # verdict record, findings add and evidence add: a role from
-                                 # routing or orchestrator, counted for refusals (6.6)
+                                 # role whose output a call records: a role from routing or
+                                 # orchestrator, counted for refusals (6.6). brief set|
+                                 # challenge, verdict record and findings add take it every
+                                 # time, evidence add defaults to orchestrator
 ppl boundary set <file>          # write/forbid lists; write must be non-empty and must not
                                  # contain "**" [R-BOUNDARY-SET-NO-WILDCARD]. Disjointness
                                  # with forbid is NOT enforced here - see R-BOUNDARY-SET-DISJOINT
@@ -823,7 +824,7 @@ ppl evidence add --check <name> --result pass|fail [--sha <sha>] --log <path> --
                                  # --sha defaults to git rev-parse HEAD in the run's repo;
                                  # --generation is the lease generation the caller captured
                                  # from `ppl stage enter` or `ppl recover` (6.2)
-ppl verdict record <file> --generation <n> [--from <role>]
+ppl verdict record <file> --generation <n> --from <role>
                                  # must carry candidate_sha and acceptance map
 ppl transition <done|blocked|failed>   # done only in stage closure
 ppl park --blocker <CODE> --safe-next "<action>" [--unsafe-to-repeat "<action>"]
@@ -1082,11 +1083,11 @@ naively re-reading the run's current stage would produce once it is already park
 Refusals (`log.jsonl`) - a `SCHEMA_INVALID` from `ppl brief set`, `brief challenge`,
 `verdict record`, `findings add` or `evidence add` appends a `refusal` event: `command`,
 `code`, `message` as `ppl` printed it (without the park note the second one carries), `role`
-(the `--from` value, `unknown` when the call gave none), the run's `lease_generation` and
-`counted`. Only a refusal of the output itself is counted: an error raised inside
+(the `--from` value, null when a call left out the flag it needs), the run's
+`lease_generation` and `counted`. Only a refusal of the output itself is counted: an error raised inside
 `errors.role_output`, which wraps the document's parse and its schema and consistency checks
-in each of the five commands. An unreadable file, a missing `--generation` or a run with no
-brief yet is how the command was called, logged with `counted` false. The role gets
+in each of the five commands. An unreadable file, a missing `--generation` or `--from`, or
+a run with no brief yet is how the command was called, logged with `counted` false. The role gets
 the refusal once, quoted, and redispatches (the skill's escalation reference). The second
 counted refusal in a row for the same command, role and generation is still printed as
 `SCHEMA_INVALID`, `ppl` parks the run with blocker `FORMAT_RETRY_EXHAUSTED` and both
@@ -1095,7 +1096,10 @@ refusals in `parking.json` under `refusals`, and a later call for that key is re
 back from the log: an accepted call for the key ends it (a `role_output_accepted` event,
 written only when a count was open), a resume from parking clears it like any park, and
 `ppl recover` moves the generation, which starts a fresh one. Same pattern as
-`VERIFICATION_UNAVAILABLE`, which also counts the second failure in a row (6.10).
+`VERIFICATION_UNAVAILABLE`, which also counts the second failure in a row (6.10). When
+`ppl` fails to read or write the count, the command's own outcome stays as it is, `ppl`
+prints `warning: refusal count not updated: <reason>` to stderr ahead of the JSON line, and
+logs a `refusal_bookkeeping_error` event when the log takes it.
 
 Review ledger (`threads.json`) - `{thread_id: {sha: {classification, at, last_note_id}}}`.
 This is what makes `ppl review pending` (section 8) safe to call every tick without ever

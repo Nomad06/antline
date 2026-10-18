@@ -737,6 +737,15 @@ class TestChallengeSchema(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
         self.assertIn("parked", ctx.exception.message)
 
+    def test_the_refusal_tells_the_challenger_what_to_correct_in_its_own_report(self):
+        # rule: R-BRIEF-CHALLENGE-SELF-CONSISTENT
+        doc = dict(CHALLENGE_OK, spec_revision="x",
+                   new_classes=[{"name": "X", "existing_owner": "Y", "justified": False}])
+        with self.assertRaises(PplError) as ctx:
+            schema.validate_challenge(doc)
+        self.assertIn("set this report's verdict to REVISE", ctx.exception.message)
+        self.assertNotIn("re-brief", ctx.exception.message)
+
     def test_revise_may_carry_the_problems_it_reports(self):
         doc = dict(CHALLENGE_OK, spec_revision="x", verdict="REVISE",
                    new_classes=[{"name": "X", "existing_owner": "Y", "justified": False}])

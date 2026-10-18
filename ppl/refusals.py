@@ -10,8 +10,10 @@ from .errors import PplError
 # The commands that record a role's output, as "<command> <action>".
 COMMANDS = ("brief set", "brief challenge", "verdict record", "findings add", "evidence add")
 ROLES = routing.REQUIRED_ROLES + ("orchestrator",)
-# A call made without --from is counted all the same, under this name.
-UNKNOWN_ROLE = "unknown"
+# The --from value a refusal for a missing one names.
+EXPECTED_ROLE = {"brief set": "ppl-briefer", "brief challenge": "ppl-brief-challenger",
+                 "verdict record": "ppl-verifier", "findings add": "ppl-verifier",
+                 "evidence add": "orchestrator"}
 CAP = 2
 
 
@@ -38,7 +40,6 @@ def _generation(task_id):
 
 
 def require_retry_left(task_id, command, role):
-    role = role or UNKNOWN_ROLE
     generation = _generation(task_id)
     if len(_counted(task_id, command, role, generation)) >= CAP:
         raise PplError("FORMAT_RETRY_EXHAUSTED",
@@ -50,8 +51,8 @@ def require_retry_left(task_id, command, role):
 
 def record_refusal(task_id, command, role, message, of_role_output):
     """Log one refusal. The second refusal of the role's output in a row for the same key
-    parks the run with both messages, and the returned sentence says so to the caller."""
-    role = role or UNKNOWN_ROLE
+    parks the run with both messages, and the returned sentence says so to the caller.
+    `role` is None when the call named none, which is never counted."""
     generation = _generation(task_id)
     store.append_log(task_id, {"event": "refusal", "command": command, "code": "SCHEMA_INVALID",
                                "message": message, "role": role,
@@ -74,7 +75,6 @@ def record_refusal(task_id, command, role, message, of_role_output):
 def record_acceptance(task_id, command, role):
     """Mark an accepted call, only when it ends a run of counted refusals, so the log
     does not grow on every ordinary call."""
-    role = role or UNKNOWN_ROLE
     generation = _generation(task_id)
     if _counted(task_id, command, role, generation):
         store.append_log(task_id, {"event": "role_output_accepted", "command": command,

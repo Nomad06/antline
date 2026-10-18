@@ -1,6 +1,6 @@
 # The brief challenge report
 
-`ppl brief challenge <file> --generation <n>` validates a JSON document against
+`ppl brief challenge <file> --generation <n> --from ppl-brief-challenger` validates a JSON document against
 `schema.CHALLENGE_FIELDS`, checks it against the run, writes `challenge.json` into the run
 directory and binds `state["brief_challenge"]` to the report's `spec_revision`. Every field
 below is required.

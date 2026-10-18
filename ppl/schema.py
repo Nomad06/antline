@@ -148,8 +148,9 @@ def validate_challenge(doc):
     validate_open_decisions(doc["open_decisions"], "challenge")
     if doc["verdict"] == "ACCEPTED" and problems:
         raise PplError("SCHEMA_INVALID",
-                       "a challenge cannot be ACCEPTED while it reports: %s - record it as "
-                       "REVISE and re-brief [R-BRIEF-CHALLENGE-SELF-CONSISTENT]"
+                       "a challenge cannot be ACCEPTED while it reports: %s - set this "
+                       "report's verdict to REVISE and keep those findings as they are "
+                       "[R-BRIEF-CHALLENGE-SELF-CONSISTENT]"
                        % "; ".join(problems))
 
 

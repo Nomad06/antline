@@ -398,7 +398,8 @@ class TestCli(unittest.TestCase):
     def test_brief_set_missing_file_is_schema_invalid(self):
         call("init", "DEMO-625", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
-        code, _, err = call("brief", "set", "/no/such/file.json", "--task", "DEMO-625")
+        code, _, err = call("brief", "set", "/no/such/file.json",
+                            "--from", "ppl-briefer", "--task", "DEMO-625")
         stamp_challenge("DEMO-625")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
@@ -407,7 +408,8 @@ class TestCli(unittest.TestCase):
         repo = make_repo()
         call("init", "DEMO-626", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         bad = write_text_file("{not json")
-        code, _, err = call("verdict", "record", bad, "--task", "DEMO-626")
+        code, _, err = call("verdict", "record", bad,
+                            "--from", "ppl-verifier", "--task", "DEMO-626")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
@@ -870,7 +872,8 @@ class TestNextSafeActionAfterArtifactCommands(unittest.TestCase):
             "verification": ["focused-tests"], "open_decisions": [],
             "name_contract": {"Foo.bar": "int"},
         })
-        code, _, err = call("brief", "set", brief_file, "--task", "DEMO-6302")
+        code, _, err = call("brief", "set", brief_file,
+                            "--from", "ppl-briefer", "--task", "DEMO-6302")
         stamp_challenge("DEMO-6302")
         self.assertEqual(code, 0, err)
         code, out, _ = call("show", "--task", "DEMO-6302", "--json")
@@ -893,7 +896,7 @@ class TestNextSafeActionAfterArtifactCommands(unittest.TestCase):
             "verification": ["focused-tests"], "open_decisions": [],
             "name_contract": {"Foo.bar": "int"},
         })
-        call("brief", "set", brief_file, "--task", "DEMO-6303")
+        call("brief", "set", brief_file, "--from", "ppl-briefer", "--task", "DEMO-6303")
         stamp_challenge("DEMO-6303")
         head = commit(repo, "work.txt", "work\n")
         revision = run.load("DEMO-6303")["spec_revision"]
@@ -903,7 +906,7 @@ class TestNextSafeActionAfterArtifactCommands(unittest.TestCase):
             "producer": {"role": "verifier"},
         })
         code, _, err = call("verdict", "record", doc, "--generation", "1",
-                            "--task", "DEMO-6303")
+                            "--from", "ppl-verifier", "--task", "DEMO-6303")
         self.assertEqual(code, 0, err)
         code, out, _ = call("show", "--task", "DEMO-6303", "--json")
         next_action = json.loads(out)["next_safe_action"]
@@ -1255,7 +1258,8 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
             "verdict": "PASS", "acceptance_evidence": {}, "findings": [],
             "producer": {"role": "verifier"},
         })
-        code, _, err = call("verdict", "record", doc, "--generation", "1", "--task", "DEMO-942")
+        code, _, err = call("verdict", "record", doc, "--generation", "1",
+                            "--from", "ppl-verifier", "--task", "DEMO-942")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
 
@@ -1292,7 +1296,7 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
         code, _, err = call("findings", "add", "--severity", "blocking",
                             "--evidence", "e", "--affected-sha", head_sha(repo),
                             "--affected-path", "a.txt",
-                            "--generation", "1", "--task", "DEMO-9440")
+                            "--generation", "1", "--from", "ppl-verifier", "--task", "DEMO-9440")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
 
@@ -1301,7 +1305,8 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
              "--harness", "example-maven")
         code, _, err = call("findings", "add", "--severity", "blocking",
                             "--evidence", "e", "--affected-sha", "a" * 40,
-                            "--affected-path", "a.txt", "--task", "DEMO-9441")
+                            "--affected-path", "a.txt",
+                            "--from", "ppl-verifier", "--task", "DEMO-9441")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
@@ -1335,7 +1340,7 @@ class TestNameContractSpecRevision(unittest.TestCase):
         repo = make_repo()
         call("init", "DEMO-960", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         code, out, err = call("brief", "set", self._brief_file({"Foo.bar": "int"}),
-                              "--task", "DEMO-960")
+                              "--from", "ppl-briefer", "--task", "DEMO-960")
         stamp_challenge("DEMO-960")
         self.assertEqual(code, 0, err)
         self.assertIn("spec_revision sha256:", out)
@@ -1371,7 +1376,7 @@ class TestNameContractSpecRevision(unittest.TestCase):
         state["stage"] = "closure"
         run.save(state)
         call("brief", "set", self._brief_file(name_contract, acceptance=acceptance),
-             "--task", task_id)
+             "--from", "ppl-briefer", "--task", task_id)
         stamp_challenge(task_id)
         head = commit(repo, "work-%s.txt" % task_id, "work\n")
         from ppl import run
@@ -1382,7 +1387,8 @@ class TestNameContractSpecRevision(unittest.TestCase):
             "acceptance_evidence": acceptance_evidence or {"AC-1": "evidence:focused-tests"},
             "findings": [], "producer": {"role": "verifier"},
         })
-        call("verdict", "record", doc, "--generation", "1", "--task", task_id)
+        call("verdict", "record", doc, "--generation", "1",
+             "--from", "ppl-verifier", "--task", task_id)
         rc = self._rc_zero()
         call("evidence", "add", "--check", "focused-tests", "--result", "pass",
              "--sha", head, "--log", "/tmp/l", "--rc", rc, "--generation", "1", "--task", task_id)
@@ -1414,7 +1420,8 @@ class TestNameContractSpecRevision(unittest.TestCase):
         self._to_verified_pass("DEMO-962", repo, {"Foo.bar": "int"})
         # The verdict above is durably PASS, matching the contract at the time
         # it was recorded. Only now does a rebrief move the run's binding.
-        call("brief", "set", self._brief_file({"Foo.bar": "long"}), "--task", "DEMO-962")
+        call("brief", "set", self._brief_file({"Foo.bar": "long"}),
+             "--from", "ppl-briefer", "--task", "DEMO-962")
         stamp_challenge("DEMO-962")
         code, _, err = call("transition", "done", "--task", "DEMO-962")
         self.assertEqual(code, 2)
@@ -1441,7 +1448,7 @@ class TestNameContractSpecRevision(unittest.TestCase):
         # not the write boundary. Before this fix: gate OPEN, spec_revision
         # unchanged, because spec_revision hashed name_contract alone.
         call("brief", "set", self._brief_file({"Foo.bar": "int"}, acceptance=["AC-1"]),
-             "--task", "DEMO-9970")
+             "--from", "ppl-briefer", "--task", "DEMO-9970")
         stamp_challenge("DEMO-9970")
         code, _, err = call("transition", "done", "--task", "DEMO-9970")
         self.assertEqual(code, 2)
@@ -1461,7 +1468,7 @@ class TestNameContractSpecRevision(unittest.TestCase):
         call("brief", "set",
              self._brief_file({"Foo.bar": "int"}, purpose="a materially different purpose",
                               governing_requirements=["REQ-9"]),
-             "--task", "DEMO-9971")
+             "--from", "ppl-briefer", "--task", "DEMO-9971")
         stamp_challenge("DEMO-9971")
         code, out, err = call("transition", "done", "--task", "DEMO-9971")
         self.assertEqual(code, 0, err)
@@ -1511,7 +1518,8 @@ class TestBoundaryChangeSpecRevisionStaleness(unittest.TestCase):
         state["status"] = "in_progress"
         state["stage"] = "closure"
         run.save(state)
-        call("brief", "set", self._brief_file(["src/**"]), "--task", task_id)
+        call("brief", "set", self._brief_file(["src/**"]),
+             "--from", "ppl-briefer", "--task", task_id)
         stamp_challenge(task_id)
         head = commit(repo, "escaped.txt", "work\n")
         revision = run.load(task_id)["spec_revision"]
@@ -1520,7 +1528,8 @@ class TestBoundaryChangeSpecRevisionStaleness(unittest.TestCase):
             "verdict": "PASS", "acceptance_evidence": {"AC-1": "evidence:focused-tests"},
             "findings": [], "producer": {"role": "verifier"},
         })
-        call("verdict", "record", doc, "--generation", "1", "--task", task_id)
+        call("verdict", "record", doc, "--generation", "1",
+             "--from", "ppl-verifier", "--task", task_id)
         rc = self._rc_zero()
         call("evidence", "add", "--check", "focused-tests", "--result", "pass",
              "--sha", head, "--log", "/tmp/l", "--rc", rc, "--generation", "1", "--task", task_id)
@@ -1569,7 +1578,8 @@ class TestBoundaryChangeSpecRevisionStaleness(unittest.TestCase):
         # (R-BOUNDARY-SET-NO-WILDCARD), so re-setting it below would silently
         # no-op on a refused write rather than exercising a real same-content
         # rewrite - a narrow, settable boundary is required to prove anything.
-        call("brief", "set", self._brief_file(["work.txt"]), "--task", task_id)
+        call("brief", "set", self._brief_file(["work.txt"]),
+             "--from", "ppl-briefer", "--task", task_id)
         stamp_challenge(task_id)
         head = commit(repo, "work.txt", "work\n")
         revision = run.load(task_id)["spec_revision"]
@@ -1578,7 +1588,8 @@ class TestBoundaryChangeSpecRevisionStaleness(unittest.TestCase):
             "verdict": "PASS", "acceptance_evidence": {"AC-1": "evidence:focused-tests"},
             "findings": [], "producer": {"role": "verifier"},
         })
-        call("verdict", "record", doc, "--generation", "1", "--task", task_id)
+        call("verdict", "record", doc, "--generation", "1",
+             "--from", "ppl-verifier", "--task", task_id)
         rc = self._rc_zero()
         call("evidence", "add", "--check", "focused-tests", "--result", "pass",
              "--sha", head, "--log", "/tmp/l", "--rc", rc, "--generation", "1", "--task", task_id)
@@ -2835,7 +2846,8 @@ class TestRefusalRetryCap(unittest.TestCase):
             task_id = "DEMO-182%d" % number
             with self.subTest(command=command):
                 self.init(task_id, make_repo())
-                self.assertEqual(self.brief_set(task_id, good_brief(task_id))[0], 0)
+                self.assertEqual(self.brief_set(task_id, good_brief(task_id),
+                                                "--from", "ppl-briefer")[0], 0)
                 for _ in range(2):
                     code, _, err = call(*argv, "--from", "ppl-verifier", "--task", task_id)
                     self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
@@ -2915,16 +2927,42 @@ class TestRefusalRetryCap(unittest.TestCase):
         code, _, err = self.brief_set("DEMO-1806", good_brief("DEMO-1806"), "--from", "ppl-briefer")
         self.assertEqual(code, 0, err)
 
-    def test_a_call_without_from_is_counted_as_an_unknown_role(self):
+    def test_a_missing_from_is_refused_naming_the_role_to_pass_and_not_counted(self):
         # rule: R-REFUSAL-RETRY-CAP
-        from ppl import run
-        self.init("DEMO-1807")
-        self.brief_set("DEMO-1807", write_text_file("not json"))
-        self.brief_set("DEMO-1807", write_text_file("not json"))
-        self.assertEqual([e["role"] for e in refusals_of("DEMO-1807")], ["unknown", "unknown"])
-        self.assertEqual(run.load("DEMO-1807")["stage"], "parking")
-        code, _, err = self.brief_set("DEMO-1807", good_brief("DEMO-1807"))
-        self.assertEqual(json.loads(err)["error_code"], "FORMAT_RETRY_EXHAUSTED")
+        from ppl import paths, run
+        self.init("DEMO-1807", make_repo())
+        expected = {
+            "brief set": (("brief", "set", good_brief("DEMO-1807")), "ppl-briefer"),
+            "brief challenge": (("brief", "challenge", write_text_file("not json"),
+                                 "--generation", "1"), "ppl-brief-challenger"),
+            "verdict record": (("verdict", "record", write_text_file("not json"),
+                                "--generation", "1"), "ppl-verifier"),
+            "findings add": (("findings", "add", "--severity", "minor", "--evidence", "e",
+                              "--affected-sha", "a" * 40, "--affected-path", "a.txt",
+                              "--generation", "1"), "ppl-verifier"),
+        }
+        for command, (argv, role) in expected.items():
+            with self.subTest(command=command):
+                for _ in range(2):
+                    code, _, err = call(*argv, "--task", "DEMO-1807")
+                    error = json.loads(err)
+                    self.assertEqual(error["error_code"], "SCHEMA_INVALID")
+                    self.assertIn("--from %s" % role, error["message"])
+                self.assertEqual(refusals_of("DEMO-1807")[-1]["command"], command)
+        events = refusals_of("DEMO-1807")
+        self.assertEqual(len(events), 8)
+        self.assertEqual({(event["counted"], event["role"]) for event in events}, {(False, None)})
+        self.assertNotEqual(run.load("DEMO-1807")["stage"], "parking")
+        self.assertFalse((paths.run_dir("DEMO-1807") / "brief.json").exists())
+
+    def test_evidence_add_records_the_orchestrator_when_from_is_left_out(self):
+        self.init("DEMO-1816", make_repo())
+        code, _, err = call("evidence", "add", "--check", "", "--result", "pass",
+                            "--log", "/tmp/log.txt", "--rc", "/tmp/rc", "--generation", "1",
+                            "--task", "DEMO-1816")
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertEqual([(e["role"], e["counted"]) for e in refusals_of("DEMO-1816")],
+                         [("orchestrator", True)])
 
     def test_from_takes_only_a_known_role_or_the_orchestrator(self):
         self.init("DEMO-1808")
@@ -2968,14 +3006,51 @@ class TestRefusalRetryCap(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
         self.assertFalse(paths.run_dir("DEMO-1811").exists())
 
-    def test_a_refusal_that_cannot_be_logged_still_exits_two_with_its_code(self):
+    def failing_append(self, failing_event):
+        from ppl import store
+        real = store.append_log
+
+        def append(task_id, event):
+            if event.get("event") == failing_event:
+                raise OSError("disk full")
+            return real(task_id, event)
+        return mock.patch.object(store, "append_log", side_effect=append)
+
+    def test_a_refusal_count_that_cannot_be_written_warns_and_keeps_the_refusal(self):
         from ppl import store
         self.init("DEMO-1812")
-        with mock.patch.object(store, "append_log", side_effect=OSError("disk full")):
+        with self.failing_append("refusal"):
             code, _, err = self.brief_set("DEMO-1812", write_text_file("not json"),
                                           "--from", "ppl-briefer")
         self.assertEqual(code, 2)
-        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        lines = err.strip().splitlines()
+        self.assertEqual(lines[0], "warning: refusal count not updated: disk full")
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[-1])["error_code"], "SCHEMA_INVALID")
+        errors = [e for e in store.read_log("DEMO-1812")
+                  if e.get("event") == "refusal_bookkeeping_error"]
+        self.assertEqual([(e["command"], e["role"], e["reason"]) for e in errors],
+                         [("brief set", "ppl-briefer", "disk full")])
+
+    def test_a_log_that_takes_no_write_at_all_still_gets_the_warning_and_the_refusal(self):
+        from ppl import store
+        self.init("DEMO-1817")
+        with mock.patch.object(store, "append_log", side_effect=OSError("read-only")):
+            code, _, err = self.brief_set("DEMO-1817", write_text_file("not json"),
+                                          "--from", "ppl-briefer")
+        self.assertEqual(code, 2)
+        lines = err.strip().splitlines()
+        self.assertEqual(lines[0], "warning: refusal count not updated: read-only")
+        self.assertEqual(json.loads(lines[-1])["error_code"], "SCHEMA_INVALID")
+
+    def test_an_acceptance_that_cannot_be_written_warns_and_keeps_exit_zero(self):
+        self.init("DEMO-1818")
+        self.brief_set("DEMO-1818", write_text_file("not json"), "--from", "ppl-briefer")
+        with self.failing_append("role_output_accepted"):
+            code, _, err = self.brief_set("DEMO-1818", good_brief("DEMO-1818"),
+                                          "--from", "ppl-briefer")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err.strip(), "warning: refusal count not updated: disk full")
 
 
 if __name__ == "__main__":

@@ -74,6 +74,8 @@ refused as a stale attempt [R-LEASE-STALE-WRITE].
 **Whose output.** `ppl brief set`, `ppl brief challenge`, `ppl verdict record`, `ppl findings
 add` and `ppl evidence add` record a role's output: pass `--from <role>` on every one of
 them, naming the role that wrote it (`orchestrator` for a gate receipt you wrote yourself).
+The first four refuse a call without it `SCHEMA_INVALID`, naming the value to pass, and
+`ppl evidence add` defaults to `orchestrator` [R-REFUSAL-RETRY-CAP].
 When one of them exits 2 with `SCHEMA_INVALID`, follow "The role output rule" in
 `references/escalation.md`: do not edit the content, redispatch that role once with the
 refusal quoted, and report a second refusal instead of trying a third time. `ppl` counts the

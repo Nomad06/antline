@@ -57,9 +57,16 @@ def role_output_command(args):
 
 
 def require_retry_left(task_id, args):
-    """Checked after the run's own gates and before the input is read, so a spent key is
-    refused whatever the input [R-REFUSAL-RETRY-CAP]."""
-    refusals.require_retry_left(task_id, role_output_command(args), args.from_role)
+    """Checked after the run's own gates and before the input is read: the call has to
+    name whose output it records, and a spent key is refused whatever the input
+    [R-REFUSAL-RETRY-CAP]."""
+    command = role_output_command(args)
+    if args.from_role is None:
+        raise PplError("SCHEMA_INVALID",
+                       "ppl %s needs --from <role>, the role whose output it records: pass "
+                       "--from %s for that role's output, or another of %s"
+                       % (command, refusals.EXPECTED_ROLE[command], ", ".join(refusals.ROLES)))
+    refusals.require_retry_left(task_id, command, args.from_role)
 
 
 def load_json_arg(path, what, kind=dict):
@@ -919,10 +926,12 @@ class JsonArgumentParser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
-def add_from(parser):
+def add_from(parser, default=None):
     # The role whose output the call records, so a refusal is counted against it
-    # [R-REFUSAL-RETRY-CAP].
-    parser.add_argument("--from", dest="from_role", choices=list(refusals.ROLES))
+    # [R-REFUSAL-RETRY-CAP]. Required in effect (require_retry_left) unless a default
+    # is given, so a missing one is a logged refusal rather than an argparse error.
+    parser.add_argument("--from", dest="from_role", choices=list(refusals.ROLES),
+                        default=default)
 
 
 def build_parser():
@@ -1001,7 +1010,8 @@ def build_parser():
     # control.enforce genuinely does run first and argparse-required would
     # misreport a paused run.)
     p.add_argument("--generation", type=int)
-    add_from(p)
+    # the orchestrator runs the gates itself
+    add_from(p, default="orchestrator")
     p.add_argument("--task")
 
     p = sub.add_parser("verdict")
@@ -1207,33 +1217,50 @@ def main(argv=None):
 def _role_output_run(args):
     """(task_id, command) when this call records a role's output in a run that exists."""
     command = role_output_command(args)
-    task_id = getattr(args, "task", None) or run.active()
-    if command is None or not task_id or not run.state_path(task_id).exists():
+    try:
+        task_id = getattr(args, "task", None) or run.active()
+        if command is None or not task_id or not run.state_path(task_id).exists():
+            return None, None
+    except (OSError, PplError):
+        # a task id or pointer the command itself already failed on
         return None, None
     return task_id, command
 
 
-# Both helpers below are best effort: the command's own outcome stands and is printed
-# whatever fails here, so exit 2 keeps its JSON and exit 0 stays 0.
+# The two helpers below never change the command's outcome: exit 2 keeps its JSON as the
+# last stderr line and exit 0 stays 0. A count they cannot read or write is reported as a
+# warning line and, when the log takes it, a refusal_bookkeeping_error event.
 def count_refusal(args, err):
     """Log a refused role output in its run and park the run on the second refusal of
     its content in a row (refusals.record_refusal). Returns the sentence to add to the
     message."""
+    task_id, command = _role_output_run(args)
+    if task_id is None:
+        return None
     try:
-        task_id, command = _role_output_run(args)
-        if task_id is None:
-            return None
         return refusals.record_refusal(task_id, command, args.from_role, err.message,
                                        err.of_role_output)
-    except Exception:
+    except Exception as exc:
+        bookkeeping_failed(task_id, command, args.from_role, exc)
         return None
 
 
 def note_acceptance(args):
     """An accepted call ends the run of refusals for its command and role."""
+    task_id, command = _role_output_run(args)
+    if task_id is None:
+        return
     try:
-        task_id, command = _role_output_run(args)
-        if task_id is not None:
-            refusals.record_acceptance(task_id, command, args.from_role)
+        refusals.record_acceptance(task_id, command, args.from_role)
+    except Exception as exc:
+        bookkeeping_failed(task_id, command, args.from_role, exc)
+
+
+def bookkeeping_failed(task_id, command, role, exc):
+    reason = str(exc) or type(exc).__name__
+    sys.stderr.write("warning: refusal count not updated: %s\n" % reason)
+    try:
+        store.append_log(task_id, {"event": "refusal_bookkeeping_error", "command": command,
+                                   "role": role, "reason": reason})
     except Exception:
         pass

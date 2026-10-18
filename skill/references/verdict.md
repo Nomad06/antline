@@ -1,10 +1,10 @@
 # The verdict schema
 
-`ppl verdict record <file>` validates a JSON document against `schema.VERDICT_FIELDS`
+`ppl verdict record <file> --from ppl-verifier` validates a JSON document against `schema.VERDICT_FIELDS`
 before binding it to the current head SHA. Every field below is required - `ppl verdict
 record` refuses `SCHEMA_INVALID` on the first one missing or of the wrong type, not on all
 of them at once, so composing the verdict without this table costs one round trip per
-mistake (D3, cycle 2 wave D: this is the same defect class the brief schema already had -
+mistake, and the second mistake in a row parks the run with `FORMAT_RETRY_EXHAUSTED` (D3, cycle 2 wave D: this is the same defect class the brief schema already had -
 `references/brief.md` - on a second artifact the earlier fix did not generalise to).
 
 | Field | Type | Shape |
