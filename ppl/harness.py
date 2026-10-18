@@ -255,10 +255,10 @@ def validate(doc, source):
     The checks of the harness directory run when the document carries its _dir,
     as one from load does."""
     warnings = []
-    _check_known_keys(doc, source)
     fmt = _require(doc, "harness", "format", source, kind=int)
     if fmt != FORMAT:
         _fail(source, "harness.format %s is not supported, this ppl reads format %s" % (fmt, FORMAT))
+    _check_known_keys(doc, source)
     _require(doc, "harness", "name", source)
     _require(doc, "repo", "path", source)
     _require(doc, "repo", "default_branch", source)

@@ -251,9 +251,11 @@ hooks are registered, nothing in the cage is enforced [R-GUARD-NOT-ARMED n/a].
 
 `ppl doctor` reports per settings file `dispatch_hook` (registered or missing) and
 `hook_shape` (`ok` or what is wrong with the guard and dispatch entries: a `type`
-other than `"command"`, no `timeout`, an interpreter older than Python 3.11).
-`ppl init` refuses a run while the guard entry has such a problem, and warns when
-the dispatch hook is missing or malformed [R-DOCTOR-HOOK-SHAPE].
+other than `"command"`, no `timeout`, an interpreter or hook script that is not an
+absolute path to a file). `ppl init` refuses a run while the guard entry has such a
+problem, and warns when the dispatch hook is missing or malformed
+[R-DOCTOR-HOOK-SHAPE]. Neither runs anything to judge the shape: the interpreter's
+version is asked by `ppl doctor` when it runs the guard (`hook_runs`).
 
 ## Harness
 

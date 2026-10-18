@@ -2,6 +2,7 @@ import argparse
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1961,11 +1962,17 @@ class TestInitIsolatedFlag(unittest.TestCase):
         self.assertIs(json.loads(out)["isolated"], False)
 
 
+# The entry ppl setup claude writes: this interpreter, then the real guard script.
+GUARD_COMMAND = "%s %s" % (shlex.quote(sys.executable),
+                           shlex.quote(str(Path(__file__).resolve().parents[1] / "hooks"
+                                           / "ppl_guard.py")))
+
+
 def write_global_guard_registration(matcher=doctor.RECOMMENDED_MATCHER):
     doc = {"hooks": {"PreToolUse": [{
         "matcher": matcher,
         "hooks": [{"type": "command",
-                  "command": "python3 /home/dev/antline/hooks/ppl_guard.py",
+                  "command": GUARD_COMMAND,
                   "timeout": 5}]}]}}
     path = doctor.global_settings_path()
     path.write_text(json.dumps(doc), encoding="utf-8")
@@ -1978,7 +1985,7 @@ def write_local_guard_registration(cwd, matcher=doctor.RECOMMENDED_MATCHER):
     doc = {"hooks": {"PreToolUse": [{
         "matcher": matcher,
         "hooks": [{"type": "command",
-                  "command": "python3 /home/dev/antline/hooks/ppl_guard.py",
+                  "command": GUARD_COMMAND,
                   "timeout": 5}]}]}}
     path.write_text(json.dumps(doc), encoding="utf-8")
     return path
@@ -2089,17 +2096,25 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
         self.assertIn("no timeout", json.loads(err)["message"])
 
-    def test_init_refuses_a_guard_under_an_interpreter_older_than_the_floor(self):
+    def test_init_refuses_a_guard_whose_interpreter_is_not_an_absolute_path(self):
         # rule: R-DOCTOR-HOOK-SHAPE
-        old = Path(tmphome.mkdtemp(prefix="pplfakepython-")) / "python3"
-        old.write_text("#!/bin/sh\necho 3.9.6\n", encoding="utf-8")
-        old.chmod(0o755)
-        hook = fixtures.SOURCE / "hooks" / "ppl_guard.py"
-        self.write({"command": "%s %s" % (old, hook)})
+        self.write({"command": "python3 %s" % (fixtures.SOURCE / "hooks" / "ppl_guard.py")})
         code, _, err = self.init("DEMO-9924")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
-        self.assertIn("Python 3.9.6", json.loads(err)["message"])
+        self.assertIn("absolute", json.loads(err)["message"])
+        self.assertIn("ppl doctor", json.loads(err)["message"])
+
+    def test_init_never_runs_the_interpreter_it_judges(self):
+        marker = Path(tmphome.mkdtemp(prefix="pplmarker-")) / "ran"
+        script = Path(tmphome.mkdtemp(prefix="pplfakepython-")) / "python3"
+        script.write_text("#!/bin/sh\ntouch %s\necho 3.9.6\n" % shlex.quote(str(marker)),
+                          encoding="utf-8")
+        script.chmod(0o755)
+        self.write({"command": "%s %s" % (script, fixtures.SOURCE / "hooks" / "ppl_guard.py")})
+        code, _, err = self.init("DEMO-9925")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(marker.exists())
 
     def test_init_warns_when_the_dispatch_hook_is_missing(self):
         self.write({}, dispatch=False)

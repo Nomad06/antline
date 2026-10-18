@@ -733,13 +733,15 @@ whose `agent_type` starts with `ppl-`, writes one stderr line naming the version
 exits 0, where it used to die on import and leave every call allowed [R-GUARD-PYTHON-FLOOR].
 `ppl doctor` runs every registered guard command once on an unroled Read of `/dev/null` and
 reports `hook_runs: false`, with the first stderr line and the remedy `ppl setup claude`, when
-one does not exit 0 with an empty stderr. Per settings file it also reports `dispatch_hook:
-registered|missing` and `hook_shape: ok|<problem>` for the guard and dispatch entries: `type`
-must be `"command"`, a `timeout` must be there, and the command's first word must answer as
-Python 3.11 or newer. `ppl init` refuses `SCHEMA_INVALID` while a guard entry has such a problem
-(of another type it never fires), and warns when a guard is registered but the dispatch hook is
-missing or malformed, since the dispatch cap then counts only the spends recorded by hand
-[R-DOCTOR-HOOK-SHAPE].
+one does not exit 0 with an empty stderr. Before it runs a guard command it asks that command's interpreter for its version and
+reports one older than 3.11 the same way. Per settings file it also reports `dispatch_hook:
+registered|missing` and `hook_shape: ok|<problem>` for the guard and dispatch entries, read from
+the file and not run: `type` must be `"command"`, a `timeout` must be there, the interpreter must
+be an absolute path to an executable file and the hook script an absolute path to a file. `ppl
+init` refuses `SCHEMA_INVALID` while a guard entry has such a problem (of another type it never
+fires), points at `ppl doctor` for the interpreter's version, and warns when a guard is
+registered but the dispatch hook is missing or malformed, since the dispatch cap then counts
+only the spends recorded by hand [R-DOCTOR-HOOK-SHAPE].
 
 ## 6. State machine
 

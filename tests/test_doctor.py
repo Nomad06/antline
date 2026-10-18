@@ -662,6 +662,19 @@ class TestHookRuns(unittest.TestCase):
         self.assertIs(result["ok"], False)
         self.assertIn("exited 3", result["problem"])
 
+    def test_a_guard_under_an_interpreter_older_than_the_floor_reports_false(self):
+        # rule: R-DOCTOR-HOOK-SHAPE
+        old = Path(tmphome.mkdtemp(prefix="pplfakepython-")) / "python3"
+        old.write_text("#!/bin/sh\necho 3.9.6\n", encoding="utf-8")
+        old.chmod(0o755)
+        hook = fixtures.SOURCE / "hooks" / "ppl_guard.py"
+        write_settings(self.local_path, command="%s %s" % (old, hook))
+        result = doctor.hook_runs(cwd=self.local_dir)
+        self.assertFalse(result["ok"])
+        self.assertIn("Python 3.9.6", result["problem"])
+        self.assertIn("3.11", result["problem"])
+        self.assertIn(doctor.HOOK_RUN_REMEDY, result["problem"])
+
     def test_a_guard_that_hangs_reports_false(self):
         command, _ = self.fake_guard("import time\ntime.sleep(5)\n")
         write_settings(self.local_path, command=command)
@@ -743,21 +756,48 @@ class TestHookShape(unittest.TestCase):
         self.assertIn("no timeout", self.local()["hook_shape"])
         self.assertIn("no timeout", doctor.guard_shape_problem(cwd=self.local_dir))
 
-    def test_a_guard_under_an_interpreter_older_than_the_floor_is_reported(self):
+    def test_an_interpreter_below_the_floor_is_left_to_the_hook_run(self):
+        # the shape check reads the file only, the version is asked where doctor runs the hook
         old = self.fake_python("3.9.6")
         hook = str(fixtures.SOURCE / "hooks" / "ppl_guard.py")
         self.write(guard={"command": "%s %s" % (shlex.quote(old), shlex.quote(hook))}, dispatch={})
-        self.assertIn("Python 3.9.6", self.local()["hook_shape"])
-        self.assertIn("3.11", doctor.guard_shape_problem(cwd=self.local_dir))
+        self.assertEqual(self.local()["hook_shape"], "ok")
+        self.assertIsNone(doctor.guard_shape_problem(cwd=self.local_dir))
 
-    def test_a_guard_whose_interpreter_cannot_start_is_reported(self):
-        self.write(guard={"command": "/nonexistent/python3 /x/hooks/ppl_guard.py"}, dispatch={})
+    def test_a_guard_whose_interpreter_is_not_an_executable_file_is_reported(self):
+        hook = str(fixtures.SOURCE / "hooks" / "ppl_guard.py")
+        self.write(guard={"command": "/nonexistent/python3 %s" % hook}, dispatch={})
         self.assertIn("/nonexistent/python3", self.local()["hook_shape"])
-        self.assertIsNotNone(doctor.guard_shape_problem(cwd=self.local_dir))
+        self.assertIn("/nonexistent/python3", doctor.guard_shape_problem(cwd=self.local_dir))
+
+    def test_a_guard_whose_interpreter_is_not_an_absolute_path_is_reported(self):
+        hook = str(fixtures.SOURCE / "hooks" / "ppl_guard.py")
+        self.write(guard={"command": "python3 %s" % hook}, dispatch={})
+        self.assertIn("absolute", self.local()["hook_shape"])
+        self.assertIn("python3", doctor.guard_shape_problem(cwd=self.local_dir))
+
+    def test_a_guard_whose_script_is_missing_is_reported(self):
+        self.write(guard={"command": "%s /nonexistent/hooks/ppl_guard.py"
+                          % shlex.quote(sys.executable)}, dispatch={})
+        self.assertIn("/nonexistent/hooks/ppl_guard.py", self.local()["hook_shape"])
 
     def test_a_guard_run_as_a_bare_script_is_reported(self):
-        self.write(guard={"command": "/x/hooks/ppl_guard.py"}, dispatch={})
-        self.assertIn("shebang", self.local()["hook_shape"])
+        self.write(guard={"command": str(fixtures.SOURCE / "hooks" / "ppl_guard.py")}, dispatch={})
+        self.assertIn("names no ppl_guard.py script", self.local()["hook_shape"])
+
+    def test_inspecting_the_settings_never_runs_the_interpreter_they_name(self):
+        marker = Path(tmphome.mkdtemp(prefix="pplmarker-")) / "ran"
+        script = Path(tmphome.mkdtemp(prefix="pplfakepython-")) / "python3"
+        script.write_text("#!/bin/sh\ntouch %s\necho 3.14.0\n" % shlex.quote(str(marker)),
+                          encoding="utf-8")
+        script.chmod(0o755)
+        for event, hook in (("guard", "ppl_guard.py"), ("dispatch", "ppl_dispatch.py")):
+            command = "%s %s" % (script, fixtures.SOURCE / "hooks" / hook)
+            self.write(**{"guard": {}, "dispatch": {}, event: {"command": command}})
+            self.assertEqual(self.local()["hook_shape"], "ok")
+            self.assertIsNone(doctor.guard_shape_problem(cwd=self.local_dir))
+            self.assertIsNone(doctor.dispatch_warning(cwd=self.local_dir))
+        self.assertFalse(marker.exists())
 
     def test_a_missing_dispatch_hook_is_reported(self):
         self.write(guard={})

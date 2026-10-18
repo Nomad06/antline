@@ -2039,15 +2039,15 @@ residual = "only the two outputs that are read whole on every run are capped: th
 
 [[rule]]
 id = "R-DOCTOR-HOOK-SHAPE"
-statement = "ppl doctor reports per settings file dispatch_hook (registered or missing) and hook_shape (ok or the problems of the guard and dispatch entries: type not command, no timeout, an interpreter that does not answer as Python 3.11 or newer). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook is not, or has such a problem."
+statement = "ppl doctor reports per settings file dispatch_hook (registered or missing) and hook_shape (ok or the problems of the guard and dispatch entries, read from the file and never run: type not command, no timeout, an interpreter that is not an absolute path to an executable file, a hook script that is not an absolute path to a file). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook is not, or has such a problem. The interpreter version is asked only where ppl doctor already runs the guard (hook_runs), which reports one older than Python 3.11."
 scope = "hook registration"
 event = "ppl doctor, ppl init"
 enforcement = "blocking"
-hook_or_check = "ppl/doctor.py:_shape_problems, ppl/doctor.py:guard_shape_problem, ppl/doctor.py:dispatch_warning, ppl/cli.py:cmd_init"
-deny_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_entry_that_is_not_a_command, tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_entry_without_a_timeout, tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_under_an_interpreter_older_than_the_floor"
-allow_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_is_quiet_when_both_entries_are_the_ones_setup_writes, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_the_dispatch_hook_is_missing, tests/test_doctor.py::TestHookShape::test_the_entries_setup_writes_are_well_shaped_and_register_the_dispatch_hook"
+hook_or_check = "ppl/doctor.py:_shape_problems, ppl/doctor.py:_command_problems, ppl/doctor.py:guard_shape_problem, ppl/doctor.py:dispatch_warning, ppl/doctor.py:hook_runs, ppl/cli.py:cmd_init"
+deny_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_entry_that_is_not_a_command, tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_entry_without_a_timeout, tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_whose_interpreter_is_not_an_absolute_path, tests/test_doctor.py::TestHookRuns::test_a_guard_under_an_interpreter_older_than_the_floor_reports_false"
+allow_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_is_quiet_when_both_entries_are_the_ones_setup_writes, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_the_dispatch_hook_is_missing, tests/test_cli.py::TestInitChecksTheHookShape::test_init_never_runs_the_interpreter_it_judges, tests/test_doctor.py::TestHookShape::test_the_entries_setup_writes_are_well_shaped_and_register_the_dispatch_hook, tests/test_doctor.py::TestHookShape::test_inspecting_the_settings_never_runs_the_interpreter_they_name"
 owner = "ppl"
-residual = "judged on the two settings files ppl reads, at doctor and init time, with the interpreter looked up on ppl's own PATH, which may differ from the PATH Claude Code spawns hooks with. A missing dispatch hook is only a warning: SubagentStart cannot block anyway (R-DISPATCH-HOOK-CANNOT-BLOCK)"
+residual = "judged on the two settings files ppl reads, at doctor and init time. ppl init never runs the interpreter, so an absolute interpreter older than 3.11 passes init (the guard then denies every role call, R-GUARD-PYTHON-FLOOR) and only ppl doctor reports it, for the guard and not the dispatch hook. A missing dispatch hook is only a warning: SubagentStart cannot block anyway (R-DISPATCH-HOOK-CANNOT-BLOCK)"
 
 [[rule]]
 id = "R-SKILL-GENERATED"

@@ -34,7 +34,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -45,7 +44,6 @@ GUARD_MARKER = "ppl_guard.py"
 DISPATCH_MARKER = "ppl_dispatch.py"
 HOOK_EVENTS = (("PreToolUse", GUARD_MARKER), ("SubagentStart", DISPATCH_MARKER))
 _VERSION_PROBE = "import sys; print('%d.%d.%d' % sys.version_info[:3])"
-_VERSIONS = {}
 
 # The matcher README.md "Hooks" registers the guard on: match everything, let the hook
 # decide. An explicit tool list is fragile (a tracker prefix it does not name, a read
@@ -162,13 +160,15 @@ def hook_runs(cwd=None, workspace=None):
     {"ok": False, "problem": ...} naming the first one that does not and the
     remedy, {"ok": None} when no guard is registered. `cwd` picks the local
     settings file, `workspace` is the payload's cwd (default: `cwd`, then the
-    process cwd). Kept out of `inspect`, which `ppl init` calls on every run."""
+    process cwd). Kept out of `inspect`, which `ppl init` calls on every run:
+    this is the one place doctor runs what a settings file names, so the
+    interpreter's version is asked here too, before the hook runs."""
     commands = registered_guard_commands(cwd)
     if not commands:
         return {"ok": None, "problem": None}
     workspace = str(workspace or cwd or os.getcwd())
     for command in commands:
-        problem = _run_problem(command, workspace)
+        problem = _interpreter_problem(command) or _run_problem(command, workspace)
         if problem:
             message = "the registered guard hook `%s` %s" % (command, problem.rstrip("."))
             # The interpreter floor's own line already names the remedy.
@@ -215,37 +215,25 @@ def _hooks_of(doc, event, marker):
 
 
 def _python_version(interpreter):
-    """(version, None) of `interpreter`, or (None, why it gave none). An answer
-    is kept per interpreter file and its mtime: one ppl init judges the same
-    entries in inspect, guard_shape_problem and dispatch_warning."""
-    found = shutil.which(interpreter)
-    try:
-        key = (interpreter, found, os.stat(found).st_mtime_ns) if found else None
-    except OSError:
-        key = None
-    if key in _VERSIONS:
-        return _VERSIONS[key]
+    """(version, None) of `interpreter`, or (None, why it gave none)."""
     try:
         result = subprocess.run([interpreter, "-I", "-c", _VERSION_PROBE], capture_output=True,
                                 text=True, stdin=subprocess.DEVNULL,
                                 timeout=HOOK_RUN_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        return None, "which did not answer in %d seconds" % HOOK_RUN_TIMEOUT_SECONDS
+        return None, "which did not answer in %s seconds" % HOOK_RUN_TIMEOUT_SECONDS
     except OSError as exc:
         return None, "which could not be started: %s" % exc
     version = result.stdout.strip()
-    answer = (version, None)
     if result.returncode != 0 or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-        answer = (None, "which did not answer as a Python interpreter")
-    if key:
-        _VERSIONS[key] = answer
-    return answer
+        return None, "which did not answer as a Python interpreter"
+    return version, None
 
 
 def _interpreter_problem(command):
     """None when the first word of a hook command answers as a Python that
-    meets the hooks' floor, else what is wrong with it. The interpreter is
-    asked, the hook is not run."""
+    meets the hooks' floor, else what is wrong with it. It runs that word, so
+    only hook_runs calls it."""
     floor = _python_floor()
     shown = "%d.%d" % floor
     try:
@@ -266,8 +254,8 @@ def _interpreter_problem(command):
 
 def _shape_problems(doc, path):
     """(marker, problem) for every guard and dispatch hook in a parsed settings
-    document that Claude Code would not run as a bounded command under a Python
-    that meets the floor."""
+    document that Claude Code would not run as a bounded command: read from
+    the document only, never run."""
     problems = []
     for event, marker in HOOK_EVENTS:
         for hook in _hooks_of(doc, event, marker):
@@ -280,11 +268,31 @@ def _shape_problems(doc, path):
                 found.append("has no timeout")
             elif isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
                 found.append("has timeout %r, not a positive number of seconds" % (timeout,))
-            interpreter = _interpreter_problem(str(hook.get("command", "")))
-            if interpreter:
-                found.append(interpreter)
+            found += _command_problems(str(hook.get("command", "")), marker)
             problems += [(marker, "%s: the %s hook %s" % (path, marker, text)) for text in found]
     return problems
+
+
+def _command_problems(command, marker):
+    """What keeps a hook command from running, judged from its words alone:
+    nothing it names is run here (hook_runs asks the interpreter's version)."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return ["has a command that does not split into words"]
+    found = []
+    first = words[0] if words else ""
+    if not os.path.isabs(first):
+        found.append("runs %r, not an absolute interpreter path, so which one runs depends on "
+                     "the PATH Claude Code has" % first)
+    elif not (os.path.isfile(first) and os.access(first, os.X_OK)):
+        found.append("runs %s, which is not an executable file" % first)
+    scripts = [word for word in words[1:] if os.path.basename(word) == marker]
+    if not scripts:
+        found.append("names no %s script after its interpreter" % marker)
+    elif not (os.path.isabs(scripts[0]) and os.path.isfile(scripts[0])):
+        found.append("runs the script %s, which is not an absolute path to a file" % scripts[0])
+    return found
 
 
 def _readable_settings(cwd):
@@ -303,15 +311,16 @@ def _readable_settings(cwd):
 
 def guard_shape_problem(cwd=None):
     """None when every guard entry in the two settings files is a command with
-    a timeout run by a Python that meets the floor, else the message `ppl
-    init` refuses with: an entry of another shape never fires, or fires
-    unbounded, or denies every role call."""
+    a timeout, an absolute executable interpreter and its script, else the
+    message `ppl init` refuses with: an entry of another shape never fires, or
+    fires unbounded. The interpreter's version is left to `ppl doctor`."""
     problems = [text for path, doc in _readable_settings(cwd)
                 for marker, text in _shape_problems(doc, path) if marker == GUARD_MARKER]
     if not problems:
         return None
-    return ("%s. Run `ppl setup claude` to write the hook entries again (README.md \"Hooks\")."
-            % "; ".join(problems))
+    return ("%s. Run `ppl setup claude` to write the hook entries again (README.md \"Hooks\"), "
+            "and `ppl doctor`, which runs the hook and reports an interpreter older than Python "
+            "3.11." % "; ".join(problems))
 
 
 def dispatch_warning(cwd=None):

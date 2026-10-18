@@ -244,6 +244,12 @@ class TestStrictValidation(HarnessTestCase):
                 self.assertIn("unknown key %s" % unknown, caught.exception.message)
                 self.assertIn(nearest, caught.exception.message)
 
+    def test_a_harness_of_another_format_is_told_so_before_its_keys_are_judged(self):
+        name = self.mutate("example-generic", "format = 1", 'format = 2\nnew_key = "x"')
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertIn("harness.format 2 is not supported", caught.exception.message)
+
     def test_a_top_level_key_outside_any_table_is_refused(self):
         # rule: R-HARNESS-UNKNOWN-KEY
         name = self.mutate("example-generic", "[harness]", 'nmae = "x"\n[harness]')
