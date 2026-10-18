@@ -1801,8 +1801,13 @@ as one more task): a bare flag, `--`, or a relative path or qualified name,
 never a plain word [R-STUDIO-EXTRACT-LEAN], so `go doc ... test` or `npm run x test` cannot ride
 beside the `test` goal of a shape that does not look at token order [R-STUDIO-EXTRACT-LEAN]. A bare flag the tool
 reads as a write or exec target (`go test -o x.bin`) still passes: the shapes stay lexical.
-With no md file, or when the call
-fails, the draft comes from the preset of the stack the build files name. The review form
+An answer that is unusable as a whole (not JSON, no structured output, a draft of the wrong
+shape) is asked for once more with the same input and the reason added to the system prompt
+(`extract.RETRY_PROMPT`), in `ppl`'s own words without Claude's echoed text. A failed process
+or a timeout is not asked again, and items dropped one by one are shown in the form, not asked
+again. The job log shows each call and its cost. With no md file, or when the extraction
+fails, the draft comes from the preset of the stack the build files name, and its note quotes
+the failure, both reasons when the second answer failed too. The review form
 marks three kinds of shape: free arguments that take any token, an interpreter with no pinned
 flag, and a shape with neither a goal nor a flag. The marks are advice: the user's tick
 installs the shape as written. A check and an install each write the request's draft to a
