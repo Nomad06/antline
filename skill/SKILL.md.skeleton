@@ -387,20 +387,27 @@ telling you to pick one from its stated finding. Route all eight:
 ## After merge only
 
 The pipeline ends at approval, not at merge. `merge_watch` is a low-frequency tail: keep
-watching the <!-- include: vocab/short -->, and only once the merge is actually observed on the forge, write to the tracker: <!-- include: harness/tracker-close -->.
-Only after the merge is observed, and always in plain informal English, not a formal template.
+watching the <!-- include: vocab/short -->. Once the merge is actually observed on the forge,
+first record it: `ppl merge observed --sha <merged sha> --url <url> --task <TASK-ID>`, once
+per run - a second call is refused [R-MERGE-OBSERVED-ONCE]. Then write to the tracker: <!-- include: harness/tracker-close -->.
+Only after the merge is observed and recorded, and always in plain informal English, not a formal template.
 
 **This is enforced, not just a convention, only when `ppl doctor` reports the guard hook
 registered** (`local`, or an accepted `global`/`both`) **for this session** - the hook denies
-every Jira write tool unless the active run's stage is `merge_watch` [R-JIRA-GATE]
-[R-GUARD-NOT-ARMED n/a]. If `ppl doctor` reported `none` or `unknown`, this section is a rule
-you keep by discipline, not a cage: the run's stage being `merge_watch` or not makes no
-difference to whether the write physically goes through, and `OWNER_DECISION` has nothing to
-print because nothing ran a check to produce it [R-GUARD-NOT-ARMED n/a]. Check `ppl doctor`
-before trusting either reading rather than assuming the more comfortable one. When it IS armed: if you somehow reach this point with the
-run still in `review` or `closure`, the write will be denied outright (its reason starts with
-`OWNER_DECISION`) - go back and run `ppl stage enter merge_watch` first, do not try the
-write again hoping the hook missed it [R-JIRA-GATE]. This gate fires for the orchestrator's own session -
+every Jira write tool unless the active run's stage is `merge_watch` and `ppl merge observed`
+has recorded the merge [R-JIRA-GATE] [R-GUARD-NOT-ARMED n/a]. If `ppl doctor` reported
+`none` or `unknown`, this section is a rule you keep by discipline, not a cage: the run's
+stage and the recorded merge make no difference to whether the write physically goes
+through, and `OWNER_DECISION` has nothing to print because nothing ran a check to produce it
+[R-GUARD-NOT-ARMED n/a]. Check `ppl doctor` before trusting either reading rather than
+assuming the more comfortable one. When it IS armed, a tracker write before that point is
+denied outright (its reason starts with `OWNER_DECISION`) - do not try the write again
+hoping the hook missed it [R-JIRA-GATE]. Finish the close-out instead: from `review`, run
+`ppl stage enter closure`, `ppl transition done`, then `ppl stage enter merge_watch`; from
+`closure`, run `ppl transition done`, then `ppl stage enter merge_watch`; in `merge_watch`,
+run `ppl merge observed` as above once the merge is on the forge. `ppl transition done`
+refuses in any stage but `closure` [R-DONE-FROM-CLOSURE], and `ppl merge observed` refuses
+in any stage but `merge_watch` [R-MERGE-OBSERVED-ONCE]. The tracker gate fires for the orchestrator's own session -
 which carries no `agent_type` - whenever the run is active and `isolated` is true (the
 default), regardless of the session's cwd; the documented worktree layout in Stage 1 puts
 the worktree beside the orchestrator's session, not under it, so a cwd-only check would not
@@ -440,9 +447,9 @@ armed, which catches an accident, not a determined attempt to route around this 
 - Do not resolve a <!-- include: vocab/noun --> thread, approve, or merge - when the hook is
   armed, the forge's matching tools are denied outright [R-MCP-RESOLVE-THREAD]
   [R-MCP-APPROVE-MR] [R-MCP-MERGE-MR]; when it is not, this is discipline only.
-- Do not write to the tracker before the merge is observed, and do not write outside stage
-  `merge_watch` - see "After merge only" above for exactly when this is hook-backed and
-  when it is not.
+- Do not write to the tracker before the merge is observed and recorded with
+  `ppl merge observed`, and do not write outside stage `merge_watch` - see "After merge
+  only" above for exactly when this is hook-backed and when it is not.
 - Do not edit a test to turn a gate green. This one has no hook check at all, armed or not -
   a gate is a receipt you record yourself, not a write the guard hook watches.
 - Do not dispatch a worker to fix something outside its write boundary. When the hook is

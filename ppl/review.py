@@ -1,3 +1,5 @@
+import re
+
 from . import paths, run, store
 from .errors import PplError
 
@@ -49,6 +51,32 @@ def set_approval(task_id, sha):
     state["mr"]["approved_sha"] = sha
     run.save(state)
     store.append_log(task_id, {"event": "approval", "sha": sha})
+    return state
+
+
+_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+
+
+def record_merge(task_id, sha, url=None):
+    """Record the merge the orchestrator observed on the forge. Valid only in merge_watch and
+    only once [R-MERGE-OBSERVED-ONCE]. The tracker gate opens on merged_sha [R-JIRA-GATE]."""
+    if not sha or not _HEX_RE.match(sha):
+        raise PplError("SCHEMA_INVALID", "--sha must be a hexadecimal commit sha, got %r" % sha)
+    state = run.load(task_id)
+    if state["stage"] != "merge_watch":
+        raise PplError("ILLEGAL_TRANSITION",
+                       "ppl merge observed is valid only in stage merge_watch, current stage is %s"
+                       % state["stage"])
+    mr = state.get("mr") or {}
+    if mr.get("merged_sha"):
+        raise PplError("ILLEGAL_TRANSITION",
+                       "the merge is already recorded on %s, it is recorded once"
+                       % mr["merged_sha"])
+    mr["merged_sha"] = sha
+    mr["merged_url"] = url
+    state["mr"] = mr
+    run.save(state)
+    store.append_log(task_id, {"event": "merge_observed", "sha": sha, "url": url})
     return state
 
 

@@ -2014,11 +2014,17 @@ def decide(payload):
     if not halt_scoped:
         return None
 
-    if (state.get("stage") != "merge_watch"
-            and is_tracker_write_tool(tool, tracker_from_snapshot(task_id))):
-        return deny("OWNER_DECISION",
-                    "Jira is written only after the merge is observed, current stage is %s"
-                    % state.get("stage"))
+    if is_tracker_write_tool(tool, tracker_from_snapshot(task_id)):
+        if state.get("stage") != "merge_watch":
+            return deny("OWNER_DECISION",
+                        "Jira is written only after the merge is observed, current stage is %s"
+                        % state.get("stage"))
+        mr = state.get("mr")
+        if not (isinstance(mr, dict) and mr.get("merged_sha")):
+            return deny("OWNER_DECISION",
+                        "Jira is written only after the merge is observed: the run is in "
+                        "merge_watch but no merge is recorded, run `ppl merge observed --sha "
+                        "<merged sha>` first")
 
     record = control.read(task_id)
     if record and record.get("invalid"):

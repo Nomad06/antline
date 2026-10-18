@@ -87,7 +87,8 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "last_activity_at": store.now(),
         "budgets": dict(DEFAULT_BUDGETS),
         "orchestrator": {"pid": pid, "started_at": process_started_at(pid)},
-        "mr": {"iid": None, "url": None, "approved_sha": None},
+        "mr": {"iid": None, "url": None, "approved_sha": None,
+               "merged_sha": None, "merged_url": None},
         "last_durable_fact": "run initialised",
         "next_safe_action": "complete admission checklist",
         "unsafe_to_repeat": [],
@@ -370,7 +371,8 @@ STAGE_NEXT_ACTION = {
     "mr": "push the branch and open the merge request",
     "review": "run the review loop (references/review-loop.md)",
     "closure": "transition the run to done (ppl transition done)",
-    "merge_watch": "watch for the merge, then write the post-merge Jira update",
+    "merge_watch": ("watch for the merge, record it (ppl merge observed), then write the "
+                    "post-merge Jira update"),
     # "parking" and "escalation" are not keyed here: `run.park` sets
     # `next_safe_action` from the caller's own `safe_next` (a real, specific
     # answer to "what do I do about this blocker"), and stage_enter never

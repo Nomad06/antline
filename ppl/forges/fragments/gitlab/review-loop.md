@@ -64,8 +64,10 @@ Each tick, in this order:
 7. **Never resolve the thread.** Only the person who wrote the remark may resolve it.
 8. Red CI on the candidate: classify against the baseline first. A pre-existing failure is
    `BASELINE_FAILURE`, a new one is rework. Never a bare retry.
-9. Terminal: approval bound to the current head SHA. Record it with
-   `ppl review approved --sha <sha>`, then `ppl transition done`, then tell the owner.
+9. Terminal: approval bound to the current head SHA. Close out in this order:
+   `ppl review approved --sha <sha>`, `ppl approval check` (must read `current`),
+   `ppl stage enter closure`, `ppl transition done`, `ppl stage enter merge_watch`, then
+   tell the owner.
 
 Wake-up discipline: do not poll for work the harness will notify you about. Use a long
 fallback interval and let notifications do the fast path.

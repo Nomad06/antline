@@ -228,7 +228,8 @@ when the snapshot is missing or malformed: comment, edit, transition, worklog, c
 context add, covering the names the server has used across builds, so an older or newer
 registration is gated. The gate matches the write operations by name under any of those
 prefixes (`is_tracker_write_tool`), never an exact tool name under one of them, and denies them
-until the run reaches `merge_watch` [R-JIRA-GATE]. The hook reads `agent_type` from the stdin
+until the run reaches `merge_watch` and `ppl merge observed` has recorded the merged SHA in
+`state.mr.merged_sha` [R-JIRA-GATE]. The hook reads `agent_type` from the stdin
 payload (present when the hook fires inside a subagent), loads `runs/<active>/boundary.json`,
 and returns:
 
@@ -244,8 +245,8 @@ and returns:
 
 The reason string is always `"<CODE> <message>"` - a stable code, a space, then a free-text
 message. `<CODE>` is one of the codes in section 13 (`BOUNDARY_VIOLATION` for every cage
-denial in this section, `OWNER_DECISION` for a pause/stop/destroy or a pre-`merge_watch`
-tracker write).
+denial in this section, `OWNER_DECISION` for a pause/stop/destroy or a tracker write before
+`merge_watch` or before the merge is recorded).
 
 **What the hook is scoped by.** Four denials are global and are decided before any run is
 looked up (`ppl_guard.py`'s `decide()`, before `active_state()` is called): the denied forge
@@ -279,7 +280,7 @@ for each row, exactly what `ppl_guard.py` requires before it fires:
 | `gh pr merge`, `gh pr review --approve` and a `gh api graphql` call carrying `resolveReviewThread`, as Bash [R-FORGE-GH-NO-APPROVE-MERGE] | the same three owner rules, through the GitHub CLI | global, no run required, whatever forge the run names |
 | a write under the data root's `runs/` through Edit/Write/MultiEdit/NotebookEdit [R-RUNS-WRITE-PROTECTION], or through a Bash write-shaped construct whose resolved target lands under the runs directory - absolute, `~`, after a `cd`, `pushd` or `popd`, through a `(` subshell or `{` group, behind `env -C` or a wrapper verb (`command`, `builtin`, `exec`, `nohup`, `nice`, `time`, each read by its basename when spelled by a path), with the redirect glued or spaced, relative to the session cwd or through a symlinked alias - or a removal (`rm`, an `rm`-source `mv`/`git mv`, `git rm`, `rsync --delete`) that holds it (`rm -rf ~/.ppl`), or a copy into a directory that places a source's own name on it (`cp -r x/runs ~/.ppl`; a copy into `~` under another name writes beside runs/), or that names the runs directory literally [R-RUNS-BASH-WRITE] | state integrity. Sole carve-out: `control.json`, the panel's inbox (section 9.2), and in the Bash check for the unroled operator session only - a role that rewrote it could lift the operator's pause. An interpreter invocation (`python3 -c "open(path,'w').write(...)"`) or a quoted `sh -c` string models neither shape and is not caught, and a target spelled through a variable (`$HOME/...`) is not resolved, so only a pipeline-scoped session is denied it [R-GUARD-BASH-WRITE-BOUNDARY] - see R-RUNS-BASH-WRITE's residual | global, no run required |
 | direct writes to the repo tree by any role whose provider is not a Claude Code subagent [R-APPLY-PATCH-BOUNDARY] | such a provider has no hooks at all to deny anything with; the guarantee is architectural (no direct write path exists for it), backed by `ppl apply-patch`'s separate diff validation (section 10.1) - `ppl_guard.py` makes no check of its own here | not a hook check |
-| tracker write tools until merge is observed on the forge [R-JIRA-GATE] | owner rule: tracker writes only after merge | requires an active run; scoped as described above (the `isolated` broadening included) - **not** global, and not enforced at all when no run is active |
+| tracker write tools until the run is in `merge_watch` and the merge observed on the forge is recorded with `ppl merge observed` [R-JIRA-GATE] | owner rule: tracker writes only after merge | requires an active run; scoped as described above (the `isolated` broadening included) - **not** global, and not enforced at all when no run is active |
 | every state-changing `ppl` CLI subcommand, when `agent_type` is one of the roles in `boundary.ROLE_RULES` [R-GUARD-PPL-CLI-DENIED] | `ppl-code-worker` and `ppl-test-worker` both hold `Bash`, and none of the write checks above sees a `ppl <command>` invocation - it writes through ppl's own API, not a shell redirect or a tracked path, so a worker driving its own CLI could mark its own blocking finding fixed or open its own done gate. Read-only lookups (`ppl show`, with `--task <id>` and not a positional id, `ppl status`, `ppl doctor`, `ppl metrics`, `ppl findings list`, `ppl control get`, `ppl routing show`, `ppl approval check`, `ppl mr state`, `ppl review pending`) stay allowed | global, no run required - fires by `agent_type` alone, before `active_state()` is even looked up |
 | a write-shaped Bash construct (a redirect - `>`, `>>`, `&>`, `>|`, glued to a word like `echo x>f` or spaced, a `cd`'s own redirect included - `tee`, `sed -i`, `cp`, `mv`, `dd`, `rm`, `touch`, `truncate`, `ln`, `install`, `rsync`, `git rm`/`git mv`/`git checkout <ref> -- <path>`/`git restore`; `patch`, `git apply` and the whole-tree git rewriters fail closed as unnameable) whose target resolves inside the active run's repo [R-GUARD-BASH-WRITE-BOUNDARY] | the structured write boundary (`is_role` / `hits_repo` / `boundary.check_path`) covers Edit/Write/MultiEdit/NotebookEdit only, and both workers hold Bash, so `hooks/ppl_guard.py:bash_write_boundary_deny` extracts the target out of every such construct and runs it through the same per-role decision `check_path` makes | active run, any writing role or an unroled session - fires whenever the resolved target lands inside the repo, whatever the session's cwd, mirroring R-UNROLED-REPO-WRITE's own "the target path is the honest question" |
 
@@ -643,7 +644,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 159 rows: 115 `blocking`, 16 `soft` and 28 `n/a`. Of the
+As of this commit the table carries 161 rows: 117 `blocking`, 16 `soft` and 28 `n/a`. Of the
 `n/a` rows, 20 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -731,9 +732,12 @@ run stages:      admission -> baseline -> briefing -> implementation -> tests
 ```
 
 The task reaches `done` when the MR is approved on the current head SHA - that is the
-owner-defined end of the pipeline. `merge_watch` is an optional low-frequency tail that
-exists only to observe the human merge and fire the post-merge tracker update. It cannot
-change the lifecycle [R-MERGE-WATCH-TERMINAL].
+owner-defined end of the pipeline. The close-out runs `review -> closure`, `ppl transition
+done`, then `closure -> merge_watch`, and `ppl transition done` refuses in any stage but
+`closure`, so a run cannot end with stage `review` and status `done` [R-DONE-FROM-CLOSURE].
+`merge_watch` is an optional low-frequency tail that exists only to observe the human merge
+and fire the post-merge tracker update. It cannot change the lifecycle
+[R-MERGE-WATCH-TERMINAL].
 
 Task lifecycle is the only business truth. The run stage explains where the orchestrator
 stopped and does not become a second registry.
@@ -810,7 +814,7 @@ ppl evidence add --check <name> --result pass|fail [--sha <sha>] --log <path> --
                                  # --generation is the lease generation the caller captured
                                  # from `ppl stage enter` or `ppl recover` (6.2)
 ppl verdict record <file> --generation <n>  # must carry candidate_sha and acceptance map
-ppl transition <done|blocked|failed>
+ppl transition <done|blocked|failed>   # done only in stage closure
 ppl park --blocker <CODE> --safe-next "<action>" [--unsafe-to-repeat "<action>"]
 ppl escalate --code <CODE> --question "<text>"
 ppl budget spend <dispatch|retry|usd>
@@ -832,6 +836,9 @@ ppl review answered --thread <id> --sha <sha> --classification <c> --generation 
                                   [--last-note-id <id>]
                                   # records a reply in the ledger (threads.json)
 ppl review approved --sha <sha>  # records approval on a SHA
+ppl merge observed --sha <sha> [--url <url>]
+                                  # records the merge seen on the forge, in merge_watch
+                                  # only and once; the tracker gate waits for it
 
 ppl serve [--port 8787]          # admin panel, loopback only
 ppl control set <pause|resume|stop|destroy> [--scope local|full]
@@ -914,7 +921,9 @@ fail for reasons that have nothing to do with the target being illegal. Without 
 ordering, a lifecycle transition that is illegal on its face - still `planned`, say - would
 surface as whatever the done gate happened to trip over first (`EXTERNAL_BLOCKED` for a
 missing `base_sha`, on a run that has not recorded one) rather than the much more direct
-`ILLEGAL_TRANSITION`.
+`ILLEGAL_TRANSITION`. Next, still ahead of the done gate, `done` is refused with
+`ILLEGAL_TRANSITION` naming `closure` unless the run's stage is `closure`
+[R-DONE-FROM-CLOSURE].
 
 Condition 4 reads `boundary.write` and `boundary.forbid` fresh
 from disk on every `ppl transition done` call, and `ppl boundary set` can rewrite that same
@@ -1594,14 +1603,15 @@ Per tick:
    arrives. It never resolves a thread [R-MCP-RESOLVE-THREAD].
 5. CI red on the candidate -> classify as regression vs baseline, then rework or park. Not
    a bare retry in hope.
-6. Terminal condition: an approval exists and is bound to the current head SHA. `ppl
-   transition done` runs, the lease is released, the owner is notified. This is the end of
-   the pipeline as defined by the owner.
+6. Terminal condition: an approval exists and is bound to the current head SHA. The run
+   enters `closure`, `ppl transition done` runs, the run enters `merge_watch`, the lease is
+   released, the owner is notified. This is the end of the pipeline as defined by the owner.
 
 Optional tail (`merge_watch`): after `done`, the loop may keep watching the MR at low
-frequency. When the merge is observed on the forge, and only then, the orchestrator posts the
-tracker update - plain English describing what was done and how to check it - then cleans
-the worktree per policy. This tail
+frequency. When the merge is observed on the forge, and only then, the orchestrator records it
+with `ppl merge observed --sha <merged sha>` (valid in `merge_watch` only, and once
+[R-MERGE-OBSERVED-ONCE]), posts the tracker update - plain English describing what was done
+and how to check it - then cleans the worktree per policy. This tail
 records delivery evidence; it cannot reopen or alter the lifecycle
 [R-MERGE-WATCH-TERMINAL].
 

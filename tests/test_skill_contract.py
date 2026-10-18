@@ -144,6 +144,26 @@ class TestSkillContract(unittest.TestCase):
         self.assertLess(stage7.index("ppl review approved"), stage7.index("ppl transition done"),
                         "the approval must be recorded before the run is closed")
 
+    def _after_merge(self):
+        return " ".join(self.text.split("## After merge only", 1)[1]
+                        .split("## Operator commands", 1)[0].split())
+
+    def test_after_merge_records_the_merge_before_the_tracker_note(self):
+        section = self._after_merge()
+        self.assertIn("ppl merge observed --sha", section)
+        self.assertLess(section.index("ppl merge observed"), section.index("write to the tracker"),
+                        "the tracker gate opens only once the merge is recorded")
+
+    def test_after_merge_recovers_from_review_through_closure(self):
+        # A run still in review cannot enter merge_watch, the stage graph allows it only
+        # from closure, and transition done is refused outside closure.
+        section = self._after_merge()
+        start = section.index("from `review`")
+        order = [section.index(step, start) for step in
+                 ("ppl stage enter closure", "ppl transition done", "ppl stage enter merge_watch")]
+        self.assertEqual(order, sorted(order))
+        self.assertNotIn("go back and run `ppl stage enter merge_watch` first", section)
+
 
 class TestBothForgesRender(unittest.TestCase):
     def test_generic_github_skill_satisfies_the_same_contract(self):

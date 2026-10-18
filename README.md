@@ -79,7 +79,8 @@ test suite fails if a blocking row has no test that asserts the refusal.
 
 The cells are the guard hook's own answers: each call was sent through
 `hooks/ppl_guard.py` from the studio's cage playground. The orchestrator's tracker
-writes open once the run reaches the merge watch [R-JIRA-GATE]. The read-only agents
+writes open once the run reaches the merge watch and `ppl merge observed` has recorded the
+merge [R-JIRA-GATE]. The read-only agents
 also get no Edit, Write or Bash tool in their agent files [R-ROLE-TOOLS-READONLY].
 The hook has to be registered first, and until it is, nothing in the cage is enforced
 [R-GUARD-NOT-ARMED n/a].

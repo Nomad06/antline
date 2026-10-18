@@ -207,7 +207,7 @@ class TestCli(unittest.TestCase):
         for name in ["init", "show", "status", "stage", "brief", "boundary", "baseline",
                      "evidence", "verdict", "transition", "park", "escalate", "budget",
                      "approval", "recover", "serve", "control", "routing", "dispatch",
-                     "apply-patch", "mr", "review"]:
+                     "apply-patch", "mr", "merge", "review"]:
             self.assertIn(name, cli.COMMANDS)
 
     # --- carried-forward requirement 1: recover is gated by control.enforce ---
@@ -945,6 +945,100 @@ class TestTransitionOrdering(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
 
 
+def init_at_stage(task_id, stage, status="in_progress"):
+    """A run placed directly at `stage`: the walk there is not what these tests prove."""
+    from ppl import run
+    call("init", task_id, "--tracker-url", "u", "--repo", "/tmp/repo", "--harness", "example-maven")
+    state = run.load(task_id)
+    state["stage"] = stage
+    state["status"] = status
+    run.save(state)
+
+
+class TestDoneOnlyFromClosure(unittest.TestCase):
+    """The review loop used to end with `ppl transition done` straight from review, which left
+    a run with stage review and status done. Done is now refused outside closure."""
+
+    def test_transition_done_from_review_is_refused_naming_closure(self):
+        # rule: R-DONE-FROM-CLOSURE
+        from ppl import run
+        init_at_stage("DEMO-5810", "review")
+        code, _, err = call("transition", "done", "--task", "DEMO-5810")
+        self.assertEqual(code, 2)
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], "ILLEGAL_TRANSITION")
+        self.assertIn("closure", payload["message"])
+        state = run.load("DEMO-5810")
+        self.assertEqual((state["stage"], state["status"]), ("review", "in_progress"))
+
+    def test_transition_done_from_merge_watch_is_refused_too(self):
+        # rule: R-DONE-FROM-CLOSURE
+        init_at_stage("DEMO-5811", "merge_watch")
+        code, _, err = call("transition", "done", "--task", "DEMO-5811")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
+
+    def test_other_lifecycle_targets_are_not_tied_to_closure(self):
+        init_at_stage("DEMO-5812", "review")
+        code, out, err = call("transition", "blocked", "--task", "DEMO-5812")
+        self.assertEqual(code, 0, err)
+        self.assertIn("blocked", out)
+
+
+class TestMergeObserved(unittest.TestCase):
+    """`ppl merge observed` records the merge the orchestrator saw on the forge, the fact the
+    tracker gate waits for. It is valid in merge_watch only, and only once."""
+
+    def test_merge_observed_records_the_sha_and_url_and_logs_the_event(self):
+        from ppl import run, store
+        init_at_stage("DEMO-5801", "merge_watch", status="done")
+        code, out, err = call("merge", "observed", "--sha", "a" * 40,
+                              "--url", "https://forge/mr/1", "--task", "DEMO-5801")
+        self.assertEqual(code, 0, err)
+        self.assertIn("a" * 40, out)
+        mr = run.load("DEMO-5801")["mr"]
+        self.assertEqual((mr["merged_sha"], mr["merged_url"]), ("a" * 40, "https://forge/mr/1"))
+        events = [e for e in store.read_log("DEMO-5801") if e["event"] == "merge_observed"]
+        self.assertEqual([(e["sha"], e["url"]) for e in events], [("a" * 40, "https://forge/mr/1")])
+
+    def test_merge_observed_without_a_url_records_none(self):
+        from ppl import run
+        init_at_stage("DEMO-5802", "merge_watch", status="done")
+        code, _, err = call("merge", "observed", "--sha", "b" * 40, "--task", "DEMO-5802")
+        self.assertEqual(code, 0, err)
+        mr = run.load("DEMO-5802")["mr"]
+        self.assertEqual((mr["merged_sha"], mr["merged_url"]), ("b" * 40, None))
+
+    def test_merge_observed_outside_merge_watch_is_refused(self):
+        # rule: R-MERGE-OBSERVED-ONCE
+        from ppl import run
+        for task_id, stage in (("DEMO-5803", "review"), ("DEMO-5804", "closure")):
+            init_at_stage(task_id, stage)
+            code, _, err = call("merge", "observed", "--sha", "c" * 40, "--task", task_id)
+            self.assertEqual(code, 2, stage)
+            payload = json.loads(err)
+            self.assertEqual(payload["error_code"], "ILLEGAL_TRANSITION", stage)
+            self.assertIn("merge_watch", payload["message"], stage)
+            self.assertIsNone(run.load(task_id)["mr"].get("merged_sha"), stage)
+
+    def test_a_second_merge_observed_is_refused_and_keeps_the_first(self):
+        # rule: R-MERGE-OBSERVED-ONCE
+        from ppl import run
+        init_at_stage("DEMO-5805", "merge_watch", status="done")
+        code, _, err = call("merge", "observed", "--sha", "d" * 40, "--task", "DEMO-5805")
+        self.assertEqual(code, 0, err)
+        code, _, err = call("merge", "observed", "--sha", "e" * 40, "--task", "DEMO-5805")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
+        self.assertEqual(run.load("DEMO-5805")["mr"]["merged_sha"], "d" * 40)
+
+    def test_merge_observed_refuses_a_sha_that_is_not_hexadecimal(self):
+        init_at_stage("DEMO-5806", "merge_watch", status="done")
+        code, _, err = call("merge", "observed", "--sha", "main", "--task", "DEMO-5806")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+
+
 class TestNeedsYouFlagsParkingAtEveryBoundary(unittest.TestCase):
     """E3, cycle 2 wave E, confirmed by a confirmation walk: `ppl park` only
     ever demotes lifecycle status "in_progress" -> "blocked" (wave B's W3,
@@ -1232,10 +1326,12 @@ class TestNameContractSpecRevision(unittest.TestCase):
         call("stage", "enter", "baseline", "--task", task_id)
         call("baseline", "record", write_json_file({"base_sha": base}), "--task", task_id)
         # `ppl transition done` also checks the lifecycle FSM (planned -> ...
-        # -> in_progress -> done). Irrelevant to what this test proves, so it
-        # is set directly rather than walked through every intermediate stage.
+        # -> in_progress -> done) and runs only in stage closure. Irrelevant to
+        # what this test proves, so both are set directly rather than walked
+        # through every intermediate stage.
         state = run.load(task_id)
         state["status"] = "in_progress"
+        state["stage"] = "closure"
         run.save(state)
         call("brief", "set", self._brief_file(name_contract, acceptance=acceptance),
              "--task", task_id)
@@ -1376,6 +1472,7 @@ class TestBoundaryChangeSpecRevisionStaleness(unittest.TestCase):
         call("baseline", "record", write_json_file({"base_sha": base}), "--task", task_id)
         state = run.load(task_id)
         state["status"] = "in_progress"
+        state["stage"] = "closure"
         run.save(state)
         call("brief", "set", self._brief_file(["src/**"]), "--task", task_id)
         stamp_challenge(task_id)
@@ -1429,6 +1526,7 @@ class TestBoundaryChangeSpecRevisionStaleness(unittest.TestCase):
         call("baseline", "record", write_json_file({"base_sha": base}), "--task", task_id)
         state = run.load(task_id)
         state["status"] = "in_progress"
+        state["stage"] = "closure"
         run.save(state)
         # "work.txt", not "**": cmd_boundary refuses "**" outright
         # (R-BOUNDARY-SET-NO-WILDCARD), so re-setting it below would silently

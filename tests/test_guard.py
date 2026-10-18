@@ -294,17 +294,63 @@ class TestGuard(unittest.TestCase):
             None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"}))
         self.assertIn("after the merge", self.deny_reason(result))
 
-    def test_jira_write_is_allowed_at_merge_watch(self):
+    @contextlib.contextmanager
+    def at_merge_watch(self, merged_sha="f" * 40, mr_missing=False):
+        """DEMO-700 in merge_watch, with the merge recorded unless merged_sha is None."""
         state = run.load("DEMO-700")
-        previous = state["stage"]
+        saved = (state["stage"], state.get("mr"))
         state["stage"] = "merge_watch"
+        if mr_missing:
+            state.pop("mr", None)
+        else:
+            state["mr"] = dict(state.get("mr") or {}, merged_sha=merged_sha)
         run.save(state)
         try:
+            yield
+        finally:
+            state = run.load("DEMO-700")
+            state["stage"], state["mr"] = saved
+            run.save(state)
+
+    def test_jira_write_is_allowed_at_merge_watch(self):
+        with self.at_merge_watch():
             self.assertIsNone(ppl_guard.decide(payload(
                 None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"})))
-        finally:
-            state["stage"] = previous
-            run.save(state)
+
+    def test_tracker_write_in_merge_watch_before_the_merge_is_recorded_is_denied(self):
+        # rule: R-JIRA-GATE
+        # Entering merge_watch is not observing the merge: the tracker stays shut until
+        # `ppl merge observed` recorded the merged sha.
+        with self.at_merge_watch(merged_sha=None):
+            for tool in ("mcp__atlassian__addCommentToJiraIssue",
+                         "mcp__claude_ai_Atlassian_Rovo__transitionJiraIssue",
+                         "mcp__atlassian__executeWrite"):
+                result = ppl_guard.decide(payload(None, tool, {"body": "x"}))
+                self.assertIn("OWNER_DECISION", self.deny_reason(result), tool)
+                self.assertIn("ppl merge observed", self.deny_reason(result), tool)
+
+    def test_tracker_write_in_merge_watch_without_any_mr_record_is_denied(self):
+        # rule: R-JIRA-GATE
+        # a state written before the mr record had merged fields, or with none at all
+        with self.at_merge_watch(mr_missing=True):
+            result = ppl_guard.decide(payload(
+                None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"}))
+            self.assertIn("OWNER_DECISION", self.deny_reason(result))
+        with self.at_merge_watch(merged_sha=""):
+            result = ppl_guard.decide(payload(
+                None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"}))
+            self.assertIn("OWNER_DECISION", self.deny_reason(result))
+
+    def test_tracker_write_is_allowed_after_ppl_merge_observed(self):
+        # rule: R-JIRA-GATE
+        from ppl import cli
+        with self.at_merge_watch(merged_sha=None):
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = cli.main(["merge", "observed", "--sha", "a" * 40,
+                                 "--url", "https://forge/mr/7", "--task", "DEMO-700"])
+            self.assertEqual(code, 0)
+            self.assertIsNone(ppl_guard.decide(payload(
+                None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"})))
 
     def test_jira_write_under_the_rovo_prefix_is_denied_before_merge_watch(self):
         # rule: R-JIRA-GATE
@@ -324,17 +370,10 @@ class TestGuard(unittest.TestCase):
 
     def test_jira_write_under_the_rovo_prefix_is_allowed_at_merge_watch(self):
         # rule: R-JIRA-GATE
-        state = run.load("DEMO-700")
-        previous = state["stage"]
-        state["stage"] = "merge_watch"
-        run.save(state)
-        try:
+        with self.at_merge_watch():
             self.assertIsNone(ppl_guard.decide(payload(
                 None, "mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue",
                 {"body": "x"})))
-        finally:
-            state["stage"] = previous
-            run.save(state)
 
     def test_jira_read_tools_are_not_gated_under_either_prefix(self):
         # rule: R-JIRA-GATE
@@ -400,17 +439,10 @@ class TestGuard(unittest.TestCase):
 
     def test_the_current_atlassian_write_tools_are_allowed_at_merge_watch(self):
         # rule: R-JIRA-GATE
-        state = run.load("DEMO-700")
-        previous = state["stage"]
-        state["stage"] = "merge_watch"
-        run.save(state)
-        try:
+        with self.at_merge_watch():
             for tool in self.CURRENT_WRITE_TOOLS:
                 self.assertIsNone(
                     ppl_guard.decide(payload(None, tool, {"issueKey": "X-1"})), tool)
-        finally:
-            state["stage"] = previous
-            run.save(state)
 
     def test_the_current_atlassian_read_tools_are_not_gated(self):
         # rule: R-JIRA-GATE
@@ -1747,6 +1779,13 @@ class TestGuard(unittest.TestCase):
         result = ppl_guard.decide(payload(
             "ppl-code-worker", "Bash", {"command": "ppl transition done"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_role_recording_the_merge_to_open_the_tracker_gate_is_denied(self):
+        # rule: R-GUARD-PPL-CLI-DENIED
+        for agent in ("ppl-code-worker", "ppl-review-responder"):
+            result = ppl_guard.decide(payload(
+                agent, "Bash", {"command": "ppl merge observed --sha " + "a" * 40}))
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), agent)
 
     def test_code_worker_listing_findings_is_still_allowed(self):
         self.assertIsNone(ppl_guard.decide(payload(

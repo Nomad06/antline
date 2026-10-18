@@ -446,6 +446,10 @@ def cmd_transition(args):
     # whatever the done gate tripped over on the way.
     fsm.check_lifecycle(state["status"], args.target)
     if args.target == "done":
+        if state["stage"] != "closure":
+            raise PplError("ILLEGAL_TRANSITION",
+                           "ppl transition done runs only in stage closure, current stage is %s - "
+                           "run `ppl stage enter closure` first" % state["stage"])
         head = gitfacts.head_sha(state["repo"])
         changed = gitfacts.changed_paths(state["repo"], state["base_sha"], head)
         blockers = verdict.done_blockers(task_id, head, changed)
@@ -522,6 +526,13 @@ def cmd_mr(args):
         state = run.load(task_id)
         head = gitfacts.head_sha(state["repo"])
         print(review.approval_state(task_id, head))
+    return 0
+
+
+def cmd_merge(args):
+    task_id = resolve_task(args)
+    review.record_merge(task_id, args.sha, args.url)
+    print("merge observed: %s" % args.sha)
     return 0
 
 
@@ -844,7 +855,7 @@ COMMANDS = {
     "control": cmd_control, "routing": cmd_routing, "models": cmd_models,
     "dispatch": cmd_dispatch, "harness": cmd_harness,
     "apply-patch": cmd_apply_patch, "destroy": cmd_destroy,
-    "mr": cmd_mr, "review": cmd_review, "doctor": cmd_doctor,
+    "mr": cmd_mr, "merge": cmd_merge, "review": cmd_review, "doctor": cmd_doctor,
     "watchdog": cmd_watchdog, "metrics": cmd_metrics, "label": cmd_label,
     "setup": cmd_setup,
 }
@@ -1000,6 +1011,12 @@ def build_parser():
     p.add_argument("--iid", type=int)
     p.add_argument("--url")
     p.add_argument("--author")
+    p.add_argument("--task")
+
+    p = sub.add_parser("merge")
+    p.add_argument("action", choices=["observed"])
+    p.add_argument("--sha", required=True)
+    p.add_argument("--url")
     p.add_argument("--task")
 
     p = sub.add_parser("review")

@@ -142,6 +142,19 @@ class TestSurface(unittest.TestCase):
                 self.assertTrue(text.strip(), "%s/%s is empty" % (kind, name))
                 self.assertNotIn(foreign, text.lower(), "%s/%s names the other forge" % (kind, name))
 
+    CLOSE_OUT = ("ppl review approved --sha", "ppl approval check", "ppl stage enter closure",
+                 "ppl transition done", "ppl stage enter merge_watch")
+
+    def test_the_review_loop_ends_with_the_whole_close_out_in_stage_seven_order(self):
+        for kind in ("gitlab", "github"):
+            module = forges.get(kind)
+            for name in ("review-loop", "stage7"):
+                text = " ".join(module.fragment(name).split())
+                terminal = text[text.index("Terminal"):]
+                order = [terminal.find(step) for step in self.CLOSE_OUT]
+                self.assertNotIn(-1, order, "%s/%s: %s" % (kind, name, order))
+                self.assertEqual(order, sorted(order), "%s/%s" % (kind, name))
+
     def test_github_fragments_write_the_json_flag_in_its_equals_form(self):
         github = forges.get("github")
         for name in ("stage6", "stage7", "review-loop"):
