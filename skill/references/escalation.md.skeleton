@@ -44,5 +44,9 @@ not counted either: dispatch the role again against the current head and brief
    role in the same lease generation, parks the run with `FORMAT_RETRY_EXHAUSTED`. `ppl`
    does that itself, you report it and stop. There is no third attempt.
 
+Your own gate receipt (`ppl evidence add --from orchestrator`) has no role to send back to:
+correct the receipt from the rc file and run the command again, and the refusal still counts
+toward the cap like any other [R-REFUSAL-RETRY-CAP].
+
 Silence from the owner is not consent. A parked task with a clear question is a better
 outcome than a green screen with an invented answer.

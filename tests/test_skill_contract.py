@@ -334,6 +334,22 @@ class TestSkillContract(unittest.TestCase):
         self.assertNotIn("record it as `REVISE`", self.text)
         self.assertNotIn("record it as `REVISE`", self.reference("stage-2-briefing.md"))
 
+    def test_the_gate_receipt_example_takes_its_result_from_the_rc_file(self):
+        # a literal `--result pass` in the example is copied as is, whatever the gate returned
+        stage4 = self.reference("stage-4-gates.md")
+        example = stage4[stage4.index("```bash"):stage4.index("```", stage4.index("```bash") + 3)]
+        self.assertIn("ppl evidence add", example)
+        self.assertNotIn("--result pass", example)
+        self.assertIn("from the rc file", " ".join(stage4.split()))
+
+    def test_a_refused_receipt_of_your_own_is_corrected_from_the_rc_file_not_redispatched(self):
+        rule = self.reference("escalation.md")
+        rule = " ".join(rule[rule.index("## The role output rule"):].split())
+        sentence = next(s for s in re.split(r"(?<=\.)\s", rule) if "--from orchestrator" in s)
+        for needed in ("correct the receipt from the rc file", "run the command again",
+                       "counts toward the cap"):
+            self.assertIn(needed, sentence)
+
 
 class TestEscalationReference(unittest.TestCase):
     text = (SKILL.parent / "references" / "escalation.md").read_text(encoding="utf-8")

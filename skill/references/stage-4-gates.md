@@ -6,11 +6,14 @@ the current candidate SHA with the check name from that file - use these names e
 because two of them are load-bearing:
 
 ```bash
-ppl evidence add --check focused-tests --result pass --sha $SHA --log <log> --rc <rc file> \
-  --generation $GENERATION --from orchestrator
-ppl evidence add --check secret-scan --result pass --sha $SHA --log <log> --rc <rc file> \
-  --generation $GENERATION --from orchestrator
+ppl evidence add --check focused-tests --result <pass|fail> --sha $SHA --log <log> \
+  --rc <rc file> --generation $GENERATION --from orchestrator
+ppl evidence add --check secret-scan --result <pass|fail> --sha $SHA --log <log> \
+  --rc <rc file> --generation $GENERATION --from orchestrator
 ```
+
+Take each `--result` from the rc file the gate wrote, `pass` when it holds 0 and `fail`
+otherwise - a receipt claiming `pass` on a non-zero exit code is refused [R-EVIDENCE-RC-FILE].
 
 `focused-tests` and `secret-scan` are the two checks `ppl transition done` refuses to close
 without, by their exact names - a passing receipt filed under any other name does not
