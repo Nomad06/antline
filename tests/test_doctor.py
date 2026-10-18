@@ -662,6 +662,16 @@ class TestHookRuns(unittest.TestCase):
         self.assertIs(result["ok"], False)
         self.assertIn("exited 3", result["problem"])
 
+    def test_a_guard_run_through_env_asks_the_interpreter_env_names(self):
+        hook = fixtures.SOURCE / "hooks" / "ppl_guard.py"
+        for env in ("/usr/bin/env", "/usr/bin/env -i PYTHONDONTWRITEBYTECODE=1",
+                    "/usr/bin/env -u PYTHONPATH --"):
+            with self.subTest(env=env):
+                write_settings(self.local_path, command="%s %s %s"
+                               % (env, shlex.quote(sys.executable), shlex.quote(str(hook))))
+                self.assertEqual(doctor.hook_runs(cwd=self.local_dir),
+                                 {"ok": True, "problem": None})
+
     def test_a_guard_under_an_interpreter_older_than_the_floor_reports_false(self):
         # rule: R-DOCTOR-HOOK-SHAPE
         old = Path(tmphome.mkdtemp(prefix="pplfakepython-")) / "python3"

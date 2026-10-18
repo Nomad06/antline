@@ -208,6 +208,19 @@ class TestStrictValidation(HarnessTestCase):
         (paths.harness_dir("example-maven") / "skill" / "gates.md").unlink()
         self.assertIn("<module>", self.refused("example-maven"))
 
+    def test_a_fragment_that_only_echoes_a_command_does_not_vouch_for_its_placeholder(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        name = self.mutate("example-generic", 'command = "make build"',
+                           'command = "make build TARGET=<target>"')
+        gates = paths.harness_dir(name) / "skill" / "gates.md"
+        gates.write_text("Targets: `make build TARGET=<target>`, `make lint`.\n", encoding="utf-8")
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertIn("<target>", caught.exception.message)
+        gates.write_text("Targets: `make build TARGET=<target>`, where <target> is the make "
+                         "target of the module.\n", encoding="utf-8")
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
     def test_an_overlay_for_an_unknown_role_is_refused(self):
         # rule: R-HARNESS-UNKNOWN-KEY
         fixtures.install_harness("example-generic")

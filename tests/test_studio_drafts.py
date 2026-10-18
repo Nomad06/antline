@@ -327,7 +327,25 @@ class TestSameAnswerAsTheCli(DraftTestCase):
         oversized = self.preset()
         oversized["fragments"]["templates/ppl-verifier.part"] = "x" * harness.AGENT_HARD_BYTES
         return {"clean": clean, "warned": warned, "unfocused": unfocused, "misspelt": misspelt,
-                "relative": relative, "oversized": oversized}
+                "relative": relative, "oversized": oversized, "typo": self.typo_draft()}
+
+    def typo_draft(self):
+        """A node preset whose focused-tests command carries <testclass>, its gates.md
+        regenerated from the commands the way presets and the extraction write it."""
+        draft = self.preset("node")
+        for gate in draft["doc"]["gate"]:
+            if gate["name"] == harness.FOCUSED_TESTS_GATE:
+                gate["command"] = "npm test -- <test_class> <testclass>"
+        draft["fragments"].update(stacks.gate_fragments(draft["doc"]["gate"], stack="node"))
+        self.assertIn("<testclass>", draft["fragments"]["skill/gates.md"])
+        return draft
+
+    def test_a_placeholder_typo_echoed_into_the_generated_gates_md_is_still_refused(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        draft = self.typo_draft()
+        result = drafts.check("demo", draft["doc"], draft["fragments"])
+        self.assertFalse(result["ok"], result)
+        self.assertIn("<testclass>", result["errors"][0])
 
     def test_the_cli_and_the_studio_return_the_same_errors_and_warnings(self):
         # rule: R-STUDIO-SAME-VALIDATION
@@ -343,7 +361,7 @@ class TestSameAnswerAsTheCli(DraftTestCase):
 
     def test_a_draft_the_cli_refuses_is_refused_in_the_studio(self):
         # rule: R-STUDIO-SAME-VALIDATION
-        for label in ("unfocused", "misspelt", "relative", "oversized"):
+        for label in ("unfocused", "misspelt", "relative", "oversized", "typo"):
             draft = self.drafts()[label]
             with self.subTest(draft=label):
                 result = drafts.check("demo", draft["doc"], draft["fragments"])

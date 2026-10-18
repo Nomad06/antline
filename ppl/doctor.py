@@ -44,6 +44,7 @@ GUARD_MARKER = "ppl_guard.py"
 DISPATCH_MARKER = "ppl_dispatch.py"
 HOOK_EVENTS = (("PreToolUse", GUARD_MARKER), ("SubagentStart", DISPATCH_MARKER))
 _VERSION_PROBE = "import sys; print('%d.%d.%d' % sys.version_info[:3])"
+_ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 # The matcher README.md "Hooks" registers the guard on: match everything, let the hook
 # decide. An explicit tool list is fragile (a tracker prefix it does not name, a read
@@ -230,6 +231,24 @@ def _python_version(interpreter):
     return version, None
 
 
+def _past_env(words):
+    """The program `env` runs in `words`: past its options, the argument of -u,
+    and any NAME=value."""
+    index = 1
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            index += 1
+            break
+        if word in ("-u", "--unset"):
+            index += 2
+        elif word.startswith("-") or _ENV_ASSIGNMENT_RE.match(word):
+            index += 1
+        else:
+            break
+    return words[index] if index < len(words) else ""
+
+
 def _interpreter_problem(command):
     """None when the first word of a hook command answers as a Python that
     meets the hooks' floor, else what is wrong with it. It runs that word, so
@@ -240,7 +259,8 @@ def _interpreter_problem(command):
         words = shlex.split(command)
     except ValueError:
         return "has a command that does not split into words"
-    first = words[0] if words else ""
+    first = _past_env(words) if words and os.path.basename(words[0]) == "env" else \
+        (words[0] if words else "")
     if first.endswith((GUARD_MARKER, DISPATCH_MARKER)):
         return ("runs the script itself, so its shebang picks the interpreter: name a Python "
                 "%s or newer first" % shown)

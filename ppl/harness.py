@@ -213,10 +213,17 @@ def _check_gate_commands(doc, gates, source):
         if TEST_CLASS_PLACEHOLDER not in gates[index]["command"]:
             _fail(source, "gate[%d] (%s) command must carry %s, the one test the test writer "
                   "names for the task" % (index, FOCUSED_TESTS_GATE, TEST_CLASS_PLACEHOLDER))
+    # A fragment that only echoes a command, as the studio's generated gates.md
+    # does, says nothing about what goes in its placeholders, so the echoes are
+    # cut first, the longest command first so a shorter one cannot split it.
+    echoes = sorted({gate["command"] for gate in gates}, key=len, reverse=True)
     named = set()
     if doc.get("_dir"):
         for rel in _PLACEHOLDER_FRAGMENTS:
-            named.update(_PLACEHOLDER_RE.findall(_fragment_text(doc, rel)))
+            text = _fragment_text(doc, rel)
+            for command in echoes:
+                text = text.replace(command, "")
+            named.update(_PLACEHOLDER_RE.findall(text))
     for index, gate in enumerate(gates):
         for placeholder in _PLACEHOLDER_RE.findall(gate["command"]):
             if placeholder not in RUN_TIME_PLACEHOLDERS and placeholder not in named:

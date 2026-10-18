@@ -18,7 +18,7 @@ sys.path.insert(0, str(REPO / "hooks"))
 import ppl_guard
 from ppl import config, harness, paths, routing
 from ppl.errors import PplError
-from ppl.studio import extract, project, stacks
+from ppl.studio import drafts, extract, project, stacks
 
 GOOD_DRAFT = {
     "gates": [{"name": "Install dependencies", "command": "npm ci", "source": "CLAUDE.md:3"},
@@ -530,6 +530,20 @@ class TestExtractRetry(panel_client.StudioTestCase):
         result, calls = self.run_with(answer(hostile))
         self.assertEqual(len(calls), 1)
         self.assertEqual([item["kind"] for item in result["dropped"]], ["shape"])
+
+    def test_an_extracted_gate_with_a_placeholder_nobody_fills_is_refused_by_the_check(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        # the merged gates.md echoes every command, and an echo does not say what goes there
+        gates = [dict(gate) for gate in GOOD_DRAFT["gates"]]
+        gates[1]["command"] = "npx jest <test_class> --selectProjects <project>"
+        result, _ = self.run_with(answer(dict(GOOD_DRAFT, gates=gates)))
+        info = {"path": tmphome.mkdtemp(prefix="pplrepo-"), "default_branch": "main",
+                "forge_hint": None, "name_hint": "demo"}
+        merged = extract.merge(stacks.draft("node", info), result["extracted"])
+        self.assertIn("<project>", merged["fragments"]["skill/gates.md"])
+        checked = drafts.check("demo", merged["doc"], merged["fragments"])
+        self.assertFalse(checked["ok"], checked)
+        self.assertIn("<project>", checked["errors"][0])
 
 
 class TestMerge(unittest.TestCase):

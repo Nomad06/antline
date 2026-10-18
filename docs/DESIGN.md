@@ -677,8 +677,9 @@ a harness refuses `HARNESS_INVALID` one with no `[[gate]]` named `focused-tests`
 receipt under that name [R-HARNESS-FOCUSED-TESTS-REQUIRED]. It also refuses a table or key
 `harness.KNOWN_KEYS` does not list (`[env]` keys stay free), naming the nearest known one, a gate
 placeholder other than `<test_class>`, `<worktree>`, `<TASK-ID>`, `<SHA>` and `<GENERATION>`
-that neither `skill/gates.md` nor `skill/extra-gates.md` names (example-maven's `<module>` is
-named in its `gates.md`), and a `templates/*.part` for a role that is not one of the six
+that neither `skill/gates.md` nor `skill/extra-gates.md` names outside a verbatim copy of a gate
+command (example-maven's `<module>` is named in its `gates.md`, an echo of the command such as the
+studio's generated `gates.md` vouches for nothing), and a `templates/*.part` for a role that is not one of the six
 [R-HARNESS-UNKNOWN-KEY]. Any other file under `skill/` or `templates/` is a warning, as is a
 `knowledge.skills` name found neither under the configured skills directory nor under
 `~/.claude/skills`, and a focused-tests command no `[[guard.shape]]` lets the test worker run.
@@ -734,7 +735,7 @@ exits 0, where it used to die on import and leave every call allowed [R-GUARD-PY
 `ppl doctor` runs every registered guard command once on an unroled Read of `/dev/null` and
 reports `hook_runs: false`, with the first stderr line and the remedy `ppl setup claude`, when
 one does not exit 0 with an empty stderr. Before it runs a guard command it asks that command's interpreter for its version and
-reports one older than 3.11 the same way. Per settings file it also reports `dispatch_hook:
+reports one older than 3.11 the same way (past `env` and its options to the program it runs). Per settings file it also reports `dispatch_hook:
 registered|missing` and `hook_shape: ok|<problem>` for the guard and dispatch entries, read from
 the file and not run: `type` must be `"command"`, a `timeout` must be there, the interpreter must
 be an absolute path to an executable file and the hook script an absolute path to a file. `ppl
