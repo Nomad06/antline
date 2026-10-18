@@ -1,4 +1,5 @@
 import argparse
+import functools
 import io
 import itertools
 import os
@@ -105,29 +106,73 @@ def unknown_stages(files):
     return problems
 
 
-# "from `review`, run `a`, `b`, then `c`", up to the end of the clause or the sentence
-_RECOVERY_RE = re.compile(r"\b(?:from|in) `(%s)`,? run (.+?)(?=;|\.\s|\.$|$)"
-                          % "|".join(fsm.STAGES), re.IGNORECASE)
+# "from `review`, run `a`, `b`, then `c`" or "from `closure` with status `done`, run `a`",
+# up to the end of the clause or the sentence
+_RECOVERY_RE = re.compile(r"\b(?:from|in) `(%s)`(?: with status `(%s)`)?,? run (.+?)(?=;|\.\s|\.$|$)"
+                          % ("|".join(fsm.STAGES), "|".join(fsm.LIFECYCLE)), re.IGNORECASE)
 
 
 def recovery_clauses(text):
-    """(stage, [ppl command, ...]) for every "from `<stage>`, run ..." instruction."""
+    """(stage, status or None, [ppl command, ...]) for every "from `<stage>`, run ..."
+    instruction, the status when the instruction names one."""
     found = []
     for match in _RECOVERY_RE.finditer(" ".join(text.split())):
-        steps = re.findall(r"`(ppl [^`]+)`", match.group(2))
+        steps = re.findall(r"`(ppl [^`]+)`", match.group(3))
         if steps:
-            found.append((match.group(1), steps))
+            found.append((match.group(1), match.group(2), steps))
     return found
 
 
+@functools.lru_cache(maxsize=None)
+def reachable_statuses():
+    """stage -> the lifecycle statuses a run can be in there, found by walking the real CLI
+    forward from a new run: every stage entry it accepts and `ppl transition done`. Park and
+    escalation are left out, a resume returns a run to the stage and status it left
+    [R-PARK-RESUME-EXACT] [R-PARK-RESUME-RESTORES-LIFECYCLE], and so are transition blocked
+    and failed, which take a run off the path a recovery instruction is written for."""
+    moves = ["ppl stage enter %s" % stage for stage in fsm.STAGES
+             if stage not in ("parking", "escalation")] + ["ppl transition done"]
+    seen = {("admission", "planned")}
+    queue = list(seen)
+    while queue:
+        node = queue.pop()
+        for move in moves:
+            refused, reached = _walk((move,), *node)
+            if refused is None and reached not in seen:
+                seen.add(reached)
+                queue.append(reached)
+    statuses = {}
+    for stage, status in seen:
+        statuses.setdefault(stage, set()).add(status)
+    return statuses
+
+
 def illegal_recoveries(files):
+    """A recovery instruction is walked from every status a run can be in at its stage, or
+    from the one it names. Where one names a status, every status of that stage needs one."""
+    statuses = reachable_statuses()
     problems = []
     for path, text in sorted(files.items()):
-        for stage, steps in recovery_clauses(text):
-            # merge_watch is entered only once the run is done [R-MERGE-WATCH-AFTER-DONE]
-            refused = walk(steps, stage, "done" if stage == "merge_watch" else "in_progress")
-            if refused:
-                problems.append("%s: from `%s`: %s" % (path, stage, refused))
+        covered = {}
+        for stage, status, steps in recovery_clauses(text):
+            possible = statuses.get(stage, set())
+            if not possible:
+                problems.append("%s: from `%s`: no run reaches this stage on the forward walk, so "
+                                "the instruction cannot be checked" % (path, stage))
+                continue
+            if status is not None and status not in possible:
+                problems.append("%s: from `%s` with status `%s`: no run is in that stage with that "
+                                "status" % (path, stage, status))
+                continue
+            starts = possible if status is None else {status}
+            covered.setdefault(stage, set()).update(starts)
+            for start in sorted(starts):
+                refused = walk(steps, stage, start)
+                if refused:
+                    problems.append("%s: from `%s` (status %s): %s" % (path, stage, start, refused))
+        for stage, seen in sorted(covered.items()):
+            for status in sorted(statuses[stage] - seen):
+                problems.append("%s: from `%s`: no instruction for status %s" % (path, stage, status))
     return problems
 
 
@@ -148,14 +193,21 @@ def walk(steps, stage, status):
     """None when the real ppl accepts every step in order on a run that is in `stage` with
     lifecycle `status`, else the first refusal. The stage graph and every stage and status
     precondition are the real ones. Only git and the done gate's evidence checks are
-    stubbed: what a step needs from the repo is another test's subject."""
+    stubbed, and the run carries a recorded baseline and an accepted brief challenge: what a
+    step needs from the repo or from an artifact is another test's subject."""
+    return _walk(steps, stage, status)[0]
+
+
+def _walk(steps, stage, status):
+    """(walk's answer, the (stage, status) the run ended in)"""
     task_id = "WALK-%d" % next(_walks)
     with mock.patch.dict(os.environ, {"PPL_HOME": tmphome.mkdtemp(prefix="pplwalk-")}), \
             mock.patch.object(gitfacts, "head_sha", return_value=WALK_SHA), \
             mock.patch.object(gitfacts, "changed_paths", return_value=[]), \
             mock.patch.object(verdict, "done_blockers", return_value=[]):
         state = run.init(task_id, "u", "/nonexistent/walk-repo")
-        state["stage"], state["status"] = stage, status
+        state.update(stage=stage, status=status, base_sha=WALK_SHA, spec_revision="walk",
+                     brief_challenge={"spec_revision": "walk", "verdict": "ACCEPTED"})
         run.save(state)
         for step in steps:
             before = run.load(task_id)
@@ -163,9 +215,11 @@ def walk(steps, stage, status):
             with redirect_stdout(io.StringIO()), redirect_stderr(err):
                 code = cli.main(_argv(step, task_id))
             if code != 0:
-                return "`%s` in stage %s, status %s: %s" % (step, before["stage"], before["status"],
-                                                            err.getvalue().strip())
-    return None
+                return ("`%s` in stage %s, status %s: %s"
+                        % (step, before["stage"], before["status"], err.getvalue().strip()),
+                        (before["stage"], before["status"]))
+        after = run.load(task_id)
+    return None, (after["stage"], after["status"])
 
 
 class TestSkillContract(unittest.TestCase):
@@ -330,9 +384,10 @@ class TestEveryRenderedFile(unittest.TestCase):
     def test_the_recovery_check_reads_the_after_merge_instructions(self):
         # A check that matches no clause would pass any text.
         for name, files in RENDERED.items():
-            stages = [stage for _, text in sorted(files.items())
-                      for stage, _ in recovery_clauses(text)]
-            self.assertEqual(stages, ["review", "closure", "merge_watch"], name)
+            clauses = [(stage, status) for _, text in sorted(files.items())
+                       for stage, status, _ in recovery_clauses(text)]
+            self.assertEqual(clauses, [("review", None), ("closure", "in_progress"),
+                                       ("closure", "done"), ("merge_watch", None)], name)
 
     def test_the_close_out_is_rendered_where_stage_seven_and_the_review_loop_state_it(self):
         close_out = sequences.render(sequences.CLOSE_OUT)
@@ -351,6 +406,17 @@ class TestEveryRenderedFile(unittest.TestCase):
 class TestSequences(unittest.TestCase):
     """Each sequence is walked through the real ppl from the stage and status it starts in,
     so a step the state machine or a precondition refuses fails here, not in a run."""
+
+    def test_the_statuses_a_stage_can_be_in_come_from_the_real_rules(self):
+        statuses = reachable_statuses()
+        self.assertEqual(statuses["review"], {"in_progress"})
+        self.assertEqual(statuses["closure"], {"in_progress", "done"})
+        self.assertEqual(statuses["merge_watch"], {"done"})
+        self.assertEqual(statuses["admission"], {"planned"})
+
+    def test_a_tail_of_the_close_out_starts_from_each_status_closure_can_be_in(self):
+        starts = {start[1] for start, _ in sequences.SEQUENCES.values() if start[0] == "closure"}
+        self.assertEqual(starts, reachable_statuses()["closure"])
 
     def test_the_close_out_is_the_five_steps_in_their_order(self):
         self.assertEqual(sequences.CLOSE_OUT,
@@ -402,6 +468,8 @@ SEEDS = {
     "invalid form": "Then run `ppl review approve --sha <SHA>`.",
     "unknown stage": "Then run `ppl stage enter merge_wach`.",
     "illegal recovery": "From `review`, run `ppl stage enter merge_watch` to finish.",
+    "recovery for one status": ("From `closure`, run `ppl transition done`, "
+                                "`ppl stage enter merge_watch`."),
 }
 SEEDED = fixtures.skill_files("example-maven", fragments={
     "review-loop": forges.get("gitlab").fragment("review-loop") + "\n" + "\n\n".join(SEEDS.values())})
@@ -432,10 +500,33 @@ class TestSeededDrift(unittest.TestCase):
 
     def test_an_illegal_recovery_instruction_in_a_reference_is_reported(self):
         # rule: R-FSM-STAGE-GRAPH
-        problems = self.assert_reports(illegal_recoveries(SEEDED))
+        problems = [p for p in self.assert_reports(illegal_recoveries(SEEDED)) if "`review`" in p]
         self.assertEqual(len(problems), 1)
-        self.assertIn("from `review`: `ppl stage enter merge_watch` in stage review", problems[0])
+        self.assertIn("from `review` (status in_progress): `ppl stage enter merge_watch` in stage "
+                      "review", problems[0])
         self.assertIn("ILLEGAL_TRANSITION", problems[0])
+
+    def test_a_recovery_that_holds_for_one_status_of_its_stage_only_is_reported(self):
+        # rule: R-FSM-LIFECYCLE
+        # A run stopped between `ppl transition done` and `ppl stage enter merge_watch` is in
+        # closure with status done, where transition done is refused.
+        problems = [p for p in self.assert_reports(illegal_recoveries(SEEDED)) if "`closure`" in p]
+        self.assertEqual(len(problems), 1)
+        self.assertIn("from `closure` (status done): `ppl transition done` in stage closure, "
+                      "status done", problems[0])
+        self.assertIn("ILLEGAL_TRANSITION", problems[0])
+
+    def test_a_stage_whose_recovery_names_one_status_must_name_every_status_it_can_be_in(self):
+        partial = {"references/x.md": "From `closure` with status `in_progress`, run "
+                                      "`ppl transition done`, `ppl stage enter merge_watch`."}
+        self.assertEqual(illegal_recoveries(partial),
+                         ["references/x.md: from `closure`: no instruction for status done"])
+
+    def test_a_recovery_naming_a_status_its_stage_is_never_in_is_reported(self):
+        wrong = {"references/x.md": "From `review` with status `done`, run `ppl approval check`."}
+        self.assertEqual(illegal_recoveries(wrong),
+                         ["references/x.md: from `review` with status `done`: no run is in that "
+                          "stage with that status"])
 
     def test_the_parser_refuses_the_misspelled_stage_as_well(self):
         # rule: R-FSM-STAGE-GRAPH

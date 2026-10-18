@@ -422,10 +422,12 @@ through, and `OWNER_DECISION` has nothing to print because nothing ran a check t
 assuming the more comfortable one. When it IS armed, a tracker write before that point is
 denied outright (its reason starts with `OWNER_DECISION`) - do not try the write again
 hoping the hook missed it [R-JIRA-GATE]. Finish the close-out instead, once the
-<!-- include: vocab/short --> is approved on the current head SHA: from `review`, run
-<!-- include: sequence/close-out -->; from `closure`, run
-<!-- include: sequence/close-out-from-closure -->; in `merge_watch`, run
-<!-- include: sequence/after-merge --> as above once the merge is on the forge. `ppl transition done`
+<!-- include: vocab/short --> is approved on the current head SHA, from the stage and status
+`ppl show --json` reports: from `review`, run <!-- include: sequence/close-out -->; from
+`closure` with status `in_progress`, run <!-- include: sequence/close-out-from-closure -->;
+from `closure` with status `done`, run <!-- include: sequence/close-out-from-done -->; in
+`merge_watch`, run <!-- include: sequence/after-merge --> as above once the merge is on the
+forge. `ppl transition done`
 refuses in any stage but `closure` [R-DONE-FROM-CLOSURE], `ppl stage enter merge_watch`
 refuses until the run is done [R-MERGE-WATCH-AFTER-DONE], and `ppl merge observed` refuses
 in any stage but `merge_watch` [R-MERGE-OBSERVED-ONCE]. The tracker gate fires for the orchestrator's own session -

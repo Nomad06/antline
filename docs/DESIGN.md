@@ -700,18 +700,24 @@ what was done and how to check it). A fragment's `<default-branch>` is replaced 
 
 A command sequence the skill states in more than one place is data in `ppl/sequences.py`: the
 stage 7 close-out (`ppl review approved --sha <SHA>`, `ppl approval check`, `ppl stage enter
-closure`, `ppl transition done`, `ppl stage enter merge_watch`), what is left of it from
-`closure`, and the after-merge record (`ppl merge observed`). A `<!-- include:
-sequence/<name> -->` marker renders one in a skeleton or in a forge fragment, and a forge
-fragment may carry no other marker [R-SKILL-GENERATED], so stage 7 and the review loop state
-the same close-out. `tests/test_skill_contract.py` walks every sequence through the real CLI
-from the stage and lifecycle status it starts in, with git and the done gate's evidence
-checks stubbed, so a step the stage graph or a status precondition refuses fails the suite
+closure`, `ppl transition done`, `ppl stage enter merge_watch`), what is left of it in
+`closure` before and after `ppl transition done`, and the after-merge record (`ppl merge
+observed`). A `<!-- include: sequence/<name> -->` marker renders one in a skeleton or in a
+forge fragment, and a forge fragment may carry no other marker [R-SKILL-GENERATED], so stage 7
+and the review loop state the same close-out. `tests/test_skill_contract.py` walks every
+sequence through the real CLI from the stage and lifecycle status it starts in, with git and
+the done gate's evidence checks stubbed and a recorded baseline and accepted challenge on the
+run, so a step the stage graph or a status precondition refuses fails the suite
 [R-FSM-STAGE-GRAPH] [R-DONE-FROM-CLOSURE] [R-MERGE-WATCH-AFTER-DONE]. The same module reads
 every rendered file of both example skills and fails on a `ppl` command or subcommand word
-the parser does not have, on a `ppl stage enter <s>` naming no stage of `fsm.STAGES`, and on
-a "from `<stage>`, run ..." instruction whose commands the real CLI refuses from that stage
-[R-FSM-STAGE-GRAPH].
+the parser does not have, and on a `ppl stage enter <s>` naming no stage of `fsm.STAGES`. It
+also derives, by the same walk forward from a new run (every stage entry the CLI accepts and
+`ppl transition done`), the lifecycle statuses a run can be in at each stage: `closure` is
+the one with two, `in_progress` and `done`. A "from `<stage>`, run ..." instruction is walked
+from each of them, or from the one status it names ("from `closure` with status `done`"), and
+the suite fails when the CLI refuses a step from any of them, when the named status is not
+one the stage can have, or when a stage's status-specific instructions leave one of its
+statuses without an instruction [R-FSM-STAGE-GRAPH] [R-FSM-LIFECYCLE].
 
 `ppl init` refuses `SETUP_INCOMPLETE` while
 `ppl setup` has not recorded the models step (waived by `--skip-model-check`), the harness step
