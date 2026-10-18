@@ -232,6 +232,15 @@ def stage_enter(task_id, stage):
                            "challenge bound to the current spec_revision - dispatch "
                            "ppl-brief-challenger and run `ppl brief challenge` first "
                            "[R-BRIEF-CHALLENGED-BEFORE-IMPLEMENTATION]")
+    # closure -> merge_watch is a legal edge, but merge_watch has no way back, so a run that
+    # took it before `ppl transition done` could never be closed, and the tracker gate would
+    # sit one `ppl merge observed` away. A resume into merge_watch is held to the same
+    # [R-MERGE-WATCH-AFTER-DONE].
+    if stage == "merge_watch" and state["status"] != "done":
+        raise PplError("ILLEGAL_TRANSITION",
+                       "cannot enter merge_watch while the run's status is %s - run "
+                       "`ppl transition done` in closure first [R-MERGE-WATCH-AFTER-DONE]"
+                       % state["status"])
     if stage == "escalation":
         # The one record escalation needs, kept on state itself rather than
         # a second file next to parking.json: unlike parking, there is

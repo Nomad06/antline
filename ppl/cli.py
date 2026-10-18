@@ -429,6 +429,16 @@ def cmd_findings(args):
     return 0
 
 
+def _closure_hint(stage):
+    """The next step toward closure that is actually legal from `stage`."""
+    if stage == "review":
+        return "run `ppl stage enter closure` first"
+    if stage == "merge_watch":
+        return ("the run already left closure and merge_watch has no way back, "
+                "so escalate to the owner with `ppl escalate`")
+    return "closure follows review in the stage graph"
+
+
 def cmd_transition(args):
     task_id = resolve_task(args)
     control.enforce(task_id)
@@ -448,8 +458,8 @@ def cmd_transition(args):
     if args.target == "done":
         if state["stage"] != "closure":
             raise PplError("ILLEGAL_TRANSITION",
-                           "ppl transition done runs only in stage closure, current stage is %s - "
-                           "run `ppl stage enter closure` first" % state["stage"])
+                           "ppl transition done runs only in stage closure, current stage is %s - %s"
+                           % (state["stage"], _closure_hint(state["stage"])))
         head = gitfacts.head_sha(state["repo"])
         changed = gitfacts.changed_paths(state["repo"], state["base_sha"], head)
         blockers = verdict.done_blockers(task_id, head, changed)
@@ -531,6 +541,7 @@ def cmd_mr(args):
 
 def cmd_merge(args):
     task_id = resolve_task(args)
+    control.enforce(task_id)
     review.record_merge(task_id, args.sha, args.url)
     print("merge observed: %s" % args.sha)
     return 0

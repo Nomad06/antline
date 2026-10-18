@@ -406,7 +406,8 @@ hoping the hook missed it [R-JIRA-GATE]. Finish the close-out instead: from `rev
 `ppl stage enter closure`, `ppl transition done`, then `ppl stage enter merge_watch`; from
 `closure`, run `ppl transition done`, then `ppl stage enter merge_watch`; in `merge_watch`,
 run `ppl merge observed` as above once the merge is on the forge. `ppl transition done`
-refuses in any stage but `closure` [R-DONE-FROM-CLOSURE], and `ppl merge observed` refuses
+refuses in any stage but `closure` [R-DONE-FROM-CLOSURE], `ppl stage enter merge_watch`
+refuses until the run is done [R-MERGE-WATCH-AFTER-DONE], and `ppl merge observed` refuses
 in any stage but `merge_watch` [R-MERGE-OBSERVED-ONCE]. The tracker gate fires for the orchestrator's own session -
 which carries no `agent_type` - whenever the run is active and `isolated` is true (the
 default), regardless of the session's cwd; the documented worktree layout in Stage 1 puts
@@ -422,8 +423,8 @@ that a parallel implementation of the same task replaced; `ppl metrics` reports 
 ## Operator commands
 
 The panel writes `control.json`. `ppl` checks it at `stage enter`, `brief set`,
-`baseline record`, `boundary set`, `mr set`, `review approved`, `budget spend`, `transition`
-and `recover`, and refuses to move a paused, stopped or destroyed run - read-only commands
+`baseline record`, `boundary set`, `mr set`, `merge observed`, `review approved`,
+`budget spend`, `transition` and `recover`, and refuses to move a paused, stopped or destroyed run - read-only commands
 like `status`, `show` and `control get` keep working, so a paused run is still observable,
 and `control set resume` keeps working too, so the operator can lift their own halt [R-OPERATOR-HALT-CLI].
 `ppl park` and `ppl escalate` also stay available while paused - an operator halt must not

@@ -644,7 +644,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 161 rows: 117 `blocking`, 16 `soft` and 28 `n/a`. Of the
+As of this commit the table carries 162 rows: 118 `blocking`, 16 `soft` and 28 `n/a`. Of the
 `n/a` rows, 20 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -735,6 +735,8 @@ The task reaches `done` when the MR is approved on the current head SHA - that i
 owner-defined end of the pipeline. The close-out runs `review -> closure`, `ppl transition
 done`, then `closure -> merge_watch`, and `ppl transition done` refuses in any stage but
 `closure`, so a run cannot end with stage `review` and status `done` [R-DONE-FROM-CLOSURE].
+`ppl stage enter merge_watch` in turn refuses until the status is `done`, since
+`merge_watch` has no way back to `closure` [R-MERGE-WATCH-AFTER-DONE].
 `merge_watch` is an optional low-frequency tail that exists only to observe the human merge
 and fire the post-merge tracker update. It cannot change the lifecycle
 [R-MERGE-WATCH-TERMINAL].
@@ -1656,19 +1658,20 @@ Two independent readers act on it:
 
 - `ppl` checks control at the commands that advance a run or mutate state a paused run must
   not be able to move out from under itself: `stage enter`, `brief set`, `boundary set`,
-  `baseline record`, `transition`, `budget spend`, `mr set`, `review answered`,
-  `review approved`, and `recover` - ten call sites (`ppl/cli.py`: `cmd_stage`, `cmd_brief`,
-  `cmd_boundary`, `cmd_baseline`, `cmd_transition`, `cmd_budget`, the `set` branch of
-  `cmd_mr`, the `answered` and the `approved`/`else` branches of `cmd_review`, and
-  `cmd_recover` - each carries its own `control.enforce` call) [R-OPERATOR-HALT-CLI]. Not
+  `baseline record`, `transition`, `budget spend`, `mr set`, `merge observed`,
+  `review answered`, `review approved`, and `recover` - eleven call sites (`ppl/cli.py`:
+  `cmd_stage`, `cmd_brief`, `cmd_boundary`, `cmd_baseline`, `cmd_transition`, `cmd_budget`,
+  the `set` branch of `cmd_mr`, `cmd_merge`, the `answered` and the `approved`/`else`
+  branches of `cmd_review`, and `cmd_recover` - each carries its own `control.enforce` call)
+  [R-OPERATOR-HALT-CLI]. Not
   every subcommand is gated, and deliberately so: `status`, `show` and
   `control get` must keep working while a run is halted, or the operator loses sight of the
   run they just paused; `control set resume` must work while a pause is in force or nothing
   could ever lift it; and `park` and `escalate` stay free too, since an operator halt must
-  not block recording why the run stopped [R-OPERATOR-HALT-CLI]. `review answered` is one of the ten: it appends to the review ledger (`threads.json`), which is run state a
+  not block recording why the run stopped [R-OPERATOR-HALT-CLI]. `review answered` is one of the eleven: it appends to the review ledger (`threads.json`), which is run state a
   paused run must not be free to keep advancing, the same reasoning as `review approved`
   [R-OPERATOR-HALT-CLI]. Every path that moves a run forward or rewrites ledger/boundary/mr/budget
-  state passes through one of the ten, so a halt still lands at the next such call
+  state passes through one of the eleven, so a halt still lands at the next such call
 - the `PreToolUse` guard hook stats the control file on every tool call, so a pause lands
   within one tool call rather than one stage; for the unroled main session specifically, it
   does so under the `isolated` scoping described in 5.4

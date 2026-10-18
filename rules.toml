@@ -359,7 +359,7 @@ hook_or_check = "ppl/review.py:record_merge, ppl/cli.py:cmd_merge"
 deny_test = "tests/test_cli.py::TestMergeObserved::test_merge_observed_outside_merge_watch_is_refused, tests/test_cli.py::TestMergeObserved::test_a_second_merge_observed_is_refused_and_keeps_the_first"
 allow_test = "tests/test_cli.py::TestMergeObserved::test_merge_observed_records_the_sha_and_url_and_logs_the_event, tests/test_cli.py::TestMergeObserved::test_merge_observed_without_a_url_records_none"
 owner = "ppl"
-residual = "the sha is what the orchestrator read off the forge: ppl checks that it is hexadecimal, not that the forge really merged it or that it is the approved candidate. A pipeline role is denied the command by R-GUARD-PPL-CLI-DENIED like every state-changing ppl call, and the command does not check control.json, so it records the merge on a paused run too (the guard still denies that run's tracker write while it is paused)"
+residual = "the sha is what the orchestrator read off the forge: ppl checks that it is hexadecimal, not that the forge really merged it or that it is the approved candidate. A pipeline role is denied the command by R-GUARD-PPL-CLI-DENIED like every state-changing ppl call"
 
 [[rule]]
 id = "R-JIRA-NO-ROLE-TOOL"
@@ -403,15 +403,15 @@ residual = "cooperative, not preemptive: the in-flight tool call completes first
 
 [[rule]]
 id = "R-OPERATOR-HALT-CLI"
-statement = "Ten ppl subcommands refuse to run while the operator has halted the run, and park, escalate, status, show, control get and control set resume deliberately stay available."
-scope = "ppl CLI, the ten call sites in cli.py"
-event = "ppl stage/brief/boundary/baseline/transition/budget/mr set/review answered/review approved/recover"
+statement = "Eleven ppl subcommands refuse to run while the operator has halted the run, and park, escalate, status, show, control get and control set resume deliberately stay available."
+scope = "ppl CLI, the eleven call sites in cli.py"
+event = "ppl stage/brief/boundary/baseline/transition/budget/mr set/merge observed/review answered/review approved/recover"
 enforcement = "blocking"
-hook_or_check = "ppl/control.py:enforce, ppl/cli.py:cmd_stage"
-deny_test = "tests/test_cli.py::TestCli::test_paused_run_refuses_stage_enter, tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_boundary_set_is_refused_while_paused, tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_budget_spend_is_refused_while_paused"
+hook_or_check = "ppl/control.py:enforce, ppl/cli.py:cmd_stage, ppl/cli.py:cmd_merge"
+deny_test = "tests/test_cli.py::TestCli::test_paused_run_refuses_stage_enter, tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_boundary_set_is_refused_while_paused, tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_budget_spend_is_refused_while_paused, tests/test_cli.py::TestMergeObserved::test_merge_observed_is_refused_while_paused"
 allow_test = "tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_park_still_works_while_paused, tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_escalate_still_works_while_paused, tests/test_cli.py::TestControlEnforceOnTheFourMissingGuards::test_control_set_resume_still_works_while_paused"
 owner = "operator"
-residual = "the other 13 subcommands are unchecked by design; a new one that mutates state has to add its own control.enforce call"
+residual = "the other subcommands are unchecked by design; a new one that mutates state has to add its own control.enforce call, as ppl merge observed did"
 
 [[rule]]
 id = "R-CONTROL-FAIL-CLOSED"
@@ -676,10 +676,22 @@ scope = "ppl CLI"
 event = "ppl transition done"
 enforcement = "blocking"
 hook_or_check = "ppl/cli.py:cmd_transition"
-deny_test = "tests/test_cli.py::TestDoneOnlyFromClosure::test_transition_done_from_review_is_refused_naming_closure, tests/test_cli.py::TestDoneOnlyFromClosure::test_transition_done_from_merge_watch_is_refused_too"
+deny_test = "tests/test_cli.py::TestDoneOnlyFromClosure::test_transition_done_from_review_is_refused_naming_closure, tests/test_cli.py::TestDoneOnlyFromClosure::test_transition_done_before_review_names_no_impossible_step, tests/test_cli.py::TestDoneOnlyFromClosure::test_transition_done_from_merge_watch_is_refused_too"
 allow_test = "tests/test_cli.py::TestNameContractSpecRevision::test_transition_done_succeeds_when_the_name_contract_never_changed, tests/test_cli.py::TestDoneOnlyFromClosure::test_other_lifecycle_targets_are_not_tied_to_closure"
 owner = "ppl"
-residual = "checked after fsm.check_lifecycle and before the done gate, so a lifecycle target illegal on its face is still reported first. The other lifecycle targets (blocked, failed) are not tied to a stage"
+residual = "checked after fsm.check_lifecycle and before the done gate, so a lifecycle target illegal on its face is still reported first. The refusal names a step legal from the current stage: ppl stage enter closure from review, escalation from merge_watch (which has no way back, see R-MERGE-WATCH-AFTER-DONE), and otherwise that closure follows review. The other lifecycle targets (blocked, failed) are not tied to a stage"
+
+[[rule]]
+id = "R-MERGE-WATCH-AFTER-DONE"
+statement = "ppl stage enter merge_watch is refused with ILLEGAL_TRANSITION unless the run's lifecycle status is done, so no run sits in merge_watch, which has no way back to closure, without having passed the done gate."
+scope = "ppl CLI"
+event = "ppl stage enter merge_watch"
+enforcement = "blocking"
+hook_or_check = "ppl/run.py:stage_enter"
+deny_test = "tests/test_run.py::TestMergeWatchAfterDone::test_entering_merge_watch_before_the_run_is_done_is_refused"
+allow_test = "tests/test_run.py::TestMergeWatchAfterDone::test_entering_merge_watch_once_the_run_is_done_is_allowed, tests/test_watchdog.py::TestWatchdogCheck::test_merge_watch_is_exempt_even_past_its_deadline"
+owner = "ppl"
+residual = "applies to every entry, a resume from parking included. A run that reached merge_watch before this check, with status other than done, stays there: ppl transition done refuses it outside closure and points it at escalation"
 
 [[rule]]
 id = "R-DONE-VERDICT-PASS"
@@ -1627,7 +1639,7 @@ hook_or_check = "none"
 deny_test = ""
 allow_test = ""
 owner = "repository-owner"
-residual = "GAP: relabel an enforced rule n/a, invent a GAP residual for it, correct the two counts in DESIGN 5.5 and the suite stays green. R-MATRIX-GUARD-SELF-DESCRIBING closes this for the guard's deny tables; nothing sweeps ppl/ for a refusal that a row disowns, and the ten control.enforce call sites and the done gate's conditions are the obvious next targets"
+residual = "GAP: relabel an enforced rule n/a, invent a GAP residual for it, correct the two counts in DESIGN 5.5 and the suite stays green. R-MATRIX-GUARD-SELF-DESCRIBING closes this for the guard's deny tables; nothing sweeps ppl/ for a refusal that a row disowns, and the eleven control.enforce call sites and the done gate's conditions are the obvious next targets"
 
 [[rule]]
 id = "R-DOC-KEYWORD-FREE-CLAIM"

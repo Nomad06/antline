@@ -967,16 +967,40 @@ class TestDoneOnlyFromClosure(unittest.TestCase):
         self.assertEqual(code, 2)
         payload = json.loads(err)
         self.assertEqual(payload["error_code"], "ILLEGAL_TRANSITION")
-        self.assertIn("closure", payload["message"])
+        self.assertIn("run `ppl stage enter closure` first", payload["message"])
         state = run.load("DEMO-5810")
         self.assertEqual((state["stage"], state["status"]), ("review", "in_progress"))
 
+    def test_transition_done_before_review_names_no_impossible_step(self):
+        # rule: R-DONE-FROM-CLOSURE
+        init_at_stage("DEMO-5813", "gates")
+        code, _, err = call("transition", "done", "--task", "DEMO-5813")
+        self.assertEqual(code, 2)
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], "ILLEGAL_TRANSITION")
+        self.assertNotIn("ppl stage enter closure", payload["message"])
+        self.assertIn("closure follows review", payload["message"])
+
     def test_transition_done_from_merge_watch_is_refused_too(self):
         # rule: R-DONE-FROM-CLOSURE
+        # Entering merge_watch now needs status done, so only a run stamped there (or one
+        # from before that check) reaches this. It has no way back to closure.
         init_at_stage("DEMO-5811", "merge_watch")
         code, _, err = call("transition", "done", "--task", "DEMO-5811")
         self.assertEqual(code, 2)
-        self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], "ILLEGAL_TRANSITION")
+        self.assertNotIn("ppl stage enter closure", payload["message"])
+        self.assertIn("ppl escalate", payload["message"])
+
+    def test_transition_done_again_in_merge_watch_is_refused_by_the_lifecycle(self):
+        # rule: R-DONE-FROM-CLOSURE
+        init_at_stage("DEMO-5814", "merge_watch", status="done")
+        code, _, err = call("transition", "done", "--task", "DEMO-5814")
+        self.assertEqual(code, 2)
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], "ILLEGAL_TRANSITION")
+        self.assertIn("lifecycle done cannot move to done", payload["message"])
 
     def test_other_lifecycle_targets_are_not_tied_to_closure(self):
         init_at_stage("DEMO-5812", "review")
@@ -1037,6 +1061,19 @@ class TestMergeObserved(unittest.TestCase):
         code, _, err = call("merge", "observed", "--sha", "main", "--task", "DEMO-5806")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+
+    def test_merge_observed_is_refused_while_paused(self):
+        # rule: R-OPERATOR-HALT-CLI
+        from ppl import control, run
+        init_at_stage("DEMO-5807", "merge_watch", status="done")
+        control.set_command("DEMO-5807", "pause")
+        try:
+            code, _, err = call("merge", "observed", "--sha", "f" * 40, "--task", "DEMO-5807")
+            self.assertEqual(code, 2)
+            self.assertEqual(json.loads(err)["error_code"], "OWNER_DECISION")
+            self.assertIsNone(run.load("DEMO-5807")["mr"]["merged_sha"])
+        finally:
+            control.clear("DEMO-5807")
 
 
 class TestNeedsYouFlagsParkingAtEveryBoundary(unittest.TestCase):

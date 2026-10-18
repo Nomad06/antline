@@ -313,6 +313,34 @@ class TestRun(unittest.TestCase):
         self.assertEqual(event["tracker_url"], "https://j/DEMO-110")
 
 
+class TestMergeWatchAfterDone(unittest.TestCase):
+    """closure -> merge_watch is a legal edge of the stage graph, but a run that took it
+    before `ppl transition done` sat in merge_watch with status in_progress, with no way
+    back to closure and the tracker gate one `ppl merge observed` away."""
+
+    def at_closure(self, task_id, status):
+        run.init(task_id, "https://j/%s" % task_id, "/tmp/repo")
+        state = run.load(task_id)
+        state["stage"] = "closure"
+        state["status"] = status
+        run.save(state)
+
+    def test_entering_merge_watch_before_the_run_is_done_is_refused(self):
+        # rule: R-MERGE-WATCH-AFTER-DONE
+        self.at_closure("DEMO-5820", "in_progress")
+        with self.assertRaises(PplError) as ctx:
+            run.stage_enter("DEMO-5820", "merge_watch")
+        self.assertEqual(ctx.exception.code, "ILLEGAL_TRANSITION")
+        self.assertIn("ppl transition done", ctx.exception.message)
+        state = run.load("DEMO-5820")
+        self.assertEqual((state["stage"], state["status"]), ("closure", "in_progress"))
+
+    def test_entering_merge_watch_once_the_run_is_done_is_allowed(self):
+        self.at_closure("DEMO-5821", "done")
+        state = run.stage_enter("DEMO-5821", "merge_watch")
+        self.assertEqual((state["stage"], state["status"]), ("merge_watch", "done"))
+
+
 class TestLease(unittest.TestCase):
     """The lease and its fencing generation - R-LEASE-STALE-WRITE."""
 

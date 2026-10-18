@@ -94,6 +94,12 @@ class TestWatchdogCheck(unittest.TestCase):
         run.init("DEMO-970", "https://j/DEMO-970", "/tmp/repo")
         for stage in ("baseline", "briefing", "implementation", "tests", "gates",
                       "verification", "mr", "review", "closure", "merge_watch"):
+            if stage == "merge_watch":
+                # merge_watch needs status done [R-MERGE-WATCH-AFTER-DONE], and the done
+                # gate is not what this test is about, so the status is stamped.
+                state = run.load("DEMO-970")
+                state["status"] = "done"
+                run.save(state)
             run.stage_enter("DEMO-970", stage)
             if stage == "baseline":
                 # E1, cycle 2 wave E: stage_enter now refuses to leave
