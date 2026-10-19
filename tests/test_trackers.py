@@ -638,19 +638,33 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
         self.assertFalse(self.denied("ls -la"))
 
     def test_the_budget_is_read_on_the_clock_between_words_and_commands(self):
-        ticks = []
+        def clock_over_after(reads, limit):
+            """A clock at 0 for its first `limit` reads, then past any 0.5 s deadline."""
+            def clock():
+                reads.append(None)
+                return 0.0 if len(reads) <= limit else 1.0
+            return clock
 
-        def advancing():
-            ticks.append(None)
-            return float(len(ticks))
-
-        with mock.patch.object(self.adapter, "_clock", advancing):
-            reason = self.adapter.write_reason("echo " + "a " * 50)
-        self.assertIn("took too long to read", reason)
-        # once over, the reading stops instead of reading every word
-        self.assertLess(len(ticks), 10)
+        short, padded, twice = "echo a", "echo " + "a " * 50, "echo a; echo a"
+        counts = {}
+        for command in (short, padded, twice):
+            reads = []
+            with mock.patch.object(self.adapter, "_clock", clock_over_after(reads, 10 ** 6)):
+                self.assertIsNone(self.adapter.write_reason(command))
+            counts[command] = len(reads)
+        # a read for every word and every command, not one at the start
+        self.assertGreater(counts[padded], counts[short] + 50)
+        self.assertGreater(counts[twice], counts[short])
+        # past the deadline once the short command's reads are spent: the short one is
+        # read whole, the padded one stops at the next word
+        reads = []
+        with mock.patch.object(self.adapter, "_clock", clock_over_after(reads, counts[short])):
+            self.assertIsNone(self.adapter.write_reason(short))
+        reads = []
+        with mock.patch.object(self.adapter, "_clock", clock_over_after(reads, counts[short])):
+            self.assertIn("took too long to read", self.adapter.write_reason(padded))
+        self.assertEqual(len(reads), counts[short] + 1)
         with mock.patch.object(self.adapter, "_clock", lambda: 0.0):
-            self.assertIsNone(self.adapter.write_reason("echo " + "a " * 50))
             self.assertEqual(self.adapter.write_reason("gh issue close 5"),
                              "gh issue close writes the issue")
 
