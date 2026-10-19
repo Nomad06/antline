@@ -266,6 +266,11 @@ def run_python_cases(cage):
         "python layout: the orchestrator's gh issue comment is allowed once the merge is recorded",
         cage.payload(None, "Bash", comment, elsewhere),
         "allow")
+    # a role never writes the tracker, merged or not, through MCP either [R-JIRA-NO-ROLE-TOOL]
+    cage.check(
+        "python layout: ppl-code-worker's GitHub MCP issue write after the merge is denied",
+        cage.payload("ppl-code-worker", "mcp__github__add_issue_comment", {"body": "done"}, wt),
+        "BOUNDARY_VIOLATION", reason="may not write the tracker")
 
 
 def run_cases(cage):

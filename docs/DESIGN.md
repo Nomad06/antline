@@ -220,7 +220,11 @@ top-level `matcher` verdict of `ok` or `incomplete`, and `ppl init` refuses `SCH
 create a run while a confirmed registration leaves any of them uncovered, `--no-isolated` or
 not [R-GUARD-MATCHER]. That list holds the default tracker prefixes and the default forge server names only, so an
 operator who keeps an explicit matcher and names a custom tracker prefix or `forge.mcp_server`
-in the harness covers those names by hand.
+in the harness covers those names by hand. The GitHub MCP server's issue writes are not on it:
+the tracker gate and the role ban match them under any server name, and many installs have
+no GitHub MCP server, so `ppl doctor` and `ppl init` only warn, and refuse nothing, when a
+registration's matchers cannot pass `mcp__github__add_issue_comment` (`matcher_warning`)
+[R-GUARD-MATCHER]. The `.*` that `ppl setup` registers passes every one of them.
 
 The tracker gate reads its MCP prefixes and write operations from the run's harness snapshot
 (5.6). The defaults are the Atlassian server's two registration names, `mcp__atlassian__`
@@ -244,7 +248,9 @@ the orchestrator's Bash commands on every run, whatever the run's snapshot holds
 issue comment`, an issues write through `gh api` or a GraphQL issue mutation is denied
 `OWNER_DECISION` until the merge is recorded, like an MCP write [R-TRACKER-CLI-GATE]. A role is
 denied a tracker write through a CLI before and after the merge, run or no run, since the
-tracker is the orchestrator's [R-TRACKER-CLI-NO-ROLE]. The check reads the command's words, so
+tracker is the orchestrator's [R-TRACKER-CLI-NO-ROLE], and a call to any known tracker's MCP
+write tool the same way, the defaults of every adapter and the run's own prefixes alike
+(`any_tracker_write_tool`) [R-JIRA-NO-ROLE-TOOL]. The check reads the command's words, so
 a renamed `gh` binary, an API host held in a variable, an interpreter or a script file are not
 seen, and the boundary that would close them is a GitHub credential the role sessions never
 hold [R-TRACKER-CLI-GATE]. The hook reads `agent_type` from the stdin
@@ -270,8 +276,8 @@ denial in this section, `OWNER_DECISION` for a pause/stop/destroy or a tracker w
 looked up (`ppl_guard.py`'s `decide()`, before `active_state()` is called): the denied forge
 tools and forge Bash commands, the repo landmines, the `runs/` write protection, a `ppl-*`
 role invoking a state-changing `ppl` CLI subcommand of its own, and a `ppl-*` role writing a
-tracker through its CLI - all in the table below [R-GUARD-GLOBAL-DENIALS]
-[R-TRACKER-CLI-NO-ROLE]. They fire in every session and every directory, run or no run.
+tracker, through its CLI or a tracker MCP write tool - all in the table below
+[R-GUARD-GLOBAL-DENIALS] [R-TRACKER-CLI-NO-ROLE] [R-JIRA-NO-ROLE-TOOL]. They fire in every session and every directory, run or no run.
 Everything else belongs to the active run, and a tool call belongs to that run when any of
 three things is true: its `agent_type` is a `ppl-*` role, the path it is writing is inside
 `state["repo"]`, or the session's cwd is inside that repo (or, for the tracker gate and the
@@ -301,7 +307,7 @@ for each row, exactly what `ppl_guard.py` requires before it fires:
 | direct writes to the repo tree by any role whose provider is not a Claude Code subagent [R-APPLY-PATCH-BOUNDARY] | such a provider has no hooks at all to deny anything with; the guarantee is architectural (no direct write path exists for it), backed by `ppl apply-patch`'s separate diff validation (section 10.1) - `ppl_guard.py` makes no check of its own here | not a hook check |
 | tracker write tools, of every known tracker whatever tracker the run names, until the run is in `merge_watch` and the merge observed on the forge is recorded with `ppl merge observed` [R-JIRA-GATE] | owner rule: tracker writes only after merge | requires an active run; scoped as described above (the `isolated` broadening included) - **not** global, and not enforced at all when no run is active |
 | a Bash command that writes a tracker through its CLI - every CLI adapter's write check, today GitHub Issues through `gh` (an issue write verb, a `gh api` call that writes an issues route, a GraphQL issue mutation) - whatever tracker the run names, until the run is in `merge_watch` and the merge is recorded with `ppl merge observed` [R-TRACKER-CLI-GATE] | owner rule: tracker writes only after merge, through a CLI as through MCP | requires an active run; scoped like the tracker write tools above - **not** global |
-| a Bash command that writes a tracker through its CLI, when `agent_type` is one of the roles in `boundary.ROLE_RULES`, before or after the merge [R-TRACKER-CLI-NO-ROLE] | the tracker is the orchestrator's, and a worker holding `Bash` could otherwise comment on or close the issue before anyone reviewed the change; issue reads stay allowed | global, no run required - fires by `agent_type` alone, before `active_state()` is even looked up |
+| a tracker write, when `agent_type` is one of the roles in `boundary.ROLE_RULES`, before or after the merge: a Bash command that writes a tracker through its CLI [R-TRACKER-CLI-NO-ROLE], or a call to a tracker MCP write tool of any known tracker, every adapter's defaults and the run's own prefixes [R-JIRA-NO-ROLE-TOOL] | the tracker is the orchestrator's, and a worker holding `Bash` could otherwise comment on or close the issue before anyone reviewed the change; issue reads and tracker read tools stay allowed | global, no run required - fires by `agent_type` alone, before `active_state()` is even looked up |
 | every state-changing `ppl` CLI subcommand, when `agent_type` is one of the roles in `boundary.ROLE_RULES` [R-GUARD-PPL-CLI-DENIED] | `ppl-code-worker` and `ppl-test-worker` both hold `Bash`, and none of the write checks above sees a `ppl <command>` invocation - it writes through ppl's own API, not a shell redirect or a tracked path, so a worker driving its own CLI could mark its own blocking finding fixed or open its own done gate. Read-only lookups (`ppl show`, with `--task <id>` and not a positional id, `ppl status`, `ppl doctor`, `ppl metrics`, `ppl findings list`, `ppl control get`, `ppl routing show`, `ppl approval check`, `ppl mr state`, `ppl review pending`) stay allowed | global, no run required - fires by `agent_type` alone, before `active_state()` is even looked up |
 | a write-shaped Bash construct (a redirect - `>`, `>>`, `&>`, `>|`, glued to a word like `echo x>f` or spaced, a `cd`'s own redirect included - `tee`, `sed -i`, `cp`, `mv`, `dd`, `rm`, `touch`, `truncate`, `ln`, `install`, `rsync`, `git rm`/`git mv`/`git checkout <ref> -- <path>`/`git restore`; `patch`, `git apply` and the whole-tree git rewriters fail closed as unnameable) whose target resolves inside the active run's repo [R-GUARD-BASH-WRITE-BOUNDARY] | the structured write boundary (`is_role` / `hits_repo` / `boundary.check_path`) covers Edit/Write/MultiEdit/NotebookEdit only, and both workers hold Bash, so `hooks/ppl_guard.py:bash_write_boundary_deny` extracts the target out of every such construct and runs it through the same per-role decision `check_path` makes | active run, any writing role or an unroled session - fires whenever the resolved target lands inside the repo, whatever the session's cwd, mirroring R-UNROLED-REPO-WRITE's own "the target path is the honest question" |
 

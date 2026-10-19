@@ -167,9 +167,9 @@ def cmd_init(args):
                      risk=args.risk, model_check=model_check, harness=harness_record)
     store.write_json(paths.run_dir(args.task_id) / "harness.json", snapshot)
     # after the run exists, so a refusal's stderr stays the one JSON line it is
-    warning = doctor.dispatch_warning()
-    if warning:
-        sys.stderr.write("warning: %s\n" % warning)
+    for warning in (doctor.dispatch_warning(), doctor.matcher_warning()):
+        if warning:
+            sys.stderr.write("warning: %s\n" % warning)
     print(status.card(state["task_id"]))
     return 0
 
@@ -185,6 +185,9 @@ def cmd_doctor(args):
     for line in (doctor.guard_shape_problem(), doctor.dispatch_warning()):
         if line:
             print(line)
+    warning = doctor.matcher_warning()
+    if warning:
+        print("warning: %s" % warning)
     if result.get("hook_runs_problem"):
         print(result["hook_runs_problem"])
     return 0

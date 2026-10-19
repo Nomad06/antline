@@ -15,7 +15,7 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 
 import fixtures
-from ppl import boundary, harness, paths, run, store
+from ppl import boundary, doctor, harness, paths, run, setup, store
 from ppl.trackers import jira
 import ppl_guard
 
@@ -233,6 +233,19 @@ class TestTrackerCliGate(GhRunCase):
                                                                    ELSEWHERE)))
                 self.assertIn("OWNER_DECISION", reason, tool)
 
+    def test_the_installed_matcher_passes_github_mcp_issue_writes_to_the_guard(self):
+        # rule: R-GUARD-MATCHER, R-JIRA-GATE
+        # the gate matches these under any server name, so only a catch-all
+        # matcher hands every one of them to the hook
+        matcher = setup.hook_entries(fixtures.SOURCE)["PreToolUse"]["matcher"]
+        self.assertEqual(matcher, doctor.RECOMMENDED_MATCHER)
+        self.assertEqual(matcher, ".*")
+        for tool in GITHUB_MCP_WRITES:
+            self.assertTrue(doctor.matcher_covers(matcher, tool), tool)
+            reason = self.deny_reason(ppl_guard.decide(payload(None, tool, {"body": "x"},
+                                                               ELSEWHERE)))
+            self.assertIn("OWNER_DECISION", reason, tool)
+
     def test_the_pipeline_gh_commands_pass_before_the_merge(self):
         for command in PIPELINE_GH_COMMANDS:
             self.assertIsNone(bash(None, command, ELSEWHERE), command)
@@ -279,6 +292,57 @@ class TestTrackerCliNoRole(GhRunCase):
             self.assertIsNone(bash("ppl-review-responder", command), command)
         for command in ("python3 -m pytest tests -q", "gh issue view 7 -R o/r"):
             self.assertIsNone(bash("ppl-code-worker", command), command)
+
+
+class TestTrackerMcpNoRole(GhRunCase):
+    """No role calls a tracker MCP write tool of any known adapter, merged or not, run
+    or no run: the MCP twin of the CLI ban [R-JIRA-NO-ROLE-TOOL]."""
+
+    # mcp__github__add_issue_comment first, the write the ruling names
+    WRITES = GITHUB_MCP_WRITES + JIRA_WRITES
+
+    def calls(self, tools, cwd=REPO):
+        """(role, tool, decide() result) for every role calling every tool."""
+        return [(role, tool, ppl_guard.decide(payload(role, tool, {"body": "x"}, cwd)))
+                for role in boundary.ROLE_RULES for tool in tools]
+
+    def test_a_role_is_denied_a_github_mcp_issue_write_with_no_active_run(self):
+        # rule: R-JIRA-NO-ROLE-TOOL
+        paths.active_file().unlink()
+        try:
+            self.assertIsNone(run.active())
+            for role, tool, result in self.calls(self.WRITES, ELSEWHERE):
+                reason = self.deny_reason(result)
+                self.assertIn("BOUNDARY_VIOLATION", reason, (role, tool))
+                self.assertIn("%s may not write the tracker" % role, reason)
+        finally:
+            run.set_active(TASK)
+
+    def test_a_role_is_denied_a_github_mcp_issue_write_after_the_merge_is_recorded(self):
+        # rule: R-JIRA-NO-ROLE-TOOL
+        with self.at_merge_watch():
+            for role, tool, result in self.calls(self.WRITES):
+                reason = self.deny_reason(result)
+                self.assertIn("BOUNDARY_VIOLATION", reason, (role, tool))
+                self.assertIn("%s may not write the tracker" % role, reason)
+
+    def test_a_role_is_denied_the_run_prefixed_and_the_default_jira_writes(self):
+        # rule: R-JIRA-NO-ROLE-TOOL
+        # a Jira run naming its own prefix: for a role the defaults stay shut too
+        table = dict(jira.DEFAULTS, kind="jira", mcp_prefixes=["mcp__corp_jira__"])
+        tools = ("mcp__corp_jira__editJiraIssue", "mcp__atlassian__editJiraIssue",
+                 "mcp__github__issue_write")
+        with self.with_tracker(table), self.at_merge_watch():
+            for role, tool, result in self.calls(tools):
+                reason = self.deny_reason(result)
+                self.assertIn("BOUNDARY_VIOLATION", reason, (role, tool))
+                self.assertIn("%s may not write the tracker" % role, reason)
+
+    def test_a_role_keeps_the_tracker_read_tools(self):
+        for tool in ("mcp__atlassian__getJiraIssue", "mcp__claude_ai_Atlassian_Rovo__getJiraIssue",
+                     "mcp__github__get_issue"):
+            self.assertIsNone(ppl_guard.decide(payload("ppl-briefer", tool, {"issueKey": "X-1"})),
+                              tool)
 
 
 if __name__ == "__main__":

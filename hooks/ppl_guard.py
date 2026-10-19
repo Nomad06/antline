@@ -115,6 +115,23 @@ def tracker_mcp_write(tool, tracker):
         return any(pattern.match(tool) for _, pattern in _DEFAULT_MCP_WRITES)
 
 
+def any_tracker_write_tool(tool, task_id):
+    """True for a tracker MCP write tool no role may call: every adapter's under its
+    defaults, the run's own kind included, and the run tracker's under the prefixes
+    its snapshot names. Never raises [R-JIRA-NO-ROLE-TOOL]."""
+    # every tracker write tool is mcp__-shaped, so other tools skip the snapshot read
+    if not isinstance(tool, str) or not tool.startswith("mcp__"):
+        return False
+    if any(pattern.match(tool) for _, pattern in _DEFAULT_MCP_WRITES):
+        return True
+    return tracker_mcp_write(tool, tracker_from_snapshot(task_id))
+
+
+# What a role is told for a tracker write through either transport.
+_ROLE_TRACKER_WRITE = ("%s may not write the tracker, the orchestrator does after the merge "
+                       "is observed")
+
+
 # Every CLI adapter's Bash write checks under its defaults. Each check has only
 # search(command), which answers a hit or None. They apply on every run whatever
 # tracker it names, and to every role with or without a run [R-TRACKER-CLI-GATE]
@@ -2208,6 +2225,12 @@ def _decide(payload):
     if isinstance(tool, str) and tool in denied:
         return deny("BOUNDARY_VIOLATION", denied[tool])
 
+    # R-JIRA-NO-ROLE-TOOL: no role calls a tracker MCP write tool of any known
+    # tracker, run or no run, merged or not. The CLI twin is R-TRACKER-CLI-NO-ROLE.
+    if (isinstance(agent, str) and agent in boundary.ROLE_RULES
+            and any_tracker_write_tool(tool, active)):
+        return deny("BOUNDARY_VIOLATION", _ROLE_TRACKER_WRITE % agent)
+
     runs_root = str(paths.runs_dir())
 
     if tool == "Bash":
@@ -2242,9 +2265,7 @@ def _decide(payload):
         # R-TRACKER-CLI-NO-ROLE: every role, run or no run, merged or not. The tracker
         # is the orchestrator's, and a role's issue reads stay open.
         if agent in boundary.ROLE_RULES and tracker_cli_write(command):
-            return deny("BOUNDARY_VIOLATION",
-                        "%s may not write the tracker, the orchestrator does after the merge "
-                        "is observed" % agent)
+            return deny("BOUNDARY_VIOLATION", _ROLE_TRACKER_WRITE % agent)
 
     path = target_path(tool_input) if tool in WRITE_TOOLS else None
     if path and structured_write_lands_in_runs(path, payload.get("cwd")):

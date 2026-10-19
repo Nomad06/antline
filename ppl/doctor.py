@@ -53,6 +53,10 @@ _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # `matcher_covers` still judges any explicit matcher an operator registers instead
 # against `guarded_tool_names()`, and a test holds this string to that same check.
 RECOMMENDED_MATCHER = ".*"
+# A GitHub MCP issue write. The tracker gate and the role ban match these under any
+# mcp__<server>__ prefix, and they are no guarded names: many installs have no GitHub
+# MCP server, so a matcher that cannot pass this one draws a warning, never a refusal.
+GITHUB_ISSUE_WRITE_PROBE = "mcp__github__add_issue_comment"
 
 
 def claude_home():
@@ -395,6 +399,25 @@ def uncovered_by(matchers):
     entry that registers the guard, since the hook fires when any one matches."""
     return [name for name in guarded_tool_names()
             if not any(matcher_covers(matcher, name) for matcher in matchers)]
+
+
+def matcher_warning(cwd=None):
+    """None unless a settings file registers the guard only on matchers that cannot
+    pass GITHUB_ISSUE_WRITE_PROBE, else a warning naming each such file and the gap.
+    `ppl doctor` prints it and `ppl init` writes it to stderr, neither refuses."""
+    missing = []
+    for path, doc in _readable_settings(cwd):
+        matchers = _guard_matchers(doc)
+        if matchers and not any(matcher_covers(matcher, GITHUB_ISSUE_WRITE_PROBE)
+                                for matcher in matchers):
+            missing.append(str(path))
+    if not missing:
+        return None
+    return ("%s registers the guard hook on a matcher that never passes %s to it: GitHub MCP "
+            "issue writes would not reach the guard, so neither the tracker gate nor the role "
+            "ban could hold them. If a GitHub MCP server is registered, set that entry's matcher "
+            "to \"%s\" (README.md \"Hooks\")."
+            % (" and ".join(missing), GITHUB_ISSUE_WRITE_PROBE, RECOMMENDED_MATCHER))
 
 
 def _location(path):

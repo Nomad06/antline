@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -19,6 +20,7 @@ os.environ["PPL_LOCAL_SETTINGS_DIR"] = tmphome.mkdtemp(prefix="ppllocalsettings-
 
 import fixtures
 from ppl import config, doctor, forges, models, paths, setup
+from ppl.trackers import github_issues
 
 
 # The shape ppl setup claude writes: the interpreter that ran setup, then the hook.
@@ -326,6 +328,45 @@ class TestMatcher(unittest.TestCase):
         self.assertEqual(result["local"]["uncovered"], [])
         self.assertIn("Bash", result["global"]["uncovered"])
         self.assertIn(str(self.global_path), doctor.matcher_problem(result))
+
+    # Every guarded name spelled out, the explicit matcher an operator could keep. It
+    # passes the guarded-name check and still misses the GitHub MCP issue writes.
+    @staticmethod
+    def explicit_guarded_names():
+        return "|".join(re.escape(name) for name in doctor.guarded_tool_names())
+
+    def test_an_explicit_matcher_missing_github_issue_writes_is_warned_not_refused(self):
+        # rule: R-GUARD-MATCHER
+        write_settings(self.local_path, matchers=(self.explicit_guarded_names(),))
+        result = self.inspect()
+        self.assertEqual(result["matcher"], "ok")
+        self.assertIsNone(doctor.matcher_problem(result))
+        warning = doctor.matcher_warning(cwd=self.local_dir)
+        self.assertIn(str(self.local_path), warning)
+        self.assertIn(doctor.GITHUB_ISSUE_WRITE_PROBE, warning)
+        self.assertIn("GitHub MCP issue writes would not reach the guard", warning)
+        self.assertIn('"%s"' % doctor.RECOMMENDED_MATCHER, warning)
+
+    def test_a_catch_all_matcher_draws_no_github_issue_write_warning(self):
+        self.assertEqual(doctor.GITHUB_ISSUE_WRITE_PROBE, "mcp__github__add_issue_comment")
+        # the probe is a write the adapter gates, so the warning tracks the gate
+        self.assertTrue(github_issues.mcp_write_regex({}).match(doctor.GITHUB_ISSUE_WRITE_PROBE))
+        self.assertIsNone(doctor.matcher_warning(cwd=self.local_dir))
+        installed = setup.hook_entries(fixtures.SOURCE)["PreToolUse"]["matcher"]
+        for matchers in ((installed,), (None,), ("",), ("*",), (".*",),
+                         (EDITING_TOOLS_ONLY, "Bash|Read|Grep|Glob|Agent|Task|mcp__.*")):
+            write_settings(self.local_path, matchers=matchers)
+            self.assertIsNone(doctor.matcher_warning(cwd=self.local_dir), matchers)
+        write_settings(self.local_path, guarded=False)
+        self.assertIsNone(doctor.matcher_warning(cwd=self.local_dir))
+
+    def test_a_global_explicit_matcher_is_warned_beside_a_complete_local_one(self):
+        # rule: R-GUARD-MATCHER
+        write_settings(self.local_path)
+        write_settings(self.global_path, matchers=(self.explicit_guarded_names(),))
+        warning = doctor.matcher_warning(cwd=self.local_dir)
+        self.assertIn(str(self.global_path), warning)
+        self.assertNotIn(str(self.local_path), warning)
 
 
 class TestMismatch(unittest.TestCase):

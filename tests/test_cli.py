@@ -2,6 +2,7 @@ import argparse
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -2210,6 +2211,20 @@ class TestInitVerifiesTheGuardMatcher(unittest.TestCase):
         code, _, err = call("init", "DEMO-9912", "--tracker-url", "u", "--repo", "/tmp/repo",
                             "--harness", "example-maven")
         self.assertEqual(code, 0, err)
+
+    def test_a_matcher_missing_github_issue_writes_is_a_warning_not_a_refusal(self):
+        # Many installs have no GitHub MCP server, so the gap is told, not refused.
+        explicit = "|".join(re.escape(name) for name in doctor.guarded_tool_names())
+        write_local_guard_registration(self.local_dir, matcher=explicit)
+        code, _, err = call("init", "DEMO-9913", "--tracker-url", "u", "--repo", "/tmp/repo",
+                            "--harness", "example-maven")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: ", err)
+        self.assertIn("GitHub MCP issue writes would not reach the guard", err)
+        code, out, err = call("doctor", "--task", "DEMO-9913")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: ", out)
+        self.assertIn("GitHub MCP issue writes would not reach the guard", out)
 
 
 class TestInitChecksTheHookShape(unittest.TestCase):
