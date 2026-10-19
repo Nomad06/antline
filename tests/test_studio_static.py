@@ -133,14 +133,32 @@ console.log(JSON.stringify([["tests/**"], ["**/*_test.go"], [], undefined, ["**/
                           "src/test/FooTest.java", "example.test.ts", "__tests__/example",
                           "src/test/example", "exampleTest.java", "spec/example.rb"])
 
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, the test sources check needs it")
+    def test_emptying_the_test_sources_field_restores_what_the_draft_started_with(self):
+        scratch = Path(tmphome.mkdtemp(prefix="pplnode-"))
+        copy = scratch / "testpath.mjs"
+        copy.write_bytes((STATIC / "ui" / "testpath.js").read_bytes())
+        script = """
+import { testsAfterEdit } from "%s";
+console.log(JSON.stringify([testsAfterEdit(undefined, []), testsAfterEdit(undefined, ["a/**"]) ,
+  testsAfterEdit({ sources: [] }, []), testsAfterEdit({ sources: ["x/**"] }, []),
+  testsAfterEdit({ sources: [] }, ["t/**"])].map((v) => (v === undefined ? "none" : v))));
+""" % copy.as_uri()
+        result = subprocess.run(["node", "--input-type=module", "-e", script],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         ["none", {"sources": ["a/**"]}, {"sources": []}, {"sources": []},
+                          {"sources": ["t/**"]}])
+
     def test_the_harness_form_edits_test_sources_as_a_list_field(self):
         source = (STATIC / "ui" / "harness-form.js").read_text()
         self.assertIn("Test sources", source)
         self.assertIn("Java defaults", source)
         block = source[source.index('label="Test sources"'):source.index("<h3>Build gates")]
         self.assertIn("<${ListInput}", block)
-        self.assertIn("d.tests = { sources: list }", block)
-        self.assertIn("list.length || d.tests", block)
+        self.assertIn("testsAfterEdit(draft.doc.tests, list)", block)
+        self.assertIn("delete d.tests", block)
 
     def test_the_playground_example_uses_the_example_test_path(self):
         source = (STATIC / "pages" / "playground.js").read_text()

@@ -64,7 +64,7 @@ class TestDetect(unittest.TestCase):
 NODE_TESTS = ["**/__tests__/**", "**/*.test.js", "**/*.test.jsx", "**/*.test.ts", "**/*.test.tsx",
               "**/*.test.mjs", "**/*.test.cjs", "**/*.spec.js", "**/*.spec.jsx", "**/*.spec.ts",
               "**/*.spec.tsx", "test/**", "tests/**"]
-PYTHON_TESTS = ["**/test_*.py", "**/*_test.py", "**/conftest.py", "test/**", "tests/**"]
+PYTHON_TESTS = ["tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
 
 
 class TestTestSources(unittest.TestCase):

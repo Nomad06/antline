@@ -1,6 +1,7 @@
 import { html, useEffect, useRef, useState } from "../vendor/htm-preact.mjs";
 import { post } from "../api.js";
 import { Badge, Button, Field, Notice } from "./controls.js";
+import { testsAfterEdit } from "./testpath.js";
 import { fieldBlur, fieldInput, idleField, shownText } from "./listfield.js";
 
 function clone(value) {
@@ -149,7 +150,10 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave, nameLocked
     <p class="help">The globs naming the project's tests, one per alternative and no braces. The code writer may not edit them and the test writer may edit only them.</p>
     <${Field} label="Test sources" help=${sources["tests.sources"] || ""}>
       <${ListInput} list=${(doc.tests && doc.tests.sources) || []} placeholder=${doc.tests ? "" : "Java defaults"}
-        onList=${(list) => update((d) => { if (list.length || d.tests) { d.tests = { sources: list }; } })} /><//>
+        onList=${(list) => update((d) => {
+          const next = testsAfterEdit(draft.doc.tests, list);
+          if (next) { d.tests = next; } else { delete d.tests; }
+        })} /><//>
 
     <h3>Build gates</h3>
     <p class="help">The commands the orchestrator runs and records. One must be named <code>focused-tests</code>: it runs one test, and <code>${"<test_class>"}</code> stands for that test's name.</p>

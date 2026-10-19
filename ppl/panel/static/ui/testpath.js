@@ -22,3 +22,10 @@ export function exampleTestPath(sources) {
   });
   return named.join("/");
 }
+
+export function testsAfterEdit(started, list) {
+  if (list.length) {
+    return { sources: list };
+  }
+  return started ? { sources: [] } : undefined;
+}

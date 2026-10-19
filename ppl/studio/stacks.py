@@ -56,7 +56,7 @@ INSTALL_REQUIREMENTS = "python3 -m pip install -r requirements.txt"
 NODE_TESTS = ["**/__tests__/**", "**/*.test.js", "**/*.test.jsx", "**/*.test.ts", "**/*.test.tsx",
               "**/*.test.mjs", "**/*.test.cjs", "**/*.spec.js", "**/*.spec.jsx", "**/*.spec.ts",
               "**/*.spec.tsx", "test/**", "tests/**"]
-PYTHON_TESTS = ["**/test_*.py", "**/*_test.py", "**/conftest.py", "test/**", "tests/**"]
+PYTHON_TESTS = ["tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
 
 # Every preset names its test globs, one per alternative. make and generic carry none on
 # purpose: the draft fails validation until the form gets some, so the studio asks.
