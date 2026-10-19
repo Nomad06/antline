@@ -596,7 +596,12 @@ def _path_is_provably_test_scoped(raw_path, state, cwd, patterns):
 # malformed snapshot yields no shapes, so every build denies. ---
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+$")
-_ENV_EXPORT_RE = re.compile(r"^export\s+[A-Za-z_][A-Za-z0-9_]*=\S+$")
+_ENV_EXPORT_RE = re.compile(r"^export\s+([A-Za-z_][A-Za-z0-9_]*)=\S+$")
+# Variables a test-worker export or a shape's env prefix may not set: IFS
+# re-splits words after the guard judged them, and the other two feed grep and
+# rg options from outside the command line (GREP_OPTIONS, which BSD grep
+# honours, and an rg config file that can add --pre).
+_REFUSED_ENV = frozenset({"IFS", "GREP_OPTIONS", "RIPGREP_CONFIG_PATH"})
 # The worker picks the token a harness regex runs against, so no token longer
 # than this ever reaches one. That bounds a regex whose cost grows polynomially
 # with the token. It does not bound a regex with nested quantifiers, which
@@ -676,6 +681,8 @@ class ShapeMatcher:
         i = 0
         if row["env_prefix"]:
             while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+                if tokens[i].split("=", 1)[0] in _REFUSED_ENV:
+                    return False
                 i += 1
         tokens = tokens[i:]
         if not tokens or tokens[0] != row["argv0"]:
@@ -931,79 +938,170 @@ def _ls_allowed(tokens):
 # path from disk, and is allowed on that basis - a definite classification,
 # not an unclassifiable one. ---
 
-_READ_VERBS = frozenset({"cat", "head", "tail", "less", "grep", "rg", "awk", "sed"})
-_READ_VALUE_FLAGS = {
-    "head": frozenset({"-n", "-c"}),
-    "tail": frozenset({"-n", "-c"}),
-    "grep": frozenset({"-e", "-f", "-A", "-B", "-C", "-m", "--include", "--exclude"}),
-    "rg": frozenset({"-e", "-f", "-A", "-B", "-C", "-m", "--include", "--exclude"}),
-    "sed": frozenset({"-e", "-f"}),
-    "awk": frozenset({"-F", "-v", "-f"}),
-}
-_READ_PATTERN_VERBS = frozenset({"grep", "rg", "awk", "sed"})
-_READ_PATTERN_FLAGS = frozenset({"-e", "-f"})
+def _options(flags="", files="", patterns="", values="", dirs="", glued=""):
+    """An option table: each argument a space-separated list of option names
+    of one kind, see _READ_VERB_OPTIONS."""
+    table = {}
+    for kind, names in (("flag", flags), ("file", files), ("pattern", patterns),
+                        ("value", values), ("dirs", dirs), ("glued", glued)):
+        for name in names.split():
+            table[name] = kind
+    return table
 
+
+# The test worker's read verbs and every option the guard lets them take
+# [R-TEST-WORKER-BASH-READS]. sed and awk are not here: they are interpreters
+# whose script can read a file (sed r, awk getline), write one (sed w) or run
+# a command (GNU sed e). Nor is less, which runs LESSOPEN preprocessors and
+# opens another file on +:e. An option is listed by what its value is: "flag"
+# takes none, "file" names a file the verb opens and is judged as a path,
+# "pattern" fills the pattern slot, "dirs" is grep's -d whose action other than
+# read or skip walks the tree, "value" is a number, a glob filter or a mode,
+# and "glued" takes a value only as --opt=value. An unlisted option is refused,
+# not guessed at: grep is GNU, BSD or ugrep depending on the machine, and the
+# unlisted ones include options that read a file (ugrep --config,
+# --include-from) or run a program (ugrep --filter, rg --pre).
+_READ_VERB_OPTIONS = {
+    "cat": _options(flags="-A -b -e -E -n -s -t -T -u -v -l --show-all --number-nonblank "
+                          "--number --squeeze-blank --show-ends --show-tabs --show-nonprinting"),
+    "head": _options(flags="-q -v -z --quiet --silent --verbose --zero-terminated",
+                     values="-n -c --lines --bytes"),
+    "tail": _options(flags="-f -F -r -q -v -z --retry --quiet --silent --verbose "
+                           "--zero-terminated",
+                     values="-n -c -b -s --lines --bytes --sleep-interval --pid "
+                            "--max-unchanged-stats",
+                     glued="--follow"),
+    "grep": _options(flags="-a -c -E -F -G -h -H -i -I -l -L -n -o -P -q -r -R -s -v -w -x -y "
+                           "--recursive --dereference-recursive --ignore-case --invert-match "
+                           "--word-regexp --line-regexp --count --files-with-matches "
+                           "--files-without-match --line-number --no-filename --with-filename "
+                           "--only-matching --quiet --silent --no-messages --extended-regexp "
+                           "--fixed-strings --basic-regexp --perl-regexp --text --null "
+                           "--byte-offset --initial-tab",
+                     files="-f --file --exclude-from",
+                     patterns="-e --regexp",
+                     values="-m -A -B -C -D --max-count --after-context --before-context "
+                            "--devices --include --exclude --exclude-dir --include-dir --label",
+                     dirs="-d --directories",
+                     glued="--context --color --colour"),
+    "rg": _options(flags="-i -s -S -v -w -x -c -l -n -N -o -q -F -P -H -I -a -z -b -p -u -U "
+                         "--ignore-case --smart-case --case-sensitive --invert-match "
+                         "--word-regexp --line-regexp --count --count-matches "
+                         "--files-with-matches --files-without-match --line-number "
+                         "--no-line-number --only-matching --quiet --fixed-strings --pcre2 "
+                         "--with-filename --no-filename --text --search-zip --byte-offset "
+                         "--pretty --heading --no-heading --vimgrep --json --hidden "
+                         "--no-ignore --multiline --files",
+                   files="-f --file --ignore-file",
+                   patterns="-e --regexp",
+                   values="-A -B -C -m -g -t -T -j -E -M -d -r --after-context "
+                          "--before-context --context --max-count --glob --iglob --type "
+                          "--type-not --threads --encoding --max-columns --max-depth "
+                          "--max-filesize --replace --sort --sortr --color --colors"),
+}
+_READ_VERBS = frozenset(_READ_VERB_OPTIONS)
+# grep and rg take a pattern before their paths, unless -e or -f gave it
+_READ_PATTERN_VERBS = frozenset({"grep", "rg"})
 # Round 2 review (C2, whole-branch): `rg` is recursive by default with no
 # path operand at all - it does not need a flag to walk the tree, and it
 # does not read stdin unless given a literal "-" argument. GNU/BSD `grep`
-# only behaves the same way once `-r` or `-R` is given (bundled into a
-# short-option group like "-rn" or "-nr", not only standalone). Neither
-# fact has anything to do with whether the command is fed by a pipe: a
-# piped `grep -r pattern` still walks "." and ignores stdin. So a verb
-# this set names is a tree-read whenever it is present, regardless of the
-# pipe flag. A bare `grep`/`head`/`tail`/`awk`/`sed` with no path operand
-# and NO recursive flag is the only shape that is actually reading stdin,
-# and even that is a genuine pipe filter only when a real "|" fed it -
+# only behaves the same way once `-r`, `-R` or a `-d` action other than read
+# or skip is given (bundled into a short-option group like "-rn" or "-nr",
+# not only standalone). Neither fact has anything to do with whether the
+# command is fed by a pipe: a piped `grep -r pattern` still walks "." and
+# ignores stdin. So a verb that walks the tree is a tree-read whenever it is
+# present, regardless of the pipe flag. A bare `grep`/`head`/`tail` with no
+# path operand and no recursion is the only shape that is actually reading
+# stdin, and even that is a genuine pipe filter only when a real "|" fed it -
 # not merely because the path list happens to be empty.
-_GREP_RECURSIVE_FLAGS = frozenset({"-r", "-R", "--recursive"})
-
-
-def _grep_marks_recursive(tok):
-    if tok in _GREP_RECURSIVE_FLAGS:
-        return True
-    # a bundled short-option group, e.g. "-rn" / "-nr" - "-r"/"-R" can sit
-    # anywhere in it, not only first, and it takes no value so bundling it
-    # with any other no-value flag is ordinary grep usage.
-    return tok.startswith("-") and not tok.startswith("--") and (
-        "r" in tok[1:] or "R" in tok[1:])
+_GREP_RECURSIVE = frozenset({"-r", "-R", "--recursive", "--dereference-recursive"})
 
 
 def _read_verb_operands(tokens):
-    """(path operands, whether the verb walks the tree without one) of a read
-    verb invocation, or None when `tokens` is not one."""
-    if not tokens or tokens[0] not in _READ_VERBS:
+    """(paths, whole, walks_tree, refused) for a read-verb invocation, or None
+    when `tokens` is not one. `paths` are the operands and file-option values
+    the verb opens, `whole` the indices of tokens that are one of them in
+    full, `walks_tree` whether it reads the tree from cwd without a path, and
+    `refused` the first option the guard does not classify. Short options are
+    read getopt-style: bundled (-nf), with a value glued (-fFILE) or in the
+    next token, and `--` ends the options."""
+    if not tokens or tokens[0] not in _READ_VERB_OPTIONS:
         return None
     verb = tokens[0]
-    value_flags = _READ_VALUE_FLAGS.get(verb, frozenset())
-    has_pattern_arg = verb in _READ_PATTERN_VERBS
-    consumed_pattern = not has_pattern_arg
+    table = _READ_VERB_OPTIONS[verb]
+    pattern_due = verb in _READ_PATTERN_VERBS
     recursive = verb == "rg"
-    paths = []
-    skip_next = False
-    for tok in tokens[1:]:
-        if skip_next:
-            skip_next = False
+    paths, whole = [], set()
+    refused = None
+    options = True
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if not options or tok == "-" or not tok.startswith("-"):
+            if pattern_due:
+                pattern_due = False
+            else:
+                paths.append(tok)
+                whole.add(i - 1)
             continue
-        if tok.startswith("-") and tok != "-":
-            if verb == "grep" and _grep_marks_recursive(tok):
-                recursive = True
-            if has_pattern_arg and tok in _READ_PATTERN_FLAGS:
-                consumed_pattern = True
-            if tok in value_flags:
-                skip_next = True
+        if tok == "--":
+            options = False
             continue
-        if not consumed_pattern:
-            consumed_pattern = True
-            continue
-        paths.append(tok)
-    return paths, recursive
+        if tok.startswith("--"):
+            name, eq, value = tok.partition("=")
+            kind = table.get(name)
+            if kind is None or (kind == "flag" and eq):
+                refused = refused or tok
+                continue
+            if kind in ("flag", "glued"):
+                recursive = recursive or (verb == "grep" and name in _GREP_RECURSIVE)
+                continue
+            index = None
+            if not eq:
+                if i >= len(tokens):
+                    continue
+                value, index = tokens[i], i
+                i += 1
+        else:
+            kind = value = index = None
+            for j in range(1, len(tok)):
+                char = tok[j]
+                if char.isdigit() and verb in ("grep", "head", "tail"):
+                    continue
+                kind = table.get("-" + char)
+                if kind is None:
+                    refused = refused or tok
+                    break
+                if kind == "flag":
+                    recursive = recursive or (verb == "grep" and char in "rR")
+                    kind = None
+                    continue
+                value = tok[j + 1:]
+                if not value and i < len(tokens):
+                    value, index = tokens[i], i
+                    i += 1
+                break
+            if kind is None:
+                continue
+        if kind == "file":
+            paths.append(value)
+            if index is not None:
+                whole.add(index)
+        elif kind == "pattern":
+            pattern_due = False
+        elif kind == "dirs" and value not in ("read", "skip"):
+            recursive = True
+    return paths, whole, recursive, refused
 
 
 def _read_verb_allowed(tokens, state, cwd, preceded_by_pipe, patterns):
     operands = _read_verb_operands(tokens)
     if operands is None:
         return False
-    paths, recursive = operands
+    paths, _, recursive, refused = operands
+    if refused:
+        return False
     if not paths:
         if recursive:
             # rg with no path, or grep -r/-R with no path operand: this
@@ -1014,8 +1112,9 @@ def _read_verb_allowed(tokens, state, cwd, preceded_by_pipe, patterns):
 
 
 def _segment_allowed(segment, state, cwd, preceded_by_pipe, shapes, patterns):
-    if _ENV_EXPORT_RE.match(segment):
-        return True
+    exported = _ENV_EXPORT_RE.match(segment)
+    if exported:
+        return exported.group(1) not in _REFUSED_ENV
     tokens = _shlex_tokens(segment)
     if tokens is None or not tokens:
         return False
@@ -1028,6 +1127,8 @@ def _segment_allowed(segment, state, cwd, preceded_by_pipe, shapes, patterns):
         return True
     if _git_commit_allowed(body):
         return True
+    if _read_segment_problem(segment, tokens, body):
+        return False
     if _git_add_allowed(body, state, cwd, patterns):
         return True
     if _ls_allowed(body):
@@ -1037,22 +1138,76 @@ def _segment_allowed(segment, state, cwd, preceded_by_pipe, shapes, patterns):
     return False
 
 
-def _path_operands(body):
-    """The tokens of a `git add` or a read verb that name paths, the ones
-    _path_is_provably_test_scoped judges."""
+# Characters the shell expands when it sees them unquoted. In a pattern, an
+# option or its value their expansion is new words the guard never judged:
+# from the repo root `grep -r s* tests` is `grep -r scripts src tests`.
+_WORD_EXPANSION_CHARS = frozenset("{}()*?[")
+
+
+def _word_masks(segment, count):
+    """Each shell word of `segment` with its quoted characters masked by
+    _outside_quotes, aligned with the `count` shlex tokens, or None when the
+    two do not line up."""
+    masked = _outside_quotes(segment)
+    if masked is None:
+        return None
+    words = masked.split()
+    return words if len(words) == count else None
+
+
+def _word_expansion_problem(token, mask):
+    """Why the shell would turn a word that is no path operand into other
+    words, or None. Braces, groups and globs count only unquoted (`mask`), a $
+    or a backtick counts even quoted, since double quotes still expand it."""
+    if "$" in token or "`" in token:
+        return "parameter or command expansion"
+    if any(char in _WORD_EXPANSION_CHARS for char in mask):
+        return "brace, glob or pattern-group expansion"
+    if mask[:1] in ("~", "="):
+        return "tilde or command-path expansion"
+    return None
+
+
+def _read_segment_problem(segment, tokens, body):
+    """(word, reason) for the first word of a read-verb or `git add` segment
+    the guard refuses, or None [R-TEST-WORKER-BASH-READS]. Every word after the
+    verb is checked: a path operand by _expansion_problem, which keeps a plain
+    glob such as tests/*.py, and any other word by _word_expansion_problem,
+    since a pattern or an option value the shell expands becomes operands."""
     if body[:2] == ["git", "add"]:
-        return body[2:]
+        for token in body[2:]:
+            problem = _expansion_problem(token)
+            if problem:
+                return token, "uses shell expansion the guard cannot resolve (%s)" % problem
+        return None
     operands = _read_verb_operands(body)
-    return operands[0] if operands else []
+    if operands is None:
+        return None
+    paths, whole, _, refused = operands
+    if refused:
+        return refused, ("is an option the guard does not classify, which may read a file "
+                         "or run a program")
+    masks = _word_masks(segment, len(tokens))
+    if masks is None:
+        return segment, "uses quoting the guard cannot follow"
+    for index in range(1, len(body)):
+        token = body[index]
+        problem = (_expansion_problem(token) if index in whole
+                   else _word_expansion_problem(token, masks[index]))
+        if problem:
+            return token, "uses shell expansion the guard cannot resolve (%s)" % problem
+    for path in paths:
+        problem = _expansion_problem(path)
+        if problem:
+            return path, "uses shell expansion the guard cannot resolve (%s)" % problem
+    return None
 
 
 def _denied_segment_reason(segment, command):
     tokens = _shlex_tokens(segment) or []
-    for token in _path_operands(_strip_trailing_redirect(tokens)):
-        problem = _expansion_problem(token)
-        if problem:
-            return ("ppl-test-worker's Bash path %s uses shell expansion the guard cannot "
-                    "resolve (%s): %s" % (token, problem, command))
+    found = _read_segment_problem(segment, tokens, _strip_trailing_redirect(tokens))
+    if found:
+        return "ppl-test-worker's Bash word %s %s: %s" % (found[0], found[1], command)
     return "ppl-test-worker may not read main sources via Bash: %s" % command
 
 
@@ -1745,6 +1900,19 @@ def structured_write_lands_in_runs(path, cwd):
     return _lands_in_runs(resolved, str(paths.runs_dir()))
 
 
+def _has_dotdot(path):
+    return ".." in str(path).split("/")
+
+
+def _dotdot_reason(tool, path):
+    """A test-worker path with a `..` segment: the guard collapses `..` before
+    a symlink is followed, the kernel after, so a link in a test directory
+    would take the path elsewhere [R-TEST-WORKER-READ-TOOLS]
+    [R-ROLE-TEST-WORKER-MAIN]."""
+    return ("ppl-test-worker's %s path %s has a .. segment, and .. paths are not resolved "
+            "for the test worker, name the path without it" % (tool, path))
+
+
 def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state, patterns):
     """The Bash equivalent of the structured Edit/Write/MultiEdit/
     NotebookEdit write-boundary checks below (R-GUARD-BASH-WRITE-BOUNDARY).
@@ -1759,6 +1927,8 @@ def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state, p
         bound = store.read_json(paths.run_dir(task_id) / "boundary.json",
                                 {"write": [], "forbid": []})
     for raw, seg_cwd, _removal in targets:
+        if agent == "ppl-test-worker" and raw and _has_dotdot(raw):
+            return deny("BOUNDARY_VIOLATION", _dotdot_reason("Bash write", raw))
         resolved = _resolve_path_against_cwd(raw, seg_cwd) if raw else None
         if resolved is None:
             if pipeline_scoped:
@@ -2148,10 +2318,14 @@ def _decide(payload):
                 return deny("BOUNDARY_VIOLATION", boundary.unknown_patterns_reason(task_id)
                             if patterns is None else reason)
         elif tool in READ_TOOLS:
+            raw = read_target_path(tool_input, payload)
+            glob = tool_input.get("pattern") if tool == "Glob" else None
+            for named in (raw, glob):
+                if isinstance(named, str) and _has_dotdot(named):
+                    return deny("BOUNDARY_VIOLATION", _dotdot_reason(tool, named))
             # A relative path is the session's, so it resolves against the
             # payload cwd, never the hook process's own.
-            target = _resolve_path_against_cwd(read_target_path(tool_input, payload),
-                                               payload.get("cwd"))
+            target = _resolve_path_against_cwd(raw, payload.get("cwd"))
             if not target:
                 return deny("BOUNDARY_VIOLATION",
                             "ppl-test-worker's %s call names no resolvable path" % tool)
@@ -2177,6 +2351,8 @@ def _decide(payload):
         return None
 
     if is_role:
+        if agent == "ppl-test-worker" and _has_dotdot(path):
+            return deny("BOUNDARY_VIOLATION", _dotdot_reason(tool, path))
         if not hits_repo:
             # check_path alone would not close this: its test-worker branch
             # returns as soon as a path looks like a test source, so a

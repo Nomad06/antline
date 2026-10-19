@@ -252,6 +252,195 @@ class TestPythonRun(unittest.TestCase):
                 self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Bash",
                                                            {"command": command})))
 
+    def assert_denied(self, code, command, *words):
+        """The test worker's Bash `command` is denied with `code` and every word."""
+        reason = self.deny_reason(ppl_guard.decide(payload(
+            "ppl-test-worker", "Bash", {"command": command})))
+        self.assertIn(code, reason)
+        for word in words:
+            self.assertIn(word, reason)
+        return reason
+
+    # --- H1: read verbs are readers, and a file-valued option is a path ---
+
+    def test_sed_is_not_a_read_verb(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        # sed's r reads a file named in its script, w writes one, GNU e runs one
+        for command in ("sed -e 'r src/shop/cart.py' tests/x.py",
+                        "sed -n 1p tests/unit/test_cart.py"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_awk_is_not_a_read_verb(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        for command in ("awk '{while((getline l < \"src/shop/cart.py\")>0) print l}' tests/x.py",
+                        "awk 1 tests/unit/test_cart.py"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_less_is_not_a_read_verb(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        # less runs LESSOPEN preprocessors, and +:e opens another file
+        for command in ("less '+:e src/shop/cart.py' tests/unit/test_cart.py",
+                        "less tests/unit/test_cart.py"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_grep_file_option_values_are_judged_as_paths(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        for command in ("grep -f src/shop/cart.py tests/x.py",
+                        "grep --file=src/shop/cart.py tests/x.py",
+                        "grep --file src/shop/cart.py tests/x.py",
+                        "grep -fsrc/shop/cart.py tests/x.py",
+                        "grep -nf src/shop/cart.py tests/x.py"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_grep_exclude_from_values_are_judged_as_paths(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        for command in ("grep --exclude-from=src/shop/cart.py -r total tests",
+                        "grep --exclude-from src/shop/cart.py -r total tests"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_rg_file_option_values_are_judged_as_paths(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        for command in ("rg -f src/shop/cart.py tests", "rg --file=src/shop/cart.py tests"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_rg_ignore_file_values_are_judged_as_paths(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        for command in ("rg --ignore-file src/shop/cart.py total tests",
+                        "rg --ignore-file=src/shop/cart.py total tests"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_a_pattern_glued_to_its_option_does_not_hide_a_path(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        # read as the pattern, src/shop/cart.py would have passed as a pipe filter
+        for command in ("echo x | grep -etotal src/shop/cart.py",
+                        "echo x | grep --regexp=total src/shop/cart.py",
+                        "echo x | grep -ie total src/shop/cart.py"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_grep_directories_recurse_is_a_tree_read(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        for command in ("echo x | grep --directories=recurse total",
+                        "echo x | grep -d recurse tests",
+                        "echo x | grep -drecurse total"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_an_option_the_guard_does_not_classify_is_denied(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        # grep is GNU, BSD or ugrep by machine: ugrep's --filter runs a program
+        # and --config reads options from a file, rg's --pre runs one per file
+        for command in ("rg --pre cat total tests", "rg --pre=cat total tests",
+                        "rg --hostname-bin=x total tests",
+                        "grep --filter=cat total tests/x.py",
+                        "grep --config=src/shop/cart.py total tests/x.py",
+                        "grep --fi src/shop/cart.py tests/x.py"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command, "option")
+
+    def test_verbs_that_run_programs_are_not_on_the_list(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        for command in ("find tests -exec cat {} +", "xargs cat < tests/list",
+                        "find tests -name '*.py'"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_exporting_a_variable_that_rewrites_read_options_is_denied(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        for command in ("export GREP_OPTIONS=-r; echo x | grep total",
+                        "export RIPGREP_CONFIG_PATH=tests/rc; rg total tests"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_the_read_verbs_keep_their_ordinary_options(self):
+        for command in ("grep -f tests/patterns.txt tests/x.py",
+                        "grep -n -e total -e count tests/unit/test_cart.py",
+                        "grep -rn --include='*.py' total tests",
+                        "grep -C 2 total tests/unit/test_cart.py",
+                        "rg -n total tests", "rg -f tests/patterns.txt tests",
+                        "head -n 5 tests/unit/test_cart.py", "tail -n5 tests/unit/test_cart.py",
+                        "cat -n tests/unit/test_cart.py", "echo x | grep -c total"):
+            with self.subTest(command=command):
+                self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Bash",
+                                                           {"command": command})))
+
+    # --- H2: .. is not resolved for the test worker ---
+
+    def test_a_read_tool_path_with_dotdot_is_denied(self):
+        # rule: R-TEST-WORKER-READ-TOOLS
+        # tests/link -> src/shop would take tests/link/../shop/cart.py to src/
+        for tool, tool_input in (("Read", {"file_path": REPO + "/tests/link/../shop/cart.py"}),
+                                 ("Grep", {"pattern": "x", "path": REPO + "/tests/link/.."}),
+                                 ("Glob", {"pattern": "*.py", "path": REPO + "/tests/link/.."}),
+                                 ("Glob", {"pattern": "../src/**/*.py", "path": REPO + "/tests"})):
+            with self.subTest(tool=tool, target=tool_input):
+                reason = self.deny_reason(ppl_guard.decide(payload("ppl-test-worker", tool,
+                                                                   tool_input)))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn(".. paths are not resolved", reason)
+
+    def test_a_test_worker_write_with_dotdot_is_denied(self):
+        # rule: R-ROLE-TEST-WORKER-MAIN
+        target = REPO + "/tests/link/../unit/test_new.py"
+        for tool, tool_input in (("Write", {"file_path": target}),
+                                 ("Edit", {"file_path": target}),
+                                 ("NotebookEdit", {"notebook_path": target}),
+                                 ("Bash", {"command": "echo x > tests/link/../unit/test_new.py"})):
+            with self.subTest(tool=tool):
+                reason = self.deny_reason(ppl_guard.decide(payload("ppl-test-worker", tool,
+                                                                   tool_input)))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn(".. paths are not resolved", reason)
+
+    def test_the_code_workers_dotdot_write_is_judged_as_before(self):
+        self.assertIsNone(ppl_guard.decide(payload(
+            "ppl-code-worker", "Write", {"file_path": REPO + "/src/x/../shop/cart.py"})))
+
+    # --- H3: every word of a read or git add segment, not only its paths ---
+
+    def test_a_brace_in_a_pattern_is_denied(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        # grep {x,../src/shop/cart.py} tests/x.py is grep x ../src/shop/cart.py tests/x.py
+        self.assert_denied("BOUNDARY_VIOLATION", "grep {x,../src/shop/cart.py} tests/x.py", "shell expansion")
+
+    def test_a_brace_in_an_option_value_is_denied(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        for command in ("grep -e {a,b} tests/x.py", "grep -m {1,2} total tests/x.py",
+                        "grep -r --include={a,b} total tests", "rg -g {a,b} total tests"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command, "shell expansion")
+
+    def test_an_unquoted_glob_in_a_pattern_is_denied(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        # from the repo root s* expands to scripts src, a recursive read of src
+        for command in ("grep -r s* tests", "grep -e s* tests/x.py", "grep -r .* tests"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command, "shell expansion")
+
+    def test_an_ifs_assignment_is_denied(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        for command in ("export IFS=/; cat tests/unit/test_cart.py", "IFS=/ make test"):
+            with self.subTest(command=command):
+                self.assert_denied("BOUNDARY_VIOLATION", command)
+
+    def test_a_quoted_pattern_stays_allowed(self):
+        # The guard's own quote mask tells a quoted brace, group or glob from an
+        # unquoted one, so those stay literal patterns. A $ is refused even
+        # quoted, since double quotes still expand it.
+        for command in ("grep 'foo.*bar' tests/x.py", "grep '{a,b}' tests/x.py",
+                        "grep -E '(ab)+' tests/x.py", 'grep "foo.*bar" tests/x.py',
+                        "CC=gcc make test"):
+            with self.subTest(command=command):
+                self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Bash",
+                                                           {"command": command})))
+
 
 if __name__ == "__main__":
     unittest.main()

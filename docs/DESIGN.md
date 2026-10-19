@@ -395,7 +395,15 @@ this section [R-TEST-WORKER-READ-TOOLS]. What the worker may read is what it may
 one of the run's test patterns matches, or the very directory a `<prefix>/**` pattern covers -
 `tests` under `tests/**`, every `src/test` under `**/src/test/**`, never `pkg/tests` - and a
 directory that is merely named `test` or `tests` is not readable unless a pattern says so
-[R-TEST-WORKER-READ-TOOLS] [R-TEST-PATTERNS-FROM-SNAPSHOT].
+[R-TEST-WORKER-READ-TOOLS] [R-TEST-PATTERNS-FROM-SNAPSHOT]. A test-worker path, or a Glob
+pattern, with a `..` segment is refused outright, and so is a test-worker write target with
+one: the guard collapses `..` before a symlink is followed and the kernel after, so
+`tests/link/../shop/cart.py` would reach `src/shop/cart.py` through a link in a test directory
+[R-TEST-WORKER-READ-TOOLS] [R-ROLE-TEST-WORKER-MAIN]. A link there still leads a glob or a
+link-following read (`cat tests/*/cart.py`, `grep -R`) elsewhere. No role can plant one - `ln`
+is outside the test worker's Bash and the code worker may not write a test path - short of the
+test worker running its own tests or the repository committing it [R-ROLE-CODE-WORKER-TESTS]
+[R-TEST-WORKER-READ-TOOLS].
 
 `Bash` is one opaque string, so this half is lexical - and it is an ALLOWLIST, not a
 blocklist, because the requirement is that any command shape that cannot be classified is
@@ -413,8 +421,17 @@ snapshot declares, matched token by token with flags and goals in whichever orde
 puts them [R-GUARD-SHAPES-FROM-SNAPSHOT]; the `echo` the recipe's own `; echo $? > <file>`
 exit-code idiom depends on (echo never reads a file itself, so any invocation of it is
 allowed, not only that exact shape); `git status`, `git add` of test paths only, and `git
-commit`; `ls`; and reading a test source with `cat`/`head`/`tail`/`less`/`grep`/`rg`/`awk`/
-`sed` [R-TEST-WORKER-BASH-READS].
+commit`; `ls`; and reading a test source with `cat`/`head`/`tail`/`grep`/`rg`
+[R-TEST-WORKER-BASH-READS]. `sed`, `awk` and `less` are not on that list: a sed script reads
+(`r`), writes (`w`) and runs (GNU `e`) files, awk's `getline` reads any file, and less runs
+`LESSOPEN` preprocessors and opens another file on `+:e`. Each read verb takes only the options
+the guard classifies, read getopt-style (bundled, glued, or in the next word), and a
+file-valued option's value - `grep -f`/`--file`/`--exclude-from`, `rg -f`/`--file`/
+`--ignore-file` - is judged as a path; any other option denies, because `grep` is GNU, BSD or
+ugrep depending on the machine and the unlisted options include ones that read a file (ugrep
+`--config`) or run a program (ugrep `--filter`, rg `--pre`) [R-TEST-WORKER-BASH-READS]. An
+export, or a build shape's env prefix, of `IFS`, `GREP_OPTIONS` or `RIPGREP_CONFIG_PATH`
+denies too, since each changes what an allowed command reads [R-TEST-WORKER-BASH-READS].
 
 A read verb with no path operand is not assumed to be filtering a pipe. `rg` is recursive by
 default with no path operand at all, and `grep -r`/`-R`/`--recursive` (bundled or not - `-rn`
@@ -437,7 +454,12 @@ parenthesis (a pattern group, or a zsh glob qualifier that can run code), `$` or
 leading `=` or `~user`, a `..` segment, and a glob segment starting with `.` or `[`, which can
 match `.` or `..` [R-TEST-WORKER-BASH-READS]. A plain glob such as `tests/*.py` stays allowed, since
 whatever it expands to sits where it says - unless a symlink already in a test directory points
-elsewhere, which this lexical check cannot see [R-TEST-WORKER-BASH-READS].
+elsewhere, which this lexical check cannot see [R-TEST-WORKER-BASH-READS]. Every other word after
+a read verb - the pattern, an option, its value - is checked as well, since its expansion
+becomes operands the guard never judged (`grep {x,../src/a.py} tests/x.py` reads `src/`): a `$`
+or a backtick denies even quoted, as double quotes still expand it, and a brace, a group, a glob
+or a leading `~` or `=` denies when unquoted, read off the guard's own quote mask, so
+`grep 'foo.*bar'` and `grep '{a,b}'` stay allowed [R-TEST-WORKER-BASH-READS].
 
 Conservative deny is the deliberate direction throughout: a false deny costs one clarifying
 round, a false allow silently hands the test worker the one thing its independence depends on

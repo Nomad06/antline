@@ -46,6 +46,9 @@ LAYOUT_FILES = {
     "python": {"src/shop/cart.py": "def total(items):\n    return sum(items)\n",
                "tests/unit/test_cart.py": "def test_total():\n    pass\n"},
 }
+# Links planted in the tree, uncommitted: one in a test directory pointing at
+# product code, which no role can create but a repository can hold.
+LAYOUT_LINKS = {"java": {}, "python": {"tests/link": "../src/shop"}}
 
 
 def make_worktree(layout="java"):
@@ -67,6 +70,8 @@ def make_worktree(layout="java"):
         (tree / rel).write_text(text, encoding="utf-8")
     run("add", *files)
     run("commit", "-q", "-m", "initial")
+    for rel, target in LAYOUT_LINKS[layout].items():
+        os.symlink(target, str(tree / rel))
     return tree
 
 
@@ -221,6 +226,12 @@ def run_python_cases(cage):
         "python layout: ppl-code-worker writing product code is allowed",
         cage.payload("ppl-code-worker", "Write", {"file_path": product_file}, wt),
         "allow")
+
+    cage.check(
+        "python layout: ppl-test-worker Read through a test-directory link and .. is denied",
+        cage.payload("ppl-test-worker", "Read",
+                     {"file_path": wt + "/tests/link/../shop/cart.py"}, wt),
+        "BOUNDARY_VIOLATION", reason=".. paths are not resolved")
 
     cage.check(
         "python layout: ppl-test-worker brace read that expands into src/ is denied",
