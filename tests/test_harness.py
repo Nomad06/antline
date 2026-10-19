@@ -257,6 +257,17 @@ class TestStrictValidation(HarnessTestCase):
                 self.assertIn("unknown key %s" % unknown, caught.exception.message)
                 self.assertIn(nearest, caught.exception.message)
 
+    def test_a_github_key_on_a_jira_tracker_is_refused_naming_the_nearest_key(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        union = tuple(harness.KNOWN_KEYS["tracker"]) + ("repo",)
+        name = self.mutate("example-generic", 'kind = "jira"', 'kind = "jira"\nrepo = "o/r"')
+        with mock.patch.dict(harness.KNOWN_KEYS, {"tracker": union}):
+            with self.assertRaises(PplError) as caught:
+                harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("unknown key tracker.repo", caught.exception.message)
+        self.assertIn("nearest known key is tracker.read_tools", caught.exception.message)
+
     def test_a_harness_of_another_format_is_told_so_before_its_keys_are_judged(self):
         name = self.mutate("example-generic", "format = 1", 'format = 2\nnew_key = "x"')
         with self.assertRaises(PplError) as caught:

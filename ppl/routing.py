@@ -327,10 +327,10 @@ def role_tools(name, harness_doc):
     forge = harness_doc["forge"]
     composed = list(BASE_TOOLS[name]["tools"])
     if name == "ppl-briefer":
-        composed += adapter.read_tool_names(tracker["mcp_prefixes"], tracker["read_tools"])
+        composed += adapter.mcp_read_tools(tracker)
         composed += (harness_doc.get("knowledge") or {}).get("extra_tools") or []
     composed += forges.get(forge["kind"]).role_tools(name, forge)
-    writes = adapter.write_tool_regex(tracker["mcp_prefixes"], tracker["write_operations"])
+    writes = adapter.mcp_write_regex(tracker)
     tools = []
     for tool in composed:
         if writes.match(tool):

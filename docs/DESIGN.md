@@ -2111,6 +2111,11 @@ filter out of a tool result [R-TEST-WORKER-EXECUTION-CHANNEL n/a].
 
 Frozen now, implementations added when a second provider exists.
 
+Issue trackers have their own adapter interface, in `ppl/trackers/`: every kind exports
+`KIND`, `TRANSPORT`, `DEFAULTS`, `KEYS`, `validate`, `usable`, `mcp_write_regex`,
+`mcp_read_tools` and `write_denials`, and the harness check, the guard and the role tools
+reach a tracker only through them.
+
 Input on stdin:
 
 ```json

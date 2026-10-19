@@ -16,11 +16,9 @@ from pathlib import Path
 
 from . import boundary, forges, paths, routing, sequences, trackers
 from .errors import PplError
-from .trackers import is_mcp_prefix
 
 FORMAT = 1
 FORGES = ("gitlab", "github")
-TRACKERS = ("jira",)
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Endings that git and setup keep for their own directories: a source ending in
 # .git is cloned, and setup stages a harness in <name>.replacing and retires the
@@ -29,7 +27,6 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # demo.replacing.
 RESERVED_SUFFIXES = (".git", ".replacing", ".replaced")
 _MCP_TOOL_RE = re.compile(r"mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+")
-_BARE_TOOL_RE = re.compile(r"[A-Za-z0-9_.-]+")
 # A gate name becomes a file name in the rendered recipe and the evidence
 # check name, an [env] key the left side of an assignment in a shell line.
 _GATE_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
@@ -56,7 +53,8 @@ KNOWN_KEYS = {
     "harness": ("name", "format"),
     "repo": ("path", "default_branch", "worktrees"),
     "task": ("key_pattern", "url_template"),
-    "tracker": ("kind", "mcp_prefixes", "write_operations", "read_tools"),
+    "tracker": tuple(dict.fromkeys(key for kind in trackers.KINDS
+                                   for key in trackers.get(kind).KEYS)),
     "forge": ("kind", "mcp_server"),
     "tests": ("sources",),
     "knowledge": ("skills", "extra_tools"),
@@ -148,16 +146,7 @@ def _check_granted_tools(doc, knowledge, source):
     name, so one string cannot smuggle a second tool, a newline or a key past
     the write-tool check. A harness grants MCP tools only, never a built-in
     one, and never a tracker write tool."""
-    tracker = doc["tracker"]
-    writes = set(tracker["write_operations"])
-    for index, tool in enumerate(tracker["read_tools"]):
-        if not _BARE_TOOL_RE.fullmatch(tool):
-            _fail(source, "tracker.read_tools[%d] %r is not a bare tool name (letters, digits, "
-                  "'_', '.' and '-' only)" % (index, tool))
-        if tool in writes:
-            _fail(source, "tracker.read_tools[%d] %r is also a tracker.write_operations entry, "
-                  "no role may hold a tracker write tool" % (index, tool))
-    pattern = trackers.get(tracker["kind"]).write_tool_regex(tracker["mcp_prefixes"], list(writes))
+    pattern = trackers.get(doc["tracker"]["kind"]).mcp_write_regex(doc["tracker"])
     for index, tool in enumerate(knowledge.get("extra_tools", [])):
         if not _MCP_TOOL_RE.fullmatch(tool):
             _fail(source, "knowledge.extra_tools[%d] %r is not an MCP tool name "
@@ -303,19 +292,14 @@ def validate(doc, source):
         _fail(source, "task.key_pattern is not a valid regex: %s" % exc)
     _require(doc, "task", "url_template", source)
     kind = _require(doc, "tracker", "kind", source)
-    if kind not in TRACKERS:
-        _fail(source, "tracker.kind %r is not one of %s" % (kind, ", ".join(TRACKERS)))
-    for key in ("mcp_prefixes", "write_operations", "read_tools"):
-        _require(doc, "tracker", key, source, kind=list)
-    for index, prefix in enumerate(doc["tracker"]["mcp_prefixes"]):
-        if not is_mcp_prefix(prefix):
-            _fail(source, "tracker.mcp_prefixes[%d] %r must look like mcp__<name>__"
-                  % (index, prefix))
-    defaults = trackers.get(kind).DEFAULTS["mcp_prefixes"]
-    if not set(defaults) & set(doc["tracker"]["mcp_prefixes"]):
-        warnings.append("tracker.mcp_prefixes keeps none of the %s defaults (%s): the tracker "
-                        "gate covers only the prefixes listed, and the briefer's read tools are "
-                        "named under them too" % (kind, ", ".join(defaults)))
+    if kind not in trackers.KINDS:
+        _fail(source, "tracker.kind %r is not one of %s" % (kind, ", ".join(trackers.KINDS)))
+    adapter = trackers.get(kind)
+    _check_row_keys(doc["tracker"], "tracker.", adapter.KEYS, source)
+    errors, adapter_warnings = adapter.validate(doc["tracker"])
+    if errors:
+        _fail(source, errors[0])
+    warnings.extend(adapter_warnings)
     forge = _require(doc, "forge", "kind", source)
     if forge not in FORGES:
         _fail(source, "forge.kind %r is not one of %s" % (forge, ", ".join(FORGES)))

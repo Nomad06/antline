@@ -23,10 +23,10 @@ if __name__ == "__main__" and ppl_python_floor.refuse_old_python(
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ppl import boundary, control, gitfacts, paths, run, store
+from ppl import boundary, control, gitfacts, paths, run, store, trackers
 from ppl import forges as _forges
 from ppl.errors import PplError
-from ppl.trackers import is_mcp_prefix, jira as _jira
+from ppl.trackers import jira as _jira
 
 # The Atlassian remote MCP server is registered under different names on different
 # machines: `mcp__atlassian__` where it was added by hand, `mcp__claude_ai_Atlassian_Rovo__`
@@ -55,27 +55,13 @@ def default_tracker():
             "write_operations": list(_DEFAULT_TRACKER["write_operations"])}
 
 
-def _string_list(value):
-    return (isinstance(value, list) and bool(value)
-            and all(isinstance(item, str) and item for item in value))
-
-
-def _usable_tracker(tracker):
-    """A prefix that is not shaped mcp__<name>__ would gate nothing and still replace
-    the defaults, so it makes the whole table unusable."""
-    return (isinstance(tracker, dict)
-            and _string_list(tracker.get("mcp_prefixes"))
-            and all(is_mcp_prefix(prefix) for prefix in tracker["mcp_prefixes"])
-            and _string_list(tracker.get("write_operations")))
-
-
 def tracker_from_snapshot(task_id):
     """The tracker table frozen into the run's harness snapshot, or the defaults
     when the snapshot is missing or the table is malformed in any way. Never
     raises: a decide() that raised would be allowed by main() [R-JIRA-GATE]."""
     snapshot = load_snapshot(task_id)
     tracker = snapshot.get("tracker") if snapshot else None
-    return tracker if _usable_tracker(tracker) else default_tracker()
+    return tracker if trackers.usable(tracker) else default_tracker()
 
 
 def is_tracker_write_tool(tool, tracker):
@@ -83,13 +69,12 @@ def is_tracker_write_tool(tool, tracker):
     An unusable table or entry falls back to the defaults instead of raising."""
     if not isinstance(tool, str):
         return False
-    if not _usable_tracker(tracker):
+    if not trackers.usable(tracker):
         tracker = _DEFAULT_TRACKER
     try:
-        pattern = _jira.write_tool_regex(tracker["mcp_prefixes"], tracker["write_operations"])
+        pattern = trackers.get(tracker.get("kind", trackers.DEFAULT_KIND)).mcp_write_regex(tracker)
     except Exception:
-        pattern = _jira.write_tool_regex(_DEFAULT_TRACKER["mcp_prefixes"],
-                                         _DEFAULT_TRACKER["write_operations"])
+        pattern = _jira.mcp_write_regex(_DEFAULT_TRACKER)
     return bool(pattern.match(tool))
 
 
