@@ -569,8 +569,15 @@ def _values(doc):
     def fragment(name):
         return _render_text(forge.fragment(name).strip(), sequence_values, "forge/%s" % name)
 
+    tracker = trackers.get(doc["tracker"]["kind"])
+
+    def tracker_fragment(name):
+        return _render_text(tracker.fragment(name).strip(), sequence_values, "tracker/%s" % name)
+
     return {
         **sequence_values,
+        ("tracker", "admission"): tracker_fragment("admission"),
+        ("tracker", "close"): tracker_fragment("close"),
         ("vocab", "noun"): forge.VOCABULARY["noun"],
         ("vocab", "short"): forge.VOCABULARY["short"],
         ("forge", "stage6"): fragment("stage6"),

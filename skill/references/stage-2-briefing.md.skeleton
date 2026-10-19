@@ -1,6 +1,6 @@
 # Stage 2 - briefing
 
-`ppl stage enter briefing`, then dispatch `ppl-briefer` with the Jira content, the linked
+`ppl stage enter briefing`, then dispatch `ppl-briefer` with the task content Stage 0 read, the linked
 specs and the relevant knowledge skill (<!-- include: knowledge/skills -->).
 It has no write tool and no shell of its own: it returns the brief as the JSON body of its
 final message and nothing else. Save that message to a scratch file yourself, then run
@@ -17,7 +17,7 @@ objects; an entry like `{"id": "AC1", "text": "..."}` reads as the obvious shape
 surface five stages later at the done gate instead [R-BRIEF-SCHEMA].
 
 The brief is then challenged before anything is implemented. Spend `ppl budget spend dispatch`
-and dispatch `ppl-brief-challenger` with the spec text (Jira, tech analysis), the accepted
+and dispatch `ppl-brief-challenger` with the spec text (the task content, tech analysis), the accepted
 brief and its `spec_revision`; it answers three fixed questions and nothing else: which new
 classes in `name_contract` duplicate an existing owner, which wire shapes differ from the
 spec's own wording, and what each open decision costs to close now. Save its JSON to a

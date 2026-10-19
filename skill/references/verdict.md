@@ -9,7 +9,7 @@ mistake, and the second mistake in a row parks the run with `FORMAT_RETRY_EXHAUS
 
 | Field | Type | Shape |
 |---|---|---|
-| `task_id` | string | the Jira task id, matching the run |
+| `task_id` | string | the task id, matching the run |
 | `candidate_sha` | string | the commit this verdict is about. `ppl verdict record` refuses a verdict produced for a different SHA than the current head [R-DONE-SHA-BINDING] |
 | `spec_revision` | string | copied byte-for-byte from the `spec_revision` string `ppl brief set` printed (or `ppl show --json` reports now) - not computed or guessed. A verdict carrying a different value is refused as stale once a rebrief has moved the binding [R-BRIEF-SPEC-REVISION-STALE] |
 | `verdict` | string, one of `PASS \| REWORK \| BLOCKED \| OWNER_DECISION \| INCONCLUSIVE \| ERROR \| CANCELLED \| TIMEOUT` | only `PASS` can pass the done gate; every other value is refused as not-PASS [R-DONE-VERDICT-PASS]. `INCONCLUSIVE`/`ERROR`/`CANCELLED`/`TIMEOUT` name a check that did not happen - not evidence the code is bad, and not evidence it is good either [R-VERDICT-OUTCOME-VOCAB] |

@@ -21,4 +21,5 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 "ppl.forges" = ["fragments/*/*.md"]
+"ppl.trackers" = ["fragments/*/*.md"]
 "ppl.panel" = ["index.html", "static/*", "static/*/*"]

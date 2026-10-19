@@ -4,7 +4,7 @@ lists cover the names the server has used across builds, so an older or newer
 registration is gated."""
 import re
 
-from . import is_mcp_prefix
+from . import is_mcp_prefix, read_fragment
 
 KIND = "jira"
 TRANSPORT = "mcp"
@@ -108,3 +108,7 @@ def validate(table):
             errors.append("tracker.read_tools[%d] %r is also a tracker.write_operations entry, "
                           "no role may hold a tracker write tool" % (index, tool))
     return errors, warnings
+
+
+def fragment(name):
+    return read_fragment(KIND, name)

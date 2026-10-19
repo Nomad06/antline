@@ -5,13 +5,14 @@ Only for the NEW-task branch of "Always start here" in `SKILL.md` (`ppl recover 
 resume from the stage `ppl show` reported instead; calling `ppl init` on an existing run
 raises `ILLEGAL_TRANSITION`.
 
-1. Read the Jira issue, its parent or epic, linked issues, and any linked Confluence page.
-2. `ppl init <TASK-ID> --tracker-url <url> --repo <worktree path> --harness <!-- include: harness/name -->` -
+1. `ppl init <TASK-ID> --tracker-url <url> --repo <worktree path> --harness <!-- include: harness/name -->` -
    `--repo` is the path the worktree will live at; Stage 1 creates it at exactly this path
    next, `ppl init` does not require it to exist yet. Leave `--isolated` at its default
    (true) unless the guard hook is registered somewhere broader than this launch directory -
-   see `references/stage-8-after-merge.md` for what that flag controls.
-3. Check the admission list: one outcome, fixed governing revision, stable and verifiable
+   see `references/stage-8-after-merge.md` for what that flag controls. A run has to exist
+   before the task is read, because a fetched issue is stored in the run.
+2. <!-- include: tracker/admission -->
+3. Check the admission list: one outcome, fixed governing revision (the one step 2 names), stable and verifiable
    acceptance criteria, closed material decisions, satisfied dependencies, risk tier, a
    non-empty write boundary, enumerated forbidden paths, a proof path defined before any
    implementation, and a budget.

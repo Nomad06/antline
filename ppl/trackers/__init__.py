@@ -2,10 +2,13 @@
 exports KIND, TRANSPORT ("mcp" or "cli"), DEFAULTS, KEYS (the [tracker] keys it
 reads, "kind" among them) and the functions validate(table) -> (errors, warnings),
 usable(table), mcp_write_regex(table), mcp_read_tools(table) and
-write_denials(table), the Bash write patterns of a cli adapter. The guard imports
+write_denials(table), the Bash write patterns of a cli adapter, and fragment(name), the
+text of its skill fragment `admission` (how to read the task) or `close` (how to post the
+note after the merge). The guard imports
 this package, so it parses on Python 3.9 and carries no annotations."""
 import re
 from importlib import import_module
+from pathlib import Path
 
 _MODULES = {"jira": "jira", "github-issues": "github_issues"}
 KINDS = tuple(_MODULES)
@@ -34,3 +37,8 @@ def usable(table):
 def is_mcp_prefix(prefix):
     """True for a prefix shaped mcp__<name>__, the form Claude Code gives a server's tools."""
     return isinstance(prefix, str) and bool(_MCP_PREFIX.fullmatch(prefix))
+
+
+def read_fragment(kind, name):
+    path = Path(__file__).resolve().parent / "fragments" / kind / ("%s.md" % name)
+    return path.read_text(encoding="utf-8")

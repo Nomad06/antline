@@ -49,8 +49,17 @@ class TestAdapterInterface(unittest.TestCase):
             self.assertIsInstance(adapter.KEYS, tuple, kind)
             self.assertIn("kind", adapter.KEYS, kind)
             for name in ("validate", "usable", "mcp_write_regex", "mcp_read_tools",
-                         "write_denials"):
+                         "write_denials", "fragment"):
                 self.assertTrue(callable(getattr(adapter, name, None)), (kind, name))
+
+    def test_every_kind_reads_its_two_fragments_and_refuses_an_unknown_one(self):
+        for kind in trackers.KINDS:
+            for name in ("admission", "close"):
+                text = trackers.get(kind).fragment(name)
+                self.assertTrue(text.strip(), (kind, name))
+                self.assertEqual(text, trackers.read_fragment(kind, name))
+            with self.assertRaises(OSError):
+                trackers.get(kind).fragment("nope")
 
     def test_usable_is_false_for_a_non_dict_and_reads_an_absent_kind_as_jira(self):
         for bad in (None, "jira", 5, [], ()):

@@ -32,7 +32,7 @@ keep its render out of the real `~/.claude`. Otherwise `ppl doctor` and `ppl ini
 to read and write the real data root (`~/.ppl`) and answer about the real active run. See
 README.md "Sandbox".
 
-You already know the task id (the Jira ticket you were given, or the id the operator
+You already know the task id (the tracker task you were given, or the id the operator
 named). Run:
 
 ```bash
@@ -54,7 +54,7 @@ no active run to fall back to. There are exactly three outcomes:
 - **Exit 2, `SCHEMA_INVALID`** - three different shapes, read the message to tell them
   apart. `resolve_task` with no `--task` and no active run, and `run.load` on a task id
   nobody has `ppl init`'ed yet, both mean no run exists for this task - treat it as a NEW
-  task and go to Stage 0's `ppl init` step. A message naming a repo path that "does not
+  task and go to Stage 0's `ppl init` step (`references/stage-0-admission.md`). A message naming a repo path that "does not
   exist" means the run DOES exist and its worktree simply was not created yet (typically a
   run parked before Stage 1 ran) - do **not** run `ppl init` again, create the worktree now
   (Stage 1) and re-run `ppl recover`.
@@ -127,7 +127,7 @@ the reference of the stage `ppl show --json` reports.
 - **Stage 7 - review** (`review`): `references/stage-7-review.md`. The review loop with
   `ppl-review-responder`, and the close-out once the <!-- include: vocab/short --> is approved.
 - **Stage 8 - after merge** (`closure`, `merge_watch`): `references/stage-8-after-merge.md`.
-  Record the observed merge, then the Jira note, and finish a close-out left half done.
+  Record the observed merge, then the tracker note, and finish a close-out left half done.
 
 ## Operator commands
 
@@ -139,7 +139,7 @@ and `control set resume` keeps working too, so the operator can lift their own h
 `ppl park` and `ppl escalate` also stay available while paused - an operator halt must not
 block recording why the run stopped [R-OPERATOR-HALT-CLI]. When `ppl doctor` reports the guard hook registered, it also checks `control.json` on
 every tool call, so a pause lands within one tool call, not one stage; for the orchestrator's
-own session it does so under the same isolated-scoping rule as the Jira gate
+own session it does so under the same isolated-scoping rule as the tracker gate
 (`references/stage-8-after-merge.md`). When it
 is not registered, `ppl`'s own checks above are what a pause has - it still blocks the next
 `ppl` call, just not the tool call the operator actually wanted stopped. If a run carries

@@ -7,7 +7,7 @@ default, and nothing about starting a run arms it on its own [R-GUARD-NOT-ARMED 
 
 - **`none`** - the hook is not registered anywhere. Every sentence in this skill about a hook
   stopping something is false for this session, right now: the write boundary, the Bash
-  landmines, the Jira gate, the operator pause - none of it fires. `git add -A` in the
+  landmines, the tracker gate, the operator pause - none of it fires. `git add -A` in the
   worktree returns exit 0 with no warning at all, because there is no hook there to see it.
   You are unprotected, and the only checks that actually run are the ones `ppl` itself
   performs (the state machine and the done gate) - a role staying inside its lane because

@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from ..errors import PplError
+from . import read_fragment
 
 KIND = "github-issues"
 TRANSPORT = "cli"
@@ -1135,3 +1136,7 @@ def render_issue(doc):
                                           _line(comment.get("createdAt"))), "",
                       comment.get("body") or ""]
     return "\n".join(lines) + "\n"
+
+
+def fragment(name):
+    return read_fragment(KIND, name)

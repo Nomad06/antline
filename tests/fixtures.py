@@ -61,21 +61,25 @@ def render_skill_to(directory, name="example-maven"):
     return Path(directory) / "pipeline"
 
 
-def skill_files(name="example-maven", fragments=None):
+def skill_files(name="example-maven", fragments=None, tables=None):
     """relative path -> text of every file of the skill rendered for an example harness,
     nothing written. `fragments` maps a forge fragment name to the text rendered in its
-    place, so a drift can be seeded where the real text comes from."""
+    place, so a drift can be seeded where the real text comes from. `tables` replaces
+    whole tables of the harness, installed under `name` itself in the throwaway home."""
     from unittest import mock
     from ppl import forges, harness
     saved = os.environ.get("PPL_HOME")
     os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplrender-")
     try:
-        install_harness(name)
+        if tables:
+            install_variant(name, name, **tables)
+        else:
+            install_harness(name)
         doc = harness.load(name)
         module = forges.get(doc["forge"]["kind"])
         real = module.fragment
         seeded = dict(fragments or {})
-        with mock.patch.object(module, "fragment", lambda part: seeded.get(part) or real(part)):
+        with mock.patch.object(module, "fragment", lambda part: seeded[part] if part in seeded else real(part)):
             return harness.render_skill(doc)
     finally:
         if saved is None:

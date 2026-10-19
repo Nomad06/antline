@@ -9,7 +9,7 @@ mistake, and the second mistake in a row parks the run with `FORMAT_RETRY_EXHAUS
 
 | Field | Type | Shape |
 |---|---|---|
-| `task_id` | string | the Jira task id, matching the run |
+| `task_id` | string | the task id, matching the run |
 | `purpose` | string | why this task exists |
 | `success_outcome` | string | what "done" looks like in one sentence |
 | `governing_requirements` | list | the requirement sources this brief was built from - free-form entries, no shape check beyond "is a list" |

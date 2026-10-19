@@ -18,6 +18,9 @@ import tmphome
 
 os.environ.setdefault("PPL_HOME", tmphome.mkdtemp(prefix="pplhome-"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
+import ppl_guard
+
 import fixtures
 from ppl import cli, forges, fsm, gitfacts, run, sequences, verdict
 
@@ -29,6 +32,8 @@ SKILL = fixtures.render_skill_to(RENDERED_DIR, "example-maven") / "SKILL.md"
 # orchestrator reads references/* on demand, so a drift there misleads it as much.
 EXAMPLES = ("example-maven", "example-generic")
 RENDERED = {name: fixtures.skill_files(name) for name in EXAMPLES}
+# The generic example on a GitHub Issues tracker: its tracker steps come from the other adapter.
+RENDERED["github-issues"] = fixtures.skill_files("example-generic", tables=fixtures.GITHUB_ISSUES)
 
 WORD = r"[a-z][a-z-]*"
 
@@ -242,11 +247,6 @@ class TestSkillContract(unittest.TestCase):
         # discipline, not something a hook enforces for the orchestrator's
         # own GitLab MCP calls in every case, so it no longer claims that.
         self.assertIn("do not resolve", self.text.lower())
-
-    def test_it_forbids_jira_writes_before_merge(self):
-        lowered = self.text.lower()
-        self.assertIn("jira", lowered)
-        self.assertIn("after merge", lowered)
 
     def test_it_names_no_tracker_field_of_one_particular_team(self):
         # the close-out note comes from the harness/tracker-close fragment, and
@@ -472,6 +472,84 @@ REWORK_TRIGGERS = (
 )
 REWORK_REENTRY = ("`ppl stage enter implementation`", "`references/stage-3-implementation.md`",
                   "`ppl stage enter tests`", "`references/stage-3-tests.md`")
+
+
+def _flat(text):
+    return " ".join(text.split())
+
+
+class TestTrackerNeutralSkill(unittest.TestCase):
+    """The tracker steps of the skill come from the tracker adapter: Jira keeps its MCP
+    tools, GitHub Issues reads with ppl tracker fetch and writes with gh issue comment."""
+
+    def stage(self, name, reference):
+        return _flat(RENDERED[name]["references/%s" % reference])
+
+    def test_the_tracker_write_waits_for_the_recorded_merge_for_each_tracker(self):
+        for name in EXAMPLES:
+            stage8 = self.stage(name, "stage-8-after-merge.md")
+            self.assertIn("Jira", stage8, name)
+            self.assertIn("addOrEditJiraIssueComment", stage8, name)
+            self.assertIn("[R-JIRA-GATE]", stage8, name)
+        stage8 = self.stage("github-issues", "stage-8-after-merge.md")
+        self.assertIn("gh issue comment", stage8)
+        self.assertIn("[R-TRACKER-CLI-GATE]", stage8)
+        self.assertLess(stage8.index("ppl merge observed"), stage8.index("gh issue comment"))
+        for path, text in sorted(RENDERED["github-issues"].items()):
+            self.assertNotIn("Jira", text, path)
+
+    def test_stage_zero_runs_init_before_reading_the_task(self):
+        for name in EXAMPLES:
+            stage0 = self.stage(name, "stage-0-admission.md")
+            self.assertIn("getJiraIssue", stage0, name)
+            self.assertNotIn("ppl tracker fetch", stage0, name)
+            self.assertLess(stage0.index("ppl init"), stage0.index("getJiraIssue"), name)
+        stage0 = self.stage("github-issues", "stage-0-admission.md")
+        self.assertIn("ppl tracker fetch --task", stage0)
+        self.assertLess(stage0.index("ppl init"), stage0.index("ppl tracker fetch --task"))
+        self.assertLess(stage0.index("ppl tracker fetch --task"), stage0.index("issue.md"))
+        self.assertLess(stage0.index("issue.md"), stage0.index("admission list"))
+
+    def test_stage_zero_names_the_fetched_revision_as_the_governing_one(self):
+        stage0 = self.stage("github-issues", "stage-0-admission.md")
+        self.assertIn("governing revision", stage0)
+        self.assertIn("fetched revision", stage0)
+
+    def test_no_reference_calls_the_task_a_jira_task_id(self):
+        for name, files in RENDERED.items():
+            for path, text in sorted(files.items()):
+                self.assertNotIn("Jira task id", text, "%s %s" % (name, path))
+                self.assertNotIn("Jira gate", text, "%s %s" % (name, path))
+                self.assertNotIn("Jira note", text, "%s %s" % (name, path))
+
+    def test_the_after_merge_checks_cover_every_example(self):
+        for name in RENDERED:
+            section = self.stage(name, "stage-8-after-merge.md")
+            self.assertLess(section.index("ppl merge observed --sha"),
+                            section.index("write to the tracker"), name)
+            self.assertEqual(section.count(sequences.render(sequences.AFTER_MERGE)), 2, name)
+            self.assertNotIn("<!-- include:", section, name)
+
+    def test_the_recovery_step_names_the_stage_zero_reference(self):
+        for name, files in RENDERED.items():
+            flat = _flat(files["SKILL.md"])
+            self.assertIn("Stage 0's `ppl init` step (`references/stage-0-admission.md`)", flat, name)
+
+    def test_the_rendered_close_command_is_a_tracker_write_held_until_the_merge_is_recorded(self):
+        stage8 = self.stage("github-issues", "stage-8-after-merge.md")
+        found = re.findall(r"`(gh issue comment [^`]+)`", stage8)
+        self.assertEqual(len(found), 1, found)
+        command = (found[0].replace("<number>", "45").replace("<owner/name>", "o/r")
+                   .replace("<file>", "/tmp/ppl-GH-45/note.md"))
+        self.assertEqual(command, "gh issue comment 45 -R o/r --body-file /tmp/ppl-GH-45/note.md")
+        self.assertNotIn("$", found[0])
+        self.assertTrue(ppl_guard.tracker_cli_write(command), "the close is not read as a write")
+        for stage in ("review", "closure", "merge_watch"):
+            state = {"stage": stage, "mr": {}}
+            denial = ppl_guard.tracker_gate_denial(state)
+            self.assertIsNotNone(denial, stage)
+        merged = {"stage": "merge_watch", "mr": {"merged_sha": "f" * 40}}
+        self.assertIsNone(ppl_guard.tracker_gate_denial(merged))
 
 
 class TestReworkReentersStageThree(unittest.TestCase):

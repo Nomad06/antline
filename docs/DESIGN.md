@@ -1651,8 +1651,11 @@ Entry: `/pipeline https://tracker.example/browse/DEMO-12345`
 
 ### Stage 0 - admission
 
-Orchestrator reads the tracker issue plus parent/epic and linked issues through the
-tracker's MCP read tools, plus any linked spec page. `ppl init` creates the run.
+Orchestrator runs `ppl init` first, which creates the run, then reads the tracker issue plus
+parent/epic and linked issues. A Jira tracker is read through the MCP read tools, plus any
+linked spec page. A GitHub Issues tracker is read with `ppl tracker fetch --task <TASK-ID>`,
+which stores `issue.md` in the run and records the fetched revision. The text comes from
+the tracker adapter's `admission` fragment.
 
 Admission checklist (chapter 12.2), all must pass:
 

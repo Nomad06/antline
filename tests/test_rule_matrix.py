@@ -52,6 +52,8 @@ SCANNED_DOCS = [("DESIGN.md", (REPO / "docs" / "DESIGN.md").read_text(encoding="
                 ("README.md", (REPO / "README.md").read_text(encoding="utf-8"))]
 for _example in ("example-maven", "example-generic"):
     SCANNED_DOCS += skill_docs(_example, fixtures.skill_files(_example))
+SCANNED_DOCS += skill_docs("github-issues", fixtures.skill_files("example-generic",
+                                                                tables=fixtures.GITHUB_ISSUES))
 
 GOOD_ROW = {
     "id": "R-EXAMPLE",
@@ -826,7 +828,7 @@ class TestTheRuleMatrix(PplHomeTestCase):
 
     def test_both_example_skills_are_scanned_file_by_file(self):
         labels = {label for label, _ in SCANNED_DOCS}
-        for name in ("example-maven", "example-generic"):
+        for name in ("example-maven", "example-generic", "github-issues"):
             for path in ("SKILL.md", "references/review-loop.md", "references/escalation.md",
                          "references/gates.md", "references/brief.md", "references/verdict.md",
                          "references/guard-hook.md", *run.STAGE_REFERENCES.values()):
