@@ -246,7 +246,11 @@ a Jira run gates the GitHub MCP server's issue writes under any `mcp__<server>__
 every CLI adapter's Bash write check (`write_denials`, today GitHub Issues through `gh`) reads
 the orchestrator's Bash commands on every run, whatever the run's snapshot holds, and a `gh
 issue comment`, an issues write through `gh api` or a GraphQL issue mutation is denied
-`OWNER_DECISION` until the merge is recorded, like an MCP write [R-TRACKER-CLI-GATE]. A role is
+`OWNER_DECISION` until the merge is recorded, like an MCP write [R-TRACKER-CLI-GATE]. A brace
+or a pathname glob in a `gh` call is read as a write too, except a glob inside a word that
+opens with a literal, unquoted `--jq=` or `-q=`, which stays the jq flag whatever the shell
+makes of it, and each such deny ends with what the check read, so an over-deny says what to
+respell [R-TRACKER-CLI-GATE]. A role is
 denied a tracker write through a CLI before and after the merge, run or no run, since the
 tracker is the orchestrator's [R-TRACKER-CLI-NO-ROLE], and a call to any known tracker's MCP
 write tool the same way, the defaults of every adapter and the run's own prefixes alike

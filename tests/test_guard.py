@@ -3123,6 +3123,7 @@ class TestGuard(unittest.TestCase):
                 result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
                                                   {"command": command}))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
+                self.assertIn("may not write the tracker", self.deny_reason(result), command)
             self.assertIsNone(ppl_guard.decide(payload(
                 "ppl-review-responder", "Bash", {"command": api + ".title"})))
         finally:

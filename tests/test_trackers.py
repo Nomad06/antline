@@ -370,6 +370,31 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
                              "gh api graphql -f query='{viewer{login}}'",
                              "gh api user --jq '.[0]'", "gh issue view 5 --jq '.title,.body'"])
 
+    def test_a_glob_after_a_literal_jq_flag_stays_a_read(self):
+        # whatever the shell makes of such a word keeps its --jq= or -q= prefix, so it
+        # cannot become a verb, a subcommand, a method or a route
+        self.assert_allowed(
+            ["gh api repos/o/r/pulls/12/comments --jq=.[].body",
+             "gh api repos/o/r/pulls/12/comments --jq=.[0].id",
+             "gh pr view 12 --json=reviews --jq=.reviews[0].state",
+             "gh api repos/o/r/pulls/12/comments -q=.[].body",
+             "gh api repos/o/r/pulls/12/comments --jq=.[]?.body",
+             "gh issue view 7 -R o/r --jq=.labels[].name",
+             "gh api repos/o/r/pulls/12/comments --jq='.[].body'",
+             "gh api repos/o/r/pulls/12/comments '--jq=.[0].id'"])
+        # braces, a glob in any other word, and a prefix that is quoted, expanded or
+        # itself a glob stay refused
+        self.assert_denied(
+            ["gh api repos/o/r/pulls/12/comments --jq={a,b}",
+             "gh api repos/o/r/pulls/12/comments --jq=.[{0,1}].id",
+             "gh api repos/o/r/pulls/1*/comments --jq=.[].body",
+             "gh api repos/o/r/issue[s]/5/comments -f body=x --jq=.[].id",
+             "gh api repos/o/r/pulls/12/comments \"--jq=\".[]",
+             "gh api repos/o/r/pulls/12/comments \"$J\".[]",
+             "gh api repos/o/r/pulls/12/comments --j?=.[]",
+             "gh api repos/o/r/pulls/12/comments x--jq=.[]",
+             "gh issue clo* 5 --jq=.[].id"])
+
     def test_an_alias_an_extension_or_a_subcommand_gh_does_not_ship_is_denied(self):
         self.assert_denied(
             ["gh alias set ic 'issue comment'", "gh alias import aliases.yml",

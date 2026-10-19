@@ -49,6 +49,19 @@ PIPELINE_GH_COMMANDS = (
     "gh api repos/o/r/pulls/12/comments/345/replies -f body=\"$(cat /tmp/reply.md)\"",
     "gh auth status",
 )
+# The responder's allowlisted reads with a bracketed jq filter, unquoted and quoted.
+JQ_READS = (
+    "gh api repos/o/r/pulls/12/comments --jq=.[].body",
+    "gh api repos/o/r/pulls/12/comments --jq=.[0].id",
+    "gh pr view 12 --json=reviews --jq=.reviews[0].state",
+    "gh api repos/o/r/pulls/12/comments --jq='.[].body'",
+    "gh api repos/o/r/pulls/12/comments '--jq=.[0].id'",
+    "gh pr view 12 --json=reviews --jq=\".reviews[0].state\"",
+    "gh api repos/o/r/pulls/12/comments -q=.[].body",
+)
+# A brace in the jq word, and a glob in a word that is not one.
+GLOB_WRITES = ("gh api repos/o/r/pulls/12/comments --jq={a,b}",
+               "gh api repos/o/r/pulls/1*/comments --jq=.[].body")
 
 
 def payload(agent, tool, tool_input, cwd=REPO):
@@ -246,6 +259,48 @@ class TestTrackerCliGate(GhRunCase):
                                                                ELSEWHERE)))
             self.assertIn("OWNER_DECISION", reason, tool)
 
+    def test_a_bracketed_jq_read_passes_before_the_merge(self):
+        for command in JQ_READS:
+            self.assertIsNone(bash(None, command, ELSEWHERE), command)
+
+    def test_a_brace_or_a_glob_outside_the_jq_word_is_still_gated(self):
+        # rule: R-TRACKER-CLI-GATE
+        for command in GLOB_WRITES:
+            reason = self.deny_reason(bash(None, command, ELSEWHERE))
+            self.assertIn("OWNER_DECISION", reason, command)
+            # the check's own reading, so an over-deny says what to respell
+            self.assertIn("(a glob or brace expansion in a gh call can become any word)",
+                          reason, command)
+
+    def test_the_gate_names_what_the_write_check_read(self):
+        # rule: R-TRACKER-CLI-GATE
+        reason = self.deny_reason(bash(None, COMMENT, ELSEWHERE))
+        self.assertIn("merge is observed, current stage is admission "
+                      "(gh issue comment writes the issue)", reason)
+        with self.at_merge_watch(merged_sha=None):
+            reason = self.deny_reason(bash(None, COMMENT, ELSEWHERE))
+        self.assertIn("first (gh issue comment writes the issue)", reason)
+
+    def test_a_snapshot_read_that_raises_skips_no_gate(self):
+        # rule: R-TRACKER-CLI-GATE, R-JIRA-GATE, R-JIRA-NO-ROLE-TOOL
+        with mock.patch.object(ppl_guard, "load_snapshot", side_effect=RuntimeError("defect")):
+            reason = self.deny_reason(bash(None, COMMENT, ELSEWHERE))
+            self.assertIn("OWNER_DECISION", reason)
+            for tool in JIRA_WRITES + GITHUB_MCP_WRITES:
+                reason = self.deny_reason(ppl_guard.decide(payload(None, tool, {"body": "x"},
+                                                                   ELSEWHERE)))
+                self.assertIn("OWNER_DECISION", reason, tool)
+                role = self.deny_reason(ppl_guard.decide(payload("ppl-code-worker", tool,
+                                                                 {"body": "x"})))
+                self.assertIn("BOUNDARY_VIOLATION", role, tool)
+
+    def test_a_snapshot_tracker_that_is_no_table_reads_as_none(self):
+        doc = json.loads(snapshot_path().read_text(encoding="utf-8"))
+        self.assertEqual(ppl_guard.snapshot_tracker(TASK), fixtures.GITHUB_ISSUES["tracker"])
+        for table in ("github-issues", ["github-issues"], 7, None):
+            with self.snapshot_text(json.dumps(dict(doc, tracker=table))):
+                self.assertIsNone(ppl_guard.snapshot_tracker(TASK), table)
+
     def test_the_pipeline_gh_commands_pass_before_the_merge(self):
         for command in PIPELINE_GH_COMMANDS:
             self.assertIsNone(bash(None, command, ELSEWHERE), command)
@@ -285,6 +340,19 @@ class TestTrackerCliNoRole(GhRunCase):
             reason = self.deny_reason(bash("ppl-review-responder", command))
             self.assertIn("BOUNDARY_VIOLATION", reason, command)
             self.assertIn("may run only the forge's read commands", reason, command)
+
+    def test_the_review_responder_keeps_its_bracketed_jq_reads(self):
+        for command in JQ_READS:
+            self.assertIsNone(bash("ppl-review-responder", command), command)
+
+    def test_a_role_is_denied_a_brace_or_a_glob_outside_the_jq_word(self):
+        # rule: R-TRACKER-CLI-NO-ROLE
+        for command in GLOB_WRITES:
+            reason = self.deny_reason(bash("ppl-review-responder", command))
+            self.assertIn("BOUNDARY_VIOLATION", reason, command)
+            self.assertIn("may not write the tracker, the orchestrator does after the merge is "
+                          "observed (a glob or brace expansion in a gh call can become any "
+                          "word)", reason, command)
 
     def test_a_role_keeps_its_own_commands(self):
         for command in ("gh api repos/o/r/pulls/12/comments --paginate",

@@ -87,6 +87,8 @@ _CONFIG_WRITERS = frozenset(("tee", "cp", "mv", "install", "ln", "rsync", "dd", 
 _IN_PLACE = frozenset(("sed", "gsed", "perl"))
 _WRITE_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "<>")
 _BOOLS = ("--help", "-h", "--version")
+# The jq filter flag glued to its value, the one word a pathname glob may stay in.
+_JQ_FLAGS = ("--jq=", "-q=")
 # Nesting deeper than this, or more gh programs in one command, is no command the
 # pipeline runs, and such a command is refused rather than read at length.
 _MAX_DEPTH = 16
@@ -109,11 +111,15 @@ class _Word(object):
     """One shell word after quote removal, an expansion kept as written. `expanded`
     is set by any expansion, `loose` by one outside double quotes (it can split
     into several words), `globbed` by an unquoted glob character or a brace
-    expansion, and `plain` while the word is unquoted text only. `script` is the
+    expansion, and `plain` while the word is unquoted text only. A pathname glob in
+    a word that opens with a literal, unquoted --jq= or -q= leaves it unglobbed:
+    whatever the shell makes of it keeps that prefix, so it stays the jq flag and
+    never becomes a verb, a subcommand, a method or a route. `script` is the
     text another shell would read if handed the word, each expansion of this shell
     standing as `${_}` there (braced, so a letter after it stays its own), since its
     own commands are read already."""
-    __slots__ = ("parts", "script_parts", "expanded", "loose", "globbed", "plain", "braces")
+    __slots__ = ("parts", "script_parts", "expanded", "loose", "globbed", "plain", "braces",
+                 "wild", "jq")
 
     def __init__(self):
         self.parts = []
@@ -123,6 +129,8 @@ class _Word(object):
         self.globbed = False
         self.plain = True
         self.braces = []
+        self.wild = False
+        self.jq = False
 
     @property
     def text(self):
@@ -138,12 +146,14 @@ class _Word(object):
         self.plain = False
 
     def bare(self, text):
+        if not self.parts and text.startswith(_JQ_FLAGS):
+            self.jq = True
         self.parts.append(text)
         self.script_parts.append(text)
         for match in re.finditer(r"[*?\[{},]|\.\.", text):
             token = match.group(0)
             if token in ("*", "?", "["):
-                self.globbed = True
+                self.wild = True
             else:
                 self.braces.append(token)
 
@@ -156,7 +166,9 @@ class _Word(object):
         self.plain = False
 
     def close(self):
-        # bash expands {a,b} and {1..3}, a lone {x} stays as it is
+        if self.wild and not self.jq:
+            self.globbed = True
+        # bash expands {a,b} and {1..3}, a lone {x} stays as it is, in any word
         stack = []
         for token in self.braces:
             if token == "{":
