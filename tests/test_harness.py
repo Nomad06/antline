@@ -620,6 +620,17 @@ class TestMalformedInputIsRefusedNotATraceback(HarnessTestCase):
             self.assertIn("knowledge.extra_tools[1]", caught.exception.message, bad)
             self.assertIn(bad, caught.exception.message)
 
+    def test_a_github_issues_harness_cannot_grant_a_github_mcp_issue_write(self):
+        knowledge = {"skills": [], "extra_tools": ["mcp__github__get_issue",
+                                                   "mcp__github__add_issue_comment"]}
+        fixtures.install_variant("example-generic", "gh-mcp", knowledge=knowledge,
+                                 **fixtures.GITHUB_ISSUES)
+        with self.assertRaises(PplError) as caught:
+            harness.load("gh-mcp")
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("knowledge.extra_tools[1] 'mcp__github__add_issue_comment' is a tracker "
+                      "write tool", caught.exception.message)
+
     def test_an_extra_tool_that_is_not_a_tracker_write_tool_is_accepted(self):
         name = self.mutate("example-maven", "extra_tools = []",
                            'extra_tools = ["mcp__corp__code_search", "mcp__GitLab-MCP__get_file.v2"]')

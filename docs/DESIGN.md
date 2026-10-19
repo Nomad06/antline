@@ -93,7 +93,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     refusals.py                  refused role output: the refusal count and its park (6.6)
     forges/                      gitlab.py github.py: denied tools, role tools, skill fragments
     trackers/                    jira.py: tracker read and write tool names per MCP prefix
-                                 github_issues.py: GitHub Issues through `gh`, Bash write patterns
+                                 github_issues.py: GitHub Issues through `gh`, its Bash write check
     panel/server.py              stdlib HTTP server, `ppl serve`
     panel/index.html             single-page dashboard
     studio/                      setup wizard, stack presets, md extraction, harness drafts
@@ -180,8 +180,9 @@ the SHA it was produced on.
 **Delivery adapters** - the forge adapter the harness names (`ppl/forges/`: GitLab through
 the GitLab MCP server the harness names, or GitHub through `gh`) and the tracker adapter
 the harness names (`ppl/trackers/`: Jira through the Atlassian MCP server, or GitHub Issues
-through `gh`, where the issue writes are Bash commands the adapter's `write_denials`
-patterns match).
+through `gh`, where the issue writes are Bash commands that the adapter's `write_denials`
+check reads word by word once the shell's quoting is removed, and the GitHub MCP server's
+issue write tools match its `mcp_write_regex`).
 
 ### 5.3 Roles, routing and boundaries
 

