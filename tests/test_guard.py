@@ -3103,9 +3103,12 @@ class TestGuard(unittest.TestCase):
     def test_review_responder_substitution_inside_an_allowed_shape_is_denied(self):
         # rule: R-REVIEW-RESPONDER-BASH-SHAPES
         # Each command is one allowed gh api shape token by token (--jq=\S+),
-        # and no forge pattern names gh api with a substitution, so only the
+        # and no forge pattern names gh api with a substitution, so the
         # responder's pre-check stands in front of it. bash runs a process
-        # substitution mid-word, where shlex sees an ordinary token.
+        # substitution mid-word, where shlex sees an ordinary token. The tracker
+        # check reads an expansion in gh api as a possible issue write and denies
+        # it first for every role [R-TRACKER-CLI-NO-ROLE], so the pre-check is
+        # asked directly as well.
         snap = paths.run_dir("DEMO-700") / "harness.json"
         saved = snap.read_text(encoding="utf-8")
         doc = json.loads(saved)
@@ -3115,10 +3118,11 @@ class TestGuard(unittest.TestCase):
             api = "gh api repos/acme/widgets/pulls/7 --jq="
             for command in (api + "$(id)", api + "`id`", api + "<(id)", api + ">(id)"):
                 self.assertIsNone(ppl_guard.forge_bash_denial(command, "DEMO-700"), command)
+                self.assertTrue(ppl_guard.review_responder_bash_denied(command, "DEMO-700"),
+                                command)
                 result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
                                                   {"command": command}))
-                self.assertIn("may run only the forge's read commands",
-                              self.deny_reason(result), command)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             self.assertIsNone(ppl_guard.decide(payload(
                 "ppl-review-responder", "Bash", {"command": api + ".title"})))
         finally:

@@ -133,6 +133,9 @@ class Cage:
         snapshot = harness.snapshot(harness.load(name))
         if python:
             snapshot["tests"] = {"sources": list(PYTHON_TEST_SOURCES)}
+            # tests/fixtures.py's GITHUB_ISSUES table, inline since this script
+            # cannot import the test helpers
+            snapshot["tracker"] = {"kind": "github-issues", "repo": "o/r", "task_prefix": "GH"}
         store.write_json(paths.run_dir(self.task_id) / "harness.json", snapshot)
         self.results = []
 
@@ -244,6 +247,25 @@ def run_python_cases(cage):
         cage.payload("ppl-test-worker", "Bash",
                      {"command": "cat tests/{x,../src/shop/cart.py}"}, wt),
         "BOUNDARY_VIOLATION", reason="shell expansion")
+
+    # The orchestrator's gh issue write waits for the observed merge, from its own
+    # session beside the repo [R-TRACKER-CLI-GATE]. These run last: they move the stage.
+    comment = {"command": "gh issue comment 1 -R o/r --body-file /tmp/n.md"}
+    elsewhere = str(cage.unrelated)
+    cage.check(
+        "python layout: the orchestrator's gh issue comment before merge_watch is denied",
+        cage.payload(None, "Bash", comment, elsewhere),
+        "OWNER_DECISION", reason="merge is observed")
+    cage.set_stage("merge_watch")
+    cage.check(
+        "python layout: the orchestrator's gh issue comment before ppl merge observed is denied",
+        cage.payload(None, "Bash", comment, elsewhere),
+        "OWNER_DECISION", reason="ppl merge observed")
+    cage.record_merge("b" * 40)
+    cage.check(
+        "python layout: the orchestrator's gh issue comment is allowed once the merge is recorded",
+        cage.payload(None, "Bash", comment, elsewhere),
+        "allow")
 
 
 def run_cases(cage):

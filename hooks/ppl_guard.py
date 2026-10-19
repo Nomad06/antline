@@ -55,12 +55,18 @@ def default_tracker():
             "write_operations": list(_DEFAULT_TRACKER["write_operations"])}
 
 
+def snapshot_tracker(task_id):
+    """The tracker table as the run's harness snapshot holds it, unchecked, or None
+    when there is no readable snapshot. Never raises."""
+    snapshot = load_snapshot(task_id)
+    return snapshot.get("tracker") if snapshot else None
+
+
 def tracker_from_snapshot(task_id):
     """The tracker table frozen into the run's harness snapshot, or the defaults
     when the snapshot is missing or the table is malformed in any way. Never
     raises: a decide() that raised would be allowed by main() [R-JIRA-GATE]."""
-    snapshot = load_snapshot(task_id)
-    tracker = snapshot.get("tracker") if snapshot else None
+    tracker = snapshot_tracker(task_id)
     return tracker if trackers.usable(tracker) else default_tracker()
 
 
@@ -81,6 +87,73 @@ def is_tracker_write_tool(tool, tracker):
 def is_jira_write_tool(tool):
     """True for a Jira write operation under any default Atlassian MCP server prefix."""
     return is_tracker_write_tool(tool, default_tracker())
+
+
+# Before the merge is recorded every known tracker is shut, whatever tracker the run
+# names: nothing in the pipeline writes one earlier, and a run on one tracker has no
+# business writing another. These are each adapter's MCP write tools under that
+# adapter's own defaults, by kind [R-JIRA-GATE].
+_DEFAULT_MCP_WRITES = tuple(
+    (kind, trackers.get(kind).mcp_write_regex(dict(trackers.get(kind).DEFAULTS, kind=kind)))
+    for kind in trackers.KINDS)
+
+
+def tracker_mcp_write(tool, tracker):
+    """True for a write tool of the run's tracker, under the prefixes its own table
+    names, or of any other known tracker under that adapter's defaults. A Jira
+    table's prefixes still replace the Jira defaults rather than extend them."""
+    if not isinstance(tool, str):
+        return False
+    try:
+        if is_tracker_write_tool(tool, tracker):
+            return True
+        kind = (tracker.get("kind", trackers.DEFAULT_KIND) if trackers.usable(tracker)
+                else _DEFAULT_TRACKER["kind"])
+        return any(pattern.match(tool) for other, pattern in _DEFAULT_MCP_WRITES
+                   if other != kind)
+    except Exception:
+        return any(pattern.match(tool) for _, pattern in _DEFAULT_MCP_WRITES)
+
+
+# Every CLI adapter's Bash write checks under its defaults. Each check has only
+# search(command), which answers a hit or None. They apply on every run whatever
+# tracker it names, and to every role with or without a run [R-TRACKER-CLI-GATE]
+# [R-TRACKER-CLI-NO-ROLE].
+ALL_CLI_TRACKER_DENIALS = tuple(
+    check for kind in trackers.KINDS if trackers.get(kind).TRANSPORT == "cli"
+    for check in trackers.get(kind).write_denials(dict(trackers.get(kind).DEFAULTS, kind=kind)))
+
+
+def tracker_cli_write(command):
+    """True when the Bash `command` may write any known tracker through its CLI. A
+    check that fails reads as a write, so a defect denies instead of allowing."""
+    if not isinstance(command, str):
+        return False
+    for check in ALL_CLI_TRACKER_DENIALS:
+        try:
+            if check.search(command):
+                return True
+        except Exception:
+            return True
+    return False
+
+
+def tracker_gate_denial(state):
+    """The OWNER_DECISION deny for a tracker write while the run has not observed its
+    merge: before merge_watch, or in it before `ppl merge observed` recorded the
+    merged sha. None once it has [R-JIRA-GATE] [R-TRACKER-CLI-GATE]."""
+    stage = state.get("stage")
+    if stage != "merge_watch":
+        return deny("OWNER_DECISION",
+                    "the tracker is written only after the merge is observed, current stage "
+                    "is %s" % stage)
+    mr = state.get("mr")
+    if not (isinstance(mr, dict) and mr.get("merged_sha")):
+        return deny("OWNER_DECISION",
+                    "the tracker is written only after the merge is observed: the run is in "
+                    "merge_watch but no merge is recorded, run `ppl merge observed --sha "
+                    "<merged sha>` first")
+    return None
 
 
 # The union of both adapters' denials under their default settings: what applies
@@ -2166,6 +2239,12 @@ def _decide(payload):
                         "%s may not run a state-changing ppl command, the orchestrator "
                         "drives ppl; read-only lookups (ppl show --task <id>, ppl findings "
                         "list, ...) are fine" % agent)
+        # R-TRACKER-CLI-NO-ROLE: every role, run or no run, merged or not. The tracker
+        # is the orchestrator's, and a role's issue reads stay open.
+        if agent in boundary.ROLE_RULES and tracker_cli_write(command):
+            return deny("BOUNDARY_VIOLATION",
+                        "%s may not write the tracker, the orchestrator does after the merge "
+                        "is observed" % agent)
 
     path = target_path(tool_input) if tool in WRITE_TOOLS else None
     if path and structured_write_lands_in_runs(path, payload.get("cwd")):
@@ -2251,17 +2330,16 @@ def _decide(payload):
     if not halt_scoped:
         return None
 
-    if is_tracker_write_tool(tool, tracker_from_snapshot(task_id)):
-        if state.get("stage") != "merge_watch":
-            return deny("OWNER_DECISION",
-                        "Jira is written only after the merge is observed, current stage is %s"
-                        % state.get("stage"))
-        mr = state.get("mr")
-        if not (isinstance(mr, dict) and mr.get("merged_sha")):
-            return deny("OWNER_DECISION",
-                        "Jira is written only after the merge is observed: the run is in "
-                        "merge_watch but no merge is recorded, run `ppl merge observed --sha "
-                        "<merged sha>` first")
+    # R-JIRA-GATE and R-TRACKER-CLI-GATE: one stage check for both transports. The
+    # Bash half asks it before reading the command, the cheap half first.
+    if tracker_mcp_write(tool, tracker_from_snapshot(task_id)):
+        denial = tracker_gate_denial(state)
+        if denial:
+            return denial
+    if tool == "Bash":
+        denial = tracker_gate_denial(state)
+        if denial and tracker_cli_write(tool_input.get("command", "")):
+            return denial
 
     record = control.read(task_id)
     if record and record.get("invalid"):

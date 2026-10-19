@@ -138,7 +138,7 @@ class TestPlayground(PlaygroundTestCase):
     def test_a_tracker_write_tool_is_denied_by_name(self):
         result = self.check("operator", "mcp__atlassian__editJiraIssue", "")
         self.assertEqual(result["decision"], "deny", result)
-        self.assertIn("Jira", result["reason"])
+        self.assertIn("the tracker is written only after the merge", result["reason"])
 
     def test_the_tool_input_has_the_keys_claude_code_sends(self):
         self.assertEqual(playground.tool_input("Bash", "ls"), {"command": "ls"})
