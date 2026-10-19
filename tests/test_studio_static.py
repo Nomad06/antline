@@ -115,6 +115,39 @@ console.log(JSON.stringify({ shown, typedList, blurred, cleared, clearedShown: s
         self.assertEqual(out["cleared"]["list"], [])
         self.assertEqual(out["clearedShown"], "")
 
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, the test path check needs it")
+    def test_the_example_test_path_follows_the_first_glob(self):
+        scratch = Path(tmphome.mkdtemp(prefix="pplnode-"))
+        copy = scratch / "testpath.mjs"
+        copy.write_bytes((STATIC / "ui" / "testpath.js").read_bytes())
+        script = """
+import { exampleTestPath } from "%s";
+console.log(JSON.stringify([["tests/**"], ["**/*_test.go"], [], undefined, ["**/*.test.ts", "tests/**"],
+  ["**/__tests__/**"], ["src/test/**"], ["**/*Test.java"], ["spec/**/*.rb"]].map(exampleTestPath)));
+""" % copy.as_uri()
+        result = subprocess.run(["node", "--input-type=module", "-e", script],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         ["tests/example", "example_test.go", "src/test/FooTest.java",
+                          "src/test/FooTest.java", "example.test.ts", "__tests__/example",
+                          "src/test/example", "exampleTest.java", "spec/example.rb"])
+
+    def test_the_harness_form_edits_test_sources_as_a_list_field(self):
+        source = (STATIC / "ui" / "harness-form.js").read_text()
+        self.assertIn("Test sources", source)
+        self.assertIn("Java defaults", source)
+        block = source[source.index('label="Test sources"'):source.index("<h3>Build gates")]
+        self.assertIn("<${ListInput}", block)
+        self.assertIn("d.tests = { sources: list }", block)
+        self.assertIn("list.length || d.tests", block)
+
+    def test_the_playground_example_uses_the_example_test_path(self):
+        source = (STATIC / "pages" / "playground.js").read_text()
+        self.assertIn('from "../ui/testpath.js"', source)
+        self.assertIn("exampleTestPath(", source)
+        self.assertNotIn('value: "src/test/FooTest.java"', source)
+
     def test_the_harness_form_routes_list_inputs_through_the_list_field_rules(self):
         source = (STATIC / "ui" / "harness-form.js").read_text()
         self.assertIn('from "./listfield.js"', source)

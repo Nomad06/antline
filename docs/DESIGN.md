@@ -1964,7 +1964,14 @@ shape) is asked for once more with the same input and the reason added to the sy
 or a timeout is not asked again, and items dropped one by one are shown in the form, not asked
 again. The job log shows each call and its cost. With no md file, or when the extraction
 fails, the draft comes from the preset of the stack the build files name, and its note quotes
-the failure, both reasons when the second answer failed too. The review form
+the failure, both reasons when the second answer failed too. Presets and the extraction also
+carry the test globs (`[tests] sources`), one per alternative: a preset names its stack's own,
+the extraction asks for them with the file:line each came from, a glob that fails
+`boundary.glob_problem` is dropped with its reason, twelve are kept at most, and the extracted
+list replaces the preset's. The make and generic presets carry none, so their draft fails
+validation until the form is given some, which is how the studio asks. The form edits them in
+a "Test sources" list field (empty with no table, showing `Java defaults`), and the playground
+example takes its test path from the first glob. The review form
 marks three kinds of shape: free arguments that take any token, an interpreter with no pinned
 flag, and a shape with neither a goal nor a flag. The marks are advice: the user's tick
 installs the shape as written. A check and an install each write the request's draft to a

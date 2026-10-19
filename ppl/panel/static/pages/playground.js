@@ -1,6 +1,7 @@
 import { html, useEffect, useState } from "../vendor/htm-preact.mjs";
 import { get, post } from "../api.js";
 import { Badge, Button, Field, Notice } from "../ui/controls.js";
+import { exampleTestPath } from "../ui/testpath.js";
 
 const ROLES = ["ppl-code-worker", "ppl-test-worker", "ppl-briefer", "ppl-brief-challenger",
                "ppl-verifier", "ppl-review-responder", "operator"];
@@ -10,8 +11,9 @@ function examples(doc) {
   const gates = doc && Array.isArray(doc.gate) ? doc.gate : [];
   const focused = gates.find((gate) => gate && gate.name === "focused-tests" && typeof gate.command === "string");
   const test = focused ? focused.command.replace("<test_class>", "app.FooTest").replace("<module>", "core") : "make test";
+  const sources = doc && doc.tests && Array.isArray(doc.tests.sources) ? doc.tests.sources : [];
   return [
-    { label: "The code writer edits a test", role: "ppl-code-worker", tool: "Write", value: "src/test/FooTest.java" },
+    { label: "The code writer edits a test", role: "ppl-code-worker", tool: "Write", value: exampleTestPath(sources) },
     { label: "The test writer runs one test", role: "ppl-test-worker", tool: "Bash", value: test },
     { label: "The test writer reads the code", role: "ppl-test-worker", tool: "Bash", value: "cat src/main/Foo.java" },
     { label: "Anyone stages every file", role: "operator", tool: "Bash", value: "git add -A" },

@@ -13,7 +13,7 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "hooks"))
 import ppl_guard
-from ppl import harness, tomlout
+from ppl import boundary, harness, tomlout
 from ppl.errors import PplError
 from ppl.studio import stacks
 
@@ -61,9 +61,60 @@ class TestDetect(unittest.TestCase):
         self.assertEqual(found["stack"], "node")
 
 
+NODE_TESTS = ["**/__tests__/**", "**/*.test.js", "**/*.test.jsx", "**/*.test.ts", "**/*.test.tsx",
+              "**/*.test.mjs", "**/*.test.cjs", "**/*.spec.js", "**/*.spec.jsx", "**/*.spec.ts",
+              "**/*.spec.tsx", "test/**", "tests/**"]
+PYTHON_TESTS = ["**/test_*.py", "**/*_test.py", "**/conftest.py", "test/**", "tests/**"]
+
+
+class TestTestSources(unittest.TestCase):
+    def draft(self, stack):
+        return stacks.draft(stack, project(empty_dir("pplrepo-")))
+
+    def test_each_stack_carries_its_test_globs(self):
+        expected = {"python": PYTHON_TESTS, "node": NODE_TESTS,
+                    "go": ["**/*_test.go", "**/testdata/**"],
+                    "rust": ["tests/**", "benches/**"],
+                    "maven": list(boundary.TEST_PATTERNS), "gradle": list(boundary.TEST_PATTERNS),
+                    "make": [], "generic": []}
+        self.assertEqual(set(expected), set(stacks.STACKS))
+        for stack, globs in expected.items():
+            draft = self.draft(stack)
+            self.assertEqual(draft["doc"]["tests"], {"sources": globs}, stack)
+            self.assertIn("tests.sources", draft["sources"], stack)
+
+    def test_every_preset_glob_passes_the_glob_check(self):
+        for stack, spec in stacks.STACKS.items():
+            for glob in spec["tests"]:
+                self.assertIsNone(boundary.glob_problem(glob), (stack, glob))
+
+    def test_each_preset_marks_its_own_test_file(self):
+        cases = {"python": "tests/unit/test_cart.py", "node": "src/cart.test.ts",
+                 "go": "pkg/cart/cart_test.go", "rust": "tests/cart.rs"}
+        product = {"python": "src/cart.py", "node": "src/cart.ts", "go": "pkg/cart/cart.go",
+                   "rust": "src/cart.rs"}
+        for stack, path in cases.items():
+            globs = stacks.STACKS[stack]["tests"]
+            self.assertTrue(any(boundary.glob_match(path, g) for g in globs), (stack, path))
+            self.assertFalse(any(boundary.glob_match(product[stack], g) for g in globs), stack)
+
+    def test_make_and_generic_drafts_are_refused_until_test_sources_are_given(self):
+        for stack in ("make", "generic"):
+            with self.assertRaises(PplError) as caught:
+                install_draft_validated(self.draft(stack))
+            self.assertEqual(caught.exception.code, "HARNESS_INVALID", stack)
+            self.assertIn("tests.sources", str(caught.exception), stack)
+
+
+def install_draft_validated(draft):
+    return harness.validate(install_draft(draft), "demo")
+
+
 class TestDrafts(unittest.TestCase):
     def test_every_stack_draft_validates_and_renders_without_an_open_marker(self):
         for stack in stacks.STACKS:
+            if stack in ("make", "generic"):
+                continue
             doc = install_draft(stacks.draft(stack, project(empty_dir("pplrepo-"))))
             warnings = harness.validate(doc, "demo")
             self.assertEqual(warnings, [], stack)

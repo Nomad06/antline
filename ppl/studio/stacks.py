@@ -14,7 +14,7 @@ import stat
 import tomllib
 from pathlib import Path
 
-from .. import harness, paths
+from .. import boundary, harness, paths
 from ..errors import PplError
 
 # The tokens a test-worker command may carry besides its goal. The cage matches
@@ -53,6 +53,13 @@ NAMING_GRADLE = ("Name the test by its class or method "
 INSTALL_EDITABLE = "python3 -m pip install -e ."
 INSTALL_REQUIREMENTS = "python3 -m pip install -r requirements.txt"
 
+NODE_TESTS = ["**/__tests__/**", "**/*.test.js", "**/*.test.jsx", "**/*.test.ts", "**/*.test.tsx",
+              "**/*.test.mjs", "**/*.test.cjs", "**/*.spec.js", "**/*.spec.jsx", "**/*.spec.ts",
+              "**/*.spec.tsx", "test/**", "tests/**"]
+PYTHON_TESTS = ["**/test_*.py", "**/*_test.py", "**/conftest.py", "test/**", "tests/**"]
+
+# Every preset names its test globs, one per alternative. make and generic carry none on
+# purpose: the draft fails validation until the form gets some, so the studio asks.
 # The node, python, gradle, go and rust presets leave the shapes' env_prefix off: the
 # cage takes any value in an env assignment, so one token ahead of argv0 would carry
 # what the classes above refuse. maven, make and generic keep the shapes of their
@@ -60,7 +67,7 @@ INSTALL_REQUIREMENTS = "python3 -m pip install -r requirements.txt"
 STACKS = {
     "node": {
         "label": "Node.js (npm)", "markers": ("package.json",), "base": "example-generic",
-        "build": "npm ci",
+        "build": "npm ci", "tests": NODE_TESTS,
         "gates": [{"name": "install", "command": "npm ci"},
                   {"name": "focused-tests", "command": "npm test -- <test_class>"},
                   {"name": "integration-tests", "command": "npm test"}],
@@ -70,18 +77,20 @@ STACKS = {
     "python": {
         "label": "Python (pytest)",
         "markers": ("pyproject.toml", "setup.cfg", "setup.py", "requirements.txt"),
-        "base": "example-generic", "build": INSTALL_EDITABLE,
+        "base": "example-generic", "build": INSTALL_EDITABLE, "tests": PYTHON_TESTS,
         "gates": [{"name": "install", "command": INSTALL_EDITABLE},
                   {"name": "focused-tests", "command": "pytest -q <test_class>"},
                   {"name": "integration-tests", "command": "pytest -q"}],
         "shapes": [{"argv0": "pytest", "env_prefix": False, "required_flags": [["-q", ""]],
                     "one_goal_of": [], "free_args": SAFE_FREE_ARGS}],
     },
-    "maven": {"label": "Java (Maven)", "markers": ("pom.xml",), "base": "example-maven"},
+    "maven": {"label": "Java (Maven)", "markers": ("pom.xml",), "base": "example-maven",
+              "tests": list(boundary.TEST_PATTERNS)},
     "gradle": {
         "label": "Java or Kotlin (Gradle)",
         "markers": ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"),
         "base": "example-generic", "build": "./gradlew assemble", "naming": NAMING_GRADLE,
+        "tests": list(boundary.TEST_PATTERNS),
         "gates": [{"name": "build", "command": "./gradlew assemble"},
                   {"name": "focused-tests", "command": "./gradlew test --tests <test_class>"},
                   {"name": "integration-tests", "command": "./gradlew check"}],
@@ -90,7 +99,7 @@ STACKS = {
     },
     "go": {
         "label": "Go", "markers": ("go.mod",), "base": "example-generic", "build": "go build ./...",
-        "naming": NAMING_GO,
+        "naming": NAMING_GO, "tests": ["**/*_test.go", "**/testdata/**"],
         "gates": [{"name": "build", "command": "go build ./..."},
                   {"name": "lint", "command": "go vet ./..."},
                   {"name": "focused-tests", "command": "go test ./... -run <test_class>"},
@@ -101,6 +110,7 @@ STACKS = {
     "rust": {
         "label": "Rust (cargo)", "markers": ("Cargo.toml",), "base": "example-generic",
         "build": "cargo build", "naming": NAMING_RUST,
+        "tests": ["tests/**", "benches/**"],
         "gates": [{"name": "build", "command": "cargo build"},
                   {"name": "lint", "command": "cargo clippy"},
                   {"name": "focused-tests", "command": "cargo test <test_class>"},
@@ -108,9 +118,10 @@ STACKS = {
         "shapes": [{"argv0": "cargo", "env_prefix": False, "required_flags": [],
                     "one_goal_of": ["test"], "free_args": SAFE_FREE_ARGS}],
     },
-    "make": {"label": "Make", "markers": ("Makefile", "GNUmakefile"), "base": "example-generic"},
+    "make": {"label": "Make", "markers": ("Makefile", "GNUmakefile"), "base": "example-generic",
+             "tests": []},
     "generic": {"label": "Anything else (make targets to adjust)", "markers": (),
-                "base": "example-generic"},
+                "base": "example-generic", "tests": []},
 }
 ORDER = ("node", "python", "maven", "gradle", "go", "rust", "make")
 FRAGMENT_GLOBS = ("skill/*.md", "templates/*.part")
@@ -233,6 +244,8 @@ def draft(stack, project):
     doc["repo"] = {"path": repo_path, "default_branch": project["default_branch"],
                    "worktrees": repo_path.rstrip("/") + "/.worktrees"}
     doc["env"] = {}
+    doc["tests"] = {"sources": list(spec["tests"])}
+    sources["tests.sources"] = label
     kind = project.get("forge_hint")
     if kind in harness.FORGES:
         sources["forge.kind"] = "git remote"

@@ -7,9 +7,9 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function ListInput({ list, onList }) {
+function ListInput({ list, onList, placeholder }) {
   const [field, setField] = useState(idleField);
-  return html`<input value=${shownText(field, list)}
+  return html`<input value=${shownText(field, list)} placeholder=${placeholder}
     onInput=${(e) => { const next = fieldInput(e.target.value); setField(next); onList(next.list); }}
     onBlur=${() => setField(fieldBlur())} />`;
 }
@@ -144,6 +144,12 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave, nameLocked
       ${doc.forge.kind === "gitlab" ? html`<${Field} label="GitLab MCP server name">
         <input value=${doc.forge.mcp_server || ""} onInput=${(e) => update((d) => { d.forge.mcp_server = e.target.value; })} /><//>` : null}
     </div>
+
+    <h3>Test sources</h3>
+    <p class="help">The globs naming the project's tests, one per alternative and no braces. The code writer may not edit them and the test writer may edit only them.</p>
+    <${Field} label="Test sources" help=${sources["tests.sources"] || ""}>
+      <${ListInput} list=${(doc.tests && doc.tests.sources) || []} placeholder=${doc.tests ? "" : "Java defaults"}
+        onList=${(list) => update((d) => { if (list.length || d.tests) { d.tests = { sources: list }; } })} /><//>
 
     <h3>Build gates</h3>
     <p class="help">The commands the orchestrator runs and records. One must be named <code>focused-tests</code>: it runs one test, and <code>${"<test_class>"}</code> stands for that test's name.</p>

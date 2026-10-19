@@ -26,7 +26,10 @@ class DraftTestCase(panel_client.StudioTestCase):
 
     def preset(self, stack=None):
         info = project.inspect(str(self.repo))
-        return stacks.draft(stack or info["stack"]["stack"], info)
+        draft = stacks.draft(stack or info["stack"]["stack"], info)
+        if not draft["doc"]["tests"]["sources"]:
+            draft["doc"]["tests"]["sources"] = ["tests/**"]
+        return draft
 
 
 class TestCheck(DraftTestCase):
@@ -34,6 +37,13 @@ class TestCheck(DraftTestCase):
         draft = self.preset()
         result = drafts.check("demo", draft["doc"], draft["fragments"])
         self.assertEqual(result, {"ok": True, "errors": [], "warnings": [], "flags": []})
+
+    def test_a_make_preset_asks_for_test_sources_before_install(self):
+        info = project.inspect(str(self.repo))
+        draft = stacks.draft("make", info)
+        result = drafts.check("demo", draft["doc"], draft["fragments"])
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("tests.sources" in error for error in result["errors"]), result)
 
     def test_every_stack_preset_comes_back_unflagged(self):
         for stack in stacks.STACKS:

@@ -30,6 +30,7 @@ GOOD_DRAFT = {
     "default_branch": "main",
     "task_key_pattern": "^APP-[0-9]+$",
     "notes": ["Tests need a local redis."],
+    "test_sources": [],
 }
 
 
@@ -95,6 +96,8 @@ SLOTS = {
     "shape goal": lambda c: {"test_shapes": [shape("npx", ["te" + c + "st"])]},
     "shape example": lambda c: {"test_shapes": [dict(shape("npx"), example="a" + c + "b")]},
     "shape source": lambda c: {"test_shapes": [dict(shape("npx"), source="a" + c + "b")]},
+    "test glob": lambda c: {"test_sources": [{"glob": "te" + c + "sts/**", "source": "x"}]},
+    "test source": lambda c: {"test_sources": [{"glob": "tests/**", "source": "x" + c + "y"}]},
     "env name": lambda c: {"env": [{"name": "A" + c + "B", "value": "1", "source": "x"}]},
     "env value": lambda c: {"env": [{"name": "A", "value": "1" + c + "2", "source": "x"}]},
     "env source": lambda c: {"env": [{"name": "A", "value": "1", "source": "x" + c + "y"}]},
@@ -266,6 +269,46 @@ class TestExtract(panel_client.StudioTestCase):
                 self.assertEqual([item["argv0"] for item in result["extracted"]["test_shapes"]],
                                  [argv0])
                 self.assertEqual(result["dropped"], [])
+
+    def test_a_brace_or_product_matching_glob_is_dropped_with_its_reason(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
+        bad = ("src/**/*.{js,ts}", "**", "**/*.py", "./tests/**", "/tests/**", "tests/")
+        items = [{"glob": glob, "source": "x"} for glob in bad] + [{"glob": "tests/**", "source": "x"}]
+        result, _ = self.run_with(answer(dict(GOOD_DRAFT, test_sources=items)))
+        self.assertEqual([item["glob"] for item in result["extracted"]["test_sources"]], ["tests/**"])
+        self.assertEqual(len(result["dropped"]), len(bad))
+        self.assertTrue(all(item["kind"] == "test_source" for item in result["dropped"]))
+        self.assertIn("one glob per alternative", result["dropped"][0]["reason"])
+        self.assertIn("product path", result["dropped"][1]["reason"])
+
+    def test_a_test_source_that_is_not_a_glob_and_source_pair_is_dropped(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
+        items = ["tests/**", {"glob": "tests/**"}, {"glob": 3, "source": "x"},
+                 {"glob": "tests/**", "source": "x"}]
+        result, _ = self.run_with(answer(dict(GOOD_DRAFT, test_sources=items)))
+        self.assertEqual(len(result["extracted"]["test_sources"]), 1)
+        self.assertEqual(len(result["dropped"]), 3)
+
+    def test_more_than_twelve_globs_are_dropped(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
+        items = [{"glob": "t%d/**" % n, "source": "x"} for n in range(14)]
+        result, _ = self.run_with(answer(dict(GOOD_DRAFT, test_sources=items)))
+        self.assertEqual(len(result["extracted"]["test_sources"]), extract.MAX_TEST_SOURCES)
+        self.assertEqual(extract.MAX_TEST_SOURCES, 12)
+        self.assertEqual([item["reason"] for item in result["dropped"]],
+                         ["more than 12 test source globs"] * 2)
+
+    def test_a_draft_without_a_test_sources_list_is_refused(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
+        broken = dict(GOOD_DRAFT, test_sources="tests/**")
+        with self.assertRaises(PplError) as caught:
+            self.run_with(answer(broken))
+        self.assertIn("test_sources", caught.exception.message)
+
+    def test_the_prompt_asks_for_test_source_globs_one_per_alternative(self):
+        self.assertIn("test source", extract.SYSTEM_PROMPT)
+        self.assertIn("one glob per alternative", extract.SYSTEM_PROMPT)
+        self.assertIn("test_sources", json.dumps(extract.SCHEMA["required"]))
 
     def test_a_goal_that_does_not_start_with_a_letter_or_digit_is_dropped(self):
         # rule: R-STUDIO-EXTRACT-LEAN
@@ -570,6 +613,19 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(merged["sources"]["env:NODE_ENV"], "CLAUDE.md:7")
         self.assertIn("npx jest <test_class>", merged["fragments"]["templates/ppl-test-worker.part"])
         self.assertIn("Tests need a local redis.", merged["notes"])
+
+    def test_extracted_test_sources_replace_the_preset_globs_with_their_source(self):
+        sources = [{"glob": "spec/**", "source": "CLAUDE.md:12"},
+                   {"glob": "**/*.e2e.ts", "source": "CLAUDE.md:12"}]
+        merged = extract.merge(self.preset(), self.checked(dict(GOOD_DRAFT, test_sources=sources)))
+        self.assertEqual(merged["doc"]["tests"], {"sources": ["spec/**", "**/*.e2e.ts"]})
+        self.assertEqual(merged["sources"]["tests.sources"], "CLAUDE.md:12")
+
+    def test_no_extracted_test_sources_keep_the_preset_globs(self):
+        preset = self.preset()
+        merged = extract.merge(preset, self.checked(GOOD_DRAFT))
+        self.assertEqual(merged["doc"]["tests"], preset["doc"]["tests"])
+        self.assertEqual(merged["sources"]["tests.sources"], preset["sources"]["tests.sources"])
 
     def test_merge_keeps_the_preset_shapes_when_none_are_extracted(self):
         merged = extract.merge(self.preset(), self.checked(dict(GOOD_DRAFT, test_shapes=[])))
