@@ -535,10 +535,11 @@ def _resolve_path_against_cwd(raw_path, cwd):
     return os.path.normpath(os.path.join(cwd, raw_path))
 
 
-def _path_is_provably_test_scoped(raw_path, state, cwd):
+def _path_is_provably_test_scoped(raw_path, state, cwd, patterns):
     """True only when `raw_path`, resolved against `cwd`, is confirmed to
-    land on a test source inside the active run's repo. Unlike a deny-model
-    check, ambiguity here means False, not True: a path this cannot resolve
+    land on a test source inside the active run's repo, by the run's test
+    `patterns`. Unlike a deny-model check, ambiguity here means False, not
+    True: a path this cannot resolve
     (a shell variable, a command substitution - though those are already
     denied for the whole command above), or one that resolves outside the
     repo, is not "safe because it is not our business", it is simply not
@@ -550,7 +551,7 @@ def _path_is_provably_test_scoped(raw_path, state, cwd):
     if not targets_repo(resolved, state):
         return False
     rel = relative_to_repo(resolved, state)
-    return boundary.path_is_test_scoped(rel)
+    return boundary.path_is_test_scoped(rel, patterns)
 
 
 # --- Shape 1: the build/test invocations the run's harness declares in its
@@ -700,6 +701,26 @@ def harness_shapes(task_id):
         return ShapeMatcher.from_rows((snapshot or {}).get("shapes") or [])
     except Exception:
         return ShapeMatcher([])
+
+
+def test_patterns(task_id):
+    """The run's test globs: the Java defaults when runs/<task>/harness.json is
+    missing or predates [tests], None when it cannot be trusted. Never raises
+    [R-TEST-PATTERNS-FROM-SNAPSHOT]. Unlike load_snapshot it tells a missing
+    file from an unreadable one."""
+    try:
+        return boundary.run_test_patterns(task_id)
+    except Exception:
+        return None
+
+
+def unknown_patterns_deny(task_id):
+    """A pipeline write, or a test-worker dispatch, while the run's test globs
+    are unknown: neither can be judged, so the owner restores the snapshot."""
+    return deny("OWNER_DECISION",
+                "run %s: runs/%s/harness.json is unreadable or its tests table is malformed, "
+                "test sources cannot be told from product code [R-TEST-PATTERNS-FROM-SNAPSHOT]"
+                % (task_id, task_id))
 
 
 def _active_task_id():
@@ -864,10 +885,10 @@ def _git_commit_allowed(tokens):
     return True
 
 
-def _git_add_allowed(tokens, state, cwd):
+def _git_add_allowed(tokens, state, cwd, patterns):
     if len(tokens) < 3 or tokens[0] != "git" or tokens[1] != "add":
         return False
-    return all(_path_is_provably_test_scoped(t, state, cwd) for t in tokens[2:])
+    return all(_path_is_provably_test_scoped(t, state, cwd, patterns) for t in tokens[2:])
 
 
 def _ls_allowed(tokens):
@@ -917,7 +938,7 @@ def _grep_marks_recursive(tok):
         "r" in tok[1:] or "R" in tok[1:])
 
 
-def _read_verb_allowed(tokens, state, cwd, preceded_by_pipe):
+def _read_verb_allowed(tokens, state, cwd, preceded_by_pipe, patterns):
     if not tokens or tokens[0] not in _READ_VERBS:
         return False
     verb = tokens[0]
@@ -949,10 +970,10 @@ def _read_verb_allowed(tokens, state, cwd, preceded_by_pipe):
             # reads the tree from cwd, piped or not - not a pipe filter.
             return False
         return preceded_by_pipe
-    return all(_path_is_provably_test_scoped(p, state, cwd) for p in paths)
+    return all(_path_is_provably_test_scoped(p, state, cwd, patterns) for p in paths)
 
 
-def _segment_allowed(segment, state, cwd, preceded_by_pipe, shapes):
+def _segment_allowed(segment, state, cwd, preceded_by_pipe, shapes, patterns):
     if _ENV_EXPORT_RE.match(segment):
         return True
     tokens = _shlex_tokens(segment)
@@ -967,26 +988,27 @@ def _segment_allowed(segment, state, cwd, preceded_by_pipe, shapes):
         return True
     if _git_commit_allowed(body):
         return True
-    if _git_add_allowed(body, state, cwd):
+    if _git_add_allowed(body, state, cwd, patterns):
         return True
     if _ls_allowed(body):
         return True
-    if _read_verb_allowed(body, state, cwd, preceded_by_pipe):
+    if _read_verb_allowed(body, state, cwd, preceded_by_pipe, patterns):
         return True
     return False
 
 
-def bash_denies_main_source_read(command, state, cwd, shapes):
+def bash_denies_main_source_read(command, state, cwd, shapes, patterns):
     """True unless every segment of `command`, run by ppl-test-worker, is one
     of the small set of shapes this role is derived to need. `shapes` is the
-    ShapeMatcher built from the run's harness snapshot. See the module
+    ShapeMatcher built from the run's harness snapshot, `patterns` the test
+    globs it froze, `()` when they cannot be trusted. See the module
     comment above for why this must be an allowlist rather than a blocklist,
     and for exactly which shapes are recognised.
     """
     if any(marker in command for marker in _SUBSTITUTION_MARKERS):
         return True
     for segment, preceded_by_pipe in _segments_with_pipe_flag(command):
-        if not _segment_allowed(segment, state, cwd, preceded_by_pipe, shapes):
+        if not _segment_allowed(segment, state, cwd, preceded_by_pipe, shapes, patterns):
             return True
     return False
 
@@ -1664,10 +1686,10 @@ def structured_write_lands_in_runs(path, cwd):
     return _lands_in_runs(resolved, str(paths.runs_dir()))
 
 
-def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state):
+def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state, patterns):
     """The Bash equivalent of the structured Edit/Write/MultiEdit/
     NotebookEdit write-boundary checks below (R-GUARD-BASH-WRITE-BOUNDARY).
-    Returns a deny dict or None.
+    `patterns` is test_patterns(task_id). Returns a deny dict or None.
     """
     targets = _bash_write_targets(command, payload.get("cwd"))
     if not targets:
@@ -1688,8 +1710,10 @@ def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state):
         if not targets_repo(resolved, state):
             continue
         if is_role:
+            if patterns is None and boundary.ROLE_RULES[agent]["may_write"]:
+                return unknown_patterns_deny(task_id)
             try:
-                boundary.check_path(agent, relative_to_repo(resolved, state), bound)
+                boundary.check_path(agent, relative_to_repo(resolved, state), bound, patterns)
             except PplError as err:
                 return deny(err.code, err.message)
         else:
@@ -1842,17 +1866,20 @@ def dispatches_test_worker(tool, tool_input):
     return tool in AGENT_TOOLS and tool_input.get("subagent_type") == "ppl-test-worker"
 
 
-def dispatch_leak_deny(prompt, task_id, state):
+def dispatch_leak_deny(prompt, task_id, state, patterns):
     """Deny a ppl-test-worker dispatch whose prompt carries the implementation.
 
     R-TEST-WORKER-DISPATCH-LEAK: the test worker writes tests from behaviour,
     and its own reads of main sources are already denied, so the dispatch
     prompt was the one channel left. Two detectors: patch syntax, and lines the
-    implementation added since base_sha (committed or not, test sources
-    excluded) found verbatim in the prompt. Lines the brief itself carries are
-    the agreed interfaces and stay allowed. It fails closed: a dispatch that
-    cannot be checked is not started.
+    implementation added since base_sha (committed or not, test sources by the
+    run's `patterns` excluded) found verbatim in the prompt. Lines the brief
+    itself carries are the agreed interfaces and stay allowed. It fails closed:
+    a dispatch that cannot be checked is not started, and with unknown
+    `patterns` no added line can be told test from implementation.
     """
+    if patterns is None:
+        return unknown_patterns_deny(task_id)
     if not isinstance(prompt, str) or not prompt:
         return None
     lines = prompt.splitlines()
@@ -1873,7 +1900,7 @@ def dispatch_leak_deny(prompt, task_id, state):
     in_prompt = {_leak_key(line) for line in lines}
     hits = {}
     for rel, added_here in sorted(added.items()):
-        if boundary.path_is_test_scoped(rel):
+        if boundary.path_is_test_scoped(rel, patterns):
             continue
         for line in added_here:
             key = _leak_key(line)
@@ -1959,13 +1986,17 @@ def _decide(payload):
         return None
 
     is_role = agent in boundary.ROLE_RULES
+    # Read once for the whole decision. None (the snapshot cannot be trusted)
+    # denies a writing role's write and the test-worker dispatch, and reads
+    # get () below [R-TEST-PATTERNS-FROM-SNAPSHOT].
+    patterns = test_patterns(task_id)
 
     # R-TEST-WORKER-DISPATCH-LEAK. ppl-test-worker is a pipeline role name, so a
     # dispatch of it is this run's business wherever the dispatching session sits,
     # and the check runs before any cwd-based scoping.
     if dispatches_test_worker(tool, tool_input):
         try:
-            leak = dispatch_leak_deny(tool_input.get("prompt"), task_id, state)
+            leak = dispatch_leak_deny(tool_input.get("prompt"), task_id, state, patterns)
         except Exception as err:
             # main() allows a session with no role on an internal error, which
             # here would let an unchecked dispatch through. This check fails
@@ -1985,7 +2016,7 @@ def _decide(payload):
         # for exactly what this does and does not cover.
         bash_command = tool_input.get("command", "")
         bash_result = bash_write_boundary_deny(bash_command, payload, agent,
-                                               is_role, task_id, state)
+                                               is_role, task_id, state, patterns)
         if bash_result:
             return bash_result
 
@@ -2046,10 +2077,12 @@ def _decide(payload):
     # checks, on tools (Read, Grep, Glob, Bash) the write-boundary logic
     # never looks at.
     if agent == "ppl-test-worker":
+        # unknown patterns leave no path test-scoped, so every repo read denies
+        read_patterns = () if patterns is None else patterns
         if tool == "Bash":
             command = tool_input.get("command", "")
             if bash_denies_main_source_read(command, state, payload.get("cwd"),
-                                            harness_shapes(task_id)):
+                                            harness_shapes(task_id), read_patterns):
                 return deny("BOUNDARY_VIOLATION",
                             "ppl-test-worker may not read main sources via Bash: %s"
                             % command)
@@ -2063,7 +2096,7 @@ def _decide(payload):
                             "ppl-test-worker's %s call names no resolvable path" % tool)
             if targets_repo(target, state):
                 rel = relative_to_repo(target, state)
-                if not boundary.path_is_test_scoped(rel):
+                if not boundary.path_is_test_scoped(rel, read_patterns):
                     return deny("BOUNDARY_VIOLATION",
                                 "ppl-test-worker may not read %s: only test sources are "
                                 "visible to it, reading the implementation is the exact "
@@ -2088,10 +2121,12 @@ def _decide(payload):
             return deny("BOUNDARY_VIOLATION",
                         "%s may write only inside run %s's repo, not %s"
                         % (agent, task_id, path))
+        if patterns is None and boundary.ROLE_RULES[agent]["may_write"]:
+            return unknown_patterns_deny(task_id)
         try:
             bound = store.read_json(paths.run_dir(task_id) / "boundary.json",
                                     {"write": [], "forbid": []})
-            boundary.check_path(agent, relative_to_repo(path, state), bound)
+            boundary.check_path(agent, relative_to_repo(path, state), bound, patterns)
         except PplError as err:
             return deny(err.code, err.message)
         return None

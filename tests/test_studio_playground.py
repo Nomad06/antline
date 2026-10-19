@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 import panel_client
 import ppl_guard
 from ppl import config, harness, paths, run, store, tomlout
+from ppl.boundary import TEST_PATTERNS
 from ppl.errors import PplError
 from ppl.studio import drafts, playground, project, stacks
 
@@ -28,6 +29,8 @@ class PlaygroundTestCase(panel_client.StudioTestCase):
         self.repo = panel_client.make_repo({"Makefile": "test:\n\ttrue\n", MAIN_SOURCE: "class Foo {}\n"})
         info = project.inspect(str(self.repo))
         self.draft = stacks.draft("make", info)
+        # TEST_SOURCE and MAIN_SOURCE are a Maven layout, so the draft names the Java defaults
+        self.draft["doc"]["tests"] = {"sources": list(TEST_PATTERNS)}
 
     def check(self, role, tool, value, **kwargs):
         return playground.check("demo", self.draft["doc"], self.draft["fragments"], role, tool, value, **kwargs)

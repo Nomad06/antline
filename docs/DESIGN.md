@@ -187,7 +187,7 @@ the GitLab MCP server the harness names, or GitHub through `gh`) and the tracker
 | orchestrator (main session) | the operator's session | - | state only via `ppl` CLI | Edit/Write on repo code; direct write to `runs/` |
 | ppl-briefer | good | high | nothing - it returns the brief as JSON and the controller writes it | every path, it has no write tool |
 | ppl-brief-challenger | good | xhigh | nothing - it returns its challenge as JSON, recorded with `ppl brief challenge` | every path, it has no write tool |
-| ppl-code-worker | average | high | paths in `boundary.write`, main sources | test sources (`**/src/test/**`, `**/*Test.java`, `**/*IT.java`, `**/*Tests.java`), git mutations |
+| ppl-code-worker | average | high | paths in `boundary.write`, main sources | test sources, the paths the run's test patterns match (the `[tests]` globs its harness snapshot froze, the Java defaults `**/src/test/**`, `**/*Test.java`, `**/*IT.java`, `**/*Tests.java` when absent) [R-ROLE-CODE-WORKER-TESTS] [R-TEST-PATTERNS-FROM-SNAPSHOT], git mutations |
 | ppl-test-worker | average | high | test paths only [R-ROLE-TEST-WORKER-MAIN] | main sources for writes [R-ROLE-TEST-WORKER-MAIN]; its own Read/Grep/Glob and Bash reads of them are denied by the guard hook [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS] |
 | ppl-verifier | good | xhigh | nothing | Edit, Write, MultiEdit, Bash, all git mutations |
 | ppl-review-responder | average | high | nothing | posting directly; it drafts, orchestrator posts |
@@ -391,7 +391,11 @@ Grep/Glob, none at all - the tool then searches the session's cwd). That half is
 field is read off the payload, not guessed at from text, and an omitted path resolves to the
 cwd rather than being treated as "unscoped, therefore allowed" - a search with no resolvable
 root is unclassifiable, and unclassifiable denies here exactly as it does everywhere else in
-this section [R-TEST-WORKER-READ-TOOLS].
+this section [R-TEST-WORKER-READ-TOOLS]. What the worker may read is what it may write: a path
+one of the run's test patterns matches, or the very directory a `<prefix>/**` pattern covers -
+`tests` under `tests/**`, every `src/test` under `**/src/test/**`, never `pkg/tests` - and a
+directory that is merely named `test` or `tests` is not readable unless a pattern says so
+[R-TEST-WORKER-READ-TOOLS] [R-TEST-PATTERNS-FROM-SNAPSHOT].
 
 `Bash` is one opaque string, so this half is lexical - and it is an ALLOWLIST, not a
 blocklist, because the requirement is that any command shape that cannot be classified is
@@ -646,7 +650,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 170 rows: 126 `blocking`, 17 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 171 rows: 127 `blocking`, 17 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -679,6 +683,19 @@ alternative), character classes, backslashes and a leading `!` (read literally),
 `./`, `..` or empty segment and a trailing `/` (they match nothing repo-relative, which would
 hand the tests to the code worker), and any glob matching a path of `boundary.PRODUCT_PROBES`
 [R-HARNESS-TEST-GLOBS-SANE].
+
+The run reads that frozen list, never the live harness: the guard hook, the done gate and `ppl
+apply-patch` split test sources from product code by the run's test patterns, the
+`tests.sources` of `runs/<task>/harness.json`, and a snapshot with no `tests` key or no file at
+all means the Java defaults, so a run started before `[tests]` existed keeps its behavior
+[R-TEST-PATTERNS-FROM-SNAPSHOT]. A snapshot that cannot be read or parsed, or whose `tests` table
+is malformed, is not read as "no test sources", which would hand every test to the code
+worker: the guard denies `OWNER_DECISION` each write of `ppl-code-worker` and `ppl-test-worker`
+inside the repo and each `ppl-test-worker` dispatch, the test worker's reads find no test path
+and deny `BOUNDARY_VIOLATION`, `ppl transition done` carries a blocker naming the harness
+snapshot, and `ppl apply-patch` refuses `OWNER_DECISION` [R-TEST-PATTERNS-FROM-SNAPSHOT]. No
+`ppl` command rewrites a snapshot, so the owner restores it or re-inits the run. The split is by
+path, so tests inside product files (Rust `#[cfg(test)]`, doctests) are not split.
 
 `ppl harness validate [--json]` runs `harness.verify`, the check the studio runs on a draft or a
 saved harness file, and prints its `{errors, warnings}` [R-STUDIO-SAME-VALIDATION]. Every load of
@@ -975,7 +992,10 @@ ppl doctor [--task <TASK-ID>]    # reports where the guard hook is registered - 
 2. `verdict.candidate_sha == git rev-parse HEAD`
 3. every acceptance ID in `brief.acceptance` has an evidence receipt on that same SHA
 4. `git diff --name-only <base_sha>..HEAD` is a subset of `boundary.write`, except for
-   test sources (`**/src/test/**`, `**/*Test.java`, `**/*IT.java`, `**/*Tests.java`),
+   test sources by the run's test patterns (the `[tests]` globs its harness snapshot froze,
+   the Java defaults `**/src/test/**`, `**/*Test.java`, `**/*IT.java`, `**/*Tests.java` when
+   absent, and none when the snapshot cannot be trusted, which is a blocker of its own
+   [R-TEST-PATTERNS-FROM-SNAPSHOT]),
    which are allowed anywhere in the tree, AND none of them matches `boundary.forbid` -
    checked first, ahead of the write-boundary and test-path exemption, and winning over
    both, the same order `ppl/boundary.py:check_path` already uses at write time. In a

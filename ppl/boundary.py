@@ -1,5 +1,6 @@
 import re
 
+from . import paths, store
 from .errors import PplError
 
 TEST_PATTERNS = ("**/src/test/**", "**/*Test.java", "**/*IT.java", "**/*Tests.java")
@@ -104,33 +105,59 @@ def patterns_from_snapshot(doc):
     return tuple(sources)
 
 
-def is_test_path(path):
-    return any_match(path, TEST_PATTERNS)
+_MISSING = object()
 
 
-def path_is_test_scoped(path):
-    """True when `path` is a test source (`is_test_path`) or a directory that
-    itself sits at or under a `test`/`tests` segment - a Read/Grep/Glob or a
-    Bash read aimed at such a directory can only ever surface test sources,
-    even though the directory name alone carries no file extension for
-    `is_test_path` to match.
+def run_test_patterns(task_id):
+    """The test globs runs/<task>/harness.json froze [R-TEST-PATTERNS-FROM-SNAPSHOT]:
+    the Java defaults when there is no such file (ppl init always writes one, so
+    that is a fixture or a run older than the snapshot), None when it cannot be
+    read or parsed, otherwise patterns_from_snapshot of it. Never raises."""
+    try:
+        doc = store.read_json(paths.run_dir(task_id) / "harness.json", _MISSING)
+        if doc is _MISSING:
+            return TEST_PATTERNS
+        return patterns_from_snapshot(doc)
+    except Exception:
+        return None
 
-    Deliberately conservative, matching Task 8's own doctrine (DESIGN 5.4):
-    an ordinary module root or a bare `src` directory does NOT qualify just
-    because a `src/test` subdirectory happens to live under it - only a path
-    landing AT or INSIDE a `test`/`tests` segment does. A false deny here
-    costs a clarifying round; a false allow hands the test worker the
+
+def is_test_path(path, patterns):
+    return any_match(path, patterns)
+
+
+def path_is_test_scoped(path, patterns):
+    """True when `path` is a test source or the very directory a `<prefix>/**`
+    glob covers: with `tests/**`, `tests` is scoped and `pkg/tests` is not, and
+    `**/src/test/**` scopes every `src/test` directory. A Read/Grep/Glob or a
+    Bash read aimed at such a directory can only surface what the glob names.
+
+    Deliberately conservative (DESIGN 5.4): an ordinary module root does not
+    qualify because a test directory lives under it, and a directory merely
+    named `test` or `tests` is no test source unless a glob says so. A false
+    deny costs a clarifying round, a false allow hands the test worker the
     implementation it must not see.
     """
-    if not path or path in (".", ""):
+    if not path or path == ".":
         return False
-    if is_test_path(path):
+    if is_test_path(path, patterns):
         return True
-    segments = [s for s in path.split("/") if s not in ("", ".")]
-    return "test" in segments or "tests" in segments
+    return any(glob_match(path, pattern[:-3]) for pattern in patterns or ()
+               if pattern.endswith("/**") and len(pattern) > 3)
 
 
-def check_path(role, path, bound):
+def _unknown_patterns(path):
+    return PplError("OWNER_DECISION",
+                    "the run's test patterns are unknown (runs/<task>/harness.json is "
+                    "unreadable or its tests table is malformed), so test sources cannot "
+                    "be told from product code: %s" % (path,))
+
+
+def check_path(role, path, bound, patterns):
+    """Refuses BOUNDARY_VIOLATION a write `role` may not make. `patterns` is the
+    run's run_test_patterns: None refuses OWNER_DECISION once the decision needs
+    it, since reading it as "no test sources" would hand the code worker every
+    test inside its boundary."""
     if path.startswith("/"):
         raise PplError("BOUNDARY_VIOLATION",
                        "path must not be absolute: %s" % (path,))
@@ -145,11 +172,13 @@ def check_path(role, path, bound):
         raise PplError("BOUNDARY_VIOLATION", "role %s may not write any path (%s)" % (role, path))
     if any_match(path, bound.get("forbid")):
         raise PplError("BOUNDARY_VIOLATION", "%s is a forbidden path for %s" % (path, role))
-    if rules["tests"] == "deny" and is_test_path(path):
+    if patterns is None:
+        raise _unknown_patterns(path)
+    if rules["tests"] == "deny" and is_test_path(path, patterns):
         raise PplError("BOUNDARY_VIOLATION",
                        "%s may not write test sources: %s" % (role, path))
     if rules["tests"] == "only":
-        if not is_test_path(path):
+        if not is_test_path(path, patterns):
             raise PplError("BOUNDARY_VIOLATION",
                            "%s may only write test sources: %s" % (role, path))
         return
@@ -172,11 +201,14 @@ def diff_paths(diff_text):
     return found
 
 
-def check_diff(role, diff_text, bound):
+def check_diff(role, diff_text, bound, patterns):
+    # before the loop, which would fold the refusal into a BOUNDARY_VIOLATION
+    if patterns is None:
+        raise _unknown_patterns("the whole patch")
     offenders = []
     for path in diff_paths(diff_text):
         try:
-            check_path(role, path, bound)
+            check_path(role, path, bound, patterns)
         except PplError as err:
             offenders.append("%s (%s)" % (path, err.message))
     if offenders:

@@ -266,10 +266,19 @@ def done_blockers(task_id, head_sha, changed_paths):
     # test-path exemption, and wins over it - mirrored here in the same order
     # so the done gate proves the same thing the write-time check enforces,
     # rather than only checking presence of a write match (W1, cycle 2 wave B).
+    # The test sources are the run's own, frozen in its harness snapshot. When
+    # that cannot be trusted no path is exempt, and the gate says why.
+    patterns = boundary.run_test_patterns(task_id)
+    if patterns is None:
+        reasons.append("the harness snapshot runs/%s/harness.json is unreadable or its tests "
+                       "table is malformed, so test sources cannot be told from product code - "
+                       "restore it or re-init the run [R-TEST-PATTERNS-FROM-SNAPSHOT]" % task_id)
+        patterns = ()
     for path in changed_paths:
         if boundary.any_match(path, bound.get("forbid")):
             reasons.append("changed path %s is in the forbidden-path list" % path)
-        elif not boundary.any_match(path, bound.get("write")) and not boundary.is_test_path(path):
+        elif (not boundary.any_match(path, bound.get("write"))
+              and not boundary.is_test_path(path, patterns)):
             reasons.append("changed path %s is outside the write boundary" % path)
 
     # The registry, not doc["findings"] (retired - see

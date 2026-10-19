@@ -911,10 +911,17 @@ def cmd_label(args):
 def cmd_apply_patch(args):
     task_id = resolve_task(args)
     require_current_generation(task_id, args.generation)
+    patterns = boundary.run_test_patterns(task_id)
+    if patterns is None:
+        raise PplError("OWNER_DECISION",
+                       "runs/%s/harness.json is unreadable or its tests table is malformed, so "
+                       "test sources cannot be told from product code - restore it or re-init "
+                       "the run [R-TEST-PATTERNS-FROM-SNAPSHOT]" % task_id)
     state = run.load(task_id)
     bound = store.read_json(paths.run_dir(task_id) / "boundary.json", {"write": [], "forbid": []})
-    diff_text = open(args.diff, "r", encoding="utf-8").read()
-    boundary.check_diff(args.role, diff_text, bound)
+    with open(args.diff, "r", encoding="utf-8") as handle:
+        diff_text = handle.read()
+    boundary.check_diff(args.role, diff_text, bound, patterns)
     gitfacts.apply_patch(state["repo"], args.diff)
     print("patch applied within boundary")
     return 0

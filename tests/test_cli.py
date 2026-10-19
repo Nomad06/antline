@@ -1427,6 +1427,49 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
         self.assertEqual(out.splitlines(), ["stage: escalation", "generation: 1"])
 
 
+class TestApplyPatchPatterns(unittest.TestCase):
+    """`ppl apply-patch` splits tests from product code by the run's snapshot."""
+
+    PYTHON = ["tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
+
+    def init(self, task):
+        call("init", task, "--tracker-url", "u", "--repo", make_repo(),
+             "--harness", "example-maven")
+        snapshot = paths.run_dir(task) / "harness.json"
+        self.assertTrue(snapshot.is_file(), "ppl init wrote no harness snapshot")
+        (paths.run_dir(task) / "boundary.json").write_text(
+            json.dumps({"write": ["src/**"], "forbid": []}), encoding="utf-8")
+        return snapshot
+
+    def test_apply_patch_refuses_a_python_test_for_the_code_worker(self):
+        # src/shop/test_cart.py is inside the write boundary and no Java test,
+        # so only the snapshot's Python globs can refuse it
+        snapshot = self.init("PATCH-1")
+        doc = json.loads(snapshot.read_text(encoding="utf-8"))
+        doc["tests"] = {"sources": self.PYTHON}
+        snapshot.write_text(json.dumps(doc), encoding="utf-8")
+        diff = write_text_file("--- /dev/null\n+++ b/src/shop/test_cart.py\n"
+                               "@@ -0,0 +1 @@\n+def test_total(): pass\n")
+        code, _, err = call("apply-patch", "--role", "ppl-code-worker", "--diff", diff,
+                            "--generation", "1", "--task", "PATCH-1")
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "BOUNDARY_VIOLATION")
+        self.assertIn("may not write test sources: src/shop/test_cart.py", error["message"])
+
+    def test_apply_patch_is_refused_when_the_snapshot_is_unreadable(self):
+        # rule: R-TEST-PATTERNS-FROM-SNAPSHOT
+        snapshot = self.init("PATCH-2")
+        snapshot.write_text("{not json", encoding="utf-8")
+        code, _, err = call("apply-patch", "--role", "ppl-code-worker",
+                            "--diff", "/no/such/diff.patch",
+                            "--generation", "1", "--task", "PATCH-2")
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        self.assertIn("harness.json", error["message"])
+
+
 class TestNameContractSpecRevision(unittest.TestCase):
     """R-BRIEF-SPEC-REVISION-STALE end to end through the real CLI: a rebrief
     that changes name_contract must invalidate a PASS already recorded on the

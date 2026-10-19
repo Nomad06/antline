@@ -364,6 +364,46 @@ class TestVerdict(unittest.TestCase):
         self.assertTrue(any("retry budget" in r for r in reasons))
 
 
+class TestDonePatterns(unittest.TestCase):
+    """Done condition 4 exempts the test sources the run's harness snapshot names."""
+
+    PYTHON = ["tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
+    CHANGED = ["src/shop/cart.py", "tests/unit/test_cart.py"]
+
+    def setUp(self):
+        self.task = "DEMO-%d" % next(COUNTER)
+        run.init(self.task, "u", "/tmp/repo")
+        state = run.load(self.task)
+        state["acceptance"] = ["AC-1"]
+        state["spec_revision"] = "sha256:spec"
+        state["brief_challenge"] = {"spec_revision": "sha256:spec", "verdict": "ACCEPTED",
+                                    "at": "2026-01-01T00:00:00+00:00"}
+        run.save(state)
+        verdict.record(self.task, good_verdict(self.task, "abc"), "abc")
+        evidence.add(self.task, "focused-tests", "pass", "abc", "/tmp/l", rc_zero(), PRODUCER)
+        evidence.add(self.task, "secret-scan", "pass", "abc", "/tmp/l", rc_zero(), PRODUCER)
+        evidence.add(self.task, "simplification", "skip", "abc", "/tmp/l", rc_zero(), PRODUCER)
+        store.write_json(paths.run_dir(self.task) / "boundary.json",
+                         {"write": ["src/**"], "forbid": []})
+
+    def snapshot(self):
+        return paths.run_dir(self.task) / "harness.json"
+
+    def test_done_exempts_python_tests_under_python_patterns(self):
+        # the Java defaults do not know a Python test, so it counts against the boundary
+        java = verdict.done_blockers(self.task, "abc", self.CHANGED)
+        self.assertEqual(len(java), 1, java)
+        self.assertIn("tests/unit/test_cart.py", java[0])
+        store.write_json(self.snapshot(), {"format": 1, "tests": {"sources": self.PYTHON}})
+        self.assertEqual(verdict.done_blockers(self.task, "abc", self.CHANGED), [])
+
+    def test_done_is_blocked_when_the_snapshot_is_unreadable(self):
+        # rule: R-TEST-PATTERNS-FROM-SNAPSHOT
+        self.snapshot().write_text("{not json", encoding="utf-8")
+        reasons = verdict.done_blockers(self.task, "abc", ["src/shop/cart.py"])
+        self.assertTrue(any("harness snapshot" in reason for reason in reasons), reasons)
+
+
 class TestSpecRevisionStaleness(unittest.TestCase):
     """R-BRIEF-SPEC-REVISION-STALE: the same-SHA discipline (6.5), applied to
     the name contract instead of the git head. `record` catches a verdict that

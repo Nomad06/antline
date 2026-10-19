@@ -18,6 +18,7 @@ import ppl_guard
 
 MAIN = "source/core/orders/src/main/java/orders/PriceCalculator.java"
 TEST = "source/core/orders/src/test/java/orders/PriceCalculatorTest.java"
+PYTHON = ["tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
 SIGNATURE = "public long totalWithDiscount(long amountCents, int percent) {"
 BODY_ONE = "long discount = amountCents * percent / 100;"
 BODY_TWO = "return Math.max(0L, amountCents - discount);"
@@ -238,6 +239,20 @@ class TestDispatchLeak(unittest.TestCase):
         git(self.repo, "add", ".")
         git(self.repo, "commit", "-q", "-m", "tests")
         prompt = BODY_ONE + "\n" + BODY_TWO
+        self.assertIsNone(ppl_guard.decide(dispatch(prompt)))
+
+    def test_python_test_lines_are_not_counted_under_python_patterns(self):
+        write(self.repo, "tests/test_price.py",
+              "def test_total():\n    %s\n    %s\n" % (BODY_ONE, BODY_TWO))
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-q", "-m", "tests")
+        prompt = BODY_ONE + "\n" + BODY_TWO
+        # no snapshot: the Java defaults, which take tests/test_price.py for product code
+        reason = self.reason(ppl_guard.decide(dispatch(prompt)))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("tests/test_price.py", reason)
+        store.write_json(paths.run_dir(self.task) / "harness.json",
+                         {"format": 1, "tests": {"sources": PYTHON}})
         self.assertIsNone(ppl_guard.decide(dispatch(prompt)))
 
     def test_the_same_prompt_to_the_code_worker_is_allowed(self):

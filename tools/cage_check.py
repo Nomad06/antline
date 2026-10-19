@@ -36,11 +36,23 @@ def make_ppl_home():
     return home
 
 
-def make_worktree():
-    """A real git worktree. The guard reads git for one check only, the
-    ppl-test-worker dispatch (R-TEST-WORKER-DISPATCH-LEAK), and a real repo
-    keeps every case an honest rehearsal rather than a bare directory standing
-    in for one.
+# What a Python harness's [tests] table lists, frozen into the python cage's snapshot.
+PYTHON_TEST_SOURCES = ["tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
+
+LAYOUT_FILES = {
+    "java": {"source/Main.java": "class Main {}\n",
+             "source/MainTest.java": "class MainTest {}\n",
+             "source/src/test/OtherTest.java": "class OtherTest {}\n"},
+    "python": {"src/shop/cart.py": "def total(items):\n    return sum(items)\n",
+               "tests/unit/test_cart.py": "def test_total():\n    pass\n"},
+}
+
+
+def make_worktree(layout="java"):
+    """A real git worktree holding LAYOUT_FILES[layout]. The guard reads git for
+    one check only, the ppl-test-worker dispatch (R-TEST-WORKER-DISPATCH-LEAK),
+    and a real repo keeps every case an honest rehearsal rather than a bare
+    directory standing in for one.
     """
     tree = Path(tempfile.mkdtemp(prefix="ppl-cage-repo-"))
     run = lambda *args: subprocess.run(  # noqa: E731 - local one-liner helper
@@ -49,13 +61,11 @@ def make_worktree():
     run("init", "-q")
     run("config", "user.email", "cage@example.com")
     run("config", "user.name", "cage")
-    (tree / "source").mkdir()
-    (tree / "source" / "Main.java").write_text("class Main {}\n", encoding="utf-8")
-    (tree / "source" / "MainTest.java").write_text("class MainTest {}\n", encoding="utf-8")
-    (tree / "source" / "src" / "test").mkdir(parents=True)
-    (tree / "source" / "src" / "test" / "OtherTest.java").write_text(
-        "class OtherTest {}\n", encoding="utf-8")
-    run("add", "source/Main.java", "source/MainTest.java", "source/src/test/OtherTest.java")
+    files = LAYOUT_FILES[layout]
+    for rel, text in files.items():
+        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tree / rel).write_text(text, encoding="utf-8")
+    run("add", *files)
     run("commit", "-q", "-m", "initial")
     return tree
 
@@ -86,9 +96,13 @@ def decision(result):
 
 
 class Cage:
-    def __init__(self):
+    """A sandbox run. The java layout is a Maven tree under the example Maven
+    harness's snapshot, the python one a src/ and tests/ tree whose snapshot
+    names PYTHON_TEST_SOURCES."""
+
+    def __init__(self, layout="java"):
         self.ppl_home = make_ppl_home()
-        self.worktree = make_worktree()
+        self.worktree = make_worktree(layout)
         self.unrelated = Path(tempfile.mkdtemp(prefix="ppl-cage-unrelated-"))
         os.environ["PPL_HOME"] = str(self.ppl_home)
         # ppl modules are imported only after PPL_HOME is set, matching the
@@ -98,19 +112,23 @@ class Cage:
         self._run = run
         self._store = store
         self._paths = paths
-        self.task_id = "CAGE-90001"
-        run.init(self.task_id, "https://example.atlassian.net/browse/CAGE-90001",
+        python = layout == "python"
+        self.task_id = "CAGE-90002" if python else "CAGE-90001"
+        run.init(self.task_id, "https://example.atlassian.net/browse/" + self.task_id,
                  str(self.worktree))
         store.write_json(paths.run_dir(self.task_id) / "boundary.json",
-                          {"write": ["source/**"], "forbid": []})
-        # The test worker's build shapes come from the run's harness snapshot,
-        # so the sandbox run carries the example Maven harness's one.
-        source = REPO_ROOT / "defaults" / "harnesses" / "example-maven"
-        target = paths.harness_dir("example-maven")
+                          {"write": ["src/**" if python else "source/**"], "forbid": []})
+        # The test worker's build shapes and the test globs come from the run's
+        # harness snapshot, so the sandbox run carries an example harness's one.
+        name = "example-generic" if python else "example-maven"
+        source = REPO_ROOT / "defaults" / "harnesses" / name
+        target = paths.harness_dir(name)
         if not target.exists():
             shutil.copytree(source, target)
-        store.write_json(paths.run_dir(self.task_id) / "harness.json",
-                         harness.snapshot(harness.load("example-maven")))
+        snapshot = harness.snapshot(harness.load(name))
+        if python:
+            snapshot["tests"] = {"sources": list(PYTHON_TEST_SOURCES)}
+        store.write_json(paths.run_dir(self.task_id) / "harness.json", snapshot)
         self.results = []
 
     def payload(self, agent, tool, tool_input, cwd):
@@ -149,14 +167,57 @@ class Cage:
 
 
 def main():
-    cage = Cage()
+    cages = []
     try:
-        return run_cases(cage)
+        cages.append(Cage())
+        run_cases(cages[-1])
+        cages.append(Cage(layout="python"))
+        run_python_cases(cages[-1])
+        return report([result for cage in cages for result in cage.results])
     finally:
         # This harness used to leave three directories per invocation behind in
         # TMPDIR, the same leak the test suite had.
-        for path in (cage.ppl_home.parent, cage.worktree, cage.unrelated):
-            shutil.rmtree(str(path), ignore_errors=True)
+        for cage in cages:
+            for path in (cage.ppl_home.parent, cage.worktree, cage.unrelated):
+                shutil.rmtree(str(path), ignore_errors=True)
+
+
+def report(results):
+    failed = [name for name, ok, _ in results if not ok]
+    print()
+    print("%d/%d cases passed" % (len(results) - len(failed), len(results)))
+    if failed:
+        print("FAILED: " + ", ".join(failed))
+        return 1
+    return 0
+
+
+def run_python_cases(cage):
+    """The role split on a Python layout, by the globs its snapshot froze rather
+    than the Java defaults [R-TEST-PATTERNS-FROM-SNAPSHOT]."""
+    wt = str(cage.worktree)
+    test_file = wt + "/tests/unit/test_cart.py"
+    product_file = wt + "/src/shop/cart.py"
+
+    cage.check(
+        "python layout: ppl-test-worker writing a python test is allowed",
+        cage.payload("ppl-test-worker", "Write", {"file_path": test_file}, wt),
+        "allow")
+
+    cage.check(
+        "python layout: ppl-test-worker writing product code is denied",
+        cage.payload("ppl-test-worker", "Write", {"file_path": product_file}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "python layout: ppl-code-worker writing a python test is denied",
+        cage.payload("ppl-code-worker", "Write", {"file_path": test_file}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
+        "python layout: ppl-code-worker writing product code is allowed",
+        cage.payload("ppl-code-worker", "Write", {"file_path": product_file}, wt),
+        "allow")
 
 
 def run_cases(cage):
@@ -909,14 +970,6 @@ def run_cases(cage):
         "a ppl-test-worker dispatch of acceptance criteria only is allowed",
         dispatch("AC-1: 10 percent off 1000 gives 900.\nAC-2: never below zero."),
         "allow")
-
-    failed = [name for name, ok, _ in cage.results if not ok]
-    print()
-    print("%d/%d cases passed" % (len(cage.results) - len(failed), len(cage.results)))
-    if failed:
-        print("FAILED: " + ", ".join(failed))
-        return 1
-    return 0
 
 
 if __name__ == "__main__":

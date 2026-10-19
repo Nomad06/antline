@@ -135,10 +135,9 @@ the test writer tries to `cat` product code and the hook denies it
 - One task at a time. Parallel lanes are not built yet.
 - Claude only. All agents share one model family, so their blind spots are correlated.
   The provider-neutral contract exists, the adapters for other providers do not.
-- The test/main split knows Java and Maven layouts only: `src/test/**`, `*Test.java`,
-  `*IT.java`, `*Tests.java`. On other stacks the hook takes test files for product code,
-  so it refuses them to the test writer [R-ROLE-TEST-WORKER-MAIN] and lets the code writer
-  edit them inside its boundary, until those patterns become configurable.
+- The test/main split comes from the harness's `[tests]` globs (the Java and Maven
+  defaults when it has none), and the split is by path, so tests inside product files
+  (Rust `#[cfg(test)]`, doctests) are not isolated.
 - Jira is the only tracker, through the Atlassian MCP server.
 - A worktree is not a sandbox. A process can still read credentials or write outside the
   tree if the operating system lets it.

@@ -10,13 +10,23 @@ import tmphome
 
 os.environ.setdefault("PPL_HOME", tmphome.mkdtemp(prefix="pplhome-"))
 
-from ppl import boundary
+from ppl import boundary, paths, store
 from ppl.errors import PplError
 
 BOUND = {
     "write": ["source/core/orders/**"],
     "forbid": ["source/core/ledger/**"],
 }
+JAVA = boundary.TEST_PATTERNS
+PYTHON = ["tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
+GO = ["**/*_test.go", "**/testdata/**"]
+# (name, patterns, a test file, a product file) for every stack the guard is proven on.
+PATTERN_SETS = (
+    ("java", JAVA, "a/src/test/java/FooTest.java", "a/src/main/java/Foo.java"),
+    ("python", tuple(PYTHON), "tests/unit/test_cart.py", "src/shop/cart.py"),
+    ("go", tuple(GO), "pkg/cart/cart_test.go", "pkg/cart/cart.go"),
+)
+EVERYWHERE = {"write": ["**"], "forbid": []}
 
 
 class TestGlob(unittest.TestCase):
@@ -74,40 +84,129 @@ class TestGlobProblem(unittest.TestCase):
         self.assertIn("'src/main.py'", boundary.glob_problem("src/**"))
 
 
+class TestRunTestPatterns(unittest.TestCase):
+    TASK = "BOUNDS-1"
+
+    def snapshot(self):
+        return paths.run_dir(self.TASK) / "harness.json"
+
+    def tearDown(self):
+        self.snapshot().unlink(missing_ok=True)
+
+    def test_a_run_without_a_snapshot_reads_as_the_java_defaults(self):
+        self.assertEqual(boundary.run_test_patterns(self.TASK), JAVA)
+
+    def test_a_snapshot_naming_python_globs_reads_as_those_globs(self):
+        store.write_json(self.snapshot(), {"format": 1, "tests": {"sources": PYTHON}})
+        self.assertEqual(boundary.run_test_patterns(self.TASK), tuple(PYTHON))
+
+    def test_a_snapshot_that_cannot_be_trusted_reads_as_none(self):
+        for text in ("{not json", "null", "[]", '{"tests": {"sources": []}}'):
+            with self.subTest(text=text):
+                self.snapshot().parent.mkdir(parents=True, exist_ok=True)
+                self.snapshot().write_text(text, encoding="utf-8")
+                self.assertIsNone(boundary.run_test_patterns(self.TASK))
+
+    def test_an_id_that_names_no_run_reads_as_none_without_raising(self):
+        for task_id in (None, "", "../x"):
+            with self.subTest(task_id=task_id):
+                self.assertIsNone(boundary.run_test_patterns(task_id))
+
+
+class TestEveryPatternSet(unittest.TestCase):
+    """The same role rules hold whichever stack's globs the run froze."""
+
+    def test_the_code_worker_may_not_write_the_sets_test_file(self):
+        for name, patterns, test_file, product_file in PATTERN_SETS:
+            with self.subTest(stack=name):
+                with self.assertRaises(PplError) as ctx:
+                    boundary.check_path("ppl-code-worker", test_file, EVERYWHERE, patterns)
+                self.assertEqual(ctx.exception.code, "BOUNDARY_VIOLATION")
+                self.assertIn("may not write test sources", ctx.exception.message)
+                boundary.check_path("ppl-code-worker", product_file, EVERYWHERE, patterns)
+
+    def test_the_test_worker_may_write_only_the_sets_test_file(self):
+        for name, patterns, test_file, product_file in PATTERN_SETS:
+            with self.subTest(stack=name):
+                boundary.check_path("ppl-test-worker", test_file, EVERYWHERE, patterns)
+                with self.assertRaises(PplError) as ctx:
+                    boundary.check_path("ppl-test-worker", product_file, EVERYWHERE, patterns)
+                self.assertEqual(ctx.exception.code, "BOUNDARY_VIOLATION")
+
+    def test_reads_and_writes_agree_on_every_file_path(self):
+        files = [path for _, _, test_file, product_file in PATTERN_SETS
+                 for path in (test_file, product_file)]
+        for name, patterns, _, _ in PATTERN_SETS:
+            for path in files:
+                with self.subTest(stack=name, path=path):
+                    try:
+                        boundary.check_path("ppl-test-worker", path, EVERYWHERE, patterns)
+                        writable = True
+                    except PplError:
+                        writable = False
+                    self.assertEqual(boundary.path_is_test_scoped(path, patterns), writable)
+                    self.assertEqual(boundary.is_test_path(path, patterns), writable)
+
+    def test_a_directory_glob_scopes_its_own_directory_only(self):
+        cases = ((tuple(PYTHON), "tests", True), (tuple(PYTHON), "test", True),
+                 (tuple(PYTHON), "pkg/tests", False), (tuple(PYTHON), "src", False),
+                 (JAVA, "a/src/test", True), (JAVA, "src/test", True),
+                 (JAVA, "a/test", False), (JAVA, "tests", False),
+                 (tuple(GO), "pkg/testdata", True), (tuple(GO), "pkg/tests", False))
+        for patterns, path, scoped in cases:
+            with self.subTest(patterns=patterns, path=path):
+                self.assertEqual(boundary.path_is_test_scoped(path, patterns), scoped)
+
+    def test_unknown_patterns_refuse_every_writer_instead_of_reading_as_no_tests(self):
+        # rule: R-TEST-PATTERNS-FROM-SNAPSHOT
+        # None is what run_test_patterns hands back for a snapshot it cannot
+        # trust. Read as "no test sources", it would let the code worker write
+        # any test inside its boundary.
+        for role in ("ppl-code-worker", "ppl-test-worker"):
+            with self.subTest(role=role):
+                with self.assertRaises(PplError) as ctx:
+                    boundary.check_path(role, "src/shop/test_cart.py", EVERYWHERE, None)
+                self.assertEqual(ctx.exception.code, "OWNER_DECISION")
+        diff = "--- a/src/shop/test_cart.py\n+++ b/src/shop/test_cart.py\n@@ -1 +1 @@\n-a\n+b\n"
+        with self.assertRaises(PplError) as ctx:
+            boundary.check_diff("ppl-code-worker", diff, EVERYWHERE, None)
+        self.assertEqual(ctx.exception.code, "OWNER_DECISION")
+
+
 class TestCodeWorker(unittest.TestCase):
     def test_allows_path_inside_write_boundary(self):
-        boundary.check_path("ppl-code-worker", "source/core/orders/Foo.java", BOUND)
+        boundary.check_path("ppl-code-worker", "source/core/orders/Foo.java", BOUND, JAVA)
 
     def test_rejects_path_outside_write_boundary(self):
         # rule: R-ROLE-CODE-WORKER-BOUNDARY
         with self.assertRaises(PplError) as ctx:
-            boundary.check_path("ppl-code-worker", "source/core/other/Foo.java", BOUND)
+            boundary.check_path("ppl-code-worker", "source/core/other/Foo.java", BOUND, JAVA)
         self.assertEqual(ctx.exception.code, "BOUNDARY_VIOLATION")
 
     def test_rejects_test_sources_even_inside_boundary(self):
         # rule: R-ROLE-CODE-WORKER-TESTS
         with self.assertRaises(PplError):
             boundary.check_path(
-                "ppl-code-worker", "source/core/orders/src/test/java/FooTest.java", BOUND)
+                "ppl-code-worker", "source/core/orders/src/test/java/FooTest.java", BOUND, JAVA)
 
     def test_rejects_forbidden_even_if_write_pattern_matches(self):
         # rule: R-ROLE-FORBIDDEN-PATHS
         wide = {"write": ["source/**"], "forbid": ["source/core/ledger/**"]}
         with self.assertRaises(PplError):
-            boundary.check_path("ppl-code-worker", "source/core/ledger/L.java", wide)
+            boundary.check_path("ppl-code-worker", "source/core/ledger/L.java", wide, JAVA)
 
     def test_rejects_path_with_traversal_sequence(self):
         # rule: R-PATH-TRAVERSAL
         with self.assertRaises(PplError) as ctx:
             boundary.check_path(
-                "ppl-code-worker", "source/core/orders/../../ledger/L.java", BOUND)
+                "ppl-code-worker", "source/core/orders/../../ledger/L.java", BOUND, JAVA)
         self.assertEqual(ctx.exception.code, "BOUNDARY_VIOLATION")
         self.assertIn("..", ctx.exception.message)
 
     def test_rejects_absolute_path(self):
         # rule: R-PATH-ABSOLUTE
         with self.assertRaises(PplError) as ctx:
-            boundary.check_path("ppl-code-worker", "/source/core/orders/Foo.java", BOUND)
+            boundary.check_path("ppl-code-worker", "/source/core/orders/Foo.java", BOUND, JAVA)
         self.assertEqual(ctx.exception.code, "BOUNDARY_VIOLATION")
         self.assertIn("absolute", ctx.exception.message)
 
@@ -115,18 +214,18 @@ class TestCodeWorker(unittest.TestCase):
 class TestTestWorker(unittest.TestCase):
     def test_allows_test_sources(self):
         boundary.check_path(
-            "ppl-test-worker", "source/core/orders/src/test/java/FooIT.java", BOUND)
+            "ppl-test-worker", "source/core/orders/src/test/java/FooIT.java", BOUND, JAVA)
 
     def test_rejects_main_sources(self):
         # rule: R-ROLE-TEST-WORKER-MAIN
         with self.assertRaises(PplError):
             boundary.check_path(
-                "ppl-test-worker", "source/core/orders/src/main/java/Foo.java", BOUND)
+                "ppl-test-worker", "source/core/orders/src/main/java/Foo.java", BOUND, JAVA)
 
     def test_rejects_path_with_traversal_sequence(self):
         with self.assertRaises(PplError) as ctx:
             boundary.check_path(
-                "ppl-test-worker", "source/core/orders/src/test/../../ledger/Evil.java", BOUND)
+                "ppl-test-worker", "source/core/orders/src/test/../../ledger/Evil.java", BOUND, JAVA)
         self.assertEqual(ctx.exception.code, "BOUNDARY_VIOLATION")
         self.assertIn("..", ctx.exception.message)
 
@@ -136,7 +235,7 @@ class TestReadOnlyRoles(unittest.TestCase):
         # rule: R-ROLE-READONLY-NO-WRITE
         for path in ["source/core/orders/Foo.java", "anything.txt"]:
             with self.assertRaises(PplError):
-                boundary.check_path("ppl-verifier", path, BOUND)
+                boundary.check_path("ppl-verifier", path, BOUND, JAVA)
 
     def test_every_read_only_role_may_write_nothing(self):
         # rule: R-ROLE-READONLY-NO-WRITE
@@ -144,7 +243,7 @@ class TestReadOnlyRoles(unittest.TestCase):
                      "ppl-review-responder"):
             for path in ["source/core/orders/Foo.java", "anything.txt"]:
                 with self.subTest(role=role, path=path), self.assertRaises(PplError):
-                    boundary.check_path(role, path, BOUND)
+                    boundary.check_path(role, path, BOUND, JAVA)
 
     def test_every_generated_role_has_a_row(self):
         # The guard and the dispatch counter recognise a role by its row here,
@@ -178,7 +277,7 @@ class TestDiff(unittest.TestCase):
     def test_check_diff_rejects_when_any_path_escapes(self):
         # rule: R-APPLY-PATCH-BOUNDARY
         with self.assertRaises(PplError) as ctx:
-            boundary.check_diff("ppl-code-worker", self.DIFF, BOUND)
+            boundary.check_diff("ppl-code-worker", self.DIFF, BOUND, JAVA)
         self.assertEqual(ctx.exception.code, "BOUNDARY_VIOLATION")
         self.assertIn("source/core/ledger/L.java", ctx.exception.message)
 
@@ -191,7 +290,7 @@ class TestDiff(unittest.TestCase):
             "@@ -1 +1 @@\n-old\n+new\n"
         )
         with self.assertRaises(PplError) as ctx:
-            boundary.check_diff("ppl-code-worker", traversal_diff, BOUND)
+            boundary.check_diff("ppl-code-worker", traversal_diff, BOUND, JAVA)
         self.assertEqual(ctx.exception.code, "BOUNDARY_VIOLATION")
         self.assertIn("..", ctx.exception.message)
 
