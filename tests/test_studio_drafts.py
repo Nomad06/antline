@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
-from ppl import cli, config, harness
+from ppl import cli, config, harness, trackers
 from ppl.errors import PplError
 from ppl.studio import drafts, project, stacks
 
@@ -422,6 +422,33 @@ class TestInstall(DraftTestCase):
         draft = self.preset()
         self.install(draft)
         self.assertEqual(self.install(draft)["done"], ["harness"])
+
+    def draft_for(self, kind, repo=None):
+        draft = copy.deepcopy(self.preset())
+        offer = copy.deepcopy(draft["trackers"][kind])
+        if repo:
+            offer["tracker"]["repo"] = repo
+            offer["task"] = trackers.get(kind).task_defaults(offer["tracker"])
+        draft["doc"]["tracker"], draft["doc"]["task"] = offer["tracker"], offer["task"]
+        return draft
+
+    def test_a_github_issues_draft_replacing_a_jira_harness_installs_github_issues(self):
+        self.install(self.draft_for("jira"))
+        self.install(self.draft_for("github-issues", "o/r"), replace=True)
+        installed = harness.load("demo")
+        self.assertEqual(installed["tracker"], {"kind": "github-issues", "repo": "o/r",
+                                                "task_prefix": "GH"})
+        self.assertEqual(installed["task"]["key_pattern"], "^GH-[0-9]+$")
+
+    def test_a_jira_draft_replacing_a_github_issues_harness_installs_jira(self):
+        self.install(self.draft_for("github-issues", "o/r"))
+        self.install(self.draft_for("jira"), replace=True)
+        self.assertEqual(harness.load("demo")["tracker"]["kind"], "jira")
+
+    def test_a_github_issues_draft_replacing_another_repo_installs_the_drafts_repo(self):
+        self.install(self.draft_for("github-issues", "o/old"))
+        self.install(self.draft_for("github-issues", "o/new"), replace=True)
+        self.assertEqual(harness.load("demo")["tracker"]["repo"], "o/new")
 
     def install_with_a_check_in_between(self, draft, other):
         original = harness._copy

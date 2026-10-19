@@ -257,6 +257,16 @@ class TestTrackerChoice(GithubIssuesCase):
                        "git@github.com:o", "o/r", "https://github.com/o r/x", 5):
             self.assertIsNone(read(remote), remote)
 
+    def test_dot_only_and_dot_led_repo_parts_are_refused(self):
+        for repo in ("o/..", "../r", "./r", "o/.", ".o/r", "o/.."):
+            errors, _ = self.adapter.validate(github_issues_table(repo=repo))
+            self.assertEqual(len(errors), 1, repo)
+            self.assertFalse(self.adapter.usable(github_issues_table(repo=repo)), repo)
+            self.assertIsNone(self.adapter.repo_from_remote("https://github.com/" + repo), repo)
+        for repo in ("o/.github", "o/r.js", "o/r-1_2"):
+            self.assertEqual(self.adapter.validate(github_issues_table(repo=repo)), ([], []), repo)
+            self.assertEqual(self.adapter.repo_from_remote("git@github.com:%s.git" % repo), repo)
+
     def test_the_github_issues_doctor_check_runs_auth_then_a_one_issue_list(self):
         gh = FakeGh((0, "", "logged in"), (0, "[]", ""))
         result = self.adapter.doctor_check(github_issues_table(), runner=gh)

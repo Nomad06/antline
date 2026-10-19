@@ -19,7 +19,7 @@ TRANSPORT = "cli"
 KEYS = ("kind", "repo", "task_prefix")
 DEFAULTS = {"task_prefix": "GH"}
 
-_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_REPO = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/(?!\.{1,2}\Z)[A-Za-z0-9_.-]+")
 _PREFIX = re.compile(r"[A-Z][A-Z0-9]*")
 _TASK_ID = re.compile(r"[A-Z][A-Z0-9]*-([1-9][0-9]*)")
 

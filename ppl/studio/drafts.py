@@ -183,6 +183,9 @@ def install(name, doc, fragments, replace, emit):
                    "key_pattern": loaded["task"]["key_pattern"], "forge": loaded["forge"]["kind"]}
         if loaded["forge"]["kind"] == "gitlab":
             answers["gitlab_mcp_server"] = loaded["forge"]["mcp_server"]
+        answers["tracker"] = loaded["tracker"]["kind"]
+        if loaded["tracker"]["kind"] == "github-issues":
+            answers["tracker_repo"] = loaded["tracker"]["repo"]
         if replace:
             answers["replace_harness"] = "yes"
         return wizard.run_step("harness", answers, emit)
