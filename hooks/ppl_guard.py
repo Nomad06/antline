@@ -1888,7 +1888,7 @@ def dispatch_leak_deny(prompt, task_id, state):
                 "brief's interfaces only." % (len(hits), rel, first[:40]))
 
 
-def decide(payload):
+def _decide(payload):
     if not isinstance(payload, dict):
         return None
     tool = payload.get("tool_name", "")
@@ -2014,11 +2014,17 @@ def decide(payload):
     if not halt_scoped:
         return None
 
-    if (state.get("stage") != "merge_watch"
-            and is_tracker_write_tool(tool, tracker_from_snapshot(task_id))):
-        return deny("OWNER_DECISION",
-                    "Jira is written only after the merge is observed, current stage is %s"
-                    % state.get("stage"))
+    if is_tracker_write_tool(tool, tracker_from_snapshot(task_id)):
+        if state.get("stage") != "merge_watch":
+            return deny("OWNER_DECISION",
+                        "Jira is written only after the merge is observed, current stage is %s"
+                        % state.get("stage"))
+        mr = state.get("mr")
+        if not (isinstance(mr, dict) and mr.get("merged_sha")):
+            return deny("OWNER_DECISION",
+                        "Jira is written only after the merge is observed: the run is in "
+                        "merge_watch but no merge is recorded, run `ppl merge observed --sha "
+                        "<merged sha>` first")
 
     record = control.read(task_id)
     if record and record.get("invalid"):
@@ -2103,13 +2109,62 @@ def decide(payload):
     return None
 
 
+# The session_id `ppl doctor` puts on its hook_runs probe, an unroled Read of
+# /dev/null (ppl/doctor.py:_run_problem).
+DOCTOR_PROBE_SESSION_ID = "ppl-doctor-hook-probe"
+
+
+def _is_doctor_probe(payload):
+    return (payload.get("session_id") == DOCTOR_PROBE_SESSION_ID
+            and payload.get("agent_type") is None and payload.get("tool_name") == "Read"
+            and payload.get("tool_input") == {"file_path": "/dev/null"})
+
+
+def log_denial(payload, result):
+    """Append one deny event to the active run's log. Best effort: whatever goes
+    wrong here, the decision already made stands [R-GUARD-DENIAL-LOGGED]. The
+    doctor's probe is not logged: it is not a call any session made. A log.jsonl
+    that is there but not a regular file is skipped, since opening a FIFO for
+    append blocks until a reader appears."""
+    try:
+        if _is_doctor_probe(payload):
+            return
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        task_id = run.active()
+        if not task_id:
+            return
+        log = paths.run_dir(task_id) / "log.jsonl"
+        if os.path.lexists(log) and not os.path.isfile(log):
+            return
+        tool_input = payload.get("tool_input")
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        target = tool_input.get("command") or target_path(tool_input)
+        agent = payload.get("agent_type")
+        store.append_log(task_id, {
+            "event": "deny",
+            "role": agent if isinstance(agent, str) else None,
+            "tool": payload.get("tool_name"),
+            "code": reason.split(" ", 1)[0],
+            "target": str(target)[:200] if target else None})
+    except Exception:
+        pass
+
+
+def decide(payload):
+    result = _decide(payload)
+    if result and isinstance(payload, dict):
+        log_denial(payload, result)
+    return result
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
     except Exception:
         return 0
     try:
-        result = decide(payload)
+        result = _decide(payload)
     except Exception as err:
         # Claude Code reads exit 0 with no output as allow. A ppl-* role is
         # refused instead, an unroled session keeps the allow so a hook defect
@@ -2119,16 +2174,23 @@ def main():
         # would not block the call either.
         agent = payload.get("agent_type") if isinstance(payload, dict) else None
         if isinstance(agent, str) and agent in boundary.ROLE_RULES:
-            sys.stdout.write(json.dumps(deny(
+            refusal = deny(
                 "BOUNDARY_VIOLATION",
-                "guard internal error, role call refused: %s" % type(err).__name__)))
+                "guard internal error, role call refused: %s" % type(err).__name__)
+            sys.stdout.write(json.dumps(refusal))
+            sys.stdout.flush()
+            log_denial(payload, refusal)
         try:
             sys.stderr.write("ppl_guard internal error: %s\n" % err)
         except Exception:
             pass
         return 0
     if result:
+        # The decision goes out before the log is touched, as in the branch above.
         sys.stdout.write(json.dumps(result))
+        sys.stdout.flush()
+        if isinstance(payload, dict):
+            log_denial(payload, result)
     return 0
 
 

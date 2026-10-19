@@ -1,3 +1,5 @@
+import re
+
 from . import paths, run, store
 from .errors import PplError
 
@@ -36,8 +38,9 @@ def set_mr(task_id, iid, url, author=None):
         state["mr"]["author"] = author
     # E2, cycle 2 wave E: same restamp as `ppl baseline record` and `ppl
     # brief set` - see ppl/cli.py:cmd_baseline for why this was missing.
-    # skill/SKILL.md.skeleton Stage 7 calls `ppl mr set` once, after `ppl stage
-    # enter review`, right before the review loop's first tick.
+    # the skill's Stage 7 (references/stage-7-review.md) calls `ppl mr set`
+    # once, after `ppl stage enter review`, right before the review loop's
+    # first tick.
     state["next_safe_action"] = "run the review loop (references/review-loop.md)"
     run.save(state)
     store.append_log(task_id, {"event": "mr", "iid": iid, "url": url, "author": author})
@@ -49,6 +52,33 @@ def set_approval(task_id, sha):
     state["mr"]["approved_sha"] = sha
     run.save(state)
     store.append_log(task_id, {"event": "approval", "sha": sha})
+    return state
+
+
+# 7 to 64 hex digits: an abbreviated sha up to a full SHA-256 one
+_HEX_RE = re.compile(r"[0-9a-fA-F]{7,64}")
+
+
+def record_merge(task_id, sha, url=None):
+    """Record the merge the orchestrator observed on the forge. Valid only in merge_watch and
+    only once [R-MERGE-OBSERVED-ONCE]. The tracker gate opens on merged_sha [R-JIRA-GATE]."""
+    if not sha or not _HEX_RE.fullmatch(sha):
+        raise PplError("SCHEMA_INVALID", "--sha must be a commit sha of 7 to 64 hexadecimal digits, got %r" % sha)
+    state = run.load(task_id)
+    if state["stage"] != "merge_watch":
+        raise PplError("ILLEGAL_TRANSITION",
+                       "ppl merge observed is valid only in stage merge_watch, current stage is %s"
+                       % state["stage"])
+    mr = state.get("mr") or {}
+    if mr.get("merged_sha"):
+        raise PplError("ILLEGAL_TRANSITION",
+                       "the merge is already recorded on %s, it is recorded once"
+                       % mr["merged_sha"])
+    mr["merged_sha"] = sha
+    mr["merged_url"] = url
+    state["mr"] = mr
+    run.save(state)
+    store.append_log(task_id, {"event": "merge_observed", "sha": sha, "url": url})
     return state
 
 

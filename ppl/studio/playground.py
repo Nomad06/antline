@@ -106,7 +106,7 @@ def check(name, doc, fragments, role, tool, value, boundary=None):
         # the draft lives in the throwaway root too, so two checks never share a directory
         draft = drafts.write(name, doc, fragments or {}, root=os.path.join(home, "draft"))
         loaded = harness.load(str(draft))
-        drafts._require_absolute_repo(loaded)
+        harness.require_absolute_repo(loaded)
         repo = os.path.expanduser(loaded["repo"]["path"])
         environment = _environment(home)
         spec = {"task": TASK, "repo": repo, "snapshot": harness.snapshot(loaded),

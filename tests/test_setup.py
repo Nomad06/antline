@@ -309,15 +309,12 @@ class TestNonInteractive(SetupTestCase):
         lines = []
         setup.run(steps=["paths", "harness"], answers=self.answers, non_interactive=True,
                   emit=lines.append)
-        harness_toml = paths.harness_dir("mine") / "harness.toml"
-        text = harness_toml.read_text(encoding="utf-8")
-        harness_toml.write_text(text.replace('name = "focused-tests"', 'name = "unit-tests"'),
-                                encoding="utf-8")
+        (paths.harness_dir("mine") / "skill" / "notes.md").write_text("x\n", encoding="utf-8")
         self.answers["harness_from"] = "mine"
         lines.clear()
         setup.run(steps=["harness"], answers=self.answers, non_interactive=True, emit=lines.append)
-        self.assertTrue(any(line.startswith("warning:") and "focused-tests" in line for line in lines),
-                        lines)
+        self.assertTrue(any(line.startswith("warning:") and "skill/notes.md" in line
+                            for line in lines), lines)
 
     def reserved_source(self):
         source = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / "x.replacing"

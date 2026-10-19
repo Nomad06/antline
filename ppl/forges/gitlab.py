@@ -40,10 +40,6 @@ def fragment(name):
     return read_fragment(KIND, name)
 
 
-def author_lookup():
-    return "call the GitLab MCP's `whoami` once and pass its username to `ppl mr set --author`"
-
-
 def _names(servers):
     return set(servers) if isinstance(servers, dict) else set()
 

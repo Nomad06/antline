@@ -1,8 +1,9 @@
 """Draft harness fields from the project's CLAUDE.md and AGENTS.md with one
 lean Claude call: the light tier, no tools, no MCP server, no settings
 source, the files passed on stdin as numbered data, the answer held to a
-JSON schema, then checked again here item by item. The result only ever
-fills the review form: nothing here writes a file."""
+JSON schema, then checked again here item by item. An answer refused as a
+whole is asked for once more with the reason. The result only ever fills the
+review form: nothing here writes a file."""
 import copy
 import json
 import math
@@ -35,6 +36,8 @@ SYSTEM_PROMPT = (
     "the task key pattern if the files give one. Write <test_class> where a command takes the "
     "name of one test. Give every item the file:line it came from. Leave a list empty and a "
     "value null when the files do not say it.")
+RETRY_PROMPT = ("Your previous answer was refused: %s. "
+                "Answer again with JSON that matches the schema.")
 
 _ITEM = {"type": "string"}
 SCHEMA = {
@@ -90,11 +93,23 @@ def light_model():
     raise PplError("SCHEMA_INVALID", "routing.toml declares no tier, run the Models step first")
 
 
-def command(model, binary):
+class AnswerRefused(PplError):
+    """The answer itself was refused, not the process that gave it, so one more call
+    with `reason` can fix it. `reason` is in ppl's own words: Claude's text never
+    reaches the system prompt."""
+
+    def __init__(self, message, reason=None, cost=None):
+        super().__init__("EXTRACTION_FAILED", message)
+        self.reason = reason or message
+        self.cost = cost
+
+
+def command(model, binary, refusal=None):
+    prompt = SYSTEM_PROMPT if refusal is None else SYSTEM_PROMPT + " " + RETRY_PROMPT % refusal
     return [binary, "-p", "--model", model, "--max-turns", str(MAX_TURNS),
             "--output-format", "json", "--json-schema", json.dumps(SCHEMA, separators=(",", ":")),
             "--tools", "", "--strict-mcp-config", "--setting-sources", "",
-            "--no-session-persistence", "--system-prompt", SYSTEM_PROMPT]
+            "--no-session-persistence", "--system-prompt", prompt]
 
 
 def _defused(text):
@@ -137,31 +152,40 @@ def _run_claude(cmd, text):
     return result.returncode, result.stdout, result.stderr
 
 
+def _cost(doc):
+    try:
+        cost = float(doc.get("total_cost_usd") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        cost = 0.0
+    return cost if math.isfinite(cost) else 0.0
+
+
 def parse(returncode, stdout, stderr=""):
     """(draft, cost_usd) from Claude's JSON answer: structured_output, else the
-    result text read as JSON."""
+    result text read as JSON. A process that failed raises a plain PplError, an
+    answer that is unusable raises AnswerRefused."""
     try:
         doc = json.loads(stdout or "")
     except ValueError:
         detail = (stderr or stdout or "").strip()[:300] or "empty output"
-        raise PplError("EXTRACTION_FAILED", "Claude's answer is not JSON: %s" % detail)
+        message = "Claude's answer is not JSON: %s" % detail
+        if returncode != 0:
+            raise PplError("EXTRACTION_FAILED", message)
+        raise AnswerRefused(message, "Claude's answer is not JSON")
     if not isinstance(doc, dict):
-        raise PplError("EXTRACTION_FAILED", "Claude's answer is not a JSON object")
+        if returncode != 0:
+            raise PplError("EXTRACTION_FAILED", "Claude's answer is not a JSON object")
+        raise AnswerRefused("Claude's answer is not a JSON object")
     if returncode != 0 or doc.get("is_error"):
         raise PplError("EXTRACTION_FAILED", "Claude reported an error: %s"
                        % str(doc.get("result") or doc.get("subtype") or returncode)[:300])
+    cost = _cost(doc)
     draft = doc.get("structured_output")
     if draft is None:
         try:
             draft = json.loads(doc.get("result") or "")
         except (TypeError, ValueError):
-            raise PplError("EXTRACTION_FAILED", "Claude's answer holds no structured output")
-    try:
-        cost = float(doc.get("total_cost_usd") or 0.0)
-    except (TypeError, ValueError, OverflowError):
-        cost = 0.0
-    if not math.isfinite(cost):
-        cost = 0.0
+            raise AnswerRefused("Claude's answer holds no structured output", cost=cost)
     return draft, cost
 
 
@@ -197,14 +221,14 @@ def check(draft):
     """(clean, dropped): the draft's items that pass, and one reason per item
     that does not. Only a draft whose top level has the wrong shape raises."""
     if not isinstance(draft, dict):
-        raise PplError("EXTRACTION_FAILED", "the draft is not a JSON object")
+        raise AnswerRefused("the draft is not a JSON object")
     draft = _plain(draft)
     for key in ("gates", "test_shapes", "env", "notes"):
         if not isinstance(draft.get(key), list):
-            raise PplError("EXTRACTION_FAILED", "the draft's %s is not a list" % key)
+            raise AnswerRefused("the draft's %s is not a list" % key)
     for key in ("default_branch", "task_key_pattern"):
         if draft.get(key) is not None and not isinstance(draft.get(key), str):
-            raise PplError("EXTRACTION_FAILED", "the draft's %s is not a string or null" % key)
+            raise AnswerRefused("the draft's %s is not a string or null" % key)
     dropped = []
 
     def drop(kind, item, reason):
@@ -292,18 +316,46 @@ def check(draft):
     return clean, dropped
 
 
+def _ask(runner, cmd, text, emit):
+    """(clean, dropped, cost) of one call. A refused answer is logged with its cost
+    before it is raised, so the job log shows every call."""
+    returncode, stdout, stderr = runner(cmd, text)
+    cost = None
+    try:
+        draft, cost = parse(returncode, stdout, stderr)
+        clean, dropped = check(draft)
+    except AnswerRefused as refused:
+        if cost is not None:
+            refused.cost = cost
+        emit("the answer was refused: %s, cost %s"
+             % (refused.message, "unknown" if refused.cost is None else "%.4f USD" % refused.cost))
+        raise
+    emit("read %d gate(s) and %d shape(s), dropped %d item(s), cost %.4f USD"
+         % (len(clean["gates"]), len(clean["test_shapes"]), len(dropped), cost))
+    return clean, dropped, cost
+
+
 def extract(files, emit=lambda line: None):
+    """One call, and one more with the reason when the answer itself is refused. A
+    failed process or a timeout is not asked again, and dropped items are shown in
+    the form instead."""
     if not files:
         raise PplError("EXTRACTION_FAILED", "no md file to read")
     model = light_model()
     binary = config.section("claude").get("binary") or "claude"
     emit("asking %s to read %s" % (model, ", ".join(item["path"] for item in files)))
     runner = RUNNER or _run_claude
-    returncode, stdout, stderr = runner(command(model, binary), bundle(files))
-    draft, cost = parse(returncode, stdout, stderr)
-    clean, dropped = check(draft)
-    emit("read %d gate(s) and %d shape(s), dropped %d item(s), cost %.4f USD"
-         % (len(clean["gates"]), len(clean["test_shapes"]), len(dropped), cost))
+    text = bundle(files)
+    try:
+        clean, dropped, cost = _ask(runner, command(model, binary), text, emit)
+    except AnswerRefused as first:
+        emit("asking %s once more with the reason" % model)
+        try:
+            clean, dropped, cost = _ask(runner, command(model, binary, first.reason), text, emit)
+        except PplError as second:
+            raise PplError("EXTRACTION_FAILED", "Claude's answer was refused (%s) and the "
+                           "second call failed too (%s)" % (first.message, second.message))
+        cost += first.cost or 0.0
     return {"extracted": clean, "dropped": dropped, "model": model, "cost_usd": cost}
 
 

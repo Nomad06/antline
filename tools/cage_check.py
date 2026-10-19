@@ -139,6 +139,11 @@ class Cage:
         state["stage"] = stage
         self._run.save(state)
 
+    def record_merge(self, sha):
+        """What `ppl merge observed --sha <sha>` records."""
+        from ppl import review  # noqa: E402
+        review.record_merge(self.task_id, sha)
+
     def run_dir(self):
         return self._paths.run_dir(self.task_id)
 
@@ -351,7 +356,14 @@ def run_cases(cage):
 
     cage.set_stage("merge_watch")
     cage.check(
-        "the same Jira write tool at merge_watch is allowed",
+        "a Jira write tool in merge_watch before ppl merge observed is denied",
+        cage.payload(None, "mcp__atlassian__addCommentToJiraIssue",
+                     {"body": "done"}, wt),
+        "OWNER_DECISION")
+
+    cage.record_merge("a" * 40)
+    cage.check(
+        "the same Jira write tool at merge_watch is allowed once the merge is recorded",
         cage.payload(None, "mcp__atlassian__addCommentToJiraIssue",
                      {"body": "done"}, wt),
         "allow")

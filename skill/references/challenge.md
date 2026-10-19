@@ -1,14 +1,15 @@
 # The brief challenge report
 
-`ppl brief challenge <file> --generation <n>` validates a JSON document against
+`ppl brief challenge <file> --generation <n> --from ppl-brief-challenger` validates a JSON document against
 `schema.CHALLENGE_FIELDS`, checks it against the run, writes `challenge.json` into the run
-directory and binds `state["brief_challenge"]` to the report's `spec_revision`. Every field
+directory and binds `state["brief_challenge"]` to the report's `spec_revision`
+[R-BRIEF-CHALLENGED-BEFORE-IMPLEMENTATION]. Every field
 below is required.
 
 | Field | Type | Shape |
 |---|---|---|
 | `task_id` | string | the Jira task id, matching the run |
-| `spec_revision` | string | copied byte-for-byte from `ppl brief set`; a report written against another value is refused, the brief changed under the challenger |
+| `spec_revision` | string | copied byte-for-byte from `ppl brief set`; a report written against another value is refused, the brief changed under the challenger [R-BRIEF-CHALLENGED-BEFORE-IMPLEMENTATION] |
 | `verdict` | string | `ACCEPTED` or `REVISE` |
 | `new_classes` | list | one `{"name": str, "existing_owner": str \| null, "justified": bool}` per class, interface, controller, service, manager or repository the `name_contract` introduces |
 | `wire_shapes` | list | one `{"shape": str, "matches_spec": bool}` per request body, response node and endpoint path the contract freezes, compared with the spec text word for word |

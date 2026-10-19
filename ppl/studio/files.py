@@ -254,16 +254,30 @@ def _renamed(text, scratch_names, installed):
     return text
 
 
+def _other_files(folder):
+    found = []
+    for sub in ("skill", "templates"):
+        for path in sorted((folder / sub).rglob("*")) if (folder / sub).is_dir() else []:
+            rel = path.relative_to(folder)
+            if path.is_file() and not any(part.startswith(".") for part in rel.parts) \
+                    and rel.as_posix() not in HARNESS_FILES:
+                found.append(rel.as_posix())
+    return found
+
+
 def check_harness(name, changes=()):
     """drafts.verify of a private copy of an installed harness with each
     (rel, text) of changes written over its file: the exact bytes a save
     writes, so what is checked is what lands. A change through a link lands
-    on the file the link points to, as a save does. The copy is removed after
+    on the file the link points to, as a save does. Any other file under skill/
+    or templates/ is laid in empty, since the check reads only its name, so the
+    answer is the one `ppl harness validate` gives. The copy is removed after
     and drafts/<name>/ is never touched."""
     folder = _installed(name)
     targets = {rel: _inside(folder, rel).resolve() for rel in HARNESS_FILES}
-    contents = {rel: (folder / rel).read_bytes() for rel in HARNESS_FILES
-                if (folder / rel).is_file()}
+    contents = {rel: b"" for rel in _other_files(folder)}
+    contents.update({rel: (folder / rel).read_bytes() for rel in HARNESS_FILES
+                     if (folder / rel).is_file()})
     for rel, text in changes:
         if rel not in HARNESS_FILES:
             raise PplError("SCHEMA_INVALID", "unknown harness file %r (files: %s)"

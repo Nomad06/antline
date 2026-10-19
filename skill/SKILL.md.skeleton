@@ -48,8 +48,8 @@ no active run to fall back to. There are exactly three outcomes:
   parked run, or an operator pause all still print as exit-0 facts you must act on. The last
   line always names the current lease generation - capture that number now. Do
   **not** run `ppl init` - the run is already there. Run `ppl show --task <TASK-ID> --json`
-  to see its current `stage`, and resume the pipeline from that stage (skip straight to the
-  matching numbered stage below).
+  to see its current `stage`, and resume the pipeline from that stage (its reference is in
+  the stage map below).
 
 - **Exit 2, `SCHEMA_INVALID`** - three different shapes, read the message to tell them
   apart. `resolve_task` with no `--task` and no active run, and `run.load` on a task id
@@ -64,365 +64,83 @@ no active run to fall back to. There are exactly three outcomes:
   `references/escalation.md` - do not attempt to continue past this one.
 
 **The lease.** Every `ppl evidence add`, `ppl verdict record`, `ppl findings add/status/
-delete`, `ppl review answered` and `ppl apply-patch` call below needs `--generation <n>`,
+delete`, `ppl review answered` and `ppl apply-patch` call in every stage needs `--generation <n>`,
 the number this recover call (or `ppl stage enter`, which prints it too) just gave you.
 Pass it back unchanged. Only `ppl recover` and the watchdog parking a run for `TIMED_OUT`
 (see `references/escalation.md`) change it; if a later command in this same session
 reports a new number, use that new number from then on - a write made with the old one is
 refused as a stale attempt [R-LEASE-STALE-WRITE].
 
-**Run `ppl doctor` here too, before you lean on anything below that talks about a hook
-stopping a tool call.** The guard hook is a `PreToolUse` hook registration in Claude Code
-settings, and registering it is a decision the owner makes separately from anything `ppl`
-does - it is not armed by default, and nothing about starting a run arms it on its own
-[R-GUARD-NOT-ARMED n/a]. `ppl doctor` prints a JSON line whose `registration` field is one
-of:
+**Whose output.** `ppl brief set`, `ppl brief challenge`, `ppl verdict record`, `ppl findings
+add` and `ppl evidence add` record a role's output: pass `--from <role>` on every one of
+them, naming the role that wrote it (`orchestrator` for a gate receipt you wrote yourself).
+The first four refuse a call without a known one `SCHEMA_INVALID`, naming the value to pass,
+and `ppl evidence add` defaults to `orchestrator` [R-REFUSAL-RETRY-CAP].
+When one of them exits 2 with `SCHEMA_INVALID`, follow "The role output rule" in
+`references/escalation.md`: do not edit the content, redispatch that role once with the
+refusal quoted, and report a second refusal instead of trying a third time. `ppl` counts the
+refusals of the output itself in a row, per command, role and lease generation (an accepted
+call ends the count, and a mistake in how you called the command or a verdict or challenge
+written for an old head or brief is logged and not counted),
+parks the run with `FORMAT_RETRY_EXHAUSTED` on the second and refuses a third call with that
+code before reading its input [R-REFUSAL-RETRY-CAP].
 
-- **`none`** - the hook is not registered anywhere. Every sentence below about a hook
-  stopping something is false for this session, right now: the write boundary, the Bash
-  landmines, the Jira gate, the operator pause - none of it fires. `git add -A` in the
-  worktree returns exit 0 with no warning at all, because there is no hook there to see it.
-  You are unprotected, and the only checks that actually run are the ones `ppl` itself
-  performs (the state machine and the done gate) - a role staying inside its lane because
-  you dispatched it correctly, not because anything physically stopped it if you did not.
-  Tell the operator, and proceed on that basis, or pause and ask them to arm it first
-  (README.md "Hooks"). The dispatch counter is a hook too (`SubagentStart`): with
-  `none`, run `ppl budget spend dispatch` yourself before every `ppl-*` dispatch, or the
-  hard cap at `ppl stage enter` compares against zero for the whole run.
-- **`local`** - registered in this directory's `.claude/settings.local.json` only. This is
-  the isolated, recommended state; the present-tense claims below hold for this run.
-- **`global`** or **`both`** - registered in `~/.claude/settings.json`, which fires in every
-  Claude Code session on the machine, not just this run - the opposite of what `isolated`
-  asserts. `ppl init --isolated` (the default) already refuses `SCHEMA_INVALID` on a NEW run
-  in this configuration [R-INIT-ISOLATION-CHECK]; if you are resuming an existing run that
-  predates this state, treat the isolation guarantee specifically as an owner decision, the
-  same as `none`, even though the hook itself is armed and every other cage rule does fire.
-- **`unknown`** - a settings file exists but could not be read or parsed. Read this the same
-  way as `none`: this check has no confirmed answer about isolation from a file it is unable
-  to read, so nothing below should be taken as armed until that is fixed.
+**Run `ppl doctor` here too, before you lean on anything in this skill that talks about a
+hook stopping a tool call.** The guard hook is not armed by default, and nothing about
+starting a run arms it on its own [R-GUARD-NOT-ARMED n/a]. `ppl doctor` prints a JSON line
+with a `registration` and a `matcher` field. `registration` `local` (this directory's
+`.claude/settings.local.json` only) with `matcher` `ok` is the isolated, recommended state:
+the present-tense hook claims in this skill hold for this run. On any other reading -
+`none`, `global`, `both`, `unknown`, or `matcher` `incomplete` - read
+`references/guard-hook.md` before going on: it says what each one leaves unprotected and what
+to tell the operator.
 
-The same JSON line carries a `matcher` field - `ok` when every registered guard entry's matcher
-passes all the tool names the hook acts on, `incomplete` when some are left out, with the
-`uncovered` list under `local`/`global` naming them. An uncovered tool is a denial that can never
-fire, so read `incomplete` as `none` for exactly those tools, tell the operator, and expect
-`ppl init` to refuse a NEW run until the matcher is widened to the one in README.md "Hooks"
-[R-GUARD-MATCHER].
+Every sentence in this skill and its references about a hook stopping, catching or gating a
+tool call holds only when `ppl doctor` reported `local` (or a `global`/`both` you have
+accepted as an owner decision) for this session. Read it that way throughout, not just where
+it is repeated.
 
-Every sentence past this point about a hook stopping, catching or gating a tool call holds
-only when `ppl doctor` reported `local` (or a `global`/`both` you have accepted as an owner
-decision) for this session. Read it that way throughout, not just where it is repeated.
+## Stage map
 
-## Stage 0 - admission
+Each stage's procedure is a reference of its own, in the order below. Read a stage's
+reference before anything else in that stage; `ppl stage enter <stage>` names it again as its
+last output line. Most references open with that `ppl stage enter` call: when you read one
+right after making the call, skip that first step and go on from the next. On a resume, read
+the reference of the stage `ppl show --json` reports.
 
-Only for the NEW-task branch above (`ppl recover --task <TASK-ID>` came back
-`SCHEMA_INVALID`). If a run already existed, skip this stage entirely - resume from the
-stage `ppl show` reported instead; calling `ppl init` on an existing run raises
-`ILLEGAL_TRANSITION`.
-
-1. Read the Jira issue, its parent or epic, linked issues, and any linked Confluence page.
-2. `ppl init <TASK-ID> --tracker-url <url> --repo <worktree path> --harness <!-- include: harness/name -->` -
-   `--repo` is the path the worktree will live at; Stage 1 creates it at exactly this path
-   next, `ppl init` does not require it to exist yet. Leave `--isolated` at its default
-   (true) unless the guard hook is registered somewhere broader than this launch directory -
-   see "After merge only" for what that flag controls.
-3. Check the admission list: one outcome, fixed governing revision, stable and verifiable
-   acceptance criteria, closed material decisions, satisfied dependencies, risk tier, a
-   non-empty write boundary, enumerated forbidden paths, a proof path defined before any
-   implementation, and a budget.
-4. Anything missing: `ppl escalate --code SPEC_GAP --question "..."` and stop. A task that
-   fails admission does not get clarified along the way by a worker.
-
-## Stage 1 - baseline
-
-`ppl stage enter baseline` first - the FSM has no admission -> briefing edge, only
-admission -> baseline -> briefing, so skipping this call dead-ends the next stage's
-`ppl stage enter briefing` with `ILLEGAL_TRANSITION` [R-FSM-STAGE-GRAPH]. Capture the
-generation it prints, same as any other `stage enter`.
-
-Create the worktree and branch from `<!-- include: harness/default-branch -->`, at the exact
-path you already passed to `ppl init --repo` in Stage 0, with the branch name matching the
-convention `<TASK-ID>-<short-slug>`:
-
-```bash
-cd <!-- include: harness/repo -->
-git fetch origin <!-- include: harness/default-branch -->
-git worktree add <!-- include: harness/worktrees -->/<repo-name>-<TASK-ID> -b <TASK-ID>-<short-slug> origin/<!-- include: harness/default-branch -->
-```
-
-This is where every gate and every dispatched worker runs from now on.
-
-Then record the baseline. <!-- include: harness/baseline -->
-Commands are in `references/gates.md`. Then `ppl baseline record <file>`, with `base_sha`
-set to the worktree's HEAD before any of your own commits. `references/baseline.md` says exactly which field of that document is checked
-(only `base_sha`) and which are a durable note by convention only - read it before assuming
-the rest of the document is validated the way a brief or a verdict is.
-
-Without a baseline, a pre-existing red test and a regression are indistinguishable.
-
-`ppl baseline record` succeeds exactly once per run, and only for a commit HEAD descends
-from, and only while you are still in the baseline stage. It refuses a second call with
-`ILLEGAL_TRANSITION`, a non-ancestor `base_sha` with `SCHEMA_INVALID`, and a call made after
-you have already moved on to `briefing` or later with `ILLEGAL_TRANSITION` too: the
-done-gate proves your diff stays inside the write boundary by diffing `base_sha..HEAD`, so a
-baseline recorded after the work commit would empty that diff and pass the check with
-nothing in it [R-BASELINE-WRITE-ONCE] [R-BASELINE-ANCESTOR] [R-BASELINE-NOT-AT-HEAD]. On a
-freshly cut branch with no commits of your own yet, `base_sha` equal to the worktree's
-current HEAD is correct and expected - that is exactly what "before any of your own
-commits" means when there are none yet. If you believe the baseline is genuinely wrong,
-that is an owner decision - escalate, do not re-record.
-
-## Stage 2 - briefing
-
-`ppl stage enter briefing`, then dispatch `ppl-briefer` with the Jira content, the linked
-specs and the relevant knowledge skill (<!-- include: knowledge/skills -->).
-It has no write tool and no shell of its own: it returns the brief as the JSON body of its
-final message and nothing else. Save that message to a scratch file yourself, then run
-`ppl brief set <file>`, which validates the schema, derives the boundary, and binds `spec_revision` to a fingerprint of `name_contract`,
-`acceptance` and the write/forbid boundary together
-[R-BRIEF-SPEC-REVISION-STALE] - the printed value is the exact string you
-must hand the verifier verbatim in Stage 5. Note it down.
-
-The schema is ten required fields with type constraints (`references/brief.md`) - read it
-before saving the briefer's output, not after `ppl brief set` rejects it [R-BRIEF-SCHEMA]. In
-particular, `acceptance` must be a non-empty list of non-empty strings, not a list of
-objects; an entry like `{"id": "AC1", "text": "..."}` reads as the obvious shape for
-"acceptance criteria" and is refused `SCHEMA_INVALID` at this step precisely so it does not
-surface five stages later at the done gate instead [R-BRIEF-SCHEMA].
-
-The brief is then challenged before anything is implemented. Spend `ppl budget spend dispatch`
-and dispatch `ppl-brief-challenger` with the spec text (Jira, tech analysis), the accepted
-brief and its `spec_revision`; it answers three fixed questions and nothing else: which new
-classes in `name_contract` duplicate an existing owner, which wire shapes differ from the
-spec's own wording, and what each open decision costs to close now. Save its JSON to a
-scratch file and run `ppl brief challenge <file> --generation <n>`. An `ACCEPTED` report
-bound to the current `spec_revision` is what lets `ppl stage enter implementation` proceed,
-and `ppl transition done` re-reads the same binding, so a re-brief after the challenge means
-a re-challenge [R-BRIEF-CHALLENGED-BEFORE-IMPLEMENTATION]. A report that still lists an
-unjustified class, an off-spec shape or a cheap parked gap cannot be `ACCEPTED`: `ppl brief
-challenge` refuses it, you record it as `REVISE`, re-brief with its findings and challenge
-again [R-BRIEF-CHALLENGE-SELF-CONSISTENT]. The report schema is `references/challenge.md`.
-
-`open_decisions` in the brief are objects `{"question", "cost_to_close_files", "decision"}`
-with `decision` one of `in_scope`, `parked`, `owner` (bare strings are still accepted for
-old briefs). A `parked` decision whose `cost_to_close_files` is five or fewer is refused at
-`ppl brief set` and at `ppl brief challenge`: a gap that small goes in scope, or to the
-owner through `ppl escalate --code OWNER_DECISION` [R-BRIEF-OPEN-DECISION-NOT-PARKED-CHEAP].
-A three-file gap parked this way has been closed by a parallel implementation of the same
-task before: this check surfaces such a gap before the code worker runs.
-
-If the briefer's JSON carries `"error_code": "SPEC_GAP"`, escalate with that question. If
-`"error_code": "CONTEXT_INSUFFICIENT"`, enrich its prompt with the exact thing it could not
-find and re-brief exactly once, then treat a second miss as `SPEC_GAP`. A re-brief that
-changes `name_contract`, `acceptance`, or the write/forbid boundary rebinds `spec_revision`
-to a new value (as does `ppl boundary set` run on its own, once a brief has already bound
-one) - any verdict already
-recorded against the old one is refused as stale at `ppl verdict record` and at `ppl
-transition done` alike [R-BRIEF-SPEC-REVISION-STALE].
-
-## Stage 3 - implementation and tests
-
-`ppl stage enter implementation`, dispatch `ppl-code-worker` with the brief and its
-boundary. Pass the model `ppl routing show --role ppl-code-worker --task <TASK-ID>` prints:
-`routing.toml` routes a role to a stronger model for the run's risk tier (`ppl init --risk
-high`), and the generated agent file keeps the default, so the override only takes effect
-when you pass it at dispatch [R-ROUTING-BY-RISK]. It writes directly inside `allowed_write_paths`; the guard hook denies anything
-else [R-ROLE-CODE-WORKER-BOUNDARY] - **if `ppl doctor` reported the hook registered**
-(`local`, or an accepted `global`/`both`). If it reported `none` or `unknown`, nothing
-stops this worker from writing outside `allowed_write_paths` except the brief you dispatched
-it with [R-GUARD-NOT-ARMED n/a]; review its diff against the boundary yourself before
-committing. Commit its work.
-
-`ppl stage enter tests`, dispatch `ppl-test-worker` with the acceptance criteria, the
-described behaviour, the corner cases and the brief's interfaces only. Do not pass it the diff
-or describe how the code works. The guard hook denies its own Read, Grep, Glob and Bash reads
-of main sources inside the repo [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS], and it
-denies your dispatch when the prompt carries patch syntax or two or more lines the
-implementation added [R-TEST-WORKER-DISPATCH-LEAK]. A denied dispatch names what to remove:
-remove it and dispatch again, never reword the code to get past the check
-[R-TEST-WORKER-NO-DIFF n/a]. A paraphrase is not detected, so that part is on you
-**regardless of whether the hook is armed** [R-TEST-WORKER-NO-DIFF n/a]. All of these denials
-are, like the write boundary above, only live when `ppl doctor` reported the hook registered
-[R-GUARD-NOT-ARMED n/a]. Do not let one agent do both halves.
-
-## Stage 4 - gates
-
-`ppl stage enter gates`. Run the gates from `references/gates.md` in order, cheapest first.
-Every gate writes its exit code to a file, and every result becomes a receipt recorded under
-the current candidate SHA with the check name from that file - use these names exactly,
-because two of them are load-bearing:
-
-```bash
-ppl evidence add --check focused-tests --result pass --sha $SHA --log <log> --rc <rc file> \
-  --generation $GENERATION
-ppl evidence add --check secret-scan --result pass --sha $SHA --log <log> --rc <rc file> \
-  --generation $GENERATION
-```
-
-`focused-tests` and `secret-scan` are the two checks `ppl transition done` refuses to close
-without, by their exact names - a passing receipt filed under any other name does not
-satisfy them [R-DONE-SECRET-SCAN]. Record the rest of the gates the same way under their own check names (see
-`references/gates.md`); every acceptance ID also needs its own passing receipt, referenced
-later by the verifier as `evidence:<check-name>`.
-
-A gate that fails inside the boundary routes to rework. A gate that fails outside the
-boundary is `BASELINE_FAILURE`: park it, escalate with provenance, and do not edit a test to
-make it green.
-
-Once the gates are green, run the simplification pass before verification: spend a dispatch
-and dispatch the `code-simplifier` agent inside `allowed_write_paths` (main sources only,
-tests stay as the test worker left them) with the brief's `name_contract`, asking for the
-smallest diff that keeps every contract name. If it changes anything, commit, which is a new
-candidate SHA, and run the gates again in full. File the receipt either way: `--check simplification --result pass`
-when it ran, `--result skip` with the reason in its log when there was nothing to simplify
-(a docs-only change, a diff already at the challenge's shape). `ppl transition done`
-refuses a head without that receipt [R-DONE-SIMPLIFICATION-RECEIPT].
-
-A new commit means a new candidate SHA, and every receipt and verdict is filed under the SHA
-that produced it - a receipt from the previous SHA proves nothing about this one. After any
-rework, gates run again in full and evidence is recorded again under the new SHA; there is
-no partial credit across a SHA change.
-
-## Stage 5 - verification
-
-Before dispatch, run `ppl findings list --task <task_id>` yourself and pass the result to
-`ppl-verifier` along with the brief, the challenge report (`runs/<task>/challenge.json`),
-the diff, the tests, the gate receipts with their exit codes, and the `spec_revision` string
-`ppl brief set` printed in Stage 2 - so it does
-not re-report a defect someone already recorded (see the dedupe note below) and so its
-verdict carries the current binding rather than one it invented (`ppl show --json` also
-carries the current value, if a rebrief happened since Stage 2 and you need to refetch it).
-Then `ppl stage enter verification`, dispatch `ppl-verifier`. It has no
-shell and cannot run `ppl` or re-run anything itself, by design: a role with a shell and no
-write boundary could write anywhere, and every generated role is denied every state-changing
-`ppl` subcommand even where it does hold Bash (`ppl-code-worker`, `ppl-test-worker`) -
-`ppl show --task <id>` and `ppl findings list` stay allowed, everything else does not
-[R-ROLE-TOOLS-READONLY] [R-GUARD-PPL-CLI-DENIED]. It verifies only what the receipts and
-the diff already prove. The exact field names and types `ppl verdict record` checks are in
-`references/verdict.md` - read it before composing the verdict, not after `ppl verdict
-record` rejects the first attempt: SCHEMA_INVALID, and no schema reference to read, is
-exactly the shape D3 (cycle 2 wave D) found taking six attempts to get past. Its verdict
-maps each acceptance ID to a string of the exact form
-`evidence:<check-name>` (letters, digits, dot, underscore, hyphen only); `ppl verdict
-record` rejects anything else, and `ppl transition done` later refuses an acceptance ID
-whose reference does not resolve to a receipt that actually passed on the current head SHA
-[R-ACCEPTANCE-EVIDENCE-FORMAT] [R-DONE-ACCEPTANCE-EVIDENCE].
-
-Findings are not part of the verdict document any more - they live in their own registry,
-and only YOU, the orchestrator, write to it; the verifier only reports. Its report carries
-a separate `findings` array (severity, evidence, affected_sha, affected_path, owner when it
-can name one) alongside the empty-by-contract verdict JSON. For each entry, before
-recording the verdict, run `ppl findings add --severity <blocking|important|minor>
---evidence "<...>" --affected-sha <candidate_sha> --affected-path <path> [--owner <name>]
-[--fix-link <url>] --generation $GENERATION` - your own generation, not anything the
-verifier claims, since it holds no lease. `ppl findings add` decides the routing itself,
-from the real base-to-candidate diff, never from what is asked of it: a finding whose
-`--affected-path` is inside the candidate's own diff is `own_diff` (fixed now, as REWORK
-below); a finding whose path the candidate never touched is `foreign` (batch-escalated to
-`--owner` and does not block this task) [R-FINDINGS-TRACK-DERIVED]. A verdict document
-whose `findings` array is not empty is refused when recorded
-[R-FINDINGS-VERDICT-FIELD-RETIRED] - record the findings first.
-
-Findings no longer expire when the head moves (a real defect does not stop existing
-because an unrelated commit landed), so re-adding the same still-open defect on every round
-would pile up duplicate blockers instead of the one real finding closing once it is
-actually fixed. That is why you list open findings before dispatch and hand them to the
-verifier: only add what it reports as genuinely new.
-
-Record the verdict with `ppl verdict record <file> --generation $GENERATION`. It refuses a
-verdict produced for a different SHA than the current head [R-DONE-SHA-BINDING].
-
-The verdict's own `verdict` field (`PASS | REWORK | BLOCKED | OWNER_DECISION | INCONCLUSIVE
-| ERROR | CANCELLED | TIMEOUT`, written by the verifier) is a different, smaller vocabulary
-than `error_code` (the closed list in `references/escalation.md`, printed by `ppl` on
-stderr). They happen to share the exact spelling `OWNER_DECISION` and nothing else lines up -
-`BLOCKED` here is not itself a valid `--blocker` value for `ppl park`, it is the verifier
-telling you to pick one from its stated finding. Route all eight:
-
-- **PASS** - forward to Stage 6.
-- **REWORK** - `ppl budget spend retry` first. This is the only place the retry budget is
-  ever spent, so skipping it makes the three-cycle limit below unenforced prose, not a real
-  limit. Then dispatch a fresh worker with the finding, which produces a new SHA and
-  restarts Stage 4 in full. If `ppl budget spend retry` itself exits 2 with
-  `BUDGET_EXHAUSTED`, stop rework immediately and park; do not dispatch the worker it was
-  gating. Three rework cycles is the limit either way; past that the problem has changed
-  class and needs a re-brief, a re-plan, or the owner.
-- **BLOCKED** - the verifier judges the candidate unfit to proceed, for a reason stated in
-  the findings you just recorded on its behalf (`ppl findings list --task <task_id>` to see
-  them again). Map that reason to the closest matching `error_code` in
-  `references/escalation.md` (typically `BASELINE_FAILURE`, `EXTERNAL_BLOCKED`, or
-  `IMPLEMENTATION_FAILURE` depending on what the finding actually says) and run `ppl park
-  --blocker <that-code> --safe-next "<action>"`. `ppl park` moves the lifecycle status to
-  `blocked` itself as part of parking - do not also run `ppl transition blocked`, the state
-  machine now refuses that as `ILLEGAL_TRANSITION` [R-FSM-LIFECYCLE].
-- **OWNER_DECISION** - the specification does not determine the answer even after reading
-  the code, which is the verifier's own rule for choosing this verdict. Run
-  `ppl escalate --code OWNER_DECISION --question "<the verifier's question, from its
-  report>"`.
-- **INCONCLUSIVE, ERROR, TIMEOUT** - a check did not actually happen: it crashed, ran past
-  its own time budget, or produced no clear result. None of these is a kind of PASS and none
-  is a kind of REWORK/BLOCKED either - a check that did not run is not the code's fault, so
-  retry budget is not spent for one - only `ppl budget spend retry` above ever spends it
-  [R-BUDGET-RETRY]. Spend `ppl budget spend dispatch` instead (dispatch
-  already caps a runaway loop) and dispatch a fresh verification attempt at the SAME sha -
-  nothing about the code needs to change, only the check needs retrying. Do not decide
-  whether this is the second such outcome in a row yourself: `ppl verdict record` already
-  refuses it for you if it is, exiting 2 with `VERIFICATION_UNAVAILABLE` and a parking record
-  already written [R-VERIFICATION-UNAVAILABLE-PARK] - read that exit code, do not
-  re-dispatch into the same check a third time regardless of what this bullet says. Never
-  let a verifier report PASS to mean "I ran out of time to check properly" - that is exactly
-  the self-attestation the done gate exists to refuse [R-DONE-VERDICT-PASS].
-- **CANCELLED** - a human or the operator cancelled this check, not the verifier itself. Do
-  not redispatch it automatically; that would be ignoring the person who stopped it. Run
-  `ppl escalate --code OWNER_DECISION --question "verification was cancelled on <sha> - "
-  "resume, redispatch, or park?"` and wait.
-
-## Stage 6 - <!-- include: vocab/noun -->
-
-<!-- include: forge/stage6 -->
-
-## Stage 7 - review
-
-<!-- include: forge/stage7 -->
-
-## After merge only
-
-The pipeline ends at approval, not at merge. `merge_watch` is a low-frequency tail: keep
-watching the <!-- include: vocab/short -->, and only once the merge is actually observed on the forge, write to the tracker: <!-- include: harness/tracker-close -->.
-Only after the merge is observed, and always in plain informal English, not a formal template.
-
-**This is enforced, not just a convention, only when `ppl doctor` reports the guard hook
-registered** (`local`, or an accepted `global`/`both`) **for this session** - the hook denies
-every Jira write tool unless the active run's stage is `merge_watch` [R-JIRA-GATE]
-[R-GUARD-NOT-ARMED n/a]. If `ppl doctor` reported `none` or `unknown`, this section is a rule
-you keep by discipline, not a cage: the run's stage being `merge_watch` or not makes no
-difference to whether the write physically goes through, and `OWNER_DECISION` has nothing to
-print because nothing ran a check to produce it [R-GUARD-NOT-ARMED n/a]. Check `ppl doctor`
-before trusting either reading rather than assuming the more comfortable one. When it IS armed: if you somehow reach this point with the
-run still in `review` or `closure`, the write will be denied outright (its reason starts with
-`OWNER_DECISION`) - go back and run `ppl stage enter merge_watch` first, do not try the
-write again hoping the hook missed it [R-JIRA-GATE]. This gate fires for the orchestrator's own session -
-which carries no `agent_type` - whenever the run is active and `isolated` is true (the
-default), regardless of the session's cwd; the documented worktree layout in Stage 1 puts
-the worktree beside the orchestrator's session, not under it, so a cwd-only check would not
-have caught this session in the first place. With `--no-isolated`, this falls back to
-a cwd check instead (DESIGN 5.4).
-
-Once the outcome is known, label the accepted SHA: `ppl label --sha <sha> --actual
-correct|defective|outcompeted --task <TASK-ID>`. `outcompeted` is for a correct candidate
-that a parallel implementation of the same task replaced; `ppl metrics` reports it as
-`outcompeted_rate` so design losses are counted, not only defects [R-METRIC-OUTCOMPETED].
+- **Stage 0 - admission** (`admission`, a NEW task): `references/stage-0-admission.md`. Read
+  the task and its links, `ppl init`, check the admission list, `SPEC_GAP` on a gap.
+- **Stage 1 - baseline** (`baseline`): `references/stage-1-baseline.md`. Create the
+  worktree, then record the baseline, once.
+- **Stage 2 - briefing** (`briefing`): `references/stage-2-briefing.md`. `ppl-briefer`
+  writes the brief (`ppl brief set`), `ppl-brief-challenger` challenges it (`ppl brief
+  challenge`).
+- **Stage 3 - implementation and tests** (`implementation`, then `tests`):
+  `references/stage-3-implementation.md` dispatches `ppl-code-worker`, then
+  `references/stage-3-tests.md` dispatches `ppl-test-worker`, a different agent.
+- **Stage 4 - gates** (`gates`): `references/stage-4-gates.md`. The gates in order, a receipt
+  for each, then the simplification pass.
+- **Stage 5 - verification** (`verification`): `references/stage-5-verification.md`.
+  `ppl-verifier` reports, you record its findings and then its verdict, and route the verdict.
+- **Stage 6 - <!-- include: vocab/noun -->** (`mr`): `references/stage-6-mr.md`. Push the
+  branch and open the <!-- include: vocab/short -->.
+- **Stage 7 - review** (`review`): `references/stage-7-review.md`. The review loop with
+  `ppl-review-responder`, and the close-out once the <!-- include: vocab/short --> is approved.
+- **Stage 8 - after merge** (`closure`, `merge_watch`): `references/stage-8-after-merge.md`.
+  Record the observed merge, then the Jira note, and finish a close-out left half done.
 
 ## Operator commands
 
 The panel writes `control.json`. `ppl` checks it at `stage enter`, `brief set`,
-`baseline record`, `boundary set`, `mr set`, `review approved`, `budget spend`, `transition`
-and `recover`, and refuses to move a paused, stopped or destroyed run - read-only commands
+`baseline record`, `boundary set`, `mr set`, `merge observed`, `review answered`,
+`review approved`, `budget spend`, `transition` and `recover`, and refuses to move a paused, stopped or destroyed run - read-only commands
 like `status`, `show` and `control get` keep working, so a paused run is still observable,
 and `control set resume` keeps working too, so the operator can lift their own halt [R-OPERATOR-HALT-CLI].
 `ppl park` and `ppl escalate` also stay available while paused - an operator halt must not
 block recording why the run stopped [R-OPERATOR-HALT-CLI]. When `ppl doctor` reports the guard hook registered, it also checks `control.json` on
 every tool call, so a pause lands within one tool call, not one stage; for the orchestrator's
-own session it does so under the same isolated-scoping rule as the Jira gate above. When it
+own session it does so under the same isolated-scoping rule as the Jira gate
+(`references/stage-8-after-merge.md`). When it
 is not registered, `ppl`'s own checks above are what a pause has - it still blocks the next
 `ppl` call, just not the tool call the operator actually wanted stopped. If a run carries
 `remote_cleanup.json`, the operator asked for a full destroy: close the <!-- include: vocab/noun -->,
@@ -440,9 +158,9 @@ armed, which catches an accident, not a determined attempt to route around this 
 - Do not resolve a <!-- include: vocab/noun --> thread, approve, or merge - when the hook is
   armed, the forge's matching tools are denied outright [R-MCP-RESOLVE-THREAD]
   [R-MCP-APPROVE-MR] [R-MCP-MERGE-MR]; when it is not, this is discipline only.
-- Do not write to the tracker before the merge is observed, and do not write outside stage
-  `merge_watch` - see "After merge only" above for exactly when this is hook-backed and
-  when it is not.
+- Do not write to the tracker before the merge is observed and recorded with
+  `ppl merge observed`, and do not write outside stage `merge_watch` - see
+  `references/stage-8-after-merge.md` for exactly when this is hook-backed and when it is not.
 - Do not edit a test to turn a gate green. This one has no hook check at all, armed or not -
   a gate is a receipt you record yourself, not a write the guard hook watches.
 - Do not dispatch a worker to fix something outside its write boundary. When the hook is

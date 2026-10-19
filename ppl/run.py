@@ -4,7 +4,7 @@ import subprocess
 import uuid
 
 from . import fsm, paths, store
-from .errors import PplError
+from .errors import PplError, role_output
 
 DEFAULT_BUDGETS = {
     "dispatch_used": 0, "dispatch_norm": 21, "dispatch_hard": 34,
@@ -81,14 +81,14 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "candidate_sha": None,
         "spec_revision": None,
         "acceptance": [],
-        "attempt": 1,
         "attempt_id": None,
         "lease_generation": 1,
         "deadline": store.deadline_in(INACTIVITY_TIMEOUT_SECONDS),
         "last_activity_at": store.now(),
         "budgets": dict(DEFAULT_BUDGETS),
         "orchestrator": {"pid": pid, "started_at": process_started_at(pid)},
-        "mr": {"iid": None, "url": None, "approved_sha": None},
+        "mr": {"iid": None, "url": None, "approved_sha": None,
+               "merged_sha": None, "merged_url": None},
         "last_durable_fact": "run initialised",
         "next_safe_action": "complete admission checklist",
         "unsafe_to_repeat": [],
@@ -232,6 +232,32 @@ def stage_enter(task_id, stage):
                            "challenge bound to the current spec_revision - dispatch "
                            "ppl-brief-challenger and run `ppl brief challenge` first "
                            "[R-BRIEF-CHALLENGED-BEFORE-IMPLEMENTATION]")
+    # closure leads only to `ppl transition done` and has no edge back to rework, so a run
+    # whose done gate refused there had no legal way on. It enters closure only when the
+    # gate would pass at that moment, a resume included, and otherwise stays where it is
+    # [R-CLOSURE-ONLY-WHEN-DONE-PASSES].
+    if stage == "closure":
+        from . import verdict
+        blockers = verdict.current_blockers(task_id)
+        if blockers:
+            where = ("review, where rework (ppl stage enter implementation or tests) and "
+                     "evidence repair on the current head are still possible"
+                     if previous == "review" else
+                     "%s: repair the evidence on the current head (receipt, verdict, finding "
+                     "status) before resuming, or escalate OWNER_DECISION" % previous)
+            raise PplError("ILLEGAL_TRANSITION",
+                           "cannot enter closure while `ppl transition done` would refuse: "
+                           "%s. The run stays in %s [R-CLOSURE-ONLY-WHEN-DONE-PASSES]"
+                           % ("; ".join(blockers), where))
+    # closure -> merge_watch is a legal edge, but merge_watch has no way back, so a run that
+    # took it before `ppl transition done` could never be closed, and the tracker gate would
+    # sit one `ppl merge observed` away. A resume into merge_watch is held to the same
+    # [R-MERGE-WATCH-AFTER-DONE].
+    if stage == "merge_watch" and state["status"] != "done":
+        raise PplError("ILLEGAL_TRANSITION",
+                       "cannot enter merge_watch while the run's status is %s - run "
+                       "`ppl transition done` in closure first [R-MERGE-WATCH-AFTER-DONE]"
+                       % state["status"])
     if stage == "escalation":
         # The one record escalation needs, kept on state itself rather than
         # a second file next to parking.json: unlike parking, there is
@@ -371,7 +397,8 @@ STAGE_NEXT_ACTION = {
     "mr": "push the branch and open the merge request",
     "review": "run the review loop (references/review-loop.md)",
     "closure": "transition the run to done (ppl transition done)",
-    "merge_watch": "watch for the merge, then write the post-merge Jira update",
+    "merge_watch": ("watch for the merge, record it (ppl merge observed), then write the "
+                    "post-merge Jira update"),
     # "parking" and "escalation" are not keyed here: `run.park` sets
     # `next_safe_action` from the caller's own `safe_next` (a real, specific
     # answer to "what do I do about this blocker"), and stage_enter never
@@ -379,14 +406,31 @@ STAGE_NEXT_ACTION = {
     # and the escalation branch below.
 }
 
+# The skill file holding each stage's procedure, which `ppl stage enter` names
+# as its last line. Parking and escalation have none: references/escalation.md
+# is read by error code, not by stage.
+STAGE_REFERENCES = {
+    "admission": "references/stage-0-admission.md",
+    "baseline": "references/stage-1-baseline.md",
+    "briefing": "references/stage-2-briefing.md",
+    "implementation": "references/stage-3-implementation.md",
+    "tests": "references/stage-3-tests.md",
+    "gates": "references/stage-4-gates.md",
+    "verification": "references/stage-5-verification.md",
+    "mr": "references/stage-6-mr.md",
+    "review": "references/stage-7-review.md",
+    "closure": "references/stage-8-after-merge.md",
+    "merge_watch": "references/stage-8-after-merge.md",
+}
+
 
 BLOCKER_CODES = ("SPEC_GAP", "CONTEXT_INSUFFICIENT", "IMPLEMENTATION_FAILURE",
                  "TEST_FAILURE", "BASELINE_FAILURE", "BOUNDARY_VIOLATION",
                  "BUDGET_EXHAUSTED", "OWNER_DECISION", "EXTERNAL_BLOCKED", "TIMED_OUT",
-                 "VERIFICATION_UNAVAILABLE")
+                 "VERIFICATION_UNAVAILABLE", "FORMAT_RETRY_EXHAUSTED")
 
 
-def park(task_id, blocker, safe_next, unsafe_to_repeat):
+def park(task_id, blocker, safe_next, unsafe_to_repeat, refusals=None):
     if blocker not in BLOCKER_CODES:
         raise PplError("SCHEMA_INVALID",
                        "blocker must be one of: %s" % ", ".join(BLOCKER_CODES))
@@ -412,6 +456,8 @@ def park(task_id, blocker, safe_next, unsafe_to_repeat):
         "unsafe_to_repeat": list(unsafe_to_repeat or []),
         "at": store.now(),
     }
+    if refusals:
+        record["refusals"] = list(refusals)
     store.write_json(paths.run_dir(task_id) / "parking.json", record)
     state["stage"] = "parking"
     if state["status"] == "in_progress":
@@ -497,11 +543,13 @@ def record_challenge(task_id, doc):
     against a spec_revision the run no longer carries."""
     from . import schema
     state = load(task_id)
-    schema.validate_challenge(doc)
+    with role_output():
+        schema.validate_challenge(doc)
     if state.get("spec_revision") is None:
         raise PplError("SCHEMA_INVALID",
                        "no spec_revision bound for %s - run ppl brief set before ppl brief "
                        "challenge" % task_id)
+    # stale, not malformed: logged, not counted toward the retry cap
     if doc["spec_revision"] != state["spec_revision"]:
         raise PplError("SCHEMA_INVALID",
                        "challenge was written against spec_revision %s but the run is bound to "

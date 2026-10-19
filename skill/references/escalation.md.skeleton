@@ -3,23 +3,50 @@
 `error_code` is the field name in every JSON error `ppl` prints to stderr on exit 2, and the
 `--code` / `--blocker` value `ppl escalate` and `ppl park` accept. The two rows marked
 "self-inflicted" below are never valid values for `--code` or `--blocker` - they mean you
-asked `ppl` for something it does not accept, not that the task needs an owner decision.
+asked `ppl` for something it does not accept, not that the task needs an owner decision
+[R-PARK-BLOCKER-CODE].
 
 | error_code | What it means | What you do |
 |---|---|---|
 | SPEC_GAP | the governing requirements do not define the behaviour | `ppl escalate --code SPEC_GAP --question "..."`, stop this branch of work, the owner decides and the decision is written back into the spec |
 | CONTEXT_INSUFFICIENT | the answer exists but the brief did not carry it | enrich the briefer prompt with the exact miss, re-brief once, then treat as SPEC_GAP |
 | IMPLEMENTATION_FAILURE | the code does not satisfy the contract | bounded rework, fresh worker, new SHA, new verdict |
-| TEST_FAILURE | the test is wrong or incomplete | test worker rework, never a code change to satisfy a bad test |
-| BASELINE_FAILURE | the problem lives on the base revision | park it with provenance, continue on independent work, never mask it |
+| TEST_FAILURE | the test is wrong or incomplete | test worker rework, not a code change to satisfy a bad test |
+| BASELINE_FAILURE | the problem lives on the base revision | park it with provenance, continue on independent work, do not mask it |
 | BOUNDARY_VIOLATION | a role exceeded its authority | halt, the guard hook already blocked the write, re-derive the boundary or re-brief |
 | BUDGET_EXHAUSTED | dispatch, retry, or cost limit reached | park with an exact handoff, do not continue with another model |
 | OWNER_DECISION | a material decision is required, or the operator paused/stopped the run via `control.json` | halt that branch, surface options, consequences, recommendation and safe default |
 | EXTERNAL_BLOCKED | the forge, the tracker or CI is unavailable, or a worktree that once existed is no longer usable | park, retry on the next tick, do not fabricate the missing fact |
-| TIMED_OUT | no `ppl` activity was recorded on this run since its inactivity deadline - `ppl` parked it itself and bumped the lease generation | run `ppl recover`, inspect what the stuck attempt last wrote and whether it is still running, then resume with a fresh dispatch or re-brief; never just retry into the same stage |
-| VERIFICATION_UNAVAILABLE | ppl verdict record itself refused: this is the second consecutive INCONCLUSIVE/ERROR/CANCELLED/TIMEOUT verdict recorded for the same candidate_sha, and it parked the run rather than let a broken verifier masquerade as an undecided candidate forever | run ppl recover, inspect why the verifier keeps failing to reach a result on this sha (not the code), then resume with a different verification approach or an owner decision - never just redispatch the same check a third time |
-| ILLEGAL_TRANSITION (self-inflicted) | you asked for a stage or lifecycle transition the state machine does not allow from where it actually is | you are lost, run `ppl recover` and re-read the state before trying again |
-| SCHEMA_INVALID (self-inflicted) | an artifact, argument, or command line does not match its contract - includes a bad `ppl` invocation itself, a run whose repo does not exist as a directory at all (its worktree was never created), leaving the baseline stage with no baseline ever recorded, or routing.toml naming a provider kind `ppl` has no adapter for, all of which report this same code | fix the artifact or the invocation and retry once; a missing worktree is fixed by creating it (Stage 1), not by waiting, and a missing adapter is fixed by routing the role elsewhere, not by waiting either; three format failures from one role means its output is discarded and the role is redispatched with the exact mismatch named |
+| TIMED_OUT | no `ppl` activity was recorded on this run since its inactivity deadline - `ppl` parked it itself and bumped the lease generation | run `ppl recover`, inspect what the stuck attempt last wrote and whether it is still running, then resume with a fresh dispatch or re-brief; do not just retry into the same stage |
+| VERIFICATION_UNAVAILABLE | ppl verdict record itself refused: this is the second consecutive INCONCLUSIVE/ERROR/CANCELLED/TIMEOUT verdict recorded for the same candidate_sha, and it parked the run rather than let a broken verifier masquerade as an undecided candidate forever [R-VERIFICATION-UNAVAILABLE-PARK] | run ppl recover, inspect why the verifier keeps failing to reach a result on this sha (not the code), then resume with a different verification approach or an owner decision - do not just redispatch the same check a third time |
+| FORMAT_RETRY_EXHAUSTED | a role's output was refused `SCHEMA_INVALID` twice in a row for the same command in one lease generation: `ppl` parked the run itself on the second refusal, with both messages in `parking.json`, and refuses that command for that role with this code until the run resumes or the generation changes [R-REFUSAL-RETRY-CAP] | inspect both refusals, fix the role prompt or the schema, then resume, do not just redispatch a third time |
+| ILLEGAL_TRANSITION (self-inflicted) | you asked for a stage or lifecycle transition the state machine does not allow from where it actually is, or for leaving the baseline stage with no baseline ever recorded [R-BASELINE-RECORDED-BEFORE-LEAVING], or for entering closure while `ppl transition done` would refuse [R-CLOSURE-ONLY-WHEN-DONE-PASSES] | leaving baseline without one: run `ppl baseline record`, then enter the next stage again. Entering closure too early: the run stays where it was, in review or, on a resume, in parking or escalation. Do what the message names (from review, rework through Stage 3 or repair the evidence on the current head, otherwise repair the evidence or escalate `OWNER_DECISION`), then run the close-out again. Otherwise you are lost, run `ppl recover` and re-read the state before trying again |
+| SCHEMA_INVALID (self-inflicted) | an artifact, argument, or command line does not match its contract. That includes a role's output refused at `ppl brief set`, `ppl brief challenge`, `ppl verdict record`, `ppl findings add` or `ppl evidence add` [R-REFUSAL-RETRY-CAP]. A bad `ppl` invocation itself, a run whose repo does not exist as a directory at all (no worktree was ever created for it), and routing.toml naming a provider kind `ppl` has no adapter for report this same code | a role's output follows the role output rule below. Anything else is yours to fix: correct the invocation and run it again, a missing worktree is fixed by creating it (Stage 1), not by waiting, and a missing adapter is fixed by routing the role elsewhere, not by waiting either |
 
-Silence from the owner is never consent. A parked task with a clear question is a better
+## The role output rule
+
+One rule for every role output `ppl` refuses `SCHEMA_INVALID` [R-REFUSAL-RETRY-CAP]. `--from <role>` names whose
+output a call records: `ppl brief set`, `ppl brief challenge`, `ppl verdict record` and
+`ppl findings add` take it every time, and `ppl evidence add` defaults to `orchestrator`, the
+gate receipts you write yourself. Each refusal of an output is counted against that role.
+A refusal of how you called the command (a file path that cannot be read, a missing
+`--generation`, a missing or unknown `--from`) is logged but not counted: fix the call and
+run it again [R-REFUSAL-RETRY-CAP]. A verdict or challenge refused as stale (written for an old head or brief) is
+not counted either: dispatch the role again against the current head and brief
+[R-REFUSAL-RETRY-CAP].
+
+1. Do not edit the content. Fix only the envelope you added: a wrapper, a code fence, a
+   file path.
+2. Then redispatch the same role once [R-REFUSAL-RETRY-CAP], with the original dispatch and
+   the refusal quoted as data: "`ppl` refused your output: <message>. Return the same content
+   with that fixed."
+3. A second `SCHEMA_INVALID` of that output in a row, for the same command from the same
+   role in the same lease generation, parks the run with `FORMAT_RETRY_EXHAUSTED`. `ppl`
+   does that itself, you report it and stop. There is no third attempt.
+
+Your own gate receipt (`ppl evidence add --from orchestrator`) has no role to send back to:
+correct the receipt from the rc file and run the command again, and the refusal still counts
+toward the cap like any other [R-REFUSAL-RETRY-CAP].
+
+Silence from the owner is not consent. A parked task with a clear question is a better
 outcome than a green screen with an invented answer.

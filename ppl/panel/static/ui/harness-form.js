@@ -1,13 +1,17 @@
 import { html, useEffect, useRef, useState } from "../vendor/htm-preact.mjs";
 import { post } from "../api.js";
 import { Badge, Button, Field, Notice } from "./controls.js";
+import { fieldBlur, fieldInput, idleField, shownText } from "./listfield.js";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function words(text) {
-  return text.split(",").map((part) => part.trim()).filter(Boolean);
+function ListInput({ list, onList }) {
+  const [field, setField] = useState(idleField);
+  return html`<input value=${shownText(field, list)}
+    onInput=${(e) => { const next = fieldInput(e.target.value); setField(next); onList(next.list); }}
+    onBlur=${() => setField(fieldBlur())} />`;
 }
 
 function withEnv(doc, rows) {
@@ -157,7 +161,7 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave, nameLocked
       <div class="grid">
         <${Field} label="Program"><input value=${shape.argv0} onInput=${(e) => update((d) => { d.guard.shape[i].argv0 = e.target.value; })} /><//>
         <${Field} label="Allowed goals" help="Comma separated, exactly one per command line">
-          <input value=${(shape.one_goal_of || []).join(", ")} onInput=${(e) => update((d) => { d.guard.shape[i].one_goal_of = words(e.target.value); })} /><//>
+          <${ListInput} list=${shape.one_goal_of || []} onList=${(list) => update((d) => { d.guard.shape[i].one_goal_of = list; })} /><//>
         ${mode === "expert" ? html`<${Field} label="Other arguments (a regex each token must match)">
           <input value=${shape.free_args || ""} onInput=${(e) => update((d) => { d.guard.shape[i].free_args = e.target.value; })} /><//>` : null}
       </div>

@@ -1,8 +1,11 @@
+import io
+import json
 import os
 import shutil
 import sys
 import tomllib
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -10,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
-from ppl import config, harness, paths, routing
+from ppl import cli, config, harness, paths, routing
 from ppl.errors import PplError
 from ppl.studio import drafts, files
 
@@ -397,6 +400,28 @@ class TestCheckHarness(FilesTestCase):
                          (folder / "skill" / "baseline.md").read_bytes())
         self.assertEqual((folder / "skill" / "gates.md").read_text(encoding="utf-8").strip(),
                          files.read(GATES)["text"].strip())
+
+    def cli_validate(self, name):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            cli.main(["harness", "validate", name, "--json"])
+        return json.loads(out.getvalue())
+
+    def test_a_file_ppl_never_reads_gets_the_answer_the_cli_gives(self):
+        # rule: R-STUDIO-SAME-VALIDATION
+        folder = paths.harness_dir("demo")
+        (folder / "skill" / "notes.md").write_text("never read\n", encoding="utf-8")
+        result = files.check_harness("demo")
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(any("skill/notes.md" in w for w in result["warnings"]), result)
+        self.assertEqual(self.cli_validate("demo"),
+                         {"errors": result["errors"], "warnings": result["warnings"]})
+        (folder / "templates" / "ppl-codeworker.part").write_text("a typo\n", encoding="utf-8")
+        result = files.check_harness("demo", [("skill/gates.md", "Targets: `make all`.\n")])
+        self.assertFalse(result["ok"])
+        self.assertIn("templates/ppl-codeworker.part", result["errors"][0])
+        self.assertEqual(self.cli_validate("demo"),
+                         {"errors": result["errors"], "warnings": result["warnings"]})
 
     def test_a_harness_toml_with_no_name_is_refused_before_it_is_saved(self):
         key = "harness:demo:harness.toml"

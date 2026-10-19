@@ -5,25 +5,21 @@ step read a draft exactly the way they read an installed harness, and two
 requests never share a directory."""
 import os
 import re
-import shlex
 import shutil
 import tempfile
 import uuid
 from pathlib import Path
 
-from .. import harness, paths, routing, tomlout
+from .. import harness, paths, tomlout
 from ..errors import PplError
 from . import stacks, wizard
 
-FRAGMENTS = (("skill/gates.md", "skill/baseline.md", "skill/extra-gates.md",
-              "skill/tracker-close.md")
-             + tuple("templates/%s.part" % role for role in routing.REQUIRED_ROLES))
+FRAGMENTS = harness.FRAGMENTS
 INTERPRETERS = stacks.INTERPRETERS
 # A free_args class that matches every probe takes any token. The probes stay
 # short and the plain word comes first: a catastrophic regex a user typed stalls
 # the whole server (re holds the GIL), and all() stops at the first refusal.
 _PROBES = ("x", ";", "$(id)", "/etc/passwd", "a" * 12)
-_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def drafts_dir():
@@ -132,76 +128,15 @@ def _refused(exc):
     return {"ok": False, "errors": [exc.message], "warnings": [], "flags": []}
 
 
-def _require_absolute_repo(loaded):
-    path = loaded["repo"]["path"]
-    try:
-        absolute = Path(path).expanduser().is_absolute()
-    except RuntimeError:
-        absolute = False
-    if not absolute:
-        raise PplError("HARNESS_INVALID", "repo.path %r must be an absolute path or start with "
-                       "~/: setup would resolve a relative one against the working directory "
-                       "of ppl serve" % path)
-
-
-def _assignments_and_program(command):
-    """(count of leading NAME=value words, program) of a command split as the
-    guard splits one. A command shlex cannot split gives (None, its first word)."""
-    try:
-        words = shlex.split(command)
-    except ValueError:
-        words = None
-    if words is None:
-        raw = command.split()
-        return None, raw[0] if raw else ""
-    count = 0
-    while count < len(words) and _ASSIGNMENT_RE.match(words[count]):
-        count += 1
-    return count, words[count] if count < len(words) else ""
-
-
-def _unrunnable_focused_tests(loaded):
-    """A warning when the test writer's shell would refuse the focused-tests
-    command: the guard takes leading NAME=value words only for a shape with
-    env_prefix on, and the program must be the argv0 of a shape."""
-    rows = harness.shape_rows(loaded, "draft")
-    for gate in loaded.get("gate") or []:
-        if gate["name"] == harness.FOCUSED_TESTS_GATE:
-            count, program = _assignments_and_program(gate["command"])
-            if not program:
-                return []
-            named = [row for row in rows if row["argv0"] == program]
-            if count is not None and any(row["env_prefix"] or not count for row in named):
-                return []
-            text = ("the test writer cannot run the focused-tests command: no command shape "
-                    "starts with %s" % program)
-            if count and named:
-                text += " that takes an environment prefix"
-            return [text]
-    return []
-
-
 def verify(target, name):
     """The check of a harness directory on disk, a draft or a copy of an
-    installed harness: loaded back, validated, its skill rendered and every
-    role's tools composed. A problem comes back as ok False with the
+    installed harness: harness.verify, the one `ppl harness validate` runs,
+    plus the flags of its shapes. A problem comes back as ok False with the
     message, never a raise."""
-    try:
-        loaded = harness.load(str(target))
-        warnings = harness.validate(loaded, name)
-        warnings.extend(_unrunnable_focused_tests(loaded))
-        _require_absolute_repo(loaded)
-        harness.render_skill(loaded)
-        for role in routing.REQUIRED_ROLES:
-            routing.role_tools(role, loaded)
-    except PplError as exc:
-        return _refused(exc)
-    except UnicodeDecodeError as exc:
-        return _refused(PplError("HARNESS_INVALID", "a harness file is not UTF-8 text: %s" % exc))
-    except (TypeError, ValueError) as exc:
-        return _refused(PplError("HARNESS_INVALID", "the harness has a value of the wrong type "
-                                 "and cannot be rendered: %s" % exc))
-    return {"ok": True, "errors": [], "warnings": warnings, "flags": flags(loaded)}
+    result = harness.verify(target, name)
+    if result["errors"]:
+        return dict(result, ok=False, flags=[])
+    return dict(result, ok=True, flags=flags(harness.load(str(target))))
 
 
 def checked_copy(name, doc, fragments, root):

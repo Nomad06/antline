@@ -28,7 +28,7 @@ class TestSurface(unittest.TestCase):
         for kind in forges.KINDS:
             module = forges.get(kind)
             for member in ("VOCABULARY", "role_tools", "denied_tools", "denied_bash",
-                           "bash_shapes", "fragment", "author_lookup", "doctor_check"):
+                           "bash_shapes", "fragment", "doctor_check"):
                 self.assertTrue(hasattr(module, member), "%s lacks %s" % (kind, member))
 
     def test_gitlab_tools_follow_the_configured_server_name(self):
@@ -141,6 +141,16 @@ class TestSurface(unittest.TestCase):
                 text = module.fragment(name)
                 self.assertTrue(text.strip(), "%s/%s is empty" % (kind, name))
                 self.assertNotIn(foreign, text.lower(), "%s/%s names the other forge" % (kind, name))
+
+    def test_stage_seven_and_the_review_loop_include_the_close_out_instead_of_writing_it(self):
+        # The review loop once ended with its own two-command close-out while stage 7 had five.
+        for kind in ("gitlab", "github"):
+            module = forges.get(kind)
+            for name in ("review-loop", "stage7"):
+                text = module.fragment(name)
+                terminal = text[text.index("Terminal"):]
+                self.assertIn("<!-- include: sequence/close-out -->", terminal, "%s/%s" % (kind, name))
+                self.assertNotIn("ppl transition done", text, "%s/%s" % (kind, name))
 
     def test_github_fragments_write_the_json_flag_in_its_equals_form(self):
         github = forges.get("github")

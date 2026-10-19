@@ -5,9 +5,9 @@ import re
 import sys
 
 from . import (boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
-               harness, metrics, models, paths, recover, review, routing, run, schema, setup,
-               status, store, verdict, watchdog)
-from .errors import PplError
+               harness, metrics, models, paths, recover, refusals, review, routing, run, schema,
+               setup, status, store, verdict, watchdog)
+from .errors import PplError, role_output
 
 
 def resolve_task(args):
@@ -50,6 +50,31 @@ def require_current_generation(task_id, generation):
     run.refresh_deadline(task_id)
 
 
+def role_output_command(args):
+    """`<command> <action>` when this call records a role's output, else None."""
+    name = "%s %s" % (args.command, getattr(args, "action", None))
+    return name if name in refusals.COMMANDS else None
+
+
+def require_retry_left(task_id, args):
+    """Checked after the run's own gates and before the input is read: the call has to
+    name whose output it records, and a spent key is refused whatever the input
+    [R-REFUSAL-RETRY-CAP]. A log that cannot be read is a bookkeeping failure like the
+    ones count_refusal reports, and the input is validated as usual."""
+    command = role_output_command(args)
+    if args.from_role not in refusals.ROLES:
+        given = "needs" if args.from_role is None else "got --from %s, it needs" % args.from_role
+        raise PplError("SCHEMA_INVALID",
+                       "ppl %s %s --from <role>, the role whose output it records: pass "
+                       "--from %s for that role's output, or another of %s"
+                       % (command, given, refusals.EXPECTED_ROLE[command],
+                          ", ".join(refusals.ROLES)))
+    try:
+        refusals.require_retry_left(task_id, command, args.from_role)
+    except refusals.CountUnreadable as exc:
+        bookkeeping_failed(task_id, command, args.from_role, exc)
+
+
 def load_json_arg(path, what, kind=dict):
     """A missing or malformed input file is a routable error, not a traceback.
 
@@ -58,11 +83,26 @@ def load_json_arg(path, what, kind=dict):
     AttributeError, exit 1, outside the documented 0/1/2 contract - and after
     the command had already written part of the run.
     """
+    return parse_json_doc(read_arg(path, what), path, what, kind)
+
+
+def load_role_output(path, what):
+    """load_json_arg for a role's output: a file that cannot be read is how the command
+    was called, a body that is not a JSON object is what the role returned."""
+    text = read_arg(path, what)
+    with role_output():
+        return parse_json_doc(text, path, what, dict)
+
+
+def read_arg(path, what):
     try:
         with open(path, "r", encoding="utf-8") as handle:
-            text = handle.read()
+            return handle.read()
     except OSError as exc:
         raise PplError("SCHEMA_INVALID", "%s file %s could not be read: %s" % (what, path, exc))
+
+
+def parse_json_doc(text, path, what, kind):
     doc = parse_json_arg(text, "%s file %s" % (what, path))
     if kind is not None and not isinstance(doc, kind):
         raise PplError("SCHEMA_INVALID",
@@ -89,7 +129,8 @@ def cmd_init(args):
     # is refused too (doctor.matcher_problem): a denial the hook cannot see is
     # a denial that cannot fire, and the run would start believing otherwise.
     inspected = doctor.inspect()
-    problem = doctor.mismatch(args.isolated, inspected) or doctor.matcher_problem(inspected)
+    problem = (doctor.mismatch(args.isolated, inspected) or doctor.matcher_problem(inspected)
+               or doctor.guard_shape_problem())
     if problem:
         raise PplError("SCHEMA_INVALID", problem)
     # Setup is checked before the model gate so a missing models step is told as
@@ -125,6 +166,10 @@ def cmd_init(args):
     state = run.init(args.task_id, args.tracker_url, args.repo, isolated=args.isolated,
                      risk=args.risk, model_check=model_check, harness=harness_record)
     store.write_json(paths.run_dir(args.task_id) / "harness.json", snapshot)
+    # after the run exists, so a refusal's stderr stays the one JSON line it is
+    warning = doctor.dispatch_warning()
+    if warning:
+        sys.stderr.write("warning: %s\n" % warning)
     print(status.card(state["task_id"]))
     return 0
 
@@ -137,6 +182,9 @@ def cmd_doctor(args):
     problem = doctor.matcher_problem(result)
     if problem:
         print(problem)
+    for line in (doctor.guard_shape_problem(), doctor.dispatch_warning()):
+        if line:
+            print(line)
     if result.get("hook_runs_problem"):
         print(result["hook_runs_problem"])
     return 0
@@ -179,6 +227,9 @@ def cmd_stage(args):
     # next `ppl recover` call, or until the watchdog bumps it out from under a
     # deadline this attempt overran [R-LEASE-STALE-WRITE].
     print("generation: %d" % state["lease_generation"])
+    reference = run.STAGE_REFERENCES.get(state["stage"])
+    if reference:
+        print("Before anything in this stage, read %s" % reference)
     return 0
 
 
@@ -211,13 +262,16 @@ def cmd_brief(args):
     control.enforce(task_id)
     if args.action == "challenge":
         require_current_generation(task_id, args.generation)
-        doc = load_json_arg(args.file, "challenge")
+        require_retry_left(task_id, args)
+        doc = load_role_output(args.file, "challenge")
         state = run.record_challenge(task_id, doc)
         print("challenge %s bound to spec_revision %s"
               % (doc["verdict"], state["brief_challenge"]["spec_revision"]))
         return 0
-    doc = load_json_arg(args.file, "brief")
-    schema.validate_brief(doc)
+    require_retry_left(task_id, args)
+    doc = load_role_output(args.file, "brief")
+    with role_output():
+        schema.validate_brief(doc)
     store.write_json(paths.run_dir(task_id) / "brief.json", doc)
     bound = {"write": doc["allowed_write_paths"], "forbid": doc["forbidden_paths"]}
     store.write_json(paths.run_dir(task_id) / "boundary.json", bound)
@@ -307,7 +361,7 @@ def cmd_baseline(args):
     # work it is meant to precede always empties the done-gate's diff. That
     # reasoning is right about the DANGER and wrong about WHERE to catch it:
     # on a freshly cut branch with no commits of its own yet - exactly where
-    # SKILL.md Stage 1 tells the orchestrator to record the baseline - HEAD
+    # the skill's Stage 1 tells the orchestrator to record the baseline - HEAD
     # IS the correct base_sha, and there is no other commit to name. The
     # walker driving this skill had to invent HEAD~1 to get past the old
     # refusal, and a branch cut from a fresh tip would have had no way out
@@ -316,7 +370,7 @@ def cmd_baseline(args):
     # this call happens, not by comparing two commits that read identically
     # in git for "fresh branch" and "recorded late" alike.
     #
-    # SKILL.md Stage 1 already sequences `ppl stage enter baseline` before
+    # the skill's Stage 1 already sequences `ppl stage enter baseline` before
     # this command - a run whose stage has moved past "baseline" (implementation,
     # gates, or later) recording one now is exactly the late-repair shape C3
     # named, whatever commit it names. Refused here instead of at the
@@ -378,6 +432,7 @@ def cmd_baseline(args):
 def cmd_evidence(args):
     task_id = resolve_task(args)
     require_current_generation(task_id, args.generation)
+    require_retry_left(task_id, args)
     producer = parse_json_arg(args.producer, "--producer") if args.producer else {
         "provider": "claude-code-subagent", "model": "unknown", "params_hash": ""}
     # The receipt's binding SHA comes from git rather than from the caller by
@@ -393,12 +448,13 @@ def cmd_evidence(args):
 def cmd_verdict(args):
     task_id = resolve_task(args)
     require_current_generation(task_id, args.generation)
+    require_retry_left(task_id, args)
     state = run.load(task_id)
     head = gitfacts.head_sha(state["repo"])
     # verdict.record itself sets state["candidate_sha"] once the verdict is
     # durably written, so it happens even when the second-consecutive-
     # incomplete park below raises after that write (R-VERIFICATION-UNAVAILABLE-PARK).
-    doc = verdict.record(task_id, load_json_arg(args.file, "verdict"), head)
+    doc = verdict.record(task_id, load_role_output(args.file, "verdict"), head)
     print("verdict %s recorded on %s" % (doc["verdict"], head))
     return 0
 
@@ -407,6 +463,7 @@ def cmd_findings(args):
     task_id = resolve_task(args)
     if args.action == "add":
         require_current_generation(task_id, args.generation)
+        require_retry_left(task_id, args)
         record = findings.add(task_id, args.severity, args.evidence, args.affected_sha,
                               args.affected_path, owner=args.owner, fix_link=args.fix_link)
         print("finding %s recorded: track=%s severity=%s status=%s"
@@ -429,6 +486,16 @@ def cmd_findings(args):
     return 0
 
 
+def _closure_hint(stage):
+    """The next step toward closure that is actually legal from `stage`."""
+    if stage == "review":
+        return "run `ppl stage enter closure` first"
+    if stage == "merge_watch":
+        return ("the run already left closure and merge_watch has no way back, "
+                "so escalate to the owner with `ppl escalate`")
+    return "closure follows review in the stage graph"
+
+
 def cmd_transition(args):
     task_id = resolve_task(args)
     control.enforce(task_id)
@@ -446,9 +513,11 @@ def cmd_transition(args):
     # whatever the done gate tripped over on the way.
     fsm.check_lifecycle(state["status"], args.target)
     if args.target == "done":
-        head = gitfacts.head_sha(state["repo"])
-        changed = gitfacts.changed_paths(state["repo"], state["base_sha"], head)
-        blockers = verdict.done_blockers(task_id, head, changed)
+        if state["stage"] != "closure":
+            raise PplError("ILLEGAL_TRANSITION",
+                           "ppl transition done runs only in stage closure, current stage is %s - %s"
+                           % (state["stage"], _closure_hint(state["stage"])))
+        blockers = verdict.current_blockers(task_id)
         if blockers:
             raise PplError("IMPLEMENTATION_FAILURE",
                            "cannot close task: " + "; ".join(blockers))
@@ -525,6 +594,14 @@ def cmd_mr(args):
     return 0
 
 
+def cmd_merge(args):
+    task_id = resolve_task(args)
+    control.enforce(task_id)
+    review.record_merge(task_id, args.sha, args.url)
+    print("merge observed: %s" % args.sha)
+    return 0
+
+
 def cmd_review(args):
     task_id = resolve_task(args)
     if args.action == "answered":
@@ -581,17 +658,19 @@ def cmd_recover(args):
         # parked (or otherwise left) before Stage 1 ever created its
         # worktree - SCHEMA_INVALID, whose documented remedy ("fix the
         # artifact or the invocation and retry once") is "create the
-        # worktree now, see SKILL.md Stage 1", the same fix Stage 1 already
-        # names. EXTERNAL_BLOCKED, whose remedy is "park, retry on the next
-        # tick", is kept for the other shape: a path that DOES exist but is
-        # not a usable git repository (corrupted, or something else parked
-        # on top of it) - that one really can plausibly clear on its own.
+        # worktree now, see references/stage-1-baseline.md", the same fix
+        # Stage 1 already names. EXTERNAL_BLOCKED, whose remedy is "park,
+        # retry on the next tick", is kept for the other shape: a path that
+        # DOES exist but is not a usable git repository (corrupted, or
+        # something else parked on top of it) - that one really can
+        # plausibly clear on its own.
         repo = result["facts"].get("repo")
         if not repo or not os.path.isdir(repo):
             raise PplError("SCHEMA_INVALID",
                            "recovery cannot verify the run: repo %s does not exist. The run "
                            "exists - do not run `ppl init` again. If its worktree has not "
-                           "been created yet, create it now (see SKILL.md Stage 1) and retry "
+                           "been created yet, create it now (see Stage 1, the skill's "
+                           "references/stage-1-baseline.md) and retry "
                            "`ppl recover`; a worktree that existed and was removed is the "
                            "same fix." % repo)
         raise PplError("EXTERNAL_BLOCKED",
@@ -706,13 +785,20 @@ def cmd_harness(args):
             print("warning: models not verified: %s (run ppl models verify)"
                   % ", ".join("%s (%s)" % (row["model"], row["state"]) for row in unverified))
         return 0
-    doc = harness.load(args.name)
     if args.action == "validate":
-        for warning in harness.validate(doc, args.name):
-            print("warning: %s" % warning)
-        print("harness %s is valid" % doc["harness"]["name"])
-    else:
-        print(json.dumps(doc, indent=2, sort_keys=True, default=str))
+        # the studio's check, so a harness passes or fails the same way in both
+        result = harness.verify(args.name, args.name)
+        if args.json:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            for warning in result["warnings"]:
+                print("warning: %s" % warning)
+        if result["errors"]:
+            raise PplError("HARNESS_INVALID", result["errors"][0])
+        if not args.json:
+            print("harness %s is valid" % harness.load(args.name)["harness"]["name"])
+        return 0
+    print(json.dumps(harness.load(args.name), indent=2, sort_keys=True, default=str))
     return 0
 
 
@@ -844,7 +930,7 @@ COMMANDS = {
     "control": cmd_control, "routing": cmd_routing, "models": cmd_models,
     "dispatch": cmd_dispatch, "harness": cmd_harness,
     "apply-patch": cmd_apply_patch, "destroy": cmd_destroy,
-    "mr": cmd_mr, "review": cmd_review, "doctor": cmd_doctor,
+    "mr": cmd_mr, "merge": cmd_merge, "review": cmd_review, "doctor": cmd_doctor,
     "watchdog": cmd_watchdog, "metrics": cmd_metrics, "label": cmd_label,
     "setup": cmd_setup,
 }
@@ -862,6 +948,13 @@ class JsonArgumentParser(argparse.ArgumentParser):
         sys.stderr.write(json.dumps({"error_code": "SCHEMA_INVALID", "message": message},
                                     sort_keys=True) + "\n")
         raise SystemExit(2)
+
+
+def add_from(parser, default=None):
+    # The role whose output the call records, so a refusal is counted against it
+    # [R-REFUSAL-RETRY-CAP]. Checked in require_retry_left, not by argparse choices, so
+    # a missing or unknown one is a logged refusal rather than an argparse error.
+    parser.add_argument("--from", dest="from_role", default=default)
 
 
 def build_parser():
@@ -899,7 +992,7 @@ def build_parser():
 
     p = sub.add_parser("stage")
     p.add_argument("action", choices=["enter"])
-    p.add_argument("stage")
+    p.add_argument("stage", choices=fsm.STAGES)
     p.add_argument("--task")
 
     p = sub.add_parser("brief")
@@ -908,6 +1001,7 @@ def build_parser():
     p.add_argument("--task")
     # challenge is a lease-fenced write like verdict record, set is not
     p.add_argument("--generation", type=int)
+    add_from(p)
 
     p = sub.add_parser("boundary")
     p.add_argument("action", choices=["set"])
@@ -939,6 +1033,8 @@ def build_parser():
     # control.enforce genuinely does run first and argparse-required would
     # misreport a paused run.)
     p.add_argument("--generation", type=int)
+    # the orchestrator runs the gates itself
+    add_from(p, default="orchestrator")
     p.add_argument("--task")
 
     p = sub.add_parser("verdict")
@@ -948,17 +1044,20 @@ def build_parser():
     # control.enforce call either, so this is not about preserving ordering
     # against one.
     p.add_argument("--generation", type=int)
+    add_from(p)
     p.add_argument("--task")
 
     p = sub.add_parser("findings")
     p.add_argument("action", choices=["add", "status", "delete", "list"])
     # add
-    p.add_argument("--severity", choices=list(findings.SEVERITIES))
+    # findings.add checks it, so a wrong one counts as the role's output
+    p.add_argument("--severity")
     p.add_argument("--evidence")
     p.add_argument("--affected-sha", dest="affected_sha")
     p.add_argument("--affected-path", dest="affected_path")
     p.add_argument("--owner")
     p.add_argument("--fix-link", dest="fix_link")
+    add_from(p)
     # status / delete
     p.add_argument("--finding-id", dest="finding_id")
     p.add_argument("--status", choices=list(findings.STATUSES))
@@ -1000,6 +1099,12 @@ def build_parser():
     p.add_argument("--iid", type=int)
     p.add_argument("--url")
     p.add_argument("--author")
+    p.add_argument("--task")
+
+    p = sub.add_parser("merge")
+    p.add_argument("action", choices=["observed"])
+    p.add_argument("--sha", required=True)
+    p.add_argument("--url")
     p.add_argument("--task")
 
     p = sub.add_parser("review")
@@ -1059,6 +1164,8 @@ def build_parser():
     p.add_argument("action", choices=["validate", "list", "show", "add", "apply"])
     p.add_argument("name", nargs="?")
     p.add_argument("--source")
+    p.add_argument("--json", action="store_true",
+                   help="validate: print {errors, warnings} as the studio shows them")
 
     p = sub.add_parser("setup")
     # No choices= here: argparse before 3.12 checks the empty list against
@@ -1119,7 +1226,67 @@ def main(argv=None):
     if args.command == "budget":
         args.amount = int(args.amount) if args.kind != "usd" else float(args.amount)
     try:
-        return COMMANDS[args.command](args)
+        code = COMMANDS[args.command](args)
     except PplError as err:
-        sys.stderr.write(json.dumps(err.as_dict(), sort_keys=True) + "\n")
+        error = err.as_dict()
+        if err.code == "SCHEMA_INVALID":
+            note = count_refusal(args, err)
+            if note:
+                error["message"] = "%s - %s" % (err.message, note)
+        sys.stderr.write(json.dumps(error, sort_keys=True) + "\n")
         return 2
+    if code == 0:
+        note_acceptance(args)
+    return code
+
+
+def _role_output_run(args):
+    """(task_id, command) when this call records a role's output in a run that exists."""
+    command = role_output_command(args)
+    try:
+        task_id = getattr(args, "task", None) or run.active()
+        if command is None or not task_id or not run.state_path(task_id).exists():
+            return None, None
+    except (OSError, PplError):
+        # a task id or pointer the command itself already failed on
+        return None, None
+    return task_id, command
+
+
+# The two helpers below never change the command's outcome: exit 2 keeps its JSON as the
+# last stderr line and exit 0 stays 0. A count they cannot read or write is reported as a
+# warning line and, when the log takes it, a refusal_bookkeeping_error event.
+def count_refusal(args, err):
+    """Log a refused role output in its run and park the run on the second refusal of
+    its content in a row (refusals.record_refusal). Returns the sentence to add to the
+    message."""
+    task_id, command = _role_output_run(args)
+    if task_id is None:
+        return None
+    try:
+        return refusals.record_refusal(task_id, command, args.from_role, err.message,
+                                       err.of_role_output)
+    except Exception as exc:
+        bookkeeping_failed(task_id, command, args.from_role, exc)
+        return None
+
+
+def note_acceptance(args):
+    """An accepted call ends the run of refusals for its command and role."""
+    task_id, command = _role_output_run(args)
+    if task_id is None:
+        return
+    try:
+        refusals.record_acceptance(task_id, command, args.from_role)
+    except Exception as exc:
+        bookkeeping_failed(task_id, command, args.from_role, exc)
+
+
+def bookkeeping_failed(task_id, command, role, exc):
+    reason = str(exc) or type(exc).__name__
+    sys.stderr.write("warning: refusal count not updated: %s\n" % reason)
+    try:
+        store.append_log(task_id, {"event": "refusal_bookkeeping_error", "command": command,
+                                   "role": role, "reason": reason})
+    except Exception:
+        pass

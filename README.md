@@ -79,7 +79,8 @@ test suite fails if a blocking row has no test that asserts the refusal.
 
 The cells are the guard hook's own answers: each call was sent through
 `hooks/ppl_guard.py` from the studio's cage playground. The orchestrator's tracker
-writes open once the run reaches the merge watch [R-JIRA-GATE]. The read-only agents
+writes open once the run reaches the merge watch and `ppl merge observed` has recorded the
+merge [R-JIRA-GATE]. The read-only agents
 also get no Edit, Write or Bash tool in their agent files [R-ROLE-TOOLS-READONLY].
 The hook has to be registered first, and until it is, nothing in the cage is enforced
 [R-GUARD-NOT-ARMED n/a].
@@ -248,6 +249,14 @@ guard is in `~/.claude/settings.json` [R-INIT-ISOLATION-CHECK], so if you answer
 `global` in `ppl setup claude`, start runs with `ppl init --no-isolated`. Until the
 hooks are registered, nothing in the cage is enforced [R-GUARD-NOT-ARMED n/a].
 
+`ppl doctor` reports per settings file `dispatch_hook` (registered or missing) and
+`hook_shape` (`ok` or what is wrong with the guard and dispatch entries: a `type`
+other than `"command"`, no `timeout`, an interpreter or hook script that is not an
+absolute path to a file). `ppl init` refuses a run while the guard entry has such a
+problem, and warns when the dispatch hook is missing or malformed
+[R-DOCTOR-HOOK-SHAPE]. Neither runs anything to judge the shape: the interpreter's
+version is asked by `ppl doctor` when it runs the guard (`hook_runs`).
+
 ## Harness
 
 A harness is a directory under `~/.ppl/harnesses/<name>/` holding everything
@@ -259,9 +268,23 @@ may run), `skill/` fragments and `templates/` overlays. Two examples ship in
 `ppl harness add <name> --source <directory or git url>`.
 
 ```bash
-ppl harness validate <name>
+ppl harness validate <name>   # --json prints {errors, warnings} as the studio shows them
 ppl harness apply <name>      # renders the agents and the skill, makes it active
 ```
+
+`ppl harness validate` runs the check the studio runs [R-STUDIO-SAME-VALIDATION].
+It refuses a harness with no `focused-tests` gate or one whose command lacks
+`<test_class>` [R-HARNESS-FOCUSED-TESTS-REQUIRED], an unknown table or key in
+`harness.toml` (it names the nearest known one, `[env]` takes any name), a gate
+placeholder the orchestrator does not fill and your `skill/gates.md` or
+`skill/extra-gates.md` does not name (a copy of the command itself does not
+count), and a `templates/<role>.part` for an unknown
+role [R-HARNESS-UNKNOWN-KEY]. It refuses a rendered `SKILL.md`, skill reference or agent
+file over three times the size the examples rendered when the caps were measured and warns over
+1.5 times [R-HARNESS-SIZE-CAP]. It also warns about a file under `skill/` or `templates/`
+that nothing reads, a `knowledge.skills` name missing from the skills
+directories, and a focused-tests command no `[[guard.shape]]` lets the test
+worker run.
 
 The `skill/` fragments a harness can carry are `gates.md` (notes in front of the
 gate recipes), `extra-gates.md` (project-specific gate steps), `baseline.md` (what

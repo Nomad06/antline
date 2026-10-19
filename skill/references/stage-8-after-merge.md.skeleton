@@ -1,0 +1,43 @@
+# Stage 8 - after merge only
+
+The pipeline ends at approval, not at merge. `merge_watch` is a low-frequency tail: keep
+watching the <!-- include: vocab/short -->. Once the merge is actually observed on the forge,
+first record it: <!-- include: sequence/after-merge -->, once per run - a second call is
+refused [R-MERGE-OBSERVED-ONCE]. Then write to the tracker: <!-- include: harness/tracker-close -->.
+Only after the merge is observed and recorded, and always in plain informal English, not a formal template.
+
+**This is enforced, not just a convention, only when `ppl doctor` reports the guard hook
+registered** (`local`, or an accepted `global`/`both`) **for this session** - the hook denies
+every Jira write tool unless the active run's stage is `merge_watch` and `ppl merge observed`
+has recorded the merge [R-JIRA-GATE] [R-GUARD-NOT-ARMED n/a]. If `ppl doctor` reported
+`none` or `unknown`, this section is a rule you keep by discipline, not a cage: the run's
+stage and the recorded merge make no difference to whether the write physically goes
+through, and `OWNER_DECISION` has nothing to print because nothing ran a check to produce it
+[R-GUARD-NOT-ARMED n/a]. Check `ppl doctor` before trusting either reading rather than
+assuming the more comfortable one. When it IS armed, a tracker write before that point is
+denied outright (its reason starts with `OWNER_DECISION`) - do not try the write again
+hoping the hook missed it [R-JIRA-GATE]. Finish the close-out instead, once the
+<!-- include: vocab/short --> is approved on the current head SHA, from the stage and status
+`ppl show --json` reports: from `review`, run <!-- include: sequence/close-out -->; from
+`closure` with status `in_progress`, run <!-- include: sequence/close-out-from-closure -->;
+from `closure` with status `done`, run <!-- include: sequence/close-out-from-done -->; in
+`merge_watch`, run <!-- include: sequence/after-merge --> as above once the merge is on the
+forge. `ppl transition done`
+refuses in any stage but `closure` [R-DONE-FROM-CLOSURE], `ppl stage enter merge_watch`
+refuses until the run is done [R-MERGE-WATCH-AFTER-DONE], and `ppl merge observed` refuses
+in any stage but `merge_watch` [R-MERGE-OBSERVED-ONCE]. `ppl stage enter closure` refuses
+while `ppl transition done` would [R-CLOSURE-ONLY-WHEN-DONE-PASSES], so a `ppl transition
+done` refused once the run is in `closure` means something changed after it entered: repair
+that in place - the receipt, the verdict or the finding status on the current head - and
+run `ppl transition done` again, or escalate `OWNER_DECISION`, since `closure` has no way
+back to Stage 3 [R-DONE-FROM-CLOSURE]. The tracker gate fires for the orchestrator's own session -
+which carries no `agent_type` - whenever the run is active and `isolated` is true (the
+default), regardless of the session's cwd; the documented worktree layout in Stage 1 puts
+the worktree beside the orchestrator's session, not under it, so a cwd-only check would not
+have caught this session in the first place. With `--no-isolated`, this falls back to
+a cwd check instead (DESIGN 5.4).
+
+Once the outcome is known, label the accepted SHA: `ppl label --sha <sha> --actual
+correct|defective|outcompeted --task <TASK-ID>`. `outcompeted` is for a correct candidate
+that a parallel implementation of the same task replaced; `ppl metrics` reports it as
+`outcompeted_rate` so design losses are counted, not only defects [R-METRIC-OUTCOMPETED].

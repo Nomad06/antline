@@ -13,7 +13,8 @@ Every path below is spelled out literally, on purpose. The guard hook fails clos
 redirect whose target it cannot resolve, and a `$VAR/...` or `$(...)` target is exactly
 that: an earlier version of this recipe used `RUN=$(mktemp -d)` and `> "$RUN/install.log"`,
 and the hook refused the build line for any role that ran it, and for the orchestrator whenever
-its session's cwd sat inside the worktree (post-branch review, finding 3). So: one scratch
+its session's cwd sat inside the worktree (post-branch review, finding 3)
+[R-GUARD-BASH-WRITE-BOUNDARY]. So: one scratch
 directory per task, `/tmp/ppl-<TASK-ID>`, written into every line by hand; `<SHA>` read off
 `git -C <worktree> rev-parse HEAD` in its own call and pasted in; `<GENERATION>` from
 `ppl stage enter` or `ppl recover` (SKILL.md "The lease"). Run each line below as its own
@@ -37,7 +38,8 @@ beyond "is a JSON object".
 git -C <worktree> diff origin/<!-- include: harness/default-branch -->...HEAD | grep -in -e password -e secret -e token -e 'BEGIN [A-Z ]*PRIVATE KEY' \
   > /tmp/ppl-<TASK-ID>/secrets.log 2>&1; test ! -s /tmp/ppl-<TASK-ID>/secrets.log; echo $? > /tmp/ppl-<TASK-ID>/secrets.rc
 ppl evidence add --check secret-scan --result <pass|fail from secrets.rc> --sha <SHA> \
-  --log /tmp/ppl-<TASK-ID>/secrets.log --rc /tmp/ppl-<TASK-ID>/secrets.rc --generation <GENERATION>
+  --log /tmp/ppl-<TASK-ID>/secrets.log --rc /tmp/ppl-<TASK-ID>/secrets.rc --generation <GENERATION> \
+  --from orchestrator
 ```
 
 Baseline delta is what matters, not colour. A failure present at the base SHA is
@@ -48,12 +50,12 @@ new on the candidate is a regression and belongs to rework.
 (for example, integration tests on a docs-only change). Use it sparingly and only when the
 gate could not have caught anything here - `focused-tests` and `secret-scan` are never
 skippable in practice, since `ppl transition done` requires a `pass` receipt for those two
-by name and treats a `skip` there the same as a missing receipt.
+by name and treats a `skip` there the same as a missing receipt [R-DONE-SECRET-SCAN].
 
 A rework produces a new commit, and a new commit means a new candidate SHA. Every receipt
 above is filed under `<SHA>` at the time it ran, so after a rework the entire block runs
 again against the new `<SHA>` - there is no way to carry a passing receipt forward from the
-previous candidate, by design (see the same-SHA rule in `SKILL.md` Stage 4).
+previous candidate, by design (see the same-SHA rule in `references/stage-4-gates.md`).
 
 ## Why the guard hook denies these git commands outright
 
@@ -62,7 +64,7 @@ previous candidate, by design (see the same-SHA rule in `SKILL.md` Stage 4).
   `git stash push -u -m <tag>` instead.
 - `git stash pop`, `git stash clear` and a bare `git stash drop` - denied separately from the
   bare form, same reason: the stack is shared, so a pop or a bare drop here takes the top
-  entry, which is likely another session's, and a clear eats all of them. Use
+  entry, which is likely another session's, and a clear eats all of them [R-GIT-STASH]. Use
   `git stash apply <sha>`, then drop your own entry by the index it is re-found at:
   `git stash list` to find your tag, then `git stash drop stash@{N}`.
 - `git push --force` / `-f` / a `+` refspec (`+main`, `+HEAD:main`) - irreversible on a
@@ -71,11 +73,11 @@ previous candidate, by design (see the same-SHA rule in `SKILL.md` Stage 4).
 
 These are denied by the `PreToolUse` guard hook for any `Bash` call, everywhere, not scoped
 to this run and not just a style preference - do not attempt a workaround (a different flag
-spelling, a subshell) to get past the hook.
+spelling, a subshell) to get past the hook [R-GUARD-GLOBAL-DENIALS] [R-GUARD-NOT-ARMED n/a].
 
 For a worker role the same hook also runs `git rm`, `git mv`, `git checkout <ref> -- <path>`
 and `git restore` through the write boundary like a redirect, and refuses `git apply`,
 `git checkout <ref>`, `git merge`/`rebase`/`pull`/`cherry-pick`/`revert`/`clean`, `patch` and
 an unresolvable `rsync` outright: those rewrite tree paths it cannot name from the command
-line. `git add`, `git commit`, `git status`/`diff`/`log`/`show` and `git stash push`/`apply`
+line [R-GUARD-BASH-WRITE-BOUNDARY]. `git add`, `git commit`, `git status`/`diff`/`log`/`show` and `git stash push`/`apply`
 are unaffected.

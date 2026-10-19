@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 from . import paths, schema, store
-from .errors import PplError
+from .errors import PplError, role_output
 
 RESULTS = ("pass", "fail", "skip")
 
@@ -58,17 +58,20 @@ def read_rc(rc_file):
 
 
 def add(task_id, check, result, sha, log_path, rc_file, producer):
-    _validate_check(check)
-    _validate_sha(sha)
-    if result not in RESULTS:
-        raise PplError("SCHEMA_INVALID", "result must be one of %s" % ", ".join(RESULTS))
+    with role_output():
+        _validate_check(check)
+        _validate_sha(sha)
+        if result not in RESULTS:
+            raise PplError("SCHEMA_INVALID", "result must be one of %s" % ", ".join(RESULTS))
+    # The exit-code file is how the command was called, so it is read outside the block.
     code = read_rc(rc_file)
-    if result == "pass" and code != 0:
-        raise PplError("SCHEMA_INVALID",
-                       "receipt for %s claims pass but rc=%d" % (check, code))
-    if result == "fail" and code == 0:
-        raise PplError("SCHEMA_INVALID",
-                       "receipt for %s claims fail but rc=0" % check)
+    with role_output():
+        if result == "pass" and code != 0:
+            raise PplError("SCHEMA_INVALID",
+                           "receipt for %s claims pass but rc=%d" % (check, code))
+        if result == "fail" and code == 0:
+            raise PplError("SCHEMA_INVALID",
+                           "receipt for %s claims fail but rc=0" % check)
     receipt = {
         "task_id": task_id, "check": check, "result": result,
         "candidate_sha": sha, "rc": code, "log": str(log_path),

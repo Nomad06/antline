@@ -1,5 +1,5 @@
-from . import boundary, evidence, findings, paths, run, schema, store
-from .errors import PplError
+from . import boundary, evidence, findings, gitfacts, paths, run, schema, store
+from .errors import PplError, role_output
 
 REQUIRED_CHECKS = ("focused-tests", "secret-scan")
 
@@ -12,12 +12,15 @@ ADVISORY_CHECKS = ("simplification",)
 # E2, cycle 2 wave E: `ppl verdict record` used to leave next_safe_action
 # naming itself ("dispatch ppl-verifier and record its verdict") even after
 # it had just succeeded - repeating it, the only thing the stale text names,
-# errors ILLEGAL_TRANSITION. Restamped here by outcome, mirroring
-# skill/SKILL.md.skeleton Stage 5's own routing table so the two never drift
+# errors ILLEGAL_TRANSITION. Restamped here by outcome, mirroring the routing
+# table of skill/references/stage-5-verification.md so the two never drift
 # apart - see schema.VERDICT_OUTCOMES for the full closed set this keys.
 VERDICT_NEXT_ACTION = {
     "PASS": "verdict is PASS - proceed to Stage 6 (ppl stage enter mr)",
-    "REWORK": "ppl budget spend retry, then dispatch a fresh worker with the finding",
+    "REWORK": "ppl budget spend retry, then ppl stage enter implementation "
+              "(references/stage-3-implementation.md), or ppl stage enter tests "
+              "(references/stage-3-tests.md) when the finding is the tests', and dispatch "
+              "a fresh worker with the finding",
     "BLOCKED": "map the finding to an error_code and ppl park --blocker <code> "
               "--safe-next \"...\"",
     "OWNER_DECISION": "ppl escalate --code OWNER_DECISION --question \"<the verifier's "
@@ -34,12 +37,36 @@ def _path(task_id, sha):
     return paths.run_dir(task_id) / "verdicts" / ("%s.json" % sha)
 
 
+def _history_dir(task_id, sha):
+    return paths.run_dir(task_id) / "verdicts" / sha
+
+
+def _history_numbers(folder):
+    if not folder.is_dir():
+        return []
+    return sorted(int(p.stem) for p in folder.glob("*.json") if p.stem.isdigit())
+
+
+def history(task_id, sha):
+    """Every verdict recorded for `sha`, oldest first.
+
+    A run created before the history existed has only `verdicts/<sha>.json`,
+    which then is the whole history.
+    """
+    folder = _history_dir(task_id, sha)
+    docs = [store.read_json(folder / ("%d.json" % n)) for n in _history_numbers(folder)]
+    docs = [d for d in docs if d is not None]
+    if docs:
+        return docs
+    doc = latest(task_id, sha)
+    return [doc] if doc is not None else []
+
+
 def _previous_verdict_outcome(task_id, sha):
     """The outcome of the verdict recorded for `sha` just before this one.
 
-    `verdicts/<sha>.json` only ever holds the latest verdict for that SHA -
-    a second `record` call for the same SHA overwrites it - so "the previous
-    outcome" cannot be read from that file. `log.jsonl` is append-only and
+    `verdicts/<sha>.json` only ever holds the latest verdict for that SHA, so
+    "the previous outcome" is read from `log.jsonl`, which is append-only and
     keeps every "verdict" event this run has ever recorded, including the one
     this call is about to append below, so it is read here BEFORE that
     append happens.
@@ -50,7 +77,10 @@ def _previous_verdict_outcome(task_id, sha):
 
 
 def record(task_id, doc, head_sha):
-    schema.validate_verdict(doc)
+    with role_output():
+        schema.validate_verdict(doc)
+    # A stale verdict is logged, not counted: it was dispatched against an old head or
+    # brief, and a new dispatch fixes it, not a format retry.
     if doc["candidate_sha"] != head_sha:
         raise PplError("SCHEMA_INVALID",
                        "verdict is stale: it was produced for %s but head is %s"
@@ -82,6 +112,13 @@ def record(task_id, doc, head_sha):
     # Read before the append below records this very call - see
     # _previous_verdict_outcome's own docstring for why.
     previous = _previous_verdict_outcome(task_id, head_sha)
+    folder = _history_dir(task_id, head_sha)
+    numbers = _history_numbers(folder)
+    if not numbers and _path(task_id, head_sha).exists():
+        # a run from before the history: keep its one verdict as entry 1
+        store.write_json(folder / "1.json", latest(task_id, head_sha))
+        numbers = [1]
+    store.write_json(folder / ("%d.json" % ((numbers[-1] if numbers else 0) + 1)), doc)
     store.write_json(_path(task_id, head_sha), doc)
     store.append_log(task_id, {"event": "verdict", "sha": head_sha, "verdict": doc["verdict"]})
     # Recorded here, not left to the CLI caller, so it happens whether or
@@ -143,6 +180,16 @@ def proven_acceptance(task_id, sha):
     if not sha:
         return set()
     return _proven(latest(task_id, sha), evidence.for_sha(task_id, sha))
+
+
+def current_blockers(task_id):
+    """done_blockers for the run's repo as it is now: its head, and the paths changed
+    from base_sha to it. Read by `ppl transition done` and by the closure entry check
+    [R-CLOSURE-ONLY-WHEN-DONE-PASSES]."""
+    state = run.load(task_id)
+    head = gitfacts.head_sha(state["repo"])
+    changed = gitfacts.changed_paths(state["repo"], state["base_sha"], head)
+    return done_blockers(task_id, head, changed)
 
 
 def done_blockers(task_id, head_sha, changed_paths):

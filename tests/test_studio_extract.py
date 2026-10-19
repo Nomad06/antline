@@ -18,7 +18,7 @@ sys.path.insert(0, str(REPO / "hooks"))
 import ppl_guard
 from ppl import config, harness, paths, routing
 from ppl.errors import PplError
-from ppl.studio import extract, project, stacks
+from ppl.studio import drafts, extract, project, stacks
 
 GOOD_DRAFT = {
     "gates": [{"name": "Install dependencies", "command": "npm ci", "source": "CLAUDE.md:3"},
@@ -49,6 +49,25 @@ def fake(stdout, returncode=0):
         calls.append((command, text))
         return returncode, stdout, ""
     return runner, calls
+
+
+def fake_answers(*answers):
+    """One answer per call, in order: a stdout string, a (returncode, stdout, stderr)
+    triple, or an exception the runner raises."""
+    calls = []
+    pending = list(answers)
+
+    def runner(command, text):
+        calls.append((command, text))
+        item = pending.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item if isinstance(item, tuple) else (0, item, "")
+    return runner, calls
+
+
+def system_prompt(command):
+    return command[command.index("--system-prompt") + 1]
 
 
 ZWSP = "\u200b"
@@ -423,6 +442,108 @@ class TestExtract(panel_client.StudioTestCase):
             extract.extract(FILES, lambda line: None)
         self.assertEqual(caught.exception.code, "EXTRACTION_FAILED")
         self.assertIn("not found", caught.exception.message)
+
+
+class TestExtractRetry(panel_client.StudioTestCase):
+    """One more call, with the reason, when the answer itself is refused. A failed
+    process or a timeout is not asked again."""
+
+    def setUp(self):
+        super().setUp()
+        config.ensure()
+        self.lines = []
+
+    def run_with(self, *answers):
+        runner, calls = fake_answers(*answers)
+        with mock.patch.object(extract, "RUNNER", runner):
+            result = extract.extract(FILES, self.lines.append)
+        return result, calls
+
+    def refused(self, *answers):
+        runner, calls = fake_answers(*answers)
+        with mock.patch.object(extract, "RUNNER", runner), \
+                self.assertRaises(PplError) as caught:
+            extract.extract(FILES, self.lines.append)
+        self.assertEqual(caught.exception.code, "EXTRACTION_FAILED")
+        return caught.exception.message, calls
+
+    def cost_lines(self):
+        return [line for line in self.lines if "cost" in line]
+
+    def test_invalid_json_then_valid_json_yields_the_draft_and_two_cost_lines(self):
+        result, calls = self.run_with(answer(structured=False, result="Sure: npm ci"), answer())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(result["extracted"]["gates"]), 3)
+        self.assertEqual(len(self.cost_lines()), 2)
+        self.assertTrue(all("0.0030 USD" in line for line in self.cost_lines()))
+        self.assertAlmostEqual(result["cost_usd"], 0.006)
+
+    def test_the_second_call_carries_the_refusal_reason_and_the_same_input(self):
+        _, calls = self.run_with("Sure! Here are the gates: npm ci", answer())
+        (first, first_text), (second, second_text) = calls
+        self.assertEqual(system_prompt(first), extract.SYSTEM_PROMPT)
+        self.assertTrue(system_prompt(second).startswith(extract.SYSTEM_PROMPT))
+        self.assertIn("Your previous answer was refused: Claude's answer is not JSON",
+                      system_prompt(second))
+        self.assertTrue(system_prompt(second).endswith(
+            "Answer again with JSON that matches the schema."))
+        self.assertEqual(first_text, second_text)
+        self.assertEqual(first[:first.index("--system-prompt")],
+                         second[:second.index("--system-prompt")])
+        self.assertIn("cost unknown", self.cost_lines()[0])
+
+    def test_a_draft_of_the_wrong_shape_is_asked_again(self):
+        result, calls = self.run_with(answer(dict(GOOD_DRAFT, gates="npm ci")), answer())
+        self.assertEqual(len(calls), 2)
+        self.assertIn("gates", system_prompt(calls[1][0]))
+        self.assertEqual(len(result["extracted"]["gates"]), 3)
+
+    def test_two_refused_answers_fail_naming_both_reasons(self):
+        message, calls = self.refused("not json", answer(dict(GOOD_DRAFT, gates="npm ci")))
+        self.assertEqual(len(calls), 2)
+        self.assertIn("not JSON", message)
+        self.assertIn("gates", message)
+        self.assertEqual(len(self.cost_lines()), 2)
+
+    def test_a_timeout_is_not_asked_again(self):
+        timeout = PplError("EXTRACTION_FAILED", "Claude did not answer within 120 seconds")
+        message, calls = self.refused(timeout, answer())
+        self.assertEqual(len(calls), 1)
+        self.assertIn("did not answer", message)
+
+    def test_a_failed_process_is_not_asked_again(self):
+        for failed in ((1, "", "boom"), (1, answer(is_error=True, result="Credit balance"), ""),
+                       (0, answer(is_error=True, result="Credit balance"), "")):
+            with self.subTest(failed=failed):
+                _, calls = self.refused(failed, answer())
+                self.assertEqual(len(calls), 1)
+
+    def test_a_retry_that_times_out_still_names_the_first_reason(self):
+        timeout = PplError("EXTRACTION_FAILED", "Claude did not answer within 120 seconds")
+        message, calls = self.refused("not json", timeout)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("not JSON", message)
+        self.assertIn("did not answer", message)
+
+    def test_dropped_items_are_not_asked_again(self):
+        hostile = dict(GOOD_DRAFT, test_shapes=[shape("bash")])
+        result, calls = self.run_with(answer(hostile))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([item["kind"] for item in result["dropped"]], ["shape"])
+
+    def test_an_extracted_gate_with_a_placeholder_nobody_fills_is_refused_by_the_check(self):
+        # rule: R-HARNESS-UNKNOWN-KEY
+        # the merged gates.md echoes every command, and an echo does not say what goes there
+        gates = [dict(gate) for gate in GOOD_DRAFT["gates"]]
+        gates[1]["command"] = "npx jest <test_class> --selectProjects <project>"
+        result, _ = self.run_with(answer(dict(GOOD_DRAFT, gates=gates)))
+        info = {"path": tmphome.mkdtemp(prefix="pplrepo-"), "default_branch": "main",
+                "forge_hint": None, "name_hint": "demo"}
+        merged = extract.merge(stacks.draft("node", info), result["extracted"])
+        self.assertIn("<project>", merged["fragments"]["skill/gates.md"])
+        checked = drafts.check("demo", merged["doc"], merged["fragments"])
+        self.assertFalse(checked["ok"], checked)
+        self.assertIn("<project>", checked["errors"][0])
 
 
 class TestMerge(unittest.TestCase):

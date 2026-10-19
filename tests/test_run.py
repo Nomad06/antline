@@ -106,6 +106,22 @@ class TestSchema(unittest.TestCase):
             })
         self.assertIn("name_contract", ctx.exception.message)
 
+    def test_brief_rejects_a_field_of_the_wrong_type(self):
+        # rule: R-BRIEF-SCHEMA
+        complete = {
+            "task_id": "DEMO-1", "purpose": "p", "success_outcome": "s",
+            "governing_requirements": [], "acceptance": ["AC-1"],
+            "allowed_write_paths": ["src/**"], "forbidden_paths": [],
+            "verification": ["focused-tests"], "open_decisions": [],
+            "name_contract": {"Foo.bar": "int"},
+        }
+        for field, wrong in (("allowed_write_paths", "src/**"), ("name_contract", ["Foo.bar"]),
+                             ("purpose", 7)):
+            with self.subTest(field=field), self.assertRaises(PplError) as ctx:
+                schema.validate_brief(dict(complete, **{field: wrong}))
+            self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+            self.assertIn("field %r must be" % field, ctx.exception.message)
+
     def test_brief_rejects_a_dict_shaped_acceptance_entry(self):
         # rule: R-BRIEF-SCHEMA (E1 CRITICAL, cycle 2 wave B). Only presence
         # (a non-empty list) was ever checked - the elements' shape was not.
@@ -313,6 +329,34 @@ class TestRun(unittest.TestCase):
         self.assertEqual(event["tracker_url"], "https://j/DEMO-110")
 
 
+class TestMergeWatchAfterDone(unittest.TestCase):
+    """closure -> merge_watch is a legal edge of the stage graph, but a run that took it
+    before `ppl transition done` sat in merge_watch with status in_progress, with no way
+    back to closure and the tracker gate one `ppl merge observed` away."""
+
+    def at_closure(self, task_id, status):
+        run.init(task_id, "https://j/%s" % task_id, "/tmp/repo")
+        state = run.load(task_id)
+        state["stage"] = "closure"
+        state["status"] = status
+        run.save(state)
+
+    def test_entering_merge_watch_before_the_run_is_done_is_refused(self):
+        # rule: R-MERGE-WATCH-AFTER-DONE
+        self.at_closure("DEMO-5820", "in_progress")
+        with self.assertRaises(PplError) as ctx:
+            run.stage_enter("DEMO-5820", "merge_watch")
+        self.assertEqual(ctx.exception.code, "ILLEGAL_TRANSITION")
+        self.assertIn("ppl transition done", ctx.exception.message)
+        state = run.load("DEMO-5820")
+        self.assertEqual((state["stage"], state["status"]), ("closure", "in_progress"))
+
+    def test_entering_merge_watch_once_the_run_is_done_is_allowed(self):
+        self.at_closure("DEMO-5821", "done")
+        state = run.stage_enter("DEMO-5821", "merge_watch")
+        self.assertEqual((state["stage"], state["status"]), ("merge_watch", "done"))
+
+
 class TestLease(unittest.TestCase):
     """The lease and its fencing generation - R-LEASE-STALE-WRITE."""
 
@@ -377,6 +421,22 @@ class TestDeadline(unittest.TestCase):
         run.init("DEMO-762", "https://j/DEMO-762", "/tmp/repo")
         state = run.park("DEMO-762", "TIMED_OUT", "inspect the stuck attempt", [])
         self.assertEqual(state["stage"], "parking")
+
+    def test_format_retry_exhausted_joins_the_blocker_codes(self):
+        self.assertIn("FORMAT_RETRY_EXHAUSTED", run.BLOCKER_CODES)
+
+    def test_park_keeps_the_refusals_it_is_given_in_the_parking_record(self):
+        from ppl import paths, store
+        run.init("DEMO-763", "https://j/DEMO-763", "/tmp/repo")
+        refusals = [{"command": "brief set", "role": "ppl-briefer", "message": "one"},
+                    {"command": "brief set", "role": "ppl-briefer", "message": "two"}]
+        run.park("DEMO-763", "FORMAT_RETRY_EXHAUSTED", "inspect both refusals", [],
+                 refusals=refusals)
+        record = store.read_json(paths.run_dir("DEMO-763") / "parking.json")
+        self.assertEqual(record["blocker"], "FORMAT_RETRY_EXHAUSTED")
+        self.assertEqual(record["refusals"], refusals)
+        run.park("DEMO-763", "OWNER_DECISION", "operator stop", [])
+        self.assertNotIn("refusals", store.read_json(paths.run_dir("DEMO-763") / "parking.json"))
 
 
 class TestResumeFromParking(unittest.TestCase):
@@ -693,6 +753,15 @@ class TestChallengeSchema(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
         self.assertIn("parked", ctx.exception.message)
 
+    def test_the_refusal_tells_the_challenger_what_to_correct_in_its_own_report(self):
+        # rule: R-BRIEF-CHALLENGE-SELF-CONSISTENT
+        doc = dict(CHALLENGE_OK, spec_revision="x",
+                   new_classes=[{"name": "X", "existing_owner": "Y", "justified": False}])
+        with self.assertRaises(PplError) as ctx:
+            schema.validate_challenge(doc)
+        self.assertIn("set this report's verdict to REVISE", ctx.exception.message)
+        self.assertNotIn("re-brief", ctx.exception.message)
+
     def test_revise_may_carry_the_problems_it_reports(self):
         doc = dict(CHALLENGE_OK, spec_revision="x", verdict="REVISE",
                    new_classes=[{"name": "X", "existing_owner": "Y", "justified": False}])
@@ -743,3 +812,24 @@ class TestOpenDecisionsSchema(unittest.TestCase):
             schema.validate_brief(self.brief([{"question": "a", "cost_to_close_files": 1}]))
         self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
 
+
+
+class TestAttemptFieldRetired(unittest.TestCase):
+    def test_a_new_run_state_has_no_attempt_key(self):
+        run.init("DEMO-1301", "u", "/tmp/repo")
+        self.assertNotIn("attempt", run.load("DEMO-1301"))
+
+    def test_an_old_state_carrying_attempt_still_loads_and_shows(self):
+        import contextlib
+        import io
+        from ppl import cli
+        run.init("DEMO-1302", "u", "/tmp/repo")
+        state = run.load("DEMO-1302")
+        state["attempt"] = 1
+        run.save(state)
+        self.assertEqual(run.load("DEMO-1302")["attempt"], 1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["show", "--task", "DEMO-1302"]), 0)
+            self.assertEqual(cli.main(["show", "--task", "DEMO-1302", "--json"]), 0)
+        self.assertIn("DEMO-1302", out.getvalue())

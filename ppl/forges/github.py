@@ -91,10 +91,6 @@ def fragment(name):
     return read_fragment(KIND, name)
 
 
-def author_lookup():
-    return "run `gh api user --jq .login` once and pass the login to `ppl mr set --author`"
-
-
 def doctor_check(settings, claude_json_path, workspace, runner=subprocess.run):
     try:
         version = runner(["gh", "--version"], capture_output=True, text=True, timeout=20)

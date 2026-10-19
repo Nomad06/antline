@@ -2,7 +2,7 @@
 
 Started with `/loop` in dynamic mode. The loop schedules its own next wake-up: 1200 to 1800
 seconds while idle, tighter while a CI pipeline is running. Every tick is stateless and
-reads durable state plus live GitLab, never chat history.
+reads durable state plus live GitLab, not chat history.
 
 Before the first tick: call the GitLab MCP's `whoami` once and run
 `ppl mr set --iid <iid> --url <url> --author <username>` with the result. The authorship
@@ -35,7 +35,7 @@ Each tick, in this order:
    before the tick continues.
 3. `ppl approval check` - the last line of stdout is a single JSON object,
    `{"approval": "current"|"stale"|"none", "approved_sha": ..., "head_sha": ...}`; parse that
-   line and branch on `approval`, never on the human-readable line above it. If it says
+   line and branch on `approval`, not on the human-readable line above it. If it says
    `stale`, previous approvals do not count - say so in the tick summary rather than quietly
    proceeding.
 4. `ppl review pending --threads <file> --sha <sha>`. This is the dispatch filter, not an
@@ -51,8 +51,11 @@ Each tick, in this order:
    identity opened is a remark to answer, while a multi-note thread whose newest note is
    by the identity is the pipeline's own reply and is dropped even if the ledger missed it.
 5. Act per classification:
-   - `NEEDS_CODE_CHANGE`: re-enter stage 3 with the remark as an added constraint. The full
-     loop runs again: worker, test worker, gates, verifier. A new SHA invalidates approvals.
+   - `NEEDS_CODE_CHANGE`: re-enter stage 3 with the remark as an added constraint, through
+     `ppl stage enter implementation` (`references/stage-3-implementation.md`), or
+     `ppl stage enter tests` (`references/stage-3-tests.md`) when the remark is about the
+     tests. The full loop runs again: worker, test worker, gates, verifier. A new SHA
+     invalidates approvals.
    - `NEEDS_REPLY_ONLY`: post the draft as a note on that thread.
    - `DISAGREE`: do not argue in the thread. Surface the counter-argument to the owner.
    - `NEEDS_OWNER`: surface it and park if it blocks progress.
@@ -61,11 +64,15 @@ Each tick, in this order:
    and the generation captured in step 1, so the next tick's
    `ppl review pending` does not name this thread again - unless and until a newer note
    lands on it.
-7. **Never resolve the thread.** Only the person who wrote the remark may resolve it.
+7. **Do not resolve the thread** - only the person who wrote the remark may resolve it
+   [R-MCP-RESOLVE-THREAD].
 8. Red CI on the candidate: classify against the baseline first. A pre-existing failure is
-   `BASELINE_FAILURE`, a new one is rework. Never a bare retry.
-9. Terminal: approval bound to the current head SHA. Record it with
-   `ppl review approved --sha <sha>`, then `ppl transition done`, then tell the owner.
+   `BASELINE_FAILURE`, a new one is rework, through `ppl stage enter implementation`
+   (`references/stage-3-implementation.md`), or `ppl stage enter tests`
+   (`references/stage-3-tests.md`) when a test is at fault. Do not just run it again.
+9. Terminal: approval bound to the current head SHA. Close out in this order:
+   <!-- include: sequence/close-out -->, then tell the owner. `ppl approval check` must
+   read `current` before you go on.
 
 Wake-up discipline: do not poll for work the harness will notify you about. Use a long
 fallback interval and let notifications do the fast path.
