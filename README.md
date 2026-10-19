@@ -120,9 +120,9 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `rules.toml` holds 158 rules, 114 of them blocking,
+- The limits that matter are code. `rules.toml` holds 174 rules, 130 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 1868 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 2323 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - Irreversible steps stay with people: merging, resolving threads, approving, and any
   disagreement with a reviewer.
@@ -140,6 +140,10 @@ the test writer tries to `cat` product code and the hook denies it
   (Rust `#[cfg(test)]`, doctests) are not isolated.
 - A worktree is not a sandbox. A process can still read credentials or write outside the
   tree if the operating system lets it.
+- The `gh` tracker gate reads the command's words, so a renamed binary, an API host held in a
+  variable, an interpreter or a script file is not seen. The boundary that closes this is a
+  GitHub credential the role sessions never hold, which is planned follow-up work
+  [R-TRACKER-CLI-GATE].
 - The done gate mostly checks documents the same session wrote. SHA binding and
   consistency checks catch drift and omissions, but a model that is wrong in a
   self-consistent way passes. Real independence needs CI or a verifier on separate
