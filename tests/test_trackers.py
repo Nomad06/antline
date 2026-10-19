@@ -1,7 +1,10 @@
 import random
+import re
+import time
 import unittest
 
-from ppl import trackers
+from ppl import forges, trackers
+from ppl.errors import PplError
 from ppl.trackers import jira
 
 PREFIXES = jira.DEFAULTS["mcp_prefixes"]
@@ -9,9 +12,11 @@ WRITES = jira.DEFAULTS["write_operations"]
 
 
 class TestRegistry(unittest.TestCase):
-    def test_jira_is_the_only_kind_and_resolves_to_the_adapter(self):
-        self.assertEqual(trackers.KINDS, ("jira",))
+    def test_each_kind_resolves_to_its_adapter(self):
+        self.assertEqual(trackers.KINDS, ("jira", "github-issues"))
         self.assertIs(trackers.get("jira"), jira)
+        self.assertEqual(trackers.get("github-issues").KIND, "github-issues")
+        self.assertEqual(trackers.get("github-issues").__name__, "ppl.trackers.github_issues")
 
     def test_an_unknown_kind_is_refused(self):
         with self.assertRaises(ValueError):
@@ -94,6 +99,267 @@ class TestAdapterInterface(unittest.TestCase):
     def test_jira_writes_nothing_through_bash(self):
         self.assertEqual(jira.write_denials(jira_table()), [])
         self.assertEqual(jira.TRANSPORT, "mcp")
+
+
+def github_issues_table(**override):
+    table = {"kind": "github-issues", "repo": "o/r", "task_prefix": "GH"}
+    table.update(override)
+    return table
+
+
+# Every issue-writing GraphQL mutation behind a gh issue verb the denials cover.
+ISSUE_MUTATIONS = ("addComment", "updateIssue", "closeIssue", "reopenIssue", "deleteIssue",
+                   "addLabelsToLabelable", "removeLabelsFromLabelable", "createIssue",
+                   "updateIssueComment", "deleteIssueComment", "clearLabelsFromLabelable",
+                   "addAssigneesToAssignable", "removeAssigneesFromAssignable",
+                   "transferIssue", "pinIssue", "unpinIssue", "lockLockable", "unlockLockable",
+                   "createLinkedBranch", "deleteLinkedBranch", "addSubIssue", "removeSubIssue",
+                   "reprioritizeSubIssue", "markIssueAsDuplicate", "unmarkIssueAsDuplicate",
+                   "updateIssueIssueType")
+
+
+class GithubIssuesCase(unittest.TestCase):
+    def setUp(self):
+        self.adapter = trackers.get("github-issues")
+        self.denials = self.adapter.write_denials(github_issues_table())
+
+    def denied(self, command):
+        return any(pattern.search(command) for pattern in self.denials)
+
+    def assert_denied(self, commands):
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertTrue(self.denied(command), command)
+
+    def assert_allowed(self, commands):
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertFalse(self.denied(command), command)
+
+    def assert_fast_and_clean(self, commands):
+        # A hook that runs past its timeout denies nothing, so a command that makes
+        # a pattern backtrack is a bypass, not a slowdown.
+        for command in commands:
+            with self.subTest(command=command[:40], length=len(command)):
+                start = time.perf_counter()
+                hits = [pattern.pattern[:60] for pattern in self.denials
+                        if pattern.search(command)]
+                self.assertLess(time.perf_counter() - start, 0.2)
+                self.assertEqual(hits, [])
+
+
+class TestGithubIssuesAdapter(GithubIssuesCase):
+    def test_the_adapter_writes_through_gh_and_holds_no_mcp_tool(self):
+        self.assertEqual(self.adapter.TRANSPORT, "cli")
+        self.assertEqual(self.adapter.DEFAULTS, {"task_prefix": "GH"})
+        self.assertEqual(self.adapter.KEYS, ("kind", "repo", "task_prefix"))
+        self.assertEqual(self.adapter.mcp_read_tools(github_issues_table()), [])
+        pattern = self.adapter.mcp_write_regex(github_issues_table())
+        for name in ("", "mcp__github__add_issue_comment", "mcp__atlassian__editJiraIssue",
+                     "Bash"):
+            self.assertFalse(pattern.match(name), name)
+
+    def test_the_issue_number_is_the_digits_after_the_prefix(self):
+        self.assertEqual(self.adapter.issue_number("GH-123"), 123)
+        self.assertEqual(self.adapter.issue_number("PROJ2-7"), 7)
+        for bad in ("gh-12", "GH-012", "GH-0", "GH-", "GH-12a", "123", "GH-12\n", "", None, 12):
+            with self.subTest(task_id=bad):
+                with self.assertRaises(PplError) as caught:
+                    self.adapter.issue_number(bad)
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+
+    def test_validate_requires_an_owner_name_repo_and_a_plain_prefix(self):
+        self.assertEqual(self.adapter.validate(github_issues_table()), ([], []))
+        without_prefix = github_issues_table()
+        del without_prefix["task_prefix"]
+        self.assertEqual(self.adapter.validate(without_prefix), ([], []))
+        for repo in ("", "o", "o/r/x", "https://github.com/o/r", "o r/x", 5, None):
+            with self.subTest(repo=repo):
+                errors, _ = self.adapter.validate(github_issues_table(repo=repo))
+                self.assertEqual(len(errors), 1)
+                self.assertIn("tracker.repo", errors[0])
+        for prefix in ("gh", "G-H", "", 7):
+            with self.subTest(task_prefix=prefix):
+                errors, _ = self.adapter.validate(github_issues_table(task_prefix=prefix))
+                self.assertEqual(len(errors), 1)
+                self.assertIn("tracker.task_prefix", errors[0])
+        errors, _ = self.adapter.validate({"kind": "github-issues"})
+        self.assertEqual(errors, ["tracker.repo is required, the owner/name of the GitHub "
+                                  "repository the issues live in"])
+
+    def test_a_valid_table_is_usable_and_a_broken_one_is_not(self):
+        self.assertTrue(self.adapter.usable(github_issues_table()))
+        self.assertTrue(trackers.usable(github_issues_table()))
+        for bad in (github_issues_table(repo="o"), github_issues_table(task_prefix="gh"),
+                    {"kind": "github-issues"}, None, "o/r"):
+            self.assertFalse(self.adapter.usable(bad), bad)
+        self.assertFalse(trackers.usable(github_issues_table(repo="https://github.com/o/r")))
+
+    def test_the_denials_cover_any_repo_whatever_the_table_names(self):
+        other = self.adapter.write_denials(github_issues_table(repo="x/y", task_prefix="ZZ"))
+        self.assertEqual([p.pattern for p in other], [p.pattern for p in self.denials])
+        self.assert_denied(["gh issue comment 5 -R someone/else -b x",
+                            "gh api repos/someone/else/issues/5/comments -f body=x"])
+
+
+class TestGithubIssuesWriteDenials(GithubIssuesCase):
+    def test_every_issue_write_shape_is_denied(self):
+        self.assert_denied(
+            ["gh issue comment 5 --body-file /tmp/n.md", "gh issue -R o/r comment 5 -b x",
+             "gh -R o/r issue close 5", "gh --repo=o/r issue edit 5 --add-label x",
+             "GH_REPO=o/r gh issue reopen 5", 'gh issue "close" 5', "gh issue create --title x",
+             "gh issue delete 5 --yes"]
+            + ["gh issue %s 5" % verb
+               for verb in ("transfer", "pin", "unpin", "lock", "unlock", "develop")]
+            + ["gh api -X POST repos/o/r/issues/5/comments -f body=x",
+               "gh api --method=PATCH repos/o/r/issues/5",
+               "gh api repos/o/r/issues/5/comments -f body=x",
+               "gh api repos/o/r/issues/5/labels --input l.json"]
+            + ["gh api graphql -f query='mutation{%s(input:{}){clientMutationId}}'" % name
+               for name in ("addComment", "updateIssue", "closeIssue", "reopenIssue",
+                            "deleteIssue", "addLabelsToLabelable", "removeLabelsFromLabelable")]
+            + ["gh api graphql --input q.json", "gh issue view $(echo 5)"])
+
+    def test_issue_reads_are_not_denied(self):
+        self.assert_allowed(
+            ["gh issue view 5 --json title,body", "gh issue list -R o/r -L 1", "gh issue status",
+             "gh api repos/o/r/issues/5", "gh api -X GET repos/o/r/issues -f state=open",
+             "gh api repos/o/r/pulls/5/comments", 'gh pr comment 5 -b "the issue comment"',
+             "gh api graphql -f query='query{repository(owner:\"o\",name:\"r\")"
+             "{issue(number:5){title}}}'"])
+
+    def test_the_write_denials_stay_fast_on_backtracking_decoys(self):
+        self.assert_fast_and_clean(["gh issue " + "--a 'x' " * 13 + "zzz; gh issue view 1",
+                                    "gh " + "-R o/r " * 600 + "issue view 1",
+                                    "gh api " + "-f a=b " * 600 + "repos/o/r/pulls/1"])
+
+    def test_a_flag_quote_escape_or_redirect_around_the_verb_still_denies(self):
+        self.assert_denied(
+            ["gh issue new --title x", "gh 'issue' close 5", "gh \"issue\" comment 5 -b x",
+             "gh issue -Ro/r close 5", "gh issue --repo o/r 'close' 5",
+             "gh -R o/r issue -R o/r edit 5", "gh --re\"po\" o/r issue close 5",
+             "gh -R \"o/r\" issue close 5", "gh issue \\close 5",
+             # gh reads -c as close's --comment and view as its value
+             "gh issue -c view close 5", "gh issue -\"c\" view close 5",
+             "gh issue \"-c\" view close 5", "gh issue \\-c view close 5",
+             "gh 2>/dev/null issue close 5", "gh issue >/dev/null close 5",
+             "\"gh\" issue close 5", "/usr/bin/gh issue close 5", "command gh issue close 5",
+             "bash -c 'gh issue close 5'", "echo ok && gh issue lock 5",
+             "gh issue view 5; gh issue close 5", "gh issue comment 5 -b 'a; b'"])
+
+    def test_an_issue_verb_or_a_gh_subcommand_the_shell_would_rewrite_is_denied(self):
+        self.assert_denied(
+            ["gh issue cl\\ose 5", "gh issue cl\"ose\" 5", "gh issue c''lose 5",
+             "gh issue $VERB 5", "gh issue ${VERB} 5", "gh issue -R $R view",
+             "gh issue view `echo 5`", "gh issue view \"$(echo 5)\"", "gh issue $'\\x63lose' 5",
+             "gh iss\\ue close 5", "gh \"is\"sue close 5", "gh $SUB close 5",
+             "gh $(echo issue) close 5"])
+
+    def test_a_rest_issue_write_is_denied_however_the_route_and_method_are_spelled(self):
+        self.assert_denied(
+            ["gh api -XPOST repos/o/r/issues/5/comments", "gh api -X=post repos/o/r/issues/5",
+             "gh api -X 'DELETE' repos/o/r/issues/comments/9",
+             "gh api -iX PUT repos/o/r/issues/5/lock", "gh api \"-X\" PATCH repos/o/r/issues/5",
+             "gh api --method \"POST\" repos/o/r/issues", "gh -X POST api repos/o/r/issues",
+             "gh api repos/{owner}/{repo}/issues/5/comments -F body=@n.md",
+             "gh api repos/:owner/:repo/issues/5/comments -f body=x",
+             "gh api /repos/o/r/issues/5/comments -fbody=x",
+             "gh api https://api.github.com/repos/o/r/issues/5/comments --raw-field body=x",
+             "gh api 'repos/o/r/issues/5/comments' -f body=x",
+             "gh api \"https://ghe.example/api/v3/repos/o/r/issues/5/comments\" --field=body=x",
+             "gh api -f body='a;b' repos/o/r/issues/5/comments",
+             "gh api -f body=\"a | b && c\" repos/o/r/issues/5/comments",
+             "gh api repos/o/r/issues/5/comments -f body='use -X GET'",
+             "gh api repositories/123/issues/5/comments -f body=x",
+             "gh api repos/o/r/pulls/7/../../issues/5/comments -f body=x",
+             "gh api Repos/o/r/Issues/5/comments -f body=x",
+             "gh api repos/o/r/issues/5/comments --input=-",
+             "echo '{}' | gh api repos/o/r/issues/5/comments --input -",
+             "gh api repos/o/r/issues -f title=x; gh api -X GET repos/o/r/issues",
+             "gh api repos/o/r/issues/5/comments 2>&1 -f body=x",
+             "gh api -X POST 2>&1 repos/o/r/issues/5/comments",
+             "gh api repos/o/r/issues/5/comments -f body='line one\nline two'",
+             "gh api repos/o/r/issues/5/comments \\\n  -f body=x"])
+
+    def test_a_get_or_a_pull_request_route_keeps_a_rest_call_open(self):
+        self.assert_allowed(
+            ["gh api -X HEAD repos/o/r/issues/5", "gh api --method get repos/o/r/issues -F a=1",
+             "gh api repos/o/r/issues/5 -X 'GET' -f x=y", "gh api -XGET repos/o/r/issues -f a=b",
+             "gh api repos/o/r/issues/5 --jq .body", "gh api repos/o/r/issues --paginate",
+             "gh api repos/o/r/pulls/7/comments/1/replies -f body=hi",
+             "gh api -X POST repos/o/r/pulls/7/comments/1/replies -f body=hi",
+             "gh api repos/o/r/pulls/7/comments/1/replies -f body='see "
+             "https://github.com/o/r/issues/12'",
+             "gh api repos/o/r/pulls/7/comments/1/replies -f body=\"$(cat reply.md)\"",
+             "gh api repos/$REPO/pulls/$N/comments --paginate",
+             "gh api user --jq .login",
+             "gh api repos/o/r/pulls/7/reviews -f event=COMMENT"])
+
+    def test_every_issue_mutation_and_an_unreadable_graphql_document_is_denied(self):
+        self.assert_denied(
+            ["gh api graphql -f query='mutation { %s(input: {}) { clientMutationId } }'" % name
+             for name in ISSUE_MUTATIONS]
+            + ["gh api graphql -f query='mutation($b: String!) {\n  addComment(input: "
+               "{body: $b}) { clientMutationId }\n}' -f b=x",
+               "gh api graphql -F b='a;b' -f query='mutation{closeIssue(input:{}){issue{id}}}'",
+               "gh api /graphql -f query='mutation{createIssue(input:{}){issue{id}}}'",
+               "gh api -X POST https://api.github.com/graphql -f "
+               "query='mutation{deleteIssue(input:{}){clientMutationId}}'",
+               "gh api graphql -F query=@m.graphql", "gh api graphql -Fquery=@m.graphql",
+               "gh api graphql --field 'query=@m.graphql'", "gh api graphql -F query=@-",
+               "gh api graphql --input=q.json",
+               "gh api \"https://api.github.com/graphql\" --input q.json",
+               "gh api graphql -f query=\"$(cat m.graphql)\"",
+               "gh api graphql -f query=\"$QUERY\""])
+        self.assert_allowed(
+            ["gh api graphql -f query='mutation { addPullRequestReviewThreadReply(input: {}) "
+             "{ clientMutationId } }'",
+             "gh api graphql -f query='query { repository(owner: \"o\", name: \"r\") { "
+             "issue(number: 5) { comments(first: 5) { nodes { body } } } } }'",
+             "gh api graphql -f query='query($n: Int!) { repository(owner: \"o\", "
+             "name: \"r\") { issue(number: $n) { title } } }' -F n=5"])
+
+    def test_an_expansion_hides_a_gh_api_call_unless_it_names_a_pull_request_route(self):
+        self.assert_denied(["gh api $EP -f body=x", "gh api $(cat args)",
+                            "gh api repos/o/r/$KIND/5/comments -f body=x",
+                            "gh api \"repos/o/r/${KIND}/5/comments\" -f body=x",
+                            "gh api `cat endpoint` --input body.json",
+                            "gh api repos/o/r/commits/$SHA --input <(echo x)"])
+        self.assert_allowed(["gh api repos/o/r/pulls/$N/comments",
+                             "gh api \"repos/$OWNER/$REPO/pulls/7/reviews\"",
+                             "gh api repos/o/r/issues/5 --jq '.body | $x'",
+                             "gh api user --jq '.login'"])
+
+    def test_the_github_forge_fragment_commands_pass_the_tracker_denials(self):
+        # The review loop runs before the merge is observed, so a denial here
+        # would stop it.
+        github = forges.get("github")
+        spans = [span for name in ("stage6", "stage7", "review-loop")
+                 for span in re.findall(r"`(gh [^`]+)`", github.fragment(name))]
+        self.assertTrue(spans)
+        self.assert_allowed(spans)
+
+    def test_prose_naming_gh_issue_is_not_a_write(self):
+        self.assert_allowed(
+            ["git commit -m 'trackers: deny gh issue writes'",
+             "git commit -m \"gh issue numbers are digits\"", "echo \"gh issue\"",
+             "rg -n 'gh issue' docs", "grep -rn \"gh api\" ppl", "gh pr view 7 --json=title",
+             "gh pr create --title \"Fix the issue view\" --body-file x", "gh --version",
+             "gh auth status", "brew upgrade gh", "cd gh && ls", "gh issue", "gh issue --help",
+             "gh issue -R o/r view 5", "gh issue ls", "gh issue view 5 --comments",
+             "gh issue list --search 'close it'", "gh issue view 5 --jq '.body | $x'",
+             "gh issue view 5; echo $HOME", "gh issue view 5 2>&1"])
+
+    def test_the_write_denials_stay_fast_on_padded_commands(self):
+        self.assert_fast_and_clean(
+            ["gh api " * 585, "gh issue " * 455, "gh " * 1365, "gh api r " * 455,
+             "gh api - " * 455, "gh api 'r' " * 370, "gh api \"-\" " * 370,
+             "gh api -X POST " * 270, "gh api mutation " * 250, "gh api graphql " * 270,
+             "gh api -f x " * 340, "gh api m a c d r u " * 200, "gh api repos/" + "repos/" * 680,
+             "gh api " + "repos/x/" * 500, "gh api -f '" + "a" * 4000 + "'",
+             "gh api \"" + "x" * 4000, "gh -R" + " " * 4000 + "x",
+             "gh issue -R" + " " * 4000 + "x", "gh issue " + "-a b " * 800 + "view",
+             "gh api repos/o/r/issues " + "-X GET " * 600])
 
 
 class TestWriteToolRegex(unittest.TestCase):

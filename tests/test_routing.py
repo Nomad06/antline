@@ -292,6 +292,15 @@ class TestRouting(unittest.TestCase):
         self.assertIn("mcp__claude_ai_Atlassian_Rovo__getConfluencePage", tools)
         self.assertEqual(tools[-1], "mcp__corp__code_search")
 
+    def test_the_briefer_of_a_github_issues_harness_holds_no_mcp_tool(self):
+        fixtures.install_variant("example-generic", "gh-issues", **fixtures.GITHUB_ISSUES)
+        doc = harness.load("gh-issues")
+        base = routing.BASE_TOOLS["ppl-briefer"]["tools"]
+        self.assertEqual(routing.role_tools("ppl-briefer", doc), base)
+        text = routing.render("ppl-briefer", doc)
+        self.assertIn("tools: [%s]" % ", ".join(base), text)
+        self.assertNotIn("mcp__", text)
+
     def test_review_responder_tools_come_from_the_forge(self):
         doc = harness.load("example-maven")
         self.assertEqual(routing.role_tools("ppl-review-responder", doc),

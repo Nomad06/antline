@@ -259,14 +259,35 @@ class TestStrictValidation(HarnessTestCase):
 
     def test_a_github_key_on_a_jira_tracker_is_refused_naming_the_nearest_key(self):
         # rule: R-HARNESS-UNKNOWN-KEY
-        union = tuple(harness.KNOWN_KEYS["tracker"]) + ("repo",)
+        # tracker.repo is a key of the github-issues adapter, so only the check
+        # against the jira adapter's own keys can refuse it here.
+        self.assertIn("repo", harness.KNOWN_KEYS["tracker"])
         name = self.mutate("example-generic", 'kind = "jira"', 'kind = "jira"\nrepo = "o/r"')
-        with mock.patch.dict(harness.KNOWN_KEYS, {"tracker": union}):
-            with self.assertRaises(PplError) as caught:
-                harness.load(name)
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
         self.assertEqual(caught.exception.code, "HARNESS_INVALID")
         self.assertIn("unknown key tracker.repo", caught.exception.message)
         self.assertIn("nearest known key is tracker.read_tools", caught.exception.message)
+
+    def test_a_jira_key_on_a_github_issues_tracker_is_refused_naming_the_nearest_key(self):
+        tracker = dict(fixtures.GITHUB_ISSUES["tracker"], read_tools=["getJiraIssue"])
+        fixtures.install_variant("example-generic", "gh-extra", tracker=tracker,
+                                 task=fixtures.GITHUB_ISSUES["task"])
+        with self.assertRaises(PplError) as caught:
+            harness.load("gh-extra")
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("unknown key tracker.read_tools", caught.exception.message)
+        self.assertIn("nearest known key is tracker.", caught.exception.message)
+
+    def test_a_github_issues_tracker_without_an_owner_name_repo_is_refused(self):
+        tracker = dict(fixtures.GITHUB_ISSUES["tracker"], repo="https://github.com/o/r")
+        fixtures.install_variant("example-generic", "gh-bad", tracker=tracker,
+                                 task=fixtures.GITHUB_ISSUES["task"])
+        with self.assertRaises(PplError) as caught:
+            harness.load("gh-bad")
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("tracker.repo 'https://github.com/o/r' is not an owner/name pair",
+                      caught.exception.message)
 
     def test_a_harness_of_another_format_is_told_so_before_its_keys_are_judged(self):
         name = self.mutate("example-generic", "format = 1", 'format = 2\nnew_key = "x"')
@@ -1092,6 +1113,19 @@ class TestSnapshotAndApplied(HarnessTestCase):
         fixtures.install_harness("example-generic")
         snap = harness.snapshot(harness.load("example-generic"))
         self.assertEqual(snap["tests"], {"sources": ["tests/**", "test/**"]})
+
+    def test_a_github_issues_harness_validates_and_snapshots_its_table(self):
+        fixtures.install_variant("example-generic", "gh-issues", **fixtures.GITHUB_ISSUES)
+        doc = harness.load("gh-issues")
+        # the variant keeps the example's harness.name, which only draws a warning
+        warnings = harness.validate(doc, "gh-issues")
+        self.assertEqual([w for w in warnings if not w.startswith("harness.name ")], [])
+        self.assertEqual(doc["tracker"], fixtures.GITHUB_ISSUES["tracker"])
+        snap = harness.snapshot(doc)
+        self.assertEqual(snap["tracker"], fixtures.GITHUB_ISSUES["tracker"])
+        self.assertEqual(snap["task"], {"key_pattern": "^GH-[0-9]+$"})
+        self.assertEqual(snap["forge"], {"kind": "github"})
+        self.assertEqual(json.loads(json.dumps(snap)), snap)
 
     def test_snapshot_is_named_after_the_installed_directory(self):
         fixtures.install_harness("example-maven", as_name="mine")

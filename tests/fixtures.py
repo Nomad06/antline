@@ -1,13 +1,20 @@
 """Shared fixtures: install an example harness into the current PPL_HOME."""
+import copy
 import os
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import tmphome
-from ppl import paths
+from ppl import paths, tomlout
 
 SOURCE = Path(__file__).resolve().parents[1]
+
+# The tables that turn an example harness into a GitHub Issues one.
+GITHUB_ISSUES = {"tracker": {"kind": "github-issues", "repo": "o/r", "task_prefix": "GH"},
+                 "task": {"key_pattern": "^GH-[0-9]+$",
+                          "url_template": "https://github.com/o/r/issues/<TASK-ID-number>"}}
 
 
 def install_harness(name, as_name=None):
@@ -15,6 +22,18 @@ def install_harness(name, as_name=None):
     if target.exists():
         shutil.rmtree(target)
     shutil.copytree(SOURCE / "defaults" / "harnesses" / name, target)
+    return target
+
+
+def install_variant(base, as_name, **tables):
+    """Install example harness `base` as `as_name` with each named table replaced
+    whole, so the variant keeps no key of the table it replaces."""
+    target = install_harness(base, as_name)
+    path = target / "harness.toml"
+    doc = tomllib.loads(path.read_text(encoding="utf-8"))
+    for name, table in tables.items():
+        doc[name] = copy.deepcopy(table)
+    path.write_text(tomlout.dumps(doc), encoding="utf-8")
     return target
 
 

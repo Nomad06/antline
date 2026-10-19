@@ -7,7 +7,7 @@ this package, so it parses on Python 3.9 and carries no annotations."""
 import re
 from importlib import import_module
 
-_MODULES = {"jira": "jira"}
+_MODULES = {"jira": "jira", "github-issues": "github_issues"}
 KINDS = tuple(_MODULES)
 DEFAULT_KIND = "jira"
 
