@@ -91,7 +91,11 @@ class TestRunTestPatterns(unittest.TestCase):
         return paths.run_dir(self.TASK) / "harness.json"
 
     def tearDown(self):
-        self.snapshot().unlink(missing_ok=True)
+        snapshot = self.snapshot()
+        if snapshot.is_dir() and not snapshot.is_symlink():
+            snapshot.rmdir()
+        else:
+            snapshot.unlink(missing_ok=True)
 
     def test_a_run_without_a_snapshot_reads_as_the_java_defaults(self):
         self.assertEqual(boundary.run_test_patterns(self.TASK), JAVA)
@@ -106,6 +110,23 @@ class TestRunTestPatterns(unittest.TestCase):
                 self.snapshot().parent.mkdir(parents=True, exist_ok=True)
                 self.snapshot().write_text(text, encoding="utf-8")
                 self.assertIsNone(boundary.run_test_patterns(self.TASK))
+
+    def test_anything_but_a_regular_file_reads_as_none(self):
+        # ppl writes a regular file there and never a link, so a link (dangling
+        # or not) or a directory is no snapshot to trust, not a missing one
+        target = Path(tmphome.mkdtemp(prefix="pplsnap-")) / "harness.json"
+        store.write_json(target, {"format": 1, "tests": {"sources": PYTHON}})
+        self.snapshot().parent.mkdir(parents=True, exist_ok=True)
+        for kind, make in (("dangling link", lambda: self.snapshot().symlink_to(
+                                str(target) + ".gone")),
+                           ("link to a valid snapshot", lambda: self.snapshot().symlink_to(target)),
+                           ("directory", lambda: self.snapshot().mkdir())):
+            with self.subTest(kind=kind):
+                make()
+                try:
+                    self.assertIsNone(boundary.run_test_patterns(self.TASK))
+                finally:
+                    self.tearDown()
 
     def test_an_id_that_names_no_run_reads_as_none_without_raising(self):
         for task_id in (None, "", "../x"):

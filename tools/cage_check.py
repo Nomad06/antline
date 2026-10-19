@@ -135,8 +135,9 @@ class Cage:
         return {"hook_event_name": "PreToolUse", "agent_type": agent,
                 "tool_name": tool, "tool_input": tool_input, "cwd": cwd}
 
-    def check(self, name, payload, expect):
-        """expect is "allow" or a (deny_code_substring,) tuple."""
+    def check(self, name, payload, expect, reason=None):
+        """expect is "allow" or a deny code substring. A deny can also be held
+        to a `reason` substring, for a case another rule would deny as well."""
         result = run_hook(payload, self.ppl_home)
         kind, detail = decision(result)
         if kind == "error":
@@ -146,7 +147,8 @@ class Cage:
             detail_str = "allowed" if kind == "allow" else "denied: %s" % (detail,)
         else:
             code_wanted = expect
-            ok = kind == "deny" and code_wanted in detail[0]
+            ok = (kind == "deny" and code_wanted in detail[0]
+                  and (reason is None or reason in detail[1]))
             detail_str = ("denied %s: %s" % detail) if kind == "deny" else "allowed (expected deny)"
         self.results.append((name, ok, detail_str))
         print(("PASS " if ok else "FAIL ") + name + ": " + detail_str)
@@ -209,15 +211,22 @@ def run_python_cases(cage):
         cage.payload("ppl-test-worker", "Write", {"file_path": product_file}, wt),
         "BOUNDARY_VIOLATION")
 
+    # inside the code worker's src/** boundary, so only the python globs refuse it
     cage.check(
-        "python layout: ppl-code-worker writing a python test is denied",
-        cage.payload("ppl-code-worker", "Write", {"file_path": test_file}, wt),
-        "BOUNDARY_VIOLATION")
+        "python layout: ppl-code-worker writing a python test inside its boundary is denied",
+        cage.payload("ppl-code-worker", "Write", {"file_path": wt + "/src/shop/test_cart.py"}, wt),
+        "BOUNDARY_VIOLATION", reason="may not write test sources")
 
     cage.check(
         "python layout: ppl-code-worker writing product code is allowed",
         cage.payload("ppl-code-worker", "Write", {"file_path": product_file}, wt),
         "allow")
+
+    cage.check(
+        "python layout: ppl-test-worker brace read that expands into src/ is denied",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "cat tests/{x,../src/shop/cart.py}"}, wt),
+        "BOUNDARY_VIOLATION", reason="shell expansion")
 
 
 def run_cases(cage):
@@ -579,6 +588,12 @@ def run_cases(cage):
         cage.payload("ppl-test-worker", "Bash",
                      {"command": "cat " + wt + "/source/MainTest.java"}, wt),
         "allow")
+
+    cage.check(
+        "ppl-test-worker brace read that expands out of src/test is denied",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "cat source/src/test/{x,../../Main.java}"}, wt),
+        "BOUNDARY_VIOLATION", reason="shell expansion")
 
     cage.check(
         "ppl-test-worker git diff with no pathspec is denied (an unrestricted "

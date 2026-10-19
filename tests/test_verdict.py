@@ -13,7 +13,7 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import budget, evidence, findings, paths, run, status, store, verdict
+from ppl import boundary, budget, evidence, findings, paths, run, status, store, verdict
 from ppl.errors import PplError
 
 PRODUCER = {"provider": "claude-code-subagent", "model": "opus", "params_hash": "h"}
@@ -400,8 +400,13 @@ class TestDonePatterns(unittest.TestCase):
     def test_done_is_blocked_when_the_snapshot_is_unreadable(self):
         # rule: R-TEST-PATTERNS-FROM-SNAPSHOT
         self.snapshot().write_text("{not json", encoding="utf-8")
-        reasons = verdict.done_blockers(self.task, "abc", ["src/shop/cart.py"])
+        reasons = verdict.done_blockers(self.task, "abc", self.CHANGED)
         self.assertTrue(any("harness snapshot" in reason for reason in reasons), reasons)
+        self.assertTrue(any(boundary.unknown_patterns_reason(self.task) in reason
+                            for reason in reasons), reasons)
+        # no path is exempt, so the test outside boundary.write counts against it
+        self.assertIn("changed path tests/unit/test_cart.py is outside the write boundary",
+                      reasons)
 
 
 class TestSpecRevisionStaleness(unittest.TestCase):

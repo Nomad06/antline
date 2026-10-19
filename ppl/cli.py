@@ -914,9 +914,8 @@ def cmd_apply_patch(args):
     patterns = boundary.run_test_patterns(task_id)
     if patterns is None:
         raise PplError("OWNER_DECISION",
-                       "runs/%s/harness.json is unreadable or its tests table is malformed, so "
-                       "test sources cannot be told from product code - restore it or re-init "
-                       "the run [R-TEST-PATTERNS-FROM-SNAPSHOT]" % task_id)
+                       "%s - restore the harness snapshot or re-init the run"
+                       % boundary.unknown_patterns_reason(task_id))
     state = run.load(task_id)
     bound = store.read_json(paths.run_dir(task_id) / "boundary.json", {"write": [], "forbid": []})
     with open(args.diff, "r", encoding="utf-8") as handle:

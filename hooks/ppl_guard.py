@@ -535,16 +535,49 @@ def _resolve_path_against_cwd(raw_path, cwd):
     return os.path.normpath(os.path.join(cwd, raw_path))
 
 
+# Glob characters. A segment holding one that starts with `.` or `[` can expand
+# to `.` or `..` (bash before 5.2 matches `.*` against both), which climbs out
+# of the directory the token names.
+_GLOB_CHARS = ("*", "?", "[")
+
+
+def _expansion_problem(raw_path):
+    """Why the shell would open something other than what `raw_path` spells, or
+    None [R-TEST-WORKER-BASH-READS]. The guard judges a read path as written, so
+    a path the shell rewrites is unclassifiable. A plain glob such as
+    `tests/*.py` stays allowed: all it can expand to sits where it says. shlex
+    has already dropped the quotes, so a quoted brace is refused too, a false
+    deny in the accepted direction."""
+    if "{" in raw_path or "}" in raw_path:
+        return "brace expansion"
+    if "(" in raw_path or ")" in raw_path:
+        return "a pattern group or a zsh glob qualifier"
+    if "$" in raw_path or "`" in raw_path:
+        return "parameter or command expansion"
+    if raw_path.startswith("="):
+        return "zsh command-path expansion"
+    if raw_path.startswith("~") and raw_path != "~" and not raw_path.startswith("~/"):
+        return "tilde expansion to another directory"
+    segments = raw_path.split("/")
+    if ".." in segments:
+        return "a .. segment, which a symlink makes the kernel resolve elsewhere"
+    for segment in segments:
+        if segment[:1] in (".", "[") and any(char in segment for char in _GLOB_CHARS):
+            return "a glob that can match . or .."
+    return None
+
+
 def _path_is_provably_test_scoped(raw_path, state, cwd, patterns):
     """True only when `raw_path`, resolved against `cwd`, is confirmed to
     land on a test source inside the active run's repo, by the run's test
     `patterns`. Unlike a deny-model check, ambiguity here means False, not
-    True: a path this cannot resolve
-    (a shell variable, a command substitution - though those are already
-    denied for the whole command above), or one that resolves outside the
-    repo, is not "safe because it is not our business", it is simply not
-    proven, and this is an allowlist.
+    True: a path the shell would rewrite (_expansion_problem), one this
+    cannot resolve, or one that resolves outside the repo, is not "safe
+    because it is not our business", it is simply not proven, and this is
+    an allowlist.
     """
+    if _expansion_problem(raw_path):
+        return False
     resolved = _resolve_path_against_cwd(raw_path, cwd)
     if resolved is None:
         return False
@@ -717,10 +750,7 @@ def test_patterns(task_id):
 def unknown_patterns_deny(task_id):
     """A pipeline write, or a test-worker dispatch, while the run's test globs
     are unknown: neither can be judged, so the owner restores the snapshot."""
-    return deny("OWNER_DECISION",
-                "run %s: runs/%s/harness.json is unreadable or its tests table is malformed, "
-                "test sources cannot be told from product code [R-TEST-PATTERNS-FROM-SNAPSHOT]"
-                % (task_id, task_id))
+    return deny("OWNER_DECISION", boundary.unknown_patterns_reason(task_id))
 
 
 def _active_task_id():
@@ -938,9 +968,11 @@ def _grep_marks_recursive(tok):
         "r" in tok[1:] or "R" in tok[1:])
 
 
-def _read_verb_allowed(tokens, state, cwd, preceded_by_pipe, patterns):
+def _read_verb_operands(tokens):
+    """(path operands, whether the verb walks the tree without one) of a read
+    verb invocation, or None when `tokens` is not one."""
     if not tokens or tokens[0] not in _READ_VERBS:
-        return False
+        return None
     verb = tokens[0]
     value_flags = _READ_VALUE_FLAGS.get(verb, frozenset())
     has_pattern_arg = verb in _READ_PATTERN_VERBS
@@ -964,6 +996,14 @@ def _read_verb_allowed(tokens, state, cwd, preceded_by_pipe, patterns):
             consumed_pattern = True
             continue
         paths.append(tok)
+    return paths, recursive
+
+
+def _read_verb_allowed(tokens, state, cwd, preceded_by_pipe, patterns):
+    operands = _read_verb_operands(tokens)
+    if operands is None:
+        return False
+    paths, recursive = operands
     if not paths:
         if recursive:
             # rg with no path, or grep -r/-R with no path operand: this
@@ -997,20 +1037,39 @@ def _segment_allowed(segment, state, cwd, preceded_by_pipe, shapes, patterns):
     return False
 
 
+def _path_operands(body):
+    """The tokens of a `git add` or a read verb that name paths, the ones
+    _path_is_provably_test_scoped judges."""
+    if body[:2] == ["git", "add"]:
+        return body[2:]
+    operands = _read_verb_operands(body)
+    return operands[0] if operands else []
+
+
+def _denied_segment_reason(segment, command):
+    tokens = _shlex_tokens(segment) or []
+    for token in _path_operands(_strip_trailing_redirect(tokens)):
+        problem = _expansion_problem(token)
+        if problem:
+            return ("ppl-test-worker's Bash path %s uses shell expansion the guard cannot "
+                    "resolve (%s): %s" % (token, problem, command))
+    return "ppl-test-worker may not read main sources via Bash: %s" % command
+
+
 def bash_denies_main_source_read(command, state, cwd, shapes, patterns):
-    """True unless every segment of `command`, run by ppl-test-worker, is one
-    of the small set of shapes this role is derived to need. `shapes` is the
-    ShapeMatcher built from the run's harness snapshot, `patterns` the test
-    globs it froze, `()` when they cannot be trusted. See the module
-    comment above for why this must be an allowlist rather than a blocklist,
-    and for exactly which shapes are recognised.
+    """None when every segment of `command`, run by ppl-test-worker, is one
+    of the small set of shapes this role is derived to need, the deny reason
+    otherwise. `shapes` is the ShapeMatcher built from the run's harness
+    snapshot, `patterns` the test globs it froze, `()` when they cannot be
+    trusted. See the module comment above for why this must be an allowlist
+    rather than a blocklist, and for exactly which shapes are recognised.
     """
     if any(marker in command for marker in _SUBSTITUTION_MARKERS):
-        return True
+        return "ppl-test-worker may not read main sources via Bash: %s" % command
     for segment, preceded_by_pipe in _segments_with_pipe_flag(command):
         if not _segment_allowed(segment, state, cwd, preceded_by_pipe, shapes, patterns):
-            return True
-    return False
+            return _denied_segment_reason(segment, command)
+    return None
 
 
 # --- R-GUARD-BASH-WRITE-BOUNDARY (whole-branch review, C1): the write
@@ -1900,7 +1959,8 @@ def dispatch_leak_deny(prompt, task_id, state, patterns):
     in_prompt = {_leak_key(line) for line in lines}
     hits = {}
     for rel, added_here in sorted(added.items()):
-        if boundary.path_is_test_scoped(rel, patterns):
+        # a file list, so a product file named like a test directory still counts
+        if boundary.is_test_path(rel, patterns):
             continue
         for line in added_here:
             key = _leak_key(line)
@@ -2081,11 +2141,12 @@ def _decide(payload):
         read_patterns = () if patterns is None else patterns
         if tool == "Bash":
             command = tool_input.get("command", "")
-            if bash_denies_main_source_read(command, state, payload.get("cwd"),
-                                            harness_shapes(task_id), read_patterns):
-                return deny("BOUNDARY_VIOLATION",
-                            "ppl-test-worker may not read main sources via Bash: %s"
-                            % command)
+            reason = bash_denies_main_source_read(command, state, payload.get("cwd"),
+                                                  harness_shapes(task_id), read_patterns)
+            if reason:
+                # an untrusted snapshot is the cause, not the path (decision 2 code)
+                return deny("BOUNDARY_VIOLATION", boundary.unknown_patterns_reason(task_id)
+                            if patterns is None else reason)
         elif tool in READ_TOOLS:
             # A relative path is the session's, so it resolves against the
             # payload cwd, never the hook process's own.
@@ -2097,6 +2158,9 @@ def _decide(payload):
             if targets_repo(target, state):
                 rel = relative_to_repo(target, state)
                 if not boundary.path_is_test_scoped(rel, read_patterns):
+                    if patterns is None:
+                        return deny("BOUNDARY_VIOLATION",
+                                    boundary.unknown_patterns_reason(task_id))
                     return deny("BOUNDARY_VIOLATION",
                                 "ppl-test-worker may not read %s: only test sources are "
                                 "visible to it, reading the implementation is the exact "

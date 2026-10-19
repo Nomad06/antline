@@ -1,4 +1,6 @@
+import os
 import re
+import stat
 
 from . import paths, store
 from .errors import PplError
@@ -110,16 +112,33 @@ _MISSING = object()
 
 def run_test_patterns(task_id):
     """The test globs runs/<task>/harness.json froze [R-TEST-PATTERNS-FROM-SNAPSHOT]:
-    the Java defaults when there is no such file (ppl init always writes one, so
-    that is a fixture or a run older than the snapshot), None when it cannot be
-    read or parsed, otherwise patterns_from_snapshot of it. Never raises."""
+    the Java defaults when nothing is at that path (ppl init always writes one, so
+    that is a fixture or a run older than the snapshot), None when it is anything
+    but a regular file (ppl never writes a link there) or cannot be read or
+    parsed, otherwise patterns_from_snapshot of it. Never raises."""
     try:
-        doc = store.read_json(paths.run_dir(task_id) / "harness.json", _MISSING)
-        if doc is _MISSING:
+        snapshot = paths.run_dir(task_id) / "harness.json"
+        try:
+            mode = os.lstat(snapshot).st_mode
+        except FileNotFoundError:
             return TEST_PATTERNS
+        if not stat.S_ISREG(mode):
+            return None
+        doc = store.read_json(snapshot, _MISSING)
+        # gone between the two looks: not the missing file decision 1 means
+        if doc is _MISSING:
+            return None
         return patterns_from_snapshot(doc)
     except Exception:
         return None
+
+
+def unknown_patterns_reason(task_id):
+    """The one wording for a run whose test globs cannot be trusted, used by the
+    guard, the done gate and ppl apply-patch [R-TEST-PATTERNS-FROM-SNAPSHOT]."""
+    return ("run %s: runs/%s/harness.json is unreadable or its tests table is malformed, "
+            "test sources cannot be told from product code [R-TEST-PATTERNS-FROM-SNAPSHOT]"
+            % (task_id, task_id))
 
 
 def is_test_path(path, patterns):
@@ -147,10 +166,8 @@ def path_is_test_scoped(path, patterns):
 
 
 def _unknown_patterns(path):
-    return PplError("OWNER_DECISION",
-                    "the run's test patterns are unknown (runs/<task>/harness.json is "
-                    "unreadable or its tests table is malformed), so test sources cannot "
-                    "be told from product code: %s" % (path,))
+    # check_path and check_diff are not told which run they serve
+    return PplError("OWNER_DECISION", "%s (%s)" % (unknown_patterns_reason("<task>"), path))
 
 
 def check_path(role, path, bound, patterns):

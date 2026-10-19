@@ -28,7 +28,7 @@ os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 os.environ["PPL_LOCAL_SETTINGS_DIR"] = tmphome.mkdtemp(prefix="ppllocalsettings-")
 
 import fixtures
-from ppl import cli, config, doctor, models as ppl_models, paths, setup
+from ppl import boundary, cli, config, doctor, models as ppl_models, paths, setup
 
 ROUTING_EXAMPLE = Path(__file__).resolve().parents[1] / "defaults" / "routing.example.toml"
 MODULE_HOME = os.environ["PPL_HOME"]
@@ -1468,6 +1468,7 @@ class TestApplyPatchPatterns(unittest.TestCase):
         error = json.loads(err)
         self.assertEqual(error["error_code"], "OWNER_DECISION")
         self.assertIn("harness.json", error["message"])
+        self.assertIn(boundary.unknown_patterns_reason("PATCH-2"), error["message"])
 
 
 class TestNameContractSpecRevision(unittest.TestCase):

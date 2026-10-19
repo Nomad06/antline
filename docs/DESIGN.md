@@ -430,7 +430,14 @@ has no documented need for either, and keeping a restricted form was still more 
 derived. A command substitution (`$(`, a backtick) anywhere in the raw string denies the
 whole command before any segment is even classified: it is the one construct that could
 smuggle an unrelated read inside an otherwise-allowed shape's own argument (a module name, a
-commit message, a file argument) [R-TEST-WORKER-BASH-READS].
+commit message, a file argument) [R-TEST-WORKER-BASH-READS]. A read or `git add` path is judged
+as written, so a path the shell would rewrite before opening it is unclassifiable and denies,
+naming the expansion: a brace (`tests/{x,../src/a.py}` matches `tests/**` and reads `src/`), a
+parenthesis (a pattern group, or a zsh glob qualifier that can run code), `$` or a backtick, a
+leading `=` or `~user`, a `..` segment, and a glob segment starting with `.` or `[`, which can
+match `.` or `..` [R-TEST-WORKER-BASH-READS]. A plain glob such as `tests/*.py` stays allowed, since
+whatever it expands to sits where it says - unless a symlink already in a test directory points
+elsewhere, which this lexical check cannot see [R-TEST-WORKER-BASH-READS].
 
 Conservative deny is the deliberate direction throughout: a false deny costs one clarifying
 round, a false allow silently hands the test worker the one thing its independence depends on
@@ -688,12 +695,15 @@ The run reads that frozen list, never the live harness: the guard hook, the done
 apply-patch` split test sources from product code by the run's test patterns, the
 `tests.sources` of `runs/<task>/harness.json`, and a snapshot with no `tests` key or no file at
 all means the Java defaults, so a run started before `[tests]` existed keeps its behavior
-[R-TEST-PATTERNS-FROM-SNAPSHOT]. A snapshot that cannot be read or parsed, or whose `tests` table
-is malformed, is not read as "no test sources", which would hand every test to the code
+[R-TEST-PATTERNS-FROM-SNAPSHOT]. A snapshot that cannot be read or parsed, a link or any other
+non-regular file at that path (`ppl` never writes one there), or a `tests` table that is
+malformed or names a glob validation refuses, is not read as "no test sources", which would
+hand every test to the code
 worker: the guard denies `OWNER_DECISION` each write of `ppl-code-worker` and `ppl-test-worker`
 inside the repo and each `ppl-test-worker` dispatch, the test worker's reads find no test path
-and deny `BOUNDARY_VIOLATION`, `ppl transition done` carries a blocker naming the harness
-snapshot, and `ppl apply-patch` refuses `OWNER_DECISION` [R-TEST-PATTERNS-FROM-SNAPSHOT]. No
+and deny `BOUNDARY_VIOLATION` naming the snapshot, `ppl transition done` carries a blocker naming
+the harness snapshot, and `ppl apply-patch` refuses `OWNER_DECISION`, all in one wording
+(`boundary.unknown_patterns_reason`) [R-TEST-PATTERNS-FROM-SNAPSHOT]. No
 `ppl` command rewrites a snapshot, so the owner restores it or re-inits the run. The split is by
 path, so tests inside product files (Rust `#[cfg(test)]`, doctests) are not split.
 

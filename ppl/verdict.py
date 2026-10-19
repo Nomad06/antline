@@ -270,9 +270,8 @@ def done_blockers(task_id, head_sha, changed_paths):
     # that cannot be trusted no path is exempt, and the gate says why.
     patterns = boundary.run_test_patterns(task_id)
     if patterns is None:
-        reasons.append("the harness snapshot runs/%s/harness.json is unreadable or its tests "
-                       "table is malformed, so test sources cannot be told from product code - "
-                       "restore it or re-init the run [R-TEST-PATTERNS-FROM-SNAPSHOT]" % task_id)
+        reasons.append("%s - restore the harness snapshot or re-init the run"
+                       % boundary.unknown_patterns_reason(task_id))
         patterns = ()
     for path in changed_paths:
         if boundary.any_match(path, bound.get("forbid")):

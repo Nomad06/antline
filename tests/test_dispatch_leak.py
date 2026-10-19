@@ -255,6 +255,19 @@ class TestDispatchLeak(unittest.TestCase):
                          {"format": 1, "tests": {"sources": PYTHON}})
         self.assertIsNone(ppl_guard.decide(dispatch(prompt)))
 
+    def test_a_product_file_named_like_a_test_directory_still_counts(self):
+        # rule: R-TEST-WORKER-DISPATCH-LEAK
+        # `test` is the prefix of test/**, which scopes a directory for reads,
+        # but a file named `test` is no test source
+        write(self.repo, "test", "%s\n%s\n" % (BODY_ONE, BODY_TWO))
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-q", "-m", "a product script named test")
+        store.write_json(paths.run_dir(self.task) / "harness.json",
+                         {"format": 1, "tests": {"sources": PYTHON}})
+        reason = self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("first from test ", reason)
+
     def test_the_same_prompt_to_the_code_worker_is_allowed(self):
         self.commit_implementation()
         prompt = "diff --git a/x b/x\n" + BODY_ONE + "\n" + BODY_TWO

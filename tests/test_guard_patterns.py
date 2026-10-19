@@ -13,7 +13,7 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 
 import fixtures
-from ppl import harness, paths, run, store
+from ppl import boundary, harness, paths, run, store
 import ppl_guard
 
 TASK = "PYRUN-1"
@@ -26,6 +26,11 @@ TEST = REPO + "/tests/unit/test_cart.py"
 def payload(agent, tool, tool_input, cwd=REPO):
     return {"hook_event_name": "PreToolUse", "agent_type": agent,
             "tool_name": tool, "tool_input": tool_input, "cwd": cwd}
+
+
+def snapshot_reason():
+    """The one wording every refusal over an untrusted snapshot carries."""
+    return boundary.unknown_patterns_reason(TASK)
 
 
 def python_snapshot():
@@ -124,6 +129,7 @@ class TestPythonRun(unittest.TestCase):
                                                                        tool_input)))
                     self.assertIn("OWNER_DECISION", reason)
                     self.assertIn("harness.json", reason)
+                    self.assertIn(snapshot_reason(), reason)
         finally:
             self.snapshot_path().write_text(saved, encoding="utf-8")
 
@@ -137,9 +143,15 @@ class TestPythonRun(unittest.TestCase):
                                                                {"file_path": TEST})))
             self.assertIn("OWNER_DECISION", reason)
             self.assertIn("harness.json", reason)
-            reason = self.deny_reason(ppl_guard.decide(payload("ppl-test-worker", "Read",
-                                                               {"file_path": TEST})))
-            self.assertIn("BOUNDARY_VIOLATION", reason)
+            self.assertIn(snapshot_reason(), reason)
+            # the read deny names the snapshot too, not "main sources" (M1)
+            for tool, tool_input in (("Read", {"file_path": TEST}),
+                                     ("Bash", {"command": "cat tests/unit/test_cart.py"})):
+                with self.subTest(tool=tool):
+                    reason = self.deny_reason(ppl_guard.decide(payload("ppl-test-worker", tool,
+                                                                       tool_input)))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn(snapshot_reason(), reason)
         finally:
             self.snapshot_path().write_text(saved, encoding="utf-8")
 
@@ -154,6 +166,7 @@ class TestPythonRun(unittest.TestCase):
             reason = self.deny_reason(ppl_guard.decide(dispatch))
             self.assertIn("OWNER_DECISION", reason)
             self.assertIn("harness.json", reason)
+            self.assertIn(snapshot_reason(), reason)
         finally:
             self.snapshot_path().write_text(saved, encoding="utf-8")
 
@@ -171,6 +184,73 @@ class TestPythonRun(unittest.TestCase):
                 "ppl-code-worker", "Write", {"file_path": REPO + "/src/tests_helper.py"})))
         finally:
             self.snapshot_path().write_text(saved, encoding="utf-8")
+
+    def test_a_tests_glob_validation_refuses_denies_the_test_workers_bash_write_and_dispatch(self):
+        # rule: R-TEST-PATTERNS-FROM-SNAPSHOT
+        # valid JSON, but src/** matches product code, so the table cannot be trusted
+        snap = python_snapshot()
+        snap["tests"] = {"sources": ["src/**"]}
+        saved = self.replace_snapshot(json.dumps(snap))
+        try:
+            dispatch = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "cwd": REPO,
+                        "tool_input": {"description": "write the tests",
+                                       "prompt": "AC-1: an empty cart totals zero.",
+                                       "subagent_type": "ppl-test-worker"}}
+            for call in (payload("ppl-test-worker", "Bash",
+                                 {"command": "echo x > tests/unit/test_cart.py"}),
+                         dispatch):
+                with self.subTest(tool=call["tool_name"]):
+                    reason = self.deny_reason(ppl_guard.decide(call))
+                    self.assertIn("OWNER_DECISION", reason)
+                    self.assertIn(snapshot_reason(), reason)
+        finally:
+            self.snapshot_path().write_text(saved, encoding="utf-8")
+
+    def test_shell_expansion_in_a_read_path_is_denied(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        # Each path is test-shaped as written, and the shell turns it into
+        # something else: braces and .-matching globs reach src/, a .. segment
+        # follows a symlink, ~user and =cmd name other directories, ( ) is a
+        # pattern group or a zsh glob qualifier that can run code.
+        cases = (("cat tests/{x,../src/shop/cart.py}", REPO),
+                 ("cat tests/unit/test_{cart,x}.py", REPO),
+                 ("head -n 5 tests/.*/src/shop/cart.py", REPO),
+                 ("cat tests/.?/src/shop/cart.py", REPO),
+                 ("cat tests/[.][.]/src/shop/cart.py", REPO),
+                 ("cat tests/unit/*/../../../src/shop/cart.py", REPO),
+                 ("cat tests/link/../unit/test_cart.py", REPO),
+                 ("cat ~nobody/tests/unit/test_cart.py", REPO),
+                 ("cat ~-/tests/unit/test_cart.py", REPO),
+                 ("cat =test_cart.py", REPO + "/tests/unit"),
+                 ("cat tests/@(..)/src/shop/cart.py", REPO),
+                 ("cat tests/*(e:true:)", REPO),
+                 ("cat tests/unit/test_$X.py", REPO),
+                 ("grep -n total tests/{unit,../src}", REPO))
+        for command, cwd in cases:
+            with self.subTest(command=command):
+                reason = self.deny_reason(ppl_guard.decide(payload(
+                    "ppl-test-worker", "Bash", {"command": command}, cwd=cwd)))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn("shell expansion", reason)
+        # a command substitution is refused before any path is looked at
+        reason = self.deny_reason(ppl_guard.decide(payload(
+            "ppl-test-worker", "Bash", {"command": "cat tests/`echo x`.py"})))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+
+    def test_git_add_of_a_brace_token_is_denied(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        reason = self.deny_reason(ppl_guard.decide(payload(
+            "ppl-test-worker", "Bash", {"command": "git add tests/{x,../src/shop/cart.py}"})))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("shell expansion", reason)
+
+    def test_a_plain_glob_inside_a_test_directory_is_still_allowed(self):
+        for command in ("cat tests/*.py", "cat tests/unit/test_*.py",
+                        "head -n 5 tests/unit/*.py", "grep -n total tests/unit/test_?art.py",
+                        "git add tests/unit/*.py"):
+            with self.subTest(command=command):
+                self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Bash",
+                                                           {"command": command})))
 
 
 if __name__ == "__main__":

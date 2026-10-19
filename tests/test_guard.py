@@ -2160,6 +2160,8 @@ class TestGuard(unittest.TestCase):
             result = ppl_guard.decide(payload("ppl-test-worker", "Bash",
                                               {"command": "mvn -pl :m -am test"}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+            # the test globs come from the same file, so the deny names it
+            self.assertIn("runs/DEMO-700/harness.json", self.deny_reason(result))
         finally:
             snap.write_text(saved, encoding="utf-8")
 
@@ -2397,6 +2399,16 @@ class TestGuard(unittest.TestCase):
             "ppl-test-worker", "Bash",
             {"command": "cd source/core/orders/src/test && cat ../Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_test_worker_brace_expansion_in_a_read_path_is_denied(self):
+        # rule: R-TEST-WORKER-BASH-READS
+        # shlex keeps the brace as one token that matches **/src/test/**, and
+        # the shell expands it into a read of src/main.
+        result = ppl_guard.decide(payload(
+            "ppl-test-worker", "Bash", {"command": "cat src/test/{x,../main/Foo.java}"}))
+        reason = self.deny_reason(result)
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("shell expansion", reason)
 
     def test_code_worker_reading_a_test_source_is_not_restricted(self):
         # mirror decision, recorded in DESIGN as R-CODE-WORKER-READS-UNRESTRICTED:
