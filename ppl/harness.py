@@ -570,9 +570,13 @@ def _values(doc):
         return _render_text(forge.fragment(name).strip(), sequence_values, "forge/%s" % name)
 
     tracker = trackers.get(doc["tracker"]["kind"])
+    # A tracker fragment may also name the read tools the harness lists, as it lists them.
+    tracker_values = dict(sequence_values)
+    tracker_values[("tracker", "read-tools")] = ", ".join(
+        "`%s`" % tool for tool in doc["tracker"].get("read_tools") or [])
 
     def tracker_fragment(name):
-        return _render_text(tracker.fragment(name).strip(), sequence_values, "tracker/%s" % name)
+        return _render_text(tracker.fragment(name).strip(), tracker_values, "tracker/%s" % name)
 
     return {
         **sequence_values,

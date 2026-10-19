@@ -240,7 +240,7 @@ def run_python_cases(cage):
         "python layout: ppl-test-worker grep -f of a test file over product code is denied",
         cage.payload("ppl-test-worker", "Bash",
                      {"command": "grep -f tests/p.txt src/shop/cart.py"}, wt),
-        "BOUNDARY_VIOLATION")
+        "BOUNDARY_VIOLATION", reason="-f is an option the guard does not classify")
 
     cage.check(
         "python layout: ppl-test-worker brace read that expands into src/ is denied",

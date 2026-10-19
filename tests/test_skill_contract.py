@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 import ppl_guard
 
 import fixtures
-from ppl import cli, forges, fsm, gitfacts, run, sequences, verdict
+from ppl import cli, forges, fsm, gitfacts, harness, rules, run, sequences, verdict
 
 # The skill on disk is rendered from skill/ skeletons, so the contract is
 # checked on a rendered copy, never on the real home.
@@ -489,14 +489,25 @@ class TestTrackerNeutralSkill(unittest.TestCase):
         for name in EXAMPLES:
             stage8 = self.stage(name, "stage-8-after-merge.md")
             self.assertIn("Jira", stage8, name)
-            self.assertIn("addOrEditJiraIssueComment", stage8, name)
+            # the comment tool is the harness's, not a name fixed in the fragment
+            self.assertIn("the Atlassian MCP comment tool among the harness's "
+                          "`tracker.write_operations`", stage8, name)
+            self.assertNotIn("addOrEditJiraIssueComment", stage8, name)
             self.assertIn("[R-JIRA-GATE]", stage8, name)
         stage8 = self.stage("github-issues", "stage-8-after-merge.md")
         self.assertIn("gh issue comment", stage8)
         self.assertIn("[R-TRACKER-CLI-GATE]", stage8)
         self.assertLess(stage8.index("ppl merge observed"), stage8.index("gh issue comment"))
         for path, text in sorted(RENDERED["github-issues"].items()):
-            self.assertNotIn("Jira", text, path)
+            # a rule id names Jira in capitals, any other mention is Jira text
+            self.assertNotIn("jira", rules.MARKER_RE.sub("", text).lower(), path)
+
+    def test_the_note_is_introduced_once(self):
+        for name in RENDERED:
+            stage8 = self.stage(name, "stage-8-after-merge.md")
+            self.assertIn("write to the tracker %s:" % harness.DEFAULT_TRACKER_CLOSE, stage8, name)
+            self.assertEqual(stage8.count(harness.DEFAULT_TRACKER_CLOSE), 1, name)
+            self.assertNotIn("saying a short comment", stage8, name)
 
     def test_stage_zero_runs_init_before_reading_the_task(self):
         for name in EXAMPLES:
@@ -539,8 +550,10 @@ class TestTrackerNeutralSkill(unittest.TestCase):
         stage8 = self.stage("github-issues", "stage-8-after-merge.md")
         found = re.findall(r"`(gh issue comment [^`]+)`", stage8)
         self.assertEqual(len(found), 1, found)
+        # the run's scratch directory, since a write into the worktree or runs/ is denied
+        self.assertIn("write the note to `/tmp/ppl-<TASK-ID>/note.md`", stage8)
         command = (found[0].replace("<number>", "45").replace("<owner/name>", "o/r")
-                   .replace("<file>", "/tmp/ppl-GH-45/note.md"))
+                   .replace("<TASK-ID>", "GH-45"))
         self.assertEqual(command, "gh issue comment 45 -R o/r --body-file /tmp/ppl-GH-45/note.md")
         self.assertNotIn("$", found[0])
         self.assertTrue(ppl_guard.tracker_cli_write(command), "the close is not read as a write")

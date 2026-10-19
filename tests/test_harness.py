@@ -1268,7 +1268,20 @@ class TestRenderSkill(HarnessTestCase):
     def test_the_tracker_close_note_defaults_to_a_neutral_comment(self):
         for name in ("example-maven", "example-generic"):
             text = self.render(name)["references/stage-8-after-merge.md"]
-            self.assertIn("saying %s." % harness.DEFAULT_TRACKER_CLOSE, text, name)
+            self.assertIn("write to the tracker %s:" % harness.DEFAULT_TRACKER_CLOSE, text, name)
+
+    def test_the_jira_steps_name_the_harness_read_tools(self):
+        name = self.mutate("example-maven", 'read_tools = ["getJiraIssue", "getConfluenceContent", '
+                           '"getConfluencePage", "searchJiraIssuesUsingJql", "searchConfluence", '
+                           '"executeRead"]', 'read_tools = ["getJiraIssue", "corpReadIssue"]')
+        rendered = harness.render_skill(harness.load(name))
+        stage0 = " ".join(rendered["references/stage-0-admission.md"].split())
+        self.assertIn("the Atlassian MCP read tools the harness lists in `tracker.read_tools` "
+                      "(`getJiraIssue`, `corpReadIssue`)", stage0)
+        for path, text in rendered.items():
+            for fixed in ("getConfluenceContent", "searchJiraIssuesUsingJql",
+                          "addOrEditJiraIssueComment"):
+                self.assertNotIn(fixed, text, path)
 
     def test_a_tracker_close_fragment_replaces_the_default(self):
         directory = fixtures.install_harness("example-generic")
@@ -1277,8 +1290,8 @@ class TestRenderSkill(HarnessTestCase):
             encoding="utf-8")
         rendered = harness.render_skill(harness.load("example-generic"))
         text = rendered["references/stage-8-after-merge.md"]
-        self.assertIn("saying a comment saying what was done, plus the custom "
-                      "fields the team tracks.", text)
+        self.assertIn("write to the tracker a comment saying what was done, plus the custom "
+                      "fields the team tracks:", text)
         for relative, text in rendered.items():
             self.assertNotIn(harness.DEFAULT_TRACKER_CLOSE, text, relative)
 

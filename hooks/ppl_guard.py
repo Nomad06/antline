@@ -1093,7 +1093,8 @@ _READ_VERB_OPTIONS = {
                           "--max-filesize --replace --sort --sortr --color --colors"),
 }
 _READ_VERBS = frozenset(_READ_VERB_OPTIONS)
-# grep and rg take a pattern before their paths, unless -e or -f gave it
+# grep and rg take a pattern before their paths, unless -e or --regexp gave it.
+# -f and --file are not listed, so they are refused like any unlisted option.
 _READ_PATTERN_VERBS = frozenset({"grep", "rg"})
 # Round 2 review (C2, whole-branch): `rg` is recursive by default with no
 # path operand at all - it does not need a flag to walk the tree, and it

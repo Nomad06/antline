@@ -377,6 +377,27 @@ class TestRouting(unittest.TestCase):
         for name in ("ppl-briefer", "ppl-brief-challenger", "ppl-verifier", "ppl-review-responder"):
             self.assertNotIn("JAVA_HOME", routing.render(name, self.doc))
 
+    def test_render_states_the_python_test_globs_to_the_two_workers_only(self):
+        sources = ["tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
+        fixtures.install_variant("example-generic", "py-globs", tests={"sources": sources})
+        doc = harness.load("py-globs")
+        line = ("- Test sources are the paths matching `tests/**`, `test/**`, `**/test_*.py`, "
+                "`**/*_test.py`, `**/conftest.py`. The code worker may not write these paths, "
+                "and the test worker may write only these.")
+        for name in ("ppl-code-worker", "ppl-test-worker"):
+            text = routing.render(name, doc)
+            self.assertIn(line, text)
+            self.assertLess(len(text.encode("utf-8")), harness.AGENT_SOFT_BYTES, name)
+        for name in ("ppl-briefer", "ppl-brief-challenger", "ppl-verifier", "ppl-review-responder"):
+            self.assertNotIn("Test sources are", routing.render(name, doc))
+
+    def test_render_states_the_java_default_globs_when_the_harness_has_none(self):
+        self.assertNotIn("tests", self.doc)
+        line = ("- Test sources are the paths matching `**/src/test/**`, `**/*Test.java`, "
+                "`**/*IT.java`, `**/*Tests.java`.")
+        for name in ("ppl-code-worker", "ppl-test-worker"):
+            self.assertIn(line, routing.render(name, self.doc))
+
     def test_render_without_an_overlay_leaves_the_body_untouched(self):
         fixtures.install_harness("example-generic")
         generic = harness.load("example-generic")

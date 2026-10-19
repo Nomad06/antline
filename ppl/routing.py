@@ -15,7 +15,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from . import forges, paths, trackers
+from . import boundary, forges, paths, trackers
 from .errors import PplError
 
 REQUIRED_ROLES = ("ppl-briefer", "ppl-brief-challenger", "ppl-code-worker",
@@ -356,6 +356,12 @@ def _overlay(name, harness_doc):
     if env and name in ("ppl-code-worker", "ppl-test-worker"):
         lines.append("- Environment every build command needs: %s."
                      % ", ".join("`%s=%s`" % item for item in sorted(env.items())))
+    if name in ("ppl-code-worker", "ppl-test-worker"):
+        # the globs the cage splits tests by, the Java defaults when the harness has none
+        sources = (harness_doc.get("tests") or {}).get("sources") or boundary.TEST_PATTERNS
+        lines.append("- Test sources are the paths matching %s. The code worker may not write "
+                     "these paths, and the test worker may write only these."
+                     % ", ".join("`%s`" % glob for glob in sources))
     if part.is_file():
         try:
             text = part.read_text(encoding="utf-8", errors="strict").rstrip()

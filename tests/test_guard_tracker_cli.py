@@ -165,6 +165,16 @@ class TestTrackerCliGate(GhRunCase):
         with self.at_merge_watch():
             self.assertIsNone(bash(None, COMMENT, ELSEWHERE))
 
+    def test_the_close_note_is_written_and_posted_once_the_merge_is_recorded(self):
+        # the stage 8 close: the note in the run's scratch directory, then gh issue comment
+        note = "/tmp/ppl-GH-7/note.md"
+        with self.at_merge_watch():
+            self.assertIsNone(ppl_guard.decide(payload(None, "Write", {"file_path": note,
+                                                                       "content": "Done."},
+                                                       ELSEWHERE)))
+            self.assertIsNone(bash(None, "gh issue comment 7 -R o/r --body-file " + note,
+                                   ELSEWHERE))
+
     def test_every_write_shape_is_gated_before_the_merge_is_observed(self):
         # rule: R-TRACKER-CLI-GATE
         shapes = ("gh -R o/r issue close 5",
