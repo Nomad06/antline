@@ -8,6 +8,7 @@ outside Bash are not seen. The boundary that would close them is a GitHub
 credential the role sessions never hold."""
 import json
 import re
+import time
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -55,10 +56,11 @@ MUTATIONS = ("addComment", "updateIssueComment", "deleteIssueComment", "createIs
 _MUTATION = re.compile(r"(?<![A-Za-z0-9_])(?:%s)(?![A-Za-z0-9_])" % "|".join(MUTATIONS),
                        re.IGNORECASE)
 # An issues route or the GraphQL endpoint of github.com or of a GitHub Enterprise
-# host, named by any client.
+# host, named by any client. A segment holds no slash, so a run of slashes splits one
+# way only and the search stays linear.
 _API_URL = re.compile(
     r"(?:api\.github\.com\.?(?::[0-9]+)?|/api/v3)/+(?:(?:repos/+[^/\s?#]+/+[^/\s?#]+"
-    r"|repositories/+[0-9]+)/+(?:[^\s?#]*?/+)?issues(?![A-Za-z0-9_-])|graphql(?![A-Za-z0-9_-]))"
+    r"|repositories/+[0-9]+)/+(?:[^/\s?#]+/+)*issues(?![A-Za-z0-9_-])|graphql(?![A-Za-z0-9_-]))"
     r"|/api/graphql(?![A-Za-z0-9_-])", re.IGNORECASE)
 _GH_NAME = re.compile(r"(?<![A-Za-z0-9_.-])gh(?![A-Za-z0-9_.-])")
 _SHELL_TEXT = re.compile(r"[\s;&|()<>`$'\"\\]")
@@ -96,10 +98,28 @@ _JQ_FLAGS = ("--jq=", "-q=")
 # pipeline runs, and such a command is refused rather than read at length.
 _MAX_DEPTH = 16
 _MAX_GH = 8
+# The seconds one search may spend reading a command. The guard runs it on every role
+# Bash command, and a hook past its own timeout lets the call through, so a reading
+# that runs longer stops and counts as a write. The clock is read between commands
+# and words, never inside a regex call.
+READ_BUDGET_SECONDS = 0.5
+_clock = time.monotonic
+# The deadline of the search in progress, None outside one.
+_DEADLINE = [None]
 
 
 class _Unreadable(Exception):
     """The text cannot be split into words the way the shell splits it."""
+
+
+class _OverBudget(Exception):
+    """The search has read the command for longer than READ_BUDGET_SECONDS."""
+
+
+def _tick():
+    deadline = _DEADLINE[0]
+    if deadline is not None and _clock() >= deadline:
+        raise _OverBudget()
 
 
 class _Command(list):
@@ -807,6 +827,7 @@ def _split_words(text):
 
 
 def _check_command(words, run, depth, respace=True):
+    _tick()
     # the jq exemption holds for an argument after a gh program, never for the head or a
     # program word, where the glob can become a renamed gh binary
     seen = False
@@ -821,6 +842,7 @@ def _check_command(words, run, depth, respace=True):
     runner = head is not None and words[head].text.rsplit("/", 1)[-1] in _RUNNERS
     in_gh = set()
     for index in programs:
+        _tick()
         # gh is the program the shell runs, or the first gh after a runner such as
         # sudo or xargs, else a word like `grep gh .` names it
         program = run and (index == head or (runner and index == programs[0]))
@@ -830,6 +852,7 @@ def _check_command(words, run, depth, respace=True):
             return reason
         in_gh.update(id(word) for word in words[index:])
     for index, word in enumerate(words):
+        _tick()
         if respace and word.loose:
             respaced = _SPLITTING.sub(" ", word.text)
             if respaced != word.text and _GH_NAME.search(respaced.lower()):
@@ -845,6 +868,7 @@ def _check_command(words, run, depth, respace=True):
             return reason
     script = run and _script_runner(words)
     for word in words:
+        _tick()
         if id(word) not in in_gh and _names_api(word.text):
             return "a client other than gh names a GitHub issues or GraphQL endpoint"
         texts = [word.script]
@@ -878,6 +902,7 @@ _READING = "reading"
 def _check_text(text, run, depth):
     """Why `text` may write the tracker, or None. `run` is True for a command the
     shell runs and False for a word or a here-document body, prose or a script."""
+    _tick()
     key = (text, run, depth)
     if key in _SEEN:
         return _SEEN[key]
@@ -909,10 +934,12 @@ def _read_text(text, run, depth):
             return _check_text(loosened, False, depth + 1)
         return _loose_gh_write(text)
     for words in lexer.commands:
+        _tick()
         reason = _check_command(words, run, depth)
         if reason:
             return reason
     for body in lexer.texts:
+        _tick()
         reason = _check_text(body, False, depth + 1)
         if reason:
             return reason
@@ -949,8 +976,12 @@ class _WriteCheck(object):
         if not isinstance(command, str):
             return None
         _SEEN.clear()
+        _DEADLINE[0] = _clock() + READ_BUDGET_SECONDS
         try:
             reason = _check_text(command, True, 0)
+        except _OverBudget:
+            reason = ("the command took too long to read (over %s s), so it counts as a "
+                      "tracker write: split it into shorter commands" % READ_BUDGET_SECONDS)
         except Exception:
             # a defect here must not let the call through: read the command as one the
             # shell cannot split
@@ -958,6 +989,7 @@ class _WriteCheck(object):
             reason = ("the tracker write check failed on a command naming gh"
                       if _GH_NAME.search(flat) or _names_api(flat) else None)
         finally:
+            _DEADLINE[0] = None
             _SEEN.clear()
         return _Hit(reason) if reason else None
 

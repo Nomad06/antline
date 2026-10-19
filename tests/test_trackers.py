@@ -627,6 +627,42 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
             self.assertTrue(self.denied("curl https://api.github.com/graphql -d x"))
             self.assertFalse(self.denied("ls -la"))
 
+    def test_a_check_past_its_time_budget_reads_as_a_write(self):
+        # a hook past its own timeout lets the call through, so a slow reading denies
+        with mock.patch.object(self.adapter, "READ_BUDGET_SECONDS", 0):
+            for command in ("ls -la", "gh pr checks 12", "echo api.github.com/repos/a/b/"):
+                with self.subTest(command=command):
+                    self.assertTrue(self.denied(command))
+                    self.assertIn("took too long to read", self.adapter.write_reason(command))
+        self.assertEqual(self.adapter.READ_BUDGET_SECONDS, 0.5)
+        self.assertFalse(self.denied("ls -la"))
+
+    def test_the_budget_is_read_on_the_clock_between_words_and_commands(self):
+        ticks = []
+
+        def advancing():
+            ticks.append(None)
+            return float(len(ticks))
+
+        with mock.patch.object(self.adapter, "_clock", advancing):
+            reason = self.adapter.write_reason("echo " + "a " * 50)
+        self.assertIn("took too long to read", reason)
+        # once over, the reading stops instead of reading every word
+        self.assertLess(len(ticks), 10)
+        with mock.patch.object(self.adapter, "_clock", lambda: 0.0):
+            self.assertIsNone(self.adapter.write_reason("echo " + "a " * 50))
+            self.assertEqual(self.adapter.write_reason("gh issue close 5"),
+                             "gh issue close writes the issue")
+
+    def test_a_reading_outside_a_search_has_no_budget(self):
+        with mock.patch.object(self.adapter, "READ_BUDGET_SECONDS", 0):
+            self.assertTrue(self.denied("ls"))
+            self.adapter._SEEN.clear()
+            try:
+                self.assertIsNone(self.adapter._check_text("ls -la", True, 0))
+            finally:
+                self.adapter._SEEN.clear()
+
     def test_a_command_the_shell_cannot_split_denies_when_it_could_reach_gh(self):
         self.assert_denied(["gh issue close 5 'unterminated", "echo \"x; gh issue close 5",
                             "gh issue view $(echo 5", "gh issue view `echo 5",
@@ -760,7 +796,12 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
              "echo " + "a\\ " * 1300, "cat <<E\n" + "x\n" * 2000 + "E",
              "echo " + "$(" * 1000 + ")" * 1000, "echo " + "'a b gh c' " * 400,
              "gh api graphql -f query='query{" + "a{" * 1000 + "}" * 1000 + "}'",
-             "curl " + "https://api.github.com/x " * 160, "echo " + "`" * 4000])
+             "curl " + "https://api.github.com/x " * 160, "echo " + "`" * 4000,
+             # a run of slashes, or of encoded ones, after an API route prefix
+             "echo api.github.com/repos/a/b/" + "/" * 4000,
+             "echo /api/v3/repos/a/b/" + "/" * 4000,
+             "echo api.github.com/repositories/1/" + "/" * 4000,
+             "echo api.github.com/repos/o/r/" + "%2F" * 1300])
         # a command naming gh this many times is no command the pipeline runs, and
         # a gh command the shell cannot split is denied
         self.assert_fast(["gh api " * 585, "gh issue " * 455, "gh " * 1365, "gh api r " * 455,

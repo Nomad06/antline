@@ -2,6 +2,7 @@ import contextlib
 import json
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -16,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 
 import fixtures
 from ppl import boundary, doctor, harness, paths, run, setup, store
-from ppl.trackers import jira
+from ppl.trackers import github_issues, jira
 import ppl_guard
 
 TASK = "GH-7"
@@ -59,6 +60,12 @@ JQ_READS = (
     "gh pr view 12 --json=reviews --jq=\".reviews[0].state\"",
     "gh api repos/o/r/pulls/12/comments -q=.[].body",
 )
+# The final review's role commands: a 1.3 KB word that made the issues route regex
+# backtrack past the hook's own timeout, then the call the cage exists to stop.
+SLOW_WORD = "echo 'api.github.com/repos/a/b/" + "/" * 1300 + "'"
+SLOW_ROLE_COMMANDS = (("ppl-test-worker", SLOW_WORD + "; cat src/shop/cart.py"),
+                      ("ppl-code-worker", SLOW_WORD + "; echo x > tests/unit/test_cart.py"),
+                      ("ppl-code-worker", SLOW_WORD + "; gh issue close 9 -R o/r"))
 # A brace in the jq word, and a glob in a word that is not one.
 GLOB_WRITES = ("gh api repos/o/r/pulls/12/comments --jq={a,b}",
                "gh api repos/o/r/pulls/1*/comments --jq=.[].body")
@@ -380,6 +387,37 @@ class TestTrackerCliNoRole(GhRunCase):
             self.assertIsNone(bash("ppl-review-responder", command), command)
         for command in ("python3 -m pytest tests -q", "gh issue view 7 -R o/r"):
             self.assertIsNone(bash("ppl-code-worker", command), command)
+
+
+class TestTrackerCheckBudget(GhRunCase):
+    """The write check reads every role Bash command before the rest of the cage, so it
+    finishes inside its budget or denies: a hook past its own timeout allows the call."""
+
+    def test_a_padded_role_command_is_denied_within_a_second(self):
+        # rule: R-TRACKER-CLI-NO-ROLE
+        for agent, command in SLOW_ROLE_COMMANDS:
+            with self.subTest(agent=agent, command=command[-40:]):
+                start = time.perf_counter()
+                reason = self.deny_reason(bash(agent, command))
+                self.assertLess(time.perf_counter() - start, 1.0)
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+
+    def test_a_check_past_its_budget_denies_a_role(self):
+        # rule: R-TRACKER-CLI-NO-ROLE
+        with mock.patch.object(github_issues, "READ_BUDGET_SECONDS", 0):
+            reason = self.deny_reason(bash("ppl-code-worker", "gh pr checks 12"))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("ppl-code-worker may not write the tracker", reason)
+        self.assertIn("took too long to read", reason)
+
+    def test_a_check_past_its_budget_holds_the_orchestrator_until_the_merge(self):
+        # rule: R-TRACKER-CLI-GATE
+        with mock.patch.object(github_issues, "READ_BUDGET_SECONDS", 0):
+            reason = self.deny_reason(bash(None, "gh pr checks 12", ELSEWHERE))
+            self.assertIn("OWNER_DECISION", reason)
+            self.assertIn("took too long to read", reason)
+            with self.at_merge_watch():
+                self.assertIsNone(bash(None, "gh pr checks 12", ELSEWHERE))
 
 
 class TestTrackerMcpNoRole(GhRunCase):

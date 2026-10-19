@@ -250,7 +250,9 @@ issue comment`, an issues write through `gh api` or a GraphQL issue mutation is 
 or a pathname glob in a `gh` call is read as a write too, except a glob inside a word that
 opens with a literal, unquoted `--jq=` or `-q=`, which stays the jq flag whatever the shell
 makes of it, and each such deny ends with what the check read, so an over-deny says what to
-respell [R-TRACKER-CLI-GATE]. A role is
+respell [R-TRACKER-CLI-GATE]. The check reads the clock between commands and words, and a
+command it has read for longer than `READ_BUDGET_SECONDS` (0.5 s) counts as a write, since a
+hook past its own timeout lets the call through [R-TRACKER-CLI-GATE] [R-TRACKER-CLI-NO-ROLE]. A role is
 denied a tracker write through a CLI before and after the merge, run or no run, since the
 tracker is the orchestrator's [R-TRACKER-CLI-NO-ROLE], and a call to any known tracker's MCP
 write tool the same way, the defaults of every adapter and the run's own prefixes alike
