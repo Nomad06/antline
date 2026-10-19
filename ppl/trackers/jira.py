@@ -110,5 +110,15 @@ def validate(table):
     return errors, warnings
 
 
+def doctor_check(table, runner=None):
+    """Jira is reached through an MCP server this check cannot probe."""
+    return {"ok": True, "detail": "not probed"}
+
+
+def task_defaults(table):
+    return {"key_pattern": "^[A-Z][A-Z0-9]+-[0-9]+$",
+            "url_template": "https://example.atlassian.net/browse/<TASK-ID>"}
+
+
 def fragment(name):
     return read_fragment(KIND, name)

@@ -1,5 +1,6 @@
 import random
 import re
+import subprocess
 import time
 import unittest
 from unittest import mock
@@ -49,7 +50,7 @@ class TestAdapterInterface(unittest.TestCase):
             self.assertIsInstance(adapter.KEYS, tuple, kind)
             self.assertIn("kind", adapter.KEYS, kind)
             for name in ("validate", "usable", "mcp_write_regex", "mcp_read_tools",
-                         "write_denials", "fragment"):
+                         "write_denials", "fragment", "doctor_check", "task_defaults"):
                 self.assertTrue(callable(getattr(adapter, name, None)), (kind, name))
 
     def test_every_kind_reads_its_two_fragments_and_refuses_an_unknown_one(self):
@@ -223,6 +224,96 @@ class TestGithubIssuesAdapter(GithubIssuesCase):
         self.assertEqual([p.pattern for p in other], [p.pattern for p in self.denials])
         self.assert_denied(["gh issue comment 5 -R someone/else -b x",
                             "gh api repos/someone/else/issues/5/comments -f body=x"])
+
+
+class FakeGh:
+    """A runner that answers each gh call from a list of (code, stdout, stderr) or an
+    exception to raise, and records the argv and keyword arguments."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.calls = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        code, out, err = answer
+        return subprocess.CompletedProcess(argv, code, out, err)
+
+
+class TestTrackerChoice(GithubIssuesCase):
+    def test_repo_from_remote_reads_github_remotes_only(self):
+        read = self.adapter.repo_from_remote
+        for remote in ("https://github.com/o/r", "https://github.com/o/r.git",
+                       "git@github.com:o/r", "git@github.com:o/r.git",
+                       "https://github.com/o/r/"):
+            self.assertEqual(read(remote), "o/r", remote)
+        self.assertEqual(read("https://github.com/o.x/r-1_2.git"), "o.x/r-1_2")
+        for remote in (None, "", "https://gitlab.com/o/r.git", "git@gitlab.com:o/r.git",
+                       "https://github.com/o", "https://github.com/o/r/extra",
+                       "https://notgithub.com/o/r", "https://github.com.evil.io/o/r",
+                       "git@github.com:o", "o/r", "https://github.com/o r/x", 5):
+            self.assertIsNone(read(remote), remote)
+
+    def test_the_github_issues_doctor_check_runs_auth_then_a_one_issue_list(self):
+        gh = FakeGh((0, "", "logged in"), (0, "[]", ""))
+        result = self.adapter.doctor_check(github_issues_table(), runner=gh)
+        self.assertEqual(result["ok"], True)
+        self.assertIn("o/r", result["detail"])
+        self.assertEqual([argv for argv, _ in gh.calls],
+                         [["gh", "auth", "status"],
+                          ["gh", "issue", "list", "-R", "o/r", "-L", "1"]])
+        for _, kwargs in gh.calls:
+            self.assertEqual(kwargs["timeout"], 20)
+
+    def test_a_failing_gh_call_fails_the_check_and_skips_the_next(self):
+        gh = FakeGh((1, "", "not logged in to any host"))
+        result = self.adapter.doctor_check(github_issues_table(), runner=gh)
+        self.assertFalse(result["ok"])
+        self.assertIn("not logged in to any host", result["detail"])
+        self.assertEqual(len(gh.calls), 1)
+        gh = FakeGh((0, "", ""), (1, "", "Could not resolve to a Repository"))
+        result = self.adapter.doctor_check(github_issues_table(), runner=gh)
+        self.assertFalse(result["ok"])
+        self.assertIn("Could not resolve to a Repository", result["detail"])
+
+    def test_a_missing_gh_fails_the_check(self):
+        result = self.adapter.doctor_check(github_issues_table(),
+                                           runner=FakeGh(FileNotFoundError("gh")))
+        self.assertEqual(result, {"ok": False,
+                                  "detail": "gh is not installed or not on PATH"})
+
+    def test_a_gh_that_does_not_answer_fails_the_check(self):
+        timeout = subprocess.TimeoutExpired(["gh"], 20)
+        result = self.adapter.doctor_check(github_issues_table(), runner=FakeGh(timeout))
+        self.assertFalse(result["ok"])
+        self.assertIn("20 s", result["detail"])
+
+    def test_a_table_the_adapter_refuses_runs_no_gh(self):
+        gh = FakeGh()
+        result = self.adapter.doctor_check({"kind": "github-issues"}, runner=gh)
+        self.assertFalse(result["ok"])
+        self.assertIn("tracker.repo", result["detail"])
+        self.assertEqual(gh.calls, [])
+
+    def test_jira_is_not_probed(self):
+        self.assertEqual(jira.doctor_check(jira_table(), runner=FakeGh()),
+                         {"ok": True, "detail": "not probed"})
+
+    def test_task_defaults_name_the_key_pattern_and_the_issue_url(self):
+        self.assertEqual(self.adapter.task_defaults(github_issues_table()),
+                         {"key_pattern": "^GH-[0-9]+$",
+                          "url_template": "https://github.com/o/r/issues/<TASK-ID-number>"})
+        self.assertEqual(self.adapter.task_defaults(
+            github_issues_table(task_prefix="ISS", repo="a/b"))["key_pattern"], "^ISS-[0-9]+$")
+        self.assertEqual(self.adapter.task_defaults({"kind": "github-issues"}),
+                         {"key_pattern": "^GH-[0-9]+$",
+                          "url_template": "https://github.com/<repo>/issues/<TASK-ID-number>"})
+        self.assertEqual(jira.task_defaults(jira_table()),
+                         {"key_pattern": "^[A-Z][A-Z0-9]+-[0-9]+$",
+                          "url_template": "https://example.atlassian.net/browse/<TASK-ID>"})
 
 
 class TestGithubIssuesWriteDenials(GithubIssuesCase):

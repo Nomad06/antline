@@ -13,15 +13,16 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "hooks"))
 import ppl_guard
-from ppl import boundary, harness, tomlout
+from ppl import boundary, harness, tomlout, trackers
 from ppl.errors import PplError
 from ppl.studio import stacks
 
 PLACEHOLDERS = {"<test_class>": "app.FooTest", "<module>": "core"}
 
 
-def project(path, forge=None):
-    return {"path": str(path), "default_branch": "main", "forge_hint": forge, "name_hint": "demo"}
+def project(path, forge=None, remote=None):
+    return {"path": str(path), "default_branch": "main", "forge_hint": forge, "name_hint": "demo",
+            "remote_url": remote}
 
 
 def empty_dir(prefix="pplstack-"):
@@ -270,6 +271,61 @@ class TestDrafts(unittest.TestCase):
         with self.assertRaises(PplError) as caught:
             stacks.draft("cobol", project(empty_dir("pplrepo-")))
         self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+
+
+class TestTrackerDraft(unittest.TestCase):
+    def draft(self, stack="node", **kwargs):
+        return stacks.draft(stack, project(empty_dir("pplrepo-"), **kwargs))
+
+    def test_a_github_remote_drafts_github_issues_with_its_repo(self):
+        for stack in ("node", "maven"):
+            draft = self.draft(stack, forge="github", remote="git@github.com:acme/widgets.git")
+            self.assertEqual(draft["doc"]["tracker"], {"kind": "github-issues",
+                                                       "repo": "acme/widgets",
+                                                       "task_prefix": "GH"}, stack)
+            self.assertEqual(draft["doc"]["task"]["key_pattern"], "^GH-[0-9]+$")
+            self.assertEqual(draft["doc"]["task"]["url_template"],
+                             "https://github.com/acme/widgets/issues/<TASK-ID-number>")
+            self.assertEqual(draft["sources"]["tracker.kind"], "git remote")
+            self.assertEqual(install_draft(draft)["tracker"]["repo"], "acme/widgets")
+
+    def test_no_github_remote_keeps_the_jira_tracker(self):
+        for kwargs in ({}, {"forge": "gitlab", "remote": "https://gitlab.com/o/r.git"},
+                       {"forge": "github", "remote": "https://github.com/o"},
+                       {"forge": "github", "remote": None}):
+            draft = self.draft(**kwargs)
+            self.assertEqual(draft["doc"]["tracker"]["kind"], "jira", kwargs)
+            self.assertEqual(draft["doc"]["task"]["key_pattern"], "^[A-Z][A-Z0-9]+-[0-9]+$")
+            self.assertNotIn("tracker.kind", draft["sources"])
+            install_draft(draft)
+
+    def test_the_draft_offers_both_tracker_tables(self):
+        for kwargs in ({}, {"remote": "https://github.com/o/r"}):
+            draft = self.draft(**kwargs)
+            self.assertEqual(sorted(draft["trackers"]), ["github-issues", "jira"])
+            for kind, offer in draft["trackers"].items():
+                self.assertEqual(sorted(offer), ["task", "tracker"])
+                self.assertEqual(offer["tracker"]["kind"], kind)
+                self.assertEqual(sorted(offer["task"]), ["key_pattern", "url_template"])
+            self.assertEqual(trackers.get("jira").validate(draft["trackers"]["jira"]["tracker"]),
+                             ([], []))
+
+    def test_the_github_issues_offer_without_a_remote_asks_for_the_repo(self):
+        offer = self.draft()["trackers"]["github-issues"]
+        self.assertNotIn("repo", offer["tracker"])
+        errors, _ = trackers.get("github-issues").validate(offer["tracker"])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("tracker.repo", errors[0])
+        self.assertIn("<repo>", offer["task"]["url_template"])
+
+    def test_the_github_issues_offer_with_a_remote_validates(self):
+        offer = self.draft(remote="https://github.com/o/r")["trackers"]["github-issues"]
+        self.assertEqual(trackers.get("github-issues").validate(offer["tracker"]), ([], []))
+
+    def test_the_offers_do_not_share_state_with_the_draft(self):
+        draft = self.draft()
+        draft["trackers"]["jira"]["tracker"]["mcp_prefixes"].append("x")
+        self.assertNotIn("x", draft["doc"]["tracker"]["mcp_prefixes"])
 
 
 class TestShapesStayNarrow(unittest.TestCase):

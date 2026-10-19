@@ -1006,6 +1006,60 @@ def write_denials(table):
     return [_WRITES]
 
 
+_REMOTES = (re.compile(r"https://(?:[^@/]+@)?github\.com/([^/]+)/([^/]+?)(?:\.git)?/?"),
+            re.compile(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?/?"))
+
+
+def repo_from_remote(url):
+    """The owner/name of a github.com remote URL, https or scp-like, else None."""
+    if not isinstance(url, str):
+        return None
+    for pattern in _REMOTES:
+        match = pattern.fullmatch(url.strip())
+        if match:
+            repo = "%s/%s" % match.groups()
+            return repo if _REPO.fullmatch(repo) else None
+    return None
+
+
+def task_defaults(table):
+    """The task key pattern and the issue URL a table implies. <repo> stands for a repo
+    the table does not name yet, and <TASK-ID-number> for the digits of the task key."""
+    prefix = table.get("task_prefix", DEFAULTS["task_prefix"])
+    repo = table.get("repo")
+    if not (isinstance(repo, str) and _REPO.fullmatch(repo)):
+        repo = "<repo>"
+    return {"key_pattern": "^%s-[0-9]+$" % prefix,
+            "url_template": "https://github.com/%s/issues/<TASK-ID-number>" % repo}
+
+
+def doctor_check(table, runner=None):
+    """{"ok", "detail"}: gh is installed and signed in, and lists one issue of the repo.
+    Each gh call has GH_TIMEOUT seconds."""
+    import subprocess
+    runner = runner or subprocess.run
+    errors, _ = validate(table)
+    if errors:
+        return {"ok": False, "detail": errors[0]}
+    repo = table["repo"]
+    for argv in (["auth", "status"], ["issue", "list", "-R", repo, "-L", "1"]):
+        try:
+            done = runner(["gh"] + argv, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=GH_TIMEOUT)
+        except FileNotFoundError:
+            return {"ok": False, "detail": "gh is not installed or not on PATH"}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "detail": "gh %s did not answer within %d s"
+                    % (argv[0], GH_TIMEOUT)}
+        except OSError as exc:
+            return {"ok": False, "detail": "gh could not run: %s" % exc}
+        if done.returncode != 0:
+            why = ((done.stderr or "").strip() or (done.stdout or "").strip()
+                   or "exit %s" % done.returncode)
+            return {"ok": False, "detail": "gh %s failed: %s" % (" ".join(argv[:2]), why[:300])}
+    return {"ok": True, "detail": "gh is signed in and lists issues of %s" % repo}
+
+
 def issue_number(task_id):
     """The issue number of a task id shaped <PREFIX>-<number>, such as 123 for GH-123."""
     match = _TASK_ID.fullmatch(task_id) if isinstance(task_id, str) else None

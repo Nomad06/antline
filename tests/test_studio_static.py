@@ -160,6 +160,72 @@ console.log(JSON.stringify([testsAfterEdit(undefined, []), testsAfterEdit(undefi
         self.assertIn("testsAfterEdit(draft.doc.tests, list)", block)
         self.assertIn("delete d.tests", block)
 
+    def test_the_harness_form_offers_the_tracker_kind(self):
+        source = (STATIC / "ui" / "harness-form.js").read_text()
+        self.assertIn('from "./trackerkind.js"', source)
+        block = source[source.index('label="Tracker"'):source.index("<h3>Test sources")]
+        self.assertIn("disabled=${!offers}", block)
+        self.assertIn("swap(e.target.value)", block)
+        for kind in ("jira", "github-issues"):
+            self.assertIn('<option value="%s">' % kind, block)
+        for label in ("Repository", "Task prefix", "Jira MCP prefixes"):
+            self.assertIn(label, block)
+        self.assertIn("<${ListInput}", block[block.index("Jira MCP prefixes"):])
+        self.assertIn("swapTracker(doc, parked.current, offers, kind)", source)
+        self.assertIn("const offers = draft.trackers", source)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, the tracker check needs it")
+    def test_swapping_the_tracker_kind_keeps_the_rest_of_the_form(self):
+        scratch = Path(tmphome.mkdtemp(prefix="pplnode-"))
+        copy = scratch / "trackerkind.mjs"
+        copy.write_bytes((STATIC / "ui" / "trackerkind.js").read_bytes())
+        script = """
+import { retargetGithub, swapTracker } from "%s";
+const offers = {
+  jira: { tracker: { kind: "jira", mcp_prefixes: ["mcp__atlassian__"] }, task: { key_pattern: "^J-1$", url_template: "j" } },
+  "github-issues": { tracker: { kind: "github-issues", task_prefix: "GH" },
+    task: { key_pattern: "^GH-[0-9]+$", url_template: "g/<repo>/issues/<TASK-ID-number>" } },
+};
+const doc = { tracker: { kind: "jira", mcp_prefixes: ["mcp__edited__"] }, task: { key_pattern: "^EDIT-1$", url_template: "j" },
+  tests: { sources: ["mine/**"] }, gate: [{ name: "a", command: "b" }] };
+const frozen = JSON.stringify(doc);
+const toGithub = swapTracker(doc, {}, offers, "github-issues");
+const typed = retargetGithub(toGithub.doc, offers["github-issues"], "o/r", "ISS");
+const backToJira = swapTracker(typed, toGithub.parked, offers, "jira");
+const again = swapTracker(backToJira.doc, backToJira.parked, offers, "github-issues");
+console.log(JSON.stringify({
+  untouched: JSON.stringify(doc) === frozen,
+  toGithub: toGithub.doc, parkedJira: toGithub.parked.jira,
+  typed: typed.tracker, typedTask: typed.task,
+  backToJira: backToJira.doc, again: again.doc.tracker, againTask: again.doc.task,
+  same: swapTracker(doc, {}, offers, "jira").doc === doc,
+  unknown: swapTracker(doc, {}, offers, "linear"), noOffers: swapTracker(doc, {}, undefined, "github-issues"),
+  cleared: retargetGithub(typed, offers["github-issues"], "", "GH").tracker,
+}));
+""" % copy.as_uri()
+        result = subprocess.run(["node", "--input-type=module", "-e", script],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout)
+        self.assertTrue(out["untouched"])
+        self.assertEqual(out["toGithub"]["tests"], {"sources": ["mine/**"]})
+        self.assertEqual(out["toGithub"]["gate"], [{"name": "a", "command": "b"}])
+        self.assertEqual(out["toGithub"]["tracker"], {"kind": "github-issues", "task_prefix": "GH"})
+        self.assertEqual(out["parkedJira"], {"tracker": {"kind": "jira", "mcp_prefixes": ["mcp__edited__"]},
+                                             "task": {"key_pattern": "^EDIT-1$", "url_template": "j"}})
+        self.assertEqual(out["typed"], {"kind": "github-issues", "task_prefix": "ISS", "repo": "o/r"})
+        self.assertEqual(out["typedTask"], {"key_pattern": "^ISS-[0-9]+$",
+                                            "url_template": "g/o/r/issues/<TASK-ID-number>"})
+        self.assertEqual(out["backToJira"]["tracker"], out["parkedJira"]["tracker"])
+        self.assertEqual(out["backToJira"]["task"], out["parkedJira"]["task"])
+        self.assertEqual(out["backToJira"]["tests"], {"sources": ["mine/**"]})
+        self.assertEqual(out["again"], out["typed"])
+        self.assertEqual(out["againTask"], out["typedTask"])
+        self.assertTrue(out["same"])
+        self.assertIsNone(out["unknown"])
+        self.assertIsNone(out["noOffers"])
+        self.assertEqual(out["cleared"], {"kind": "github-issues", "task_prefix": "GH"})
+
     def test_the_playground_example_uses_the_example_test_path(self):
         source = (STATIC / "pages" / "playground.js").read_text()
         self.assertIn('from "../ui/testpath.js"', source)

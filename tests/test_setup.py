@@ -561,6 +561,119 @@ class TestNonInteractive(SetupTestCase):
         self.assertEqual(set(setup.STEP_INTROS), set(setup.STEPS))
 
 
+class TestTrackerStep(SetupTestCase):
+    def run_forge(self, tracker_check=None, **kwargs):
+        checked = []
+
+        def default_check(table):
+            checked.append(table)
+            return {"ok": True, "detail": "ok"}
+        result = setup.run(steps=["paths", "harness", "forge"], answers=self.answers,
+                           non_interactive=True, forge_check=ok_forge, emit=self.lines.append,
+                           tracker_check=tracker_check or default_check, **kwargs)
+        return result, checked
+
+    def test_a_github_forge_offers_github_issues_and_writes_its_table(self):
+        self.answers.update(tracker="github-issues", tracker_repo="o/r")
+        result, checked = self.run_forge()
+        self.assertEqual(result["done"], ["paths", "harness", "forge"])
+        doc = harness.load("mine")
+        self.assertEqual(doc["tracker"], {"kind": "github-issues", "repo": "o/r",
+                                          "task_prefix": "GH"})
+        self.assertEqual(doc["task"]["key_pattern"], "^GH-[0-9]+$")
+        self.assertEqual(doc["task"]["url_template"],
+                         "https://github.com/o/r/issues/<TASK-ID-number>")
+        self.assertEqual(checked, [doc["tracker"]])
+        self.assertIn("github-issues: ok", self.lines)
+
+    def test_an_identical_rerun_with_a_changed_tracker_is_kept(self):
+        self.answers.update(tracker="github-issues", tracker_repo="o/r")
+        kwargs = dict(answers=self.answers, non_interactive=True, probe=ok_probe,
+                      forge_check=ok_forge, emit=self.lines.append,
+                      tracker_check=lambda table: {"ok": True, "detail": "ok"})
+        self.assertEqual(setup.run(**kwargs)["failed"], [])
+        written = (paths.harness_dir("mine") / "harness.toml").read_text(encoding="utf-8")
+        second = setup.run(**kwargs)
+        self.assertEqual(second["done"], list(setup.STEPS))
+        self.assertIn("harness mine is already installed and identical, kept", self.lines)
+        self.assertEqual((paths.harness_dir("mine") / "harness.toml").read_text(encoding="utf-8"),
+                         written)
+
+    def test_a_non_interactive_run_without_a_tracker_answer_keeps_the_tracker(self):
+        result, checked = self.run_forge()
+        self.assertEqual(result["done"], ["paths", "harness", "forge"])
+        doc = harness.load("mine")
+        self.assertEqual(doc["tracker"]["kind"], "jira")
+        self.assertEqual(doc["task"]["key_pattern"], "^DEMO-[0-9]+$")
+        self.assertEqual(checked, [doc["tracker"]])
+        self.assertIn("jira: ok", self.lines)
+
+    def test_a_failing_tracker_check_fails_the_step(self):
+        self.answers.update(tracker="github-issues", tracker_repo="o/r")
+        result, _ = self.run_forge(
+            tracker_check=lambda table: {"ok": False, "detail": "gh is not installed"})
+        self.assertEqual(result["failed"], ["forge"])
+        self.assertNotIn("forge", config.steps_state()["done"])
+        self.assertIn("github-issues: gh is not installed", self.lines)
+
+    def test_switching_back_to_jira_writes_the_jira_table_and_its_task_defaults(self):
+        self.answers.update(tracker="github-issues", tracker_repo="o/r")
+        self.run_forge()
+        self.answers.update(tracker="jira", harness_from="mine")
+        result, _ = self.run_forge()
+        self.assertEqual(result["failed"], [])
+        doc = harness.load("mine")
+        self.assertEqual(doc["tracker"]["kind"], "jira")
+        self.assertIn("mcp_prefixes", doc["tracker"])
+        self.assertNotIn("repo", doc["tracker"])
+        self.assertEqual(doc["task"]["url_template"],
+                         "https://example.atlassian.net/browse/<TASK-ID>")
+
+    def test_github_issues_without_a_repo_or_a_github_remote_is_setup_incomplete(self):
+        self.answers.update(tracker="github-issues")
+        with self.assertRaises(PplError) as caught:
+            self.run_forge()
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertIn("tracker_repo", caught.exception.message)
+
+    def test_the_repo_defaults_to_the_origin_remote_of_the_checkout(self):
+        import subprocess
+        checkout = self.workspace / "repo"
+        checkout.mkdir()
+        for argv in (["init", "-q"], ["remote", "add", "origin", "git@github.com:acme/widgets.git"]):
+            subprocess.run(["git", "-C", str(checkout)] + argv, check=True)
+        self.answers.update(tracker="github-issues")
+        result, _ = self.run_forge()
+        self.assertEqual(result["failed"], [])
+        self.assertEqual(harness.load("mine")["tracker"]["repo"], "acme/widgets")
+
+    def test_a_malformed_repo_answer_is_refused_by_the_harness_check(self):
+        self.answers.update(tracker="github-issues", tracker_repo="not a repo")
+        with self.assertRaises(PplError) as caught:
+            self.run_forge()
+        self.assertIn("tracker.repo", caught.exception.message)
+
+    def test_an_unknown_tracker_answer_is_setup_incomplete(self):
+        self.answers.update(tracker="linear")
+        with self.assertRaises(PplError) as caught:
+            self.run_forge()
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+
+    def test_an_interactive_github_forge_offers_github_issues_while_the_tracker_is_untouched(self):
+        asked = []
+
+        def read(prompt):
+            asked.append(prompt)
+            return "o/r" if "owner/name" in prompt else ""
+        setup.run(steps=["paths", "harness"], answers=self.answers, non_interactive=True,
+                  emit=self.lines.append)
+        setup.run(steps=["forge"], answers={}, non_interactive=False, read=read,
+                  forge_check=ok_forge, emit=self.lines.append,
+                  tracker_check=lambda table: {"ok": True, "detail": "ok"})
+        self.assertTrue(any("github-issues" in prompt for prompt in asked), asked)
+        self.assertEqual(harness.load("mine")["tracker"]["kind"], "github-issues")
+
+
 class TestLocalSettings(SetupTestCase):
     def test_own_entries_are_replaced_and_the_user_hooks_kept(self):
         path = self.workspace / ".claude" / "settings.local.json"

@@ -672,7 +672,7 @@ def setup_state():
 def inspect_setup():
     """What `ppl setup` left behind, for `ppl doctor` to report: the roots, the
     recorded steps (`setup_state`), the model rows, the active harness and its
-    forge check.
+    forge and tracker checks.
 
     It never raises. Whatever cannot be read (a broken config.toml, a missing
     routing file, an invalid harness, a forge check that blows up) lands in the
@@ -681,7 +681,7 @@ def inspect_setup():
     there is one.
     """
     # ppl.setup imports this module, so these stay function-local
-    from . import config, forges, harness, models, paths
+    from . import config, forges, harness, models, paths, trackers
     report = {"code_root": None, "data_root": str(paths.home())}
     try:
         report["code_root"] = str(paths.root())
@@ -696,6 +696,7 @@ def inspect_setup():
         report["models_problem"] = _problem(exc)
     entry = dict(report["harness"], path=None, valid=False, repo_exists=None)
     forge = None
+    tracker = None
     if entry["active"]:
         doc = None
         try:
@@ -714,8 +715,15 @@ def inspect_setup():
                 forge.update(check)
             except Exception as exc:
                 forge.update(ok=False, detail="the forge check failed: %s" % _problem(exc))
+            table = doc["tracker"]
+            tracker = {"kind": table["kind"]}
+            try:
+                tracker.update(trackers.get(table["kind"]).doctor_check(table))
+            except Exception as exc:
+                tracker.update(ok=False, detail="the tracker check failed: %s" % _problem(exc))
     report["harness"] = entry
     report["forge"] = forge
+    report["tracker"] = tracker
     return report
 
 

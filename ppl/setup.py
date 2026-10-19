@@ -8,16 +8,17 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
-from . import config, doctor, forges, harness, models, paths, routing, tomlout
+from . import config, doctor, forges, harness, models, paths, routing, tomlout, trackers
 from .errors import PplError
 
 STEPS = ("paths", "claude", "models", "harness", "forge", "apply")
 ANSWER_KEYS = ("claude_binary", "workspace", "hooks", "verify", "harness_from", "harness_name",
                "replace_harness", "repo", "default_branch", "task_url_template", "key_pattern",
-               "forge", "gitlab_mcp_server")
+               "forge", "gitlab_mcp_server", "tracker", "tracker_repo")
 TIER_PREFIX = "tier."
 HOOK_MODES = ("local", "global", "manual")
 EXAMPLE_HARNESSES = ("example-generic", "example-maven")
@@ -30,7 +31,7 @@ STEP_INTROS = {
     "claude": "Names the Claude Code binary and an isolated workspace, and registers the two hooks.",
     "models": "Picks a model per tier and proves each one answers with a cheap probe.",
     "harness": "Installs the project harness: build gates, guard shapes, task key and tracker.",
-    "forge": "Chooses the git forge and checks that ppl can reach it.",
+    "forge": "Chooses the git forge and the issue tracker and checks that ppl can reach both.",
     "apply": "Renders the agent files and the orchestrator skill for the harness.",
 }
 
@@ -349,11 +350,12 @@ def _install(p, source, name, installed):
         before = copy.deepcopy(candidate)
         _apply_answers(p, candidate, name)
         current, problem = _load_installed(name) if installed else (None, None)
-        # The forge step rewrites [forge] on the installed copy, so the
-        # candidate takes the same forge answers before the compare. Without
-        # an answer the installed forge is kept, and nothing is asked here.
+        # The forge step rewrites [forge] and [tracker] on the installed copy, so
+        # the candidate takes the same answers before the compare. Without an
+        # answer the installed forge and tracker are kept, and nothing is asked here.
         quiet = Prompter(p.answers, True, None, p.emit)
         _apply_forge(quiet, candidate["forge"], (current or candidate)["forge"])
+        _apply_tracker(quiet, candidate, (current or candidate)["tracker"])
         harness.validate(candidate, name)
         if installed and _keep_installed(p, candidate, name, current, problem):
             return
@@ -436,21 +438,75 @@ def _apply_forge(p, forge, offered):
         forge.pop("mcp_server", None)
 
 
-def _step_forge(p, forge_check):
+SUGGESTED_TRACKER = {"github": "github-issues", "gitlab": "jira"}
+_GIT_TIMEOUT_SECONDS = 10
+
+
+def _origin_repo(checkout):
+    """The owner/name of the checkout's GitHub origin remote, or None."""
+    try:
+        done = subprocess.run(["git", "-C", str(checkout), "remote", "get-url", "origin"],
+                              capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return trackers.get("github-issues").repo_from_remote(done.stdout.strip())
+
+
+def _offered_kind(p, offered, forge_kind):
+    """The tracker kind a question defaults to. A non-interactive run keeps the current one.
+    An interactive one suggests the forge's own tracker while the current tracker is still
+    the untouched Jira example, and keeps any tracker the user already set up."""
+    current = offered["kind"]
+    if p.non_interactive or offered != dict(trackers.get(current).DEFAULTS, kind=current):
+        return current
+    return SUGGESTED_TRACKER[forge_kind]
+
+
+def _apply_tracker(p, doc, offered):
+    """[tracker] and [task] from the tracker answers, `offered` holding the table proposed
+    when there is none. A kind change writes the new kind's table and its task defaults, a
+    github-issues repo comes from the answer, the offered table or the checkout's origin."""
+    kind = p.ask("tracker", "Issue tracker: %s" % " or ".join(trackers.KINDS),
+                 _offered_kind(p, offered, doc["forge"]["kind"]), choices=trackers.KINDS)
+    changed = kind != doc["tracker"]["kind"]
+    table = doc["tracker"]
+    if changed:
+        table = dict(copy.deepcopy(trackers.get(kind).DEFAULTS), kind=kind)
+    if kind == "github-issues":
+        default = (offered.get("repo") if offered["kind"] == kind else None) \
+            or _origin_repo(doc["repo"]["path"]) or ""
+        repo = p.ask("tracker_repo", "Repository the GitHub issues live in, owner/name",
+                     default, required=not default)
+        table = dict(kind=kind, repo=repo, **{key: value for key, value in table.items()
+                                              if key not in ("kind", "repo")})
+    doc["tracker"] = table
+    if changed:
+        doc["task"].update(trackers.get(kind).task_defaults(table))
+
+
+def _step_forge(p, forge_check, tracker_check):
     name = _target_harness()
     doc = harness.load(name)
     before = copy.deepcopy(doc)
     forge = doc["forge"]
     _apply_forge(p, forge, dict(forge))
+    _apply_tracker(p, doc, copy.deepcopy(doc["tracker"]))
     harness.validate(doc, name)
     _write_harness(doc, before)
     workspace = config.section("claude").get("workspace") or str(Path.home())
     claude_json = doctor.claude_home().parent / ".claude.json"
-    result = forge_check(dict(forge), claude_json, workspace)
-    line = "%s: %s" % (forge["kind"], result.get("detail", ""))
-    if not result.get("ok"):
-        raise Failed(line)
-    p.emit(line)
+    checks = (("forge", forge["kind"], forge_check(dict(forge), claude_json, workspace)),
+              ("tracker", doc["tracker"]["kind"], tracker_check(copy.deepcopy(doc["tracker"]))))
+    lines = [("%s: %s" % (kind, result.get("detail", "")), result.get("ok"))
+             for _, kind, result in checks]
+    failed = [line for line, ok in lines if not ok]
+    for line, ok in lines:
+        if ok:
+            p.emit(line)
+    if failed:
+        raise Failed("; ".join(failed))
 
 
 def _step_apply(p):
@@ -467,6 +523,10 @@ def _default_forge_check(settings, claude_json, workspace):
     return forges.get(settings["kind"]).doctor_check(settings, claude_json, workspace)
 
 
+def _default_tracker_check(table):
+    return trackers.get(table["kind"]).doctor_check(table)
+
+
 def _check_steps(names, what):
     unknown = [name for name in names if name not in STEPS]
     if unknown:
@@ -475,7 +535,7 @@ def _check_steps(names, what):
 
 
 def run(steps=None, answers=None, non_interactive=False, read=input, emit=print,
-        probe=None, forge_check=None, skip=()):
+        probe=None, forge_check=None, tracker_check=None, skip=()):
     """Run the named steps, or every step not done yet (all of them when
     every one is done), in STEPS order. Returns the steps done, skipped and
     failed, the reason each failed step gave, and whether the user quit."""
@@ -483,10 +543,12 @@ def run(steps=None, answers=None, non_interactive=False, read=input, emit=print,
     _check_steps(skip, "--skip")
     probe = probe or models.probe
     forge_check = forge_check or _default_forge_check
+    tracker_check = tracker_check or _default_tracker_check
     p = Prompter(answers, non_interactive, read, emit)
     handlers = {"paths": lambda: _step_paths(p), "claude": lambda: _step_claude(p),
                 "models": lambda: _step_models(p, probe), "harness": lambda: _step_harness(p),
-                "forge": lambda: _step_forge(p, forge_check), "apply": lambda: _step_apply(p)}
+                "forge": lambda: _step_forge(p, forge_check, tracker_check),
+                "apply": lambda: _step_apply(p)}
     if steps:
         todo = [step for step in STEPS if step in steps]
     else:

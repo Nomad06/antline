@@ -735,6 +735,22 @@ overlays. Two examples ship in `defaults/harnesses/`: `example-maven` (GitLab, M
 `example-generic` (GitHub, make gates). `ppl harness add` installs one from a directory or a
 git URL, `ppl harness validate` checks it.
 
+`[tracker] kind` is `jira` or `github-issues`, and `ppl/trackers/` holds one adapter per kind.
+`jira` is read and written through the Atlassian MCP server and takes `mcp_prefixes`,
+`write_operations` and `read_tools`. `github-issues` goes through `gh` and takes `repo`
+(owner/name, required, so validation runs no git) and `task_prefix` (capital letters or digits,
+default `GH`, task keys read `GH-123`). Each adapter also exports `task_defaults(table)`, the
+`[task]` key pattern and URL a table implies, and `doctor_check(table)`: Jira is not probed, and
+GitHub Issues runs `gh auth status` then `gh issue list -R <repo> -L 1`, 20 s each. `ppl setup`
+asks for the tracker in the forge step (a GitHub forge suggests `github-issues`, GitLab suggests
+`jira`, a non-interactive run without an answer keeps the harness's own), proposes `repo` from
+`git remote get-url origin`, writes the new kind's table and `task_defaults` on a change, and fails
+the step when the check fails. `ppl doctor` reports the same check as `tracker` next to `forge`.
+The studio's draft carries `trackers`, a `{tracker, task}` table per kind, and its kind select swaps
+`[tracker]` and `[task]` alone, keeping an edited table per kind so a swap back loses nothing. A
+`github-issues` offer without a GitHub remote has no `repo`: the form's check reports it and the
+draft installs once it is filled.
+
 `[tests] sources` lists the globs that name the project's test files, one glob per alternative
 (`glob_match` has no brace expansion). A harness with no `[tests]` table means the Java defaults
 (`boundary.TEST_PATTERNS`), and `harness.snapshot` always freezes the list into the run as

@@ -138,7 +138,6 @@ the test writer tries to `cat` product code and the hook denies it
 - The test/main split comes from the harness's `[tests]` globs (the Java and Maven
   defaults when it has none), and the split is by path, so tests inside product files
   (Rust `#[cfg(test)]`, doctests) are not isolated.
-- Jira is the only tracker, through the Atlassian MCP server.
 - A worktree is not a sandbox. A process can still read credentials or write outside the
   tree if the operating system lets it.
 - The done gate mostly checks documents the same session wrote. SHA binding and
@@ -162,7 +161,7 @@ the test writer tries to `cat` product code and the hook denies it
 - Claude Code (`claude` on PATH, logged in).
 - git.
 - A git forge: GitLab through a GitLab MCP server, or GitHub through `gh`.
-- Jira through the Atlassian MCP server for the tracker.
+- A tracker: Jira through the Atlassian MCP server, or GitHub Issues through `gh`.
 
 ## Install
 
@@ -180,7 +179,8 @@ install (`pip install -e .`) also works from the clone.
 each skippable with `s` and re-runnable with `ppl setup <step>`: the data root
 (`~/.ppl`), the hooks in an isolated workspace (`~/ppl-workspace` by default),
 a model per tier verified by a cheap probe, your harness from an example, the
-forge check, and the agent files and skill. `ppl init` refuses a run until
+forge and the tracker (GitHub Issues for a GitHub forge, Jira for GitLab, each
+checked), and the agent files and skill. `ppl init` refuses a run until
 `ppl setup` has recorded models, harness and apply as done [R-INIT-SETUP-COMPLETE],
 `--skip-model-check` waives models, and a harness only added and applied by hand
 gets `SETUP_INCOMPLETE` naming the `ppl setup` step to run.
@@ -297,7 +297,9 @@ done and how to check it). In a fragment, `<default-branch>` is replaced with
 after any harness or routing change. A harness's `tracker.mcp_prefixes`
 replaces the default Atlassian prefixes rather than extending them: list every
 prefix your tracker server is registered under. `ppl harness validate` warns when
-the list keeps none of the defaults.
+the list keeps none of the defaults. A GitHub Issues tracker is `kind = "github-issues"`
+with `repo` (owner/name) and an optional `task_prefix` (default `GH`, so tasks read
+`GH-123`), and the studio's Tracker select switches a draft between the two kinds.
 
 ## Models
 
@@ -330,7 +332,7 @@ with a code and a question, see the skill's `references/escalation.md`.
 ppl status
 ppl serve --open     # the studio on http://127.0.0.1:8787, the run list at /runs
 ppl recover          # always safe, always first after a restart
-ppl doctor           # hooks, setup, models, harness, forge
+ppl doctor           # hooks, setup, models, harness, forge, tracker
 ppl control set pause|resume|stop
 ```
 

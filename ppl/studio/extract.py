@@ -457,4 +457,4 @@ def merge(preset, extracted):
         notes.append("the files name %s as the default branch, git says %s: the form keeps git's"
                      % (branch, doc["repo"]["default_branch"]))
     return {"stack": preset["stack"], "doc": doc, "fragments": fragments,
-            "sources": sources, "notes": notes}
+            "sources": sources, "notes": notes, "trackers": copy.deepcopy(preset["trackers"])}

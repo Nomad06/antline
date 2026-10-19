@@ -3,6 +3,7 @@ import { post } from "../api.js";
 import { Badge, Button, Field, Notice } from "./controls.js";
 import { testsAfterEdit } from "./testpath.js";
 import { fieldBlur, fieldInput, idleField, shownText } from "./listfield.js";
+import { retargetGithub, swapTracker } from "./trackerkind.js";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -54,6 +55,7 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave, nameLocked
   const [error, setError] = useState(null);
   const [replaceable, setReplaceable] = useState(false);
   const live = useRef(null);
+  const parked = useRef({});
   live.current = { name, doc, envRows, fragments };
   const sources = draft.sources || {};
   const notes = (extras && extras.notes) || [];
@@ -87,6 +89,29 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave, nameLocked
     setDoc(next);
     setAcked(false);
     touch();
+  };
+  const offers = draft.trackers;
+  const tracker = doc.tracker || {};
+  const swap = (kind) => {
+    const out = swapTracker(doc, parked.current, offers, kind);
+    if (out && out.doc !== doc) {
+      parked.current = out.parked;
+      setDoc(out.doc);
+      setAcked(false);
+      touch();
+    }
+  };
+  const retarget = (repo, prefix) => {
+    if (offers) {
+      setDoc(retargetGithub(doc, offers["github-issues"], repo, prefix));
+      setAcked(false);
+      touch();
+      return;
+    }
+    update((d) => {
+      d.tracker.task_prefix = prefix;
+      if (repo) { d.tracker.repo = repo; } else { delete d.tracker.repo; }
+    });
   };
   const editRows = (change) => {
     setEnvRows(change(envRows));
@@ -144,6 +169,17 @@ export function HarnessForm({ draft, extras, mode, saveLabel, onSave, nameLocked
         </select><//>
       ${doc.forge.kind === "gitlab" ? html`<${Field} label="GitLab MCP server name">
         <input value=${doc.forge.mcp_server || ""} onInput=${(e) => update((d) => { d.forge.mcp_server = e.target.value; })} /><//>` : null}
+      <${Field} label="Tracker" help=${offers ? (sources["tracker.kind"] || "") : "Fixed here: this draft has no second tracker to offer"}>
+        <select value=${tracker.kind} disabled=${!offers} onChange=${(e) => swap(e.target.value)}>
+          <option value="jira">Jira</option>
+          <option value="github-issues">GitHub Issues</option>
+        </select><//>
+      ${tracker.kind === "github-issues" ? html`<${Field} label="Repository" help="owner/name of the repository the issues live in, required">
+        <input value=${tracker.repo || ""} onInput=${(e) => retarget(e.target.value.trim(), tracker.task_prefix || "")} /><//>
+      <${Field} label="Task prefix" help="Capital letters or digits, GH makes GH-123">
+        <input value=${tracker.task_prefix || ""} onInput=${(e) => retarget(tracker.repo || "", e.target.value.trim())} /><//>` : null}
+      ${tracker.kind === "jira" ? html`<${Field} label="Jira MCP prefixes" help="Comma separated, each shaped mcp__name__">
+        <${ListInput} list=${tracker.mcp_prefixes || []} onList=${(list) => update((d) => { d.tracker.mcp_prefixes = list; })} /><//>` : null}
     </div>
 
     <h3>Test sources</h3>

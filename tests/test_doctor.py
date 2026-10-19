@@ -19,7 +19,7 @@ os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 os.environ["PPL_LOCAL_SETTINGS_DIR"] = tmphome.mkdtemp(prefix="ppllocalsettings-")
 
 import fixtures
-from ppl import config, doctor, forges, models, paths, setup
+from ppl import config, doctor, forges, models, paths, setup, trackers
 from ppl.trackers import github_issues
 
 
@@ -600,6 +600,36 @@ class TestInspectSetup(unittest.TestCase):
         self.assertEqual(report["harness"]["active"], "example-maven")
         self.assertFalse(report["harness"]["valid"])
         self.assertIn("not valid TOML", report["harness"]["problem"])
+
+    def test_the_report_carries_the_tracker_check(self):
+        self.assertIsNone(doctor.inspect_setup()["tracker"])
+        self.complete_setup()
+        report = doctor.inspect_setup()
+        self.assertEqual(report["tracker"], {"kind": "jira", "ok": True, "detail": "not probed"})
+
+    def test_a_failing_tracker_check_is_reported_like_a_failing_forge_check(self):
+        self.complete_setup()
+        seen = []
+
+        def check(table, runner=None):
+            seen.append(table["kind"])
+            return {"ok": False, "detail": "gh is not installed or not on PATH"}
+        with mock.patch.object(trackers.get("jira"), "doctor_check", check):
+            report = doctor.inspect_setup()
+        self.assertEqual(seen, ["jira"])
+        self.assertEqual(report["tracker"], {"kind": "jira", "ok": False,
+                                             "detail": "gh is not installed or not on PATH"})
+
+    def test_a_tracker_check_that_blows_up_lands_in_the_report(self):
+        self.complete_setup()
+
+        def exploding(table, runner=None):
+            raise RuntimeError("tracker exploded")
+        with mock.patch.object(trackers.get("jira"), "doctor_check", exploding):
+            report = doctor.inspect_setup()
+        self.assertEqual(report["tracker"]["kind"], "jira")
+        self.assertFalse(report["tracker"]["ok"])
+        self.assertIn("tracker exploded", report["tracker"]["detail"])
 
     def test_a_forge_check_that_blows_up_lands_in_the_report(self):
         self.complete_setup()

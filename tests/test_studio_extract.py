@@ -600,6 +600,12 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(dropped, [])
         return clean
 
+    def test_merge_keeps_the_tracker_offers_of_the_preset(self):
+        preset = self.preset()
+        merged = extract.merge(preset, self.checked(GOOD_DRAFT))
+        self.assertEqual(merged["trackers"], preset["trackers"])
+        self.assertIsNot(merged["trackers"], preset["trackers"])
+
     def test_merge_lays_the_extracted_gates_shapes_and_env_over_the_preset(self):
         merged = extract.merge(self.preset(), self.checked(GOOD_DRAFT))
         doc = merged["doc"]

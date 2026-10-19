@@ -14,7 +14,7 @@ import stat
 import tomllib
 from pathlib import Path
 
-from .. import boundary, harness, paths
+from .. import boundary, harness, paths, trackers
 from ..errors import PplError
 
 # The tokens a test-worker command may carry besides its goal. The cage matches
@@ -224,6 +224,20 @@ def _python_install(root):
     return INSTALL_EDITABLE
 
 
+def _tracker_offers(doc, remote):
+    """{kind: {"tracker", "task"}} for the form's tracker select: the base harness's own
+    Jira tables and a github-issues table naming the remote's repo, or none when the
+    remote is not a GitHub one, which the validator then asks for."""
+    github = trackers.get("github-issues")
+    table = {"kind": "github-issues"}
+    repo = github.repo_from_remote(remote)
+    if repo:
+        table["repo"] = repo
+    table.update(github.DEFAULTS)
+    return {"jira": {"tracker": copy.deepcopy(doc["tracker"]), "task": copy.deepcopy(doc["task"])},
+            "github-issues": {"tracker": table, "task": github.task_defaults(table)}}
+
+
 def draft(stack, project):
     """A draft harness for `project` from the stack's preset."""
     if stack not in STACKS:
@@ -255,6 +269,12 @@ def draft(stack, project):
     doc["forge"] = {"kind": kind}
     if kind == "gitlab":
         doc["forge"]["mcp_server"] = "GitLab-MCP"
+    offers = _tracker_offers(doc, project.get("remote_url"))
+    if offers["github-issues"]["tracker"].get("repo"):
+        offer = offers["github-issues"]
+        doc["tracker"] = copy.deepcopy(offer["tracker"])
+        doc["task"] = copy.deepcopy(offer["task"])
+        sources["tracker.kind"] = "git remote"
     if "gates" in spec:
         gates = [dict(gate) for gate in spec["gates"]]
         build = spec["build"]
@@ -273,4 +293,5 @@ def draft(stack, project):
         sources.setdefault("gate:%s" % gate["name"], label)
     for index, _ in enumerate((doc.get("guard") or {}).get("shape") or []):
         sources["shape:%d" % index] = label
-    return {"stack": stack, "doc": doc, "fragments": fragments, "sources": sources}
+    return {"stack": stack, "doc": doc, "fragments": fragments, "sources": sources,
+            "trackers": offers}

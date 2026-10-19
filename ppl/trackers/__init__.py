@@ -2,7 +2,8 @@
 exports KIND, TRANSPORT ("mcp" or "cli"), DEFAULTS, KEYS (the [tracker] keys it
 reads, "kind" among them) and the functions validate(table) -> (errors, warnings),
 usable(table), mcp_write_regex(table), mcp_read_tools(table) and
-write_denials(table), the Bash write patterns of a cli adapter, and fragment(name), the
+write_denials(table), the Bash write patterns of a cli adapter, doctor_check(table, runner)
+-> {"ok", "detail"}, task_defaults(table) -> {"key_pattern", "url_template"} and fragment(name), the
 text of its skill fragment `admission` (how to read the task) or `close` (how to post the
 note after the merge). The guard imports
 this package, so it parses on Python 3.9 and carries no annotations."""
