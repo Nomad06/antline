@@ -51,6 +51,19 @@ class TestPatternsFromSnapshot(unittest.TestCase):
                 self.assertIsNone(boundary.patterns_from_snapshot(doc))
 
 
+class TestPatternsFromSnapshotFailsClosed(unittest.TestCase):
+    def test_a_glob_harness_validation_refuses_reads_as_untrustworthy(self):
+        for sources in (["**"], ["tests/**", "src/**"], ["**/*.{js,ts}"], ["./tests/**"]):
+            with self.subTest(sources=sources):
+                self.assertIsNone(boundary.patterns_from_snapshot({"tests": {"sources": sources}}))
+
+    def test_the_java_defaults_and_the_generic_globs_are_read_unchanged(self):
+        for sources in (list(boundary.TEST_PATTERNS), ["tests/**", "test/**"]):
+            with self.subTest(sources=sources):
+                self.assertEqual(boundary.patterns_from_snapshot({"tests": {"sources": sources}}),
+                                 tuple(sources))
+
+
 class TestGlobProblem(unittest.TestCase):
     def test_the_java_defaults_and_ordinary_test_globs_have_no_problem(self):
         for glob in boundary.TEST_PATTERNS + ("tests/**", "test/**", "**/*_test.go", "**/*.spec.ts"):

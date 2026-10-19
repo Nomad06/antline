@@ -99,6 +99,8 @@ def patterns_from_snapshot(doc):
         return None
     if not all(isinstance(item, str) and item for item in sources):
         return None
+    if any(glob_problem(item) for item in sources):
+        return None
     return tuple(sources)
 
 
