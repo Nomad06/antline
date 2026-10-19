@@ -2,11 +2,12 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 
 from . import (boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
                harness, metrics, models, paths, recover, refusals, review, routing, run, schema,
-               setup, status, store, verdict, watchdog)
+               setup, status, store, trackers, verdict, watchdog)
 from .errors import PplError, role_output
 
 
@@ -236,6 +237,63 @@ def cmd_stage(args):
     return 0
 
 
+def _run_tracker(task_id):
+    """(adapter, [tracker] table) the run froze: the Jira defaults when it has no snapshot or
+    one from before trackers, OWNER_DECISION when the snapshot cannot be trusted."""
+    snapshot = paths.run_dir(task_id) / "harness.json"
+    try:
+        mode = os.lstat(snapshot).st_mode
+    except FileNotFoundError:
+        mode = None
+    unreadable = PplError("OWNER_DECISION",
+                          "the tracker of %s cannot be read from its harness snapshot - restore "
+                          "%s or re-init the run" % (task_id, snapshot))
+    if mode is None:
+        return trackers.get("jira"), dict(trackers.get("jira").DEFAULTS, kind="jira")
+    if not stat.S_ISREG(mode):
+        raise unreadable
+    try:
+        doc = store.read_json(snapshot)
+    except PplError:
+        raise unreadable
+    if not isinstance(doc, dict):
+        raise unreadable
+    if "tracker" not in doc:
+        return trackers.get("jira"), dict(trackers.get("jira").DEFAULTS, kind="jira")
+    table = doc["tracker"]
+    if not trackers.usable(table):
+        raise unreadable
+    kind = table.get("kind", trackers.DEFAULT_KIND)
+    return trackers.get(kind), table
+
+
+def require_tracker_fetched(task_id):
+    """A CLI tracker's briefer reads the files ppl tracker fetch wrote, so ppl brief set
+    waits for the fetch. Refused before the retry cap, which is not charged
+    [R-TRACKER-FETCH-PROVENANCE]."""
+    adapter, _ = _run_tracker(task_id)
+    if adapter.TRANSPORT == "cli" and not run.load(task_id).get("tracker_revision"):
+        raise PplError("ILLEGAL_TRANSITION",
+                       "the issue of %s was not fetched: run `ppl tracker fetch` first, then "
+                       "dispatch ppl-briefer" % task_id)
+
+
+def cmd_tracker(args):
+    task_id = resolve_task(args)
+    control.enforce(task_id)
+    adapter, table = _run_tracker(task_id)
+    if adapter.TRANSPORT != "cli":
+        raise PplError("SCHEMA_INVALID",
+                       "the %s tracker of %s is read through MCP tools, ppl tracker fetch is "
+                       "for a CLI tracker" % (adapter.KIND, task_id))
+    dest = paths.run_dir(task_id) / "tracker"
+    result = adapter.fetch(table, task_id, dest)
+    run.record_tracker_fetch(task_id, result["revision"])
+    print("issue: %s" % (dest / "issue.md"))
+    print("revision: %s" % result["revision"])
+    return 0
+
+
 def cmd_brief(args):
     # E5, cycle 2 wave E: `ppl brief set`, unlike `ppl baseline record`
     # (D2), carries no stage gate, and that asymmetry was examined rather
@@ -271,6 +329,7 @@ def cmd_brief(args):
         print("challenge %s bound to spec_revision %s"
               % (doc["verdict"], state["brief_challenge"]["spec_revision"]))
         return 0
+    require_tracker_fetched(task_id)
     require_retry_left(task_id, args)
     doc = load_role_output(args.file, "brief")
     with role_output():
@@ -941,7 +1000,7 @@ COMMANDS = {
     "apply-patch": cmd_apply_patch, "destroy": cmd_destroy,
     "mr": cmd_mr, "merge": cmd_merge, "review": cmd_review, "doctor": cmd_doctor,
     "watchdog": cmd_watchdog, "metrics": cmd_metrics, "label": cmd_label,
-    "setup": cmd_setup,
+    "setup": cmd_setup, "tracker": cmd_tracker,
 }
 
 
@@ -1011,6 +1070,10 @@ def build_parser():
     # challenge is a lease-fenced write like verdict record, set is not
     p.add_argument("--generation", type=int)
     add_from(p)
+
+    p = sub.add_parser("tracker")
+    p.add_argument("action", choices=["fetch"])
+    p.add_argument("--task")
 
     p = sub.add_parser("boundary")
     p.add_argument("action", choices=["set"])

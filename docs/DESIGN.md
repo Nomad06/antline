@@ -710,7 +710,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 173 rows: 129 `blocking`, 17 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 174 rows: 130 `blocking`, 17 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -981,6 +981,13 @@ ppl brief set <file> --from <role>
                                  # orchestrator, counted for refusals (6.6). brief set|
                                  # challenge, verdict record and findings add take it every
                                  # time, evidence add defaults to orchestrator
+ppl tracker fetch [--task]       # CLI tracker only (GitHub Issues): gh reads the issue, its parent
+                                 # and sub-issues into runs/<task>/tracker/issue.json and issue.md,
+                                 # and the revision (updatedAt) is recorded. A failed gh call
+                                 # (401, 403, 5xx, timeout, no gh) is EXTERNAL_BLOCKED with nothing
+                                 # written, a 404 on a link endpoint records "unavailable". ppl brief
+                                 # set is refused ILLEGAL_TRANSITION for a CLI tracker until this
+                                 # ran [R-TRACKER-FETCH-PROVENANCE]
 ppl boundary set <file>          # write/forbid lists; write must be non-empty and must not
                                  # contain "**" [R-BOUNDARY-SET-NO-WILDCARD]. Disjointness
                                  # with forbid is NOT enforced here - see R-BOUNDARY-SET-DISJOINT
@@ -1210,6 +1217,12 @@ Task state (`state.json`):
   "unsafe_to_repeat": []
 }
 ```
+
+`tracker_revision` is absent until `ppl tracker fetch` records the `updatedAt` of the issue it
+read, and only a CLI tracker run reads it: `ppl brief set` is refused `ILLEGAL_TRANSITION`
+while it is unset, before the retry cap, so the briefer is not charged
+[R-TRACKER-FETCH-PROVENANCE]. The fetch also logs `tracker_fetch {revision}`, and the files it
+wrote sit under `runs/<task>/tracker/`.
 
 `next_safe_action` is restamped from a stage-to-action table on every `ppl stage enter`
 call and by `ppl transition done`, not written once at admission and left alone - a field

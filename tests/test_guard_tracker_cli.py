@@ -320,6 +320,12 @@ class TestTrackerCliNoRole(GhRunCase):
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("ppl-code-worker may not write the tracker", reason)
 
+    def test_a_role_may_not_run_ppl_tracker_fetch(self):
+        # rule: R-GUARD-PPL-CLI-DENIED
+        for agent in ("ppl-briefer", "ppl-code-worker"):
+            reason = self.deny_reason(bash(agent, "ppl tracker fetch --task GH-7"))
+            self.assertIn("BOUNDARY_VIOLATION", reason, agent)
+
     def test_a_role_is_denied_tracker_writes_with_no_active_run(self):
         # rule: R-TRACKER-CLI-NO-ROLE
         paths.active_file().unlink()

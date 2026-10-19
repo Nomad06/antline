@@ -526,6 +526,16 @@ def destroy(task_id, scope):
     return result
 
 
+def record_tracker_fetch(task_id, revision):
+    """Bind the revision of the issue ppl tracker fetch read to the run
+    [R-TRACKER-FETCH-PROVENANCE]."""
+    state = load(task_id)
+    state["tracker_revision"] = revision
+    save(state)
+    store.append_log(task_id, {"event": "tracker_fetch", "revision": revision})
+    return state
+
+
 def challenge_current(state):
     """True when an ACCEPTED brief challenge is bound to the run's current
     spec_revision. Read by stage_enter (briefing -> implementation) and by the
