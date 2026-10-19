@@ -15,7 +15,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import cli, config, forges, harness, models, paths
+from ppl import boundary, cli, config, forges, harness, models, paths
 from ppl.errors import PplError
 from ppl.trackers import jira
 
@@ -990,6 +990,73 @@ class TestHarnessCli(HarnessTestCase):
 
 
 
+class TestTestGlobs(HarnessTestCase):
+    def install_sources(self, sources_toml):
+        path = fixtures.install_harness("example-generic") / "harness.toml"
+        text = path.read_text(encoding="utf-8")
+        old = 'sources = ["tests/**", "test/**"]'
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, sources_toml, 1) if sources_toml else
+                        text.replace("[tests]\n" + old + "\n", "[tests]\n", 1), encoding="utf-8")
+
+    def install_glob(self, glob):
+        self.install_sources("sources = [%s]" % json.dumps(glob))
+
+    def test_a_brace_glob_is_refused_asking_for_one_glob_per_alternative(self):
+        # rule: R-HARNESS-TEST-GLOBS-SANE
+        self.install_glob("**/*.{js,ts}")
+        with self.assertRaises(PplError) as caught:
+            harness.load("example-generic")
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("tests.sources[0] '**/*.{js,ts}'", caught.exception.message)
+        self.assertIn("one glob per alternative", caught.exception.message)
+
+    def test_glob_syntax_glob_match_reads_literally_is_refused(self):
+        # rule: R-HARNESS-TEST-GLOBS-SANE
+        for glob in ("**/test_[ab].py", "tests/\\*.py", "!tests/**"):
+            with self.subTest(glob=glob):
+                self.install_glob(glob)
+                with self.assertRaises(PplError) as caught:
+                    harness.load("example-generic")
+                self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+                self.assertIn("tests.sources[0]", caught.exception.message)
+
+    def test_an_absolute_dot_or_dotdot_glob_is_refused(self):
+        # rule: R-HARNESS-TEST-GLOBS-SANE
+        for glob in ("/tests/**", "./tests/**", "tests/", "tests//x", "../tests/**"):
+            with self.subTest(glob=glob):
+                self.install_glob(glob)
+                with self.assertRaises(PplError) as caught:
+                    harness.load("example-generic")
+                self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+                self.assertIn("tests.sources[0]", caught.exception.message)
+
+    def test_a_glob_that_matches_product_paths_is_refused(self):
+        # rule: R-HARNESS-TEST-GLOBS-SANE
+        for glob in ("**", "**/*", "*", "*/**", "**/*.py", "src/**"):
+            with self.subTest(glob=glob):
+                self.install_glob(glob)
+                with self.assertRaises(PplError) as caught:
+                    harness.load("example-generic")
+                self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+                self.assertTrue(any("'%s'" % probe in caught.exception.message
+                                    for probe in boundary.PRODUCT_PROBES), caught.exception.message)
+
+    def test_an_empty_or_non_string_sources_list_is_refused(self):
+        # rule: R-HARNESS-TEST-GLOBS-SANE
+        for text in ("sources = []", 'sources = "tests/**"', 'sources = [""]', "sources = [7]", ""):
+            with self.subTest(text=text):
+                self.install_sources(text)
+                with self.assertRaises(PplError) as caught:
+                    harness.load("example-generic")
+                self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+                self.assertIn("tests.sources", caught.exception.message)
+
+    def test_sane_globs_are_accepted(self):
+        name = self.mutate("example-generic", '"test/**"]', '"**/*_test.go"]')
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
+
 class TestSnapshotAndApplied(HarnessTestCase):
     def activate(self, name):
         paths.config_file().write_text('[harness]\nactive = "%s"\n' % name, encoding="utf-8")
@@ -998,12 +1065,22 @@ class TestSnapshotAndApplied(HarnessTestCase):
         fixtures.install_harness("example-maven")
         doc = harness.load("example-maven")
         snap = harness.snapshot(doc)
-        self.assertEqual(set(snap), {"format", "name", "task", "tracker", "forge", "shapes"})
+        self.assertEqual(set(snap), {"format", "name", "task", "tracker", "forge", "shapes", "tests"})
         self.assertEqual(snap["format"], harness.FORMAT)
         self.assertEqual(snap["name"], "example-maven")
         self.assertEqual(snap["task"], {"key_pattern": doc["task"]["key_pattern"]})
         self.assertEqual(snap["shapes"], harness.shape_rows(doc))
         self.assertEqual(json.loads(json.dumps(snap)), snap)
+
+    def test_a_harness_without_a_tests_table_snapshots_the_java_defaults(self):
+        fixtures.install_harness("example-maven")
+        snap = harness.snapshot(harness.load("example-maven"))
+        self.assertEqual(snap["tests"], {"sources": list(boundary.TEST_PATTERNS)})
+
+    def test_the_snapshot_carries_the_harness_test_globs(self):
+        fixtures.install_harness("example-generic")
+        snap = harness.snapshot(harness.load("example-generic"))
+        self.assertEqual(snap["tests"], {"sources": ["tests/**", "test/**"]})
 
     def test_snapshot_is_named_after_the_installed_directory(self):
         fixtures.install_harness("example-maven", as_name="mine")

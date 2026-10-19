@@ -48,6 +48,60 @@ def any_match(path, patterns):
     return any(glob_match(path, p) for p in patterns or ())
 
 
+# Paths no test glob may match: a glob that does would hand product code to the
+# test worker. The list is finite, so a product glob none of them resembles passes.
+PRODUCT_PROBES = ("a", "a/b", "a/b/c", "main.py", "src/main.py", "src/main.c",
+                  "src/main/java/App.java", "lib/index.js", "src/index.ts",
+                  "cmd/app/main.go", "src/lib.rs", "README.md", "Makefile")
+
+
+def glob_problem(pattern):
+    """Why `pattern` cannot name test sources, or None. Refuses what glob_match
+    reads literally (braces, classes, escapes, a leading !), what never matches a
+    repo-relative path (absolute, ./, .., empty segments, a trailing /) and a glob
+    matching any of PRODUCT_PROBES."""
+    if not isinstance(pattern, str) or not pattern:
+        return "is not a non-empty string"
+    if "{" in pattern or "}" in pattern:
+        return ("uses braces, which glob_match reads literally: list each alternative as "
+                "its own glob (one glob per alternative)")
+    for char in ("[", "]", "\\"):
+        if char in pattern:
+            return "uses %r, which glob_match reads literally" % char
+    if pattern.startswith("!"):
+        return "starts with !, which glob_match reads literally: negation is not supported"
+    if pattern.startswith("/"):
+        return "is absolute, but paths are matched repo-relative"
+    if pattern.endswith("/"):
+        return "ends with /, which no file path matches: end it with /**"
+    segments = pattern.split("/")
+    if "" in segments:
+        return "has an empty path segment, which no repo-relative path matches"
+    if "." in segments or ".." in segments:
+        return "has a . or .. segment, which no repo-relative path matches"
+    for probe in PRODUCT_PROBES:
+        if glob_match(probe, pattern):
+            return "matches the product path '%s': a test glob must not match product code" % probe
+    return None
+
+
+def patterns_from_snapshot(doc):
+    """The test globs a run froze: the Java defaults for a snapshot with no
+    `tests` key, the frozen list when it is well formed, None when the document
+    or its `tests` value cannot be trusted."""
+    if not isinstance(doc, dict):
+        return None
+    if "tests" not in doc:
+        return TEST_PATTERNS
+    tests = doc["tests"]
+    sources = tests.get("sources") if isinstance(tests, dict) else None
+    if not isinstance(sources, list) or not sources:
+        return None
+    if not all(isinstance(item, str) and item for item in sources):
+        return None
+    return tuple(sources)
+
+
 def is_test_path(path):
     return any_match(path, TEST_PATTERNS)
 

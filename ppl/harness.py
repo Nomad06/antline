@@ -14,7 +14,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from . import forges, paths, routing, sequences, trackers
+from . import boundary, forges, paths, routing, sequences, trackers
 from .errors import PplError
 from .trackers import is_mcp_prefix
 
@@ -58,6 +58,7 @@ KNOWN_KEYS = {
     "task": ("key_pattern", "url_template"),
     "tracker": ("kind", "mcp_prefixes", "write_operations", "read_tools"),
     "forge": ("kind", "mcp_server"),
+    "tests": ("sources",),
     "knowledge": ("skills", "extra_tools"),
     "env": None,
     "gate": ("name", "command"),
@@ -264,6 +265,21 @@ def _check_files(doc, source):
     return warnings
 
 
+def _check_test_sources(doc, source):
+    """A present [tests] table lists globs glob_match can honor, one per
+    alternative, none of which matches product code."""
+    if "tests" not in doc:
+        return
+    sources = doc["tests"].get("sources") if isinstance(doc["tests"], dict) else None
+    if not isinstance(sources, list) or not sources:
+        _fail(source, "tests.sources must be a non-empty list of globs naming the project's "
+              "test files")
+    for index, glob in enumerate(sources):
+        problem = boundary.glob_problem(glob)
+        if problem:
+            _fail(source, "tests.sources[%d] %r %s" % (index, glob, problem))
+
+
 def validate(doc, source):
     """Raise HARNESS_INVALID on a structural error, return a list of warnings.
     The checks of the harness directory run when the document carries its _dir,
@@ -331,6 +347,7 @@ def validate(doc, source):
         if not _text(gate.get("command")):
             _fail(source, "gate[%d].command is required" % index)
     _check_gate_commands(doc, gates, source)
+    _check_test_sources(doc, source)
     if doc.get("_dir"):
         warnings.extend(_check_files(doc, source))
     for index, row in enumerate(shape_rows(doc, source)):
@@ -484,7 +501,9 @@ def snapshot(doc):
             "task": {"key_pattern": doc["task"]["key_pattern"]},
             "tracker": copy.deepcopy(doc["tracker"]),
             "forge": copy.deepcopy(doc["forge"]),
-            "shapes": shape_rows(doc)}
+            "shapes": shape_rows(doc),
+            "tests": {"sources": list((doc.get("tests") or {}).get("sources")
+                                      or boundary.TEST_PATTERNS)}}
 
 
 def require_applied(doc):

@@ -646,7 +646,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 169 rows: 125 `blocking`, 17 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 170 rows: 126 `blocking`, 17 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -665,11 +665,20 @@ from the table it describes [R-DOC-RULE-IDS].
 
 A harness is everything project-specific, kept outside the project repository in an installed
 directory `~/.ppl/harnesses/<name>/`: `harness.toml` (repo path and default branch, task key
-pattern and URL template, `[tracker]`, `[forge]`, `[knowledge]`, `[env]`, the `[[gate]]` build
+pattern and URL template, `[tracker]`, `[forge]`, `[tests]`, `[knowledge]`, `[env]`, the `[[gate]]` build
 recipes and the `[[guard.shape]]` command shapes), `skill/` fragments and `templates/` role
 overlays. Two examples ship in `defaults/harnesses/`: `example-maven` (GitLab, Maven gates) and
 `example-generic` (GitHub, make gates). `ppl harness add` installs one from a directory or a
 git URL, `ppl harness validate` checks it.
+
+`[tests] sources` lists the globs that name the project's test files, one glob per alternative
+(`glob_match` has no brace expansion). A harness with no `[tests]` table means the Java defaults
+(`boundary.TEST_PATTERNS`), and `harness.snapshot` always freezes the list into the run as
+`tests.sources`. Validation refuses an empty or non-string list, braces (asking for one glob per
+alternative), character classes, backslashes and a leading `!` (read literally), an absolute,
+`./`, `..` or empty segment and a trailing `/` (they match nothing repo-relative, which would
+hand the tests to the code worker), and any glob matching a path of `boundary.PRODUCT_PROBES`
+[R-HARNESS-TEST-GLOBS-SANE].
 
 `ppl harness validate [--json]` runs `harness.verify`, the check the studio runs on a draft or a
 saved harness file, and prints its `{errors, warnings}` [R-STUDIO-SAME-VALIDATION]. Every load of

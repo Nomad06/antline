@@ -2050,6 +2050,18 @@ owner = "harness"
 residual = "a project placeholder counts as named once either gates fragment mentions it outside a verbatim copy of a gate command, whatever the fragment says about it: a command echo, such as the gates.md the studio generates from the commands, does not count, a reworded or partial copy does. A placeholder in a skill fragment itself is not checked"
 
 [[rule]]
+id = "R-HARNESS-TEST-GLOBS-SANE"
+statement = "harness.validate refuses HARNESS_INVALID a [tests] table whose sources is not a non-empty list of globs boundary.glob_problem accepts: no braces, character classes, backslashes or leading ! (glob_match reads them literally, and braces get a message asking for one glob per alternative), no absolute, ./, .. or empty segment and no trailing / (they match nothing repo-relative, which would hand the tests to the code worker), and no glob matching any boundary.PRODUCT_PROBES path."
+scope = "ppl CLI and panel"
+event = "harness.load, ppl harness validate, ppl harness apply, ppl init, studio draft check"
+enforcement = "blocking"
+hook_or_check = "ppl/harness.py:validate, ppl/boundary.py:glob_problem"
+deny_test = "tests/test_harness.py::TestTestGlobs::test_a_brace_glob_is_refused_asking_for_one_glob_per_alternative, tests/test_harness.py::TestTestGlobs::test_glob_syntax_glob_match_reads_literally_is_refused, tests/test_harness.py::TestTestGlobs::test_an_absolute_dot_or_dotdot_glob_is_refused, tests/test_harness.py::TestTestGlobs::test_a_glob_that_matches_product_paths_is_refused, tests/test_harness.py::TestTestGlobs::test_an_empty_or_non_string_sources_list_is_refused"
+allow_test = "tests/test_harness.py::TestTestGlobs::test_sane_globs_are_accepted, tests/test_harness.py::TestLoadAndValidate::test_both_examples_load_clean"
+owner = "harness"
+residual = "the probes are finite: a product glob none of them resembles passes"
+
+[[rule]]
 id = "R-HARNESS-SIZE-CAP"
 statement = "harness.verify refuses HARNESS_INVALID a harness whose rendered SKILL.md is over harness.SKILL_HARD_BYTES, whose rendered skill file under references/ is over harness.REFERENCE_HARD_BYTES or whose rendered agent file is over harness.AGENT_HARD_BYTES, each three times the largest file of its kind the shipped examples rendered when the caps were measured (SKILL_MEASURED_BYTES, REFERENCE_MEASURED_BYTES, AGENT_MEASURED_BYTES), and warns over 1.5 times. harness.apply refuses on the hard cap before it writes anything, so an oversized harness is never applied."
 scope = "ppl CLI and panel"

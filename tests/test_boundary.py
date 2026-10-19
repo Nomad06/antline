@@ -33,6 +33,34 @@ class TestGlob(unittest.TestCase):
         self.assertTrue(boundary.glob_match("FooIT.java", "**/*IT.java"))
 
 
+class TestPatternsFromSnapshot(unittest.TestCase):
+    def test_a_snapshot_without_a_tests_key_means_the_java_defaults(self):
+        self.assertEqual(boundary.patterns_from_snapshot({"format": 1}), boundary.TEST_PATTERNS)
+
+    def test_a_valid_tests_value_is_the_list_as_a_tuple(self):
+        doc = {"tests": {"sources": ["tests/**", "test/**"]}}
+        self.assertEqual(boundary.patterns_from_snapshot(doc), ("tests/**", "test/**"))
+
+    def test_a_malformed_tests_value_reads_as_untrustworthy(self):
+        for tests in (None, 5, [], {}, {"sources": []}, {"sources": "x/**"},
+                      {"sources": ["ok", ""]}, {"sources": [7]}):
+            with self.subTest(tests=tests):
+                self.assertIsNone(boundary.patterns_from_snapshot({"tests": tests}))
+        for doc in (None, [], "x", 3):
+            with self.subTest(doc=doc):
+                self.assertIsNone(boundary.patterns_from_snapshot(doc))
+
+
+class TestGlobProblem(unittest.TestCase):
+    def test_the_java_defaults_and_ordinary_test_globs_have_no_problem(self):
+        for glob in boundary.TEST_PATTERNS + ("tests/**", "test/**", "**/*_test.go", "**/*.spec.ts"):
+            with self.subTest(glob=glob):
+                self.assertIsNone(boundary.glob_problem(glob))
+
+    def test_a_product_glob_names_the_probe_it_matches(self):
+        self.assertIn("'src/main.py'", boundary.glob_problem("src/**"))
+
+
 class TestCodeWorker(unittest.TestCase):
     def test_allows_path_inside_write_boundary(self):
         boundary.check_path("ppl-code-worker", "source/core/orders/Foo.java", BOUND)

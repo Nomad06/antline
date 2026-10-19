@@ -20,6 +20,9 @@ read_tools = ["getJiraIssue", "getConfluenceContent", "getConfluencePage", "sear
 [forge]
 kind = "github"
 
+[tests]
+sources = ["tests/**", "test/**"]
+
 [knowledge]
 skills = []
 extra_tools = []
