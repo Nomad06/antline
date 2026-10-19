@@ -414,7 +414,9 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
              "cat /opt/homebrew/bin/gh > /tmp/g", "tee /tmp/g < /opt/homebrew/bin/gh",
              "dd if=/opt/homebrew/bin/gh of=/tmp/g", "sudo cp $(which gh) /usr/local/bin/g",
              "ditto /opt/homebrew/bin/GH /tmp/g", "bash -c 'cp $(which gh) /tmp/g'",
-             "$(which gh) co 7", "\"$(command -v gh)\" co 7"])
+             "$(which gh) co 7", "\"$(command -v gh)\" co 7",
+             "bash -c \"cp $(which gh) /tmp/g\"", "watch \"cp $(which gh) /tmp/g\"",
+             "sh -c \"ln -s `command -v gh` /tmp/g\""])
         self.assert_allowed(["which gh", "command -v gh", "ls -l /opt/homebrew/bin/gh",
                              "cp README.md /tmp/", "gh --version", "type -p gh"])
 
@@ -441,11 +443,17 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
              "> ~/.config/gh/hosts.yml", "sudo tee -a /Users/me/.config/gh/config.yml < x"])
         self.assert_denied(["cp /tmp/x.yml ~/.config/gh/", "rm -rf ~/.config/gh",
                             "cp -t ~/.config/gh /tmp/c.yml", "touch ~/.config/gh/x",
-                            "perl -pi -e 's/a/b/' ~/.config/gh/config.yml"])
+                            "perl -pi -e 's/a/b/' ~/.config/gh/config.yml",
+                            # macOS file systems ignore case
+                            "echo x > ~/.CONFIG/GH/config.yml", "cp x ~/.Config/Gh/config.yml",
+                            # every operand of a copy may be its target
+                            "cp src ~/.config/gh/ -v", "cp -v src ~/.config/gh/ --",
+                            "cp -t~/.config/gh/ src", "install src ~/.config/gh/x -m 600",
+                            "rsync -a src ~/.config/gh/ --delete",
+                            "cp ~/.config/gh/config.yml /tmp/backup.yml"])
         self.assert_allowed(["gh config get editor", "gh config list", "gh config clear-cache",
                              "cat ~/.config/gh/config.yml", "ls ~/.config/gh",
                              "sed -n 1p ~/.config/gh/config.yml",
-                             "cp ~/.config/gh/config.yml /tmp/backup.yml",
                              "mkdir -p ~/.config/other", "cat file > out"])
 
     def test_the_api_host_is_read_in_any_case_and_with_a_trailing_dot(self):
@@ -466,6 +474,17 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
         self.assert_allowed(["gh pr view 7\xa0", "echo a\x0cb", "echo  x",
                              "gh\x0bissue close 5"])
         self.assert_denied(["gh issue close\xa05", "gh issue comment 5 -b \xa0x\x0b"])
+
+    def test_an_answer_read_past_the_depth_limit_is_not_reused_for_a_shallow_read(self):
+        # past the limit the text only gets the loose reading, which does not split
+        # gh${IFS}issue, while a shallow reading does
+        text = "gh${IFS}issue${IFS}close${IFS}5"
+        self.adapter._SEEN.clear()
+        try:
+            self.assertIsNone(self.adapter._check_text(text, False, self.adapter._MAX_DEPTH + 1))
+            self.assertTrue(self.adapter._check_text(text, False, 1))
+        finally:
+            self.adapter._SEEN.clear()
 
     def test_a_defect_in_the_check_denies_a_command_naming_gh_instead_of_raising(self):
         with mock.patch.object(self.adapter, "_check_text", side_effect=RuntimeError("defect")):

@@ -78,12 +78,13 @@ _COPIERS = frozenset(("cp", "ln", "install", "rsync", "mv", "tee", "cat", "ditto
                       "gcp", "gln", "gmv", "ginstall"))
 # gh's config directory under the names the shell gives it, the programs that write,
 # move or enter what a later word names, and the in-place editors.
-_GH_CONFIG = re.compile(r"(?:^|/)\.config/+gh(?:/|$)|GH_CONFIG_DIR|XDG_CONFIG_HOME\}?/+gh(?:/|$)")
+# A macOS file system ignores case, so ~/.CONFIG/GH is the same directory.
+_GH_CONFIG = re.compile(r"(?:^|/)\.config/+gh(?:/|$)|GH_CONFIG_DIR|XDG_CONFIG_HOME\}?/+gh(?:/|$)",
+                        re.IGNORECASE)
 _CONFIG_WRITERS = frozenset(("tee", "cp", "mv", "install", "ln", "rsync", "dd", "touch",
                              "truncate", "ditto", "rm", "unlink", "chmod", "mkdir", "cd", "pushd",
                              "patch", "gcp", "gmv", "sed", "gsed", "perl"))
 _IN_PLACE = frozenset(("sed", "gsed", "perl"))
-_COPY_TARGET_LAST = frozenset(("cp", "gcp", "rsync", "ditto", "install", "ln"))
 _WRITE_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "<>")
 _BOOLS = ("--help", "-h", "--version")
 # Nesting deeper than this, or more gh programs in one command, is no command the
@@ -148,7 +149,8 @@ class _Word(object):
 
     def expansion(self, raw, loose):
         self.parts.append(raw)
-        self.script_parts.append("${_}")
+        # a gh lookup stays as written, so a copy of the binary in a script is seen
+        self.script_parts.append(raw if _WHICH_GH.search(raw) else "${_}")
         self.expanded = True
         self.loose = self.loose or loose
         self.plain = False
@@ -755,12 +757,9 @@ def _check_files(words):
     if writer is not None:
         name = words[writer].text.rsplit("/", 1)[-1]
         rest = words[writer + 1:]
-        if name in _COPY_TARGET_LAST:
-            # a copy reads its sources, only the target is written
-            targets = rest[-1:] + [word for index, word in enumerate(rest) if index and (
-                rest[index - 1].text in ("-t", "--target-directory"))] + [
-                word for word in rest if word.text.startswith("--target-directory=")]
-        elif name in _IN_PLACE and not any(
+        # every operand of a copy may be its target (a trailing flag, -t DIR, -tDIR), so a
+        # copy out of the config is denied too
+        if name in _IN_PLACE and not any(
                 re.match(r"-[A-Za-z]*i|--in-place", word.text) for word in rest):
             targets = []
         else:
@@ -846,20 +845,27 @@ def _command_of(words):
     return command
 
 
-# The texts read during one search, each with its answer, so a text met again (a
-# word whose script is the word itself) is read once. While a text is being read
-# its answer is None here: the reading in progress gives the real one.
+# The texts read during one search with their answers, keyed by depth too, since a
+# reading past _MAX_DEPTH falls back to a looser one. A text met again while it is
+# being read (a word whose script is the word itself) answers None: the reading in
+# progress, at a shallower depth, gives the real answer.
 _SEEN = {}
+_READING = "reading"
 
 
 def _check_text(text, run, depth):
     """Why `text` may write the tracker, or None. `run` is True for a command the
     shell runs and False for a word or a here-document body, prose or a script."""
-    key = (text, run)
+    key = (text, run, depth)
     if key in _SEEN:
         return _SEEN[key]
-    _SEEN[key] = None
-    reason = _read_text(text, run, depth)
+    if _SEEN.get((text, run, _READING)):
+        return None
+    _SEEN[(text, run, _READING)] = True
+    try:
+        reason = _read_text(text, run, depth)
+    finally:
+        del _SEEN[(text, run, _READING)]
     _SEEN[key] = reason
     return reason
 
