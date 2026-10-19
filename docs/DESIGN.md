@@ -156,7 +156,8 @@ come from `routing.BASE_TOOLS` in Python, and `routing.role_tools` adds only wha
 harness names - the tracker's read tools and the knowledge tools for the briefer, the forge
 adapter's review tools - so widening a role past that is a code edit, not a config edit.
 No generated role holds a tracker write tool, and a harness that would grant one is refused
-at validate and at render [R-JIRA-NO-ROLE-TOOL]. Subagents
+at validate and at render, the run tracker's under its own table and every adapter's under its
+defaults alike (`trackers.role_write_patterns`) [R-JIRA-NO-ROLE-TOOL]. Subagents
 cannot spawn subagents in Claude Code, so the "no recursive
 delegation" rule from chapter 5 is enforced by the harness itself
 [R-NO-RECURSIVE-DELEGATION n/a]. Section 10 defines the

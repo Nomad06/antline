@@ -23,7 +23,7 @@ shutil.copy(SOURCE / "defaults" / "routing.example.toml", Path(HOME) / "routing.
 import fixtures
 fixtures.install_harness("example-maven")
 
-from ppl import cli, harness, routing
+from ppl import cli, forges, harness, routing, trackers
 from ppl.errors import PplError
 
 
@@ -530,6 +530,44 @@ class TestNoRoleHoldsAJiraWriteTool(_PinnedEnv):
         self.assertIn("ppl-briefer", caught.exception.message)
         with self.assertRaises(PplError):
             routing.render("ppl-briefer", doc)
+
+    def test_a_jira_doc_that_would_grant_a_github_mcp_issue_write_is_refused_at_render(self):
+        # rule: R-JIRA-NO-ROLE-TOOL
+        for bad in ("mcp__github__add_issue_comment", "mcp__corp_github__create_issue"):
+            doc = harness.load("example-maven")
+            doc["knowledge"]["extra_tools"] = [bad]
+            with self.assertRaises(PplError) as caught:
+                routing.role_tools("ppl-briefer", doc)
+            self.assertEqual(caught.exception.code, "SCHEMA_INVALID", bad)
+            self.assertIn("role 'ppl-briefer' would hold tracker write tool %r" % bad,
+                          caught.exception.message)
+
+    def test_a_github_issues_doc_that_would_grant_a_jira_write_tool_is_refused_at_render(self):
+        # rule: R-JIRA-NO-ROLE-TOOL
+        fixtures.install_variant("example-generic", "gh-render", **fixtures.GITHUB_ISSUES)
+        for bad in ("mcp__atlassian__editJiraIssue",
+                    "mcp__claude_ai_Atlassian_Rovo_2__transitionJiraIssue"):
+            doc = harness.load("gh-render")
+            doc["knowledge"]["extra_tools"] = [bad]
+            with self.assertRaises(PplError) as caught:
+                routing.role_tools("ppl-briefer", doc)
+            self.assertEqual(caught.exception.code, "SCHEMA_INVALID", bad)
+            self.assertIn("role 'ppl-briefer' would hold tracker write tool %r" % bad,
+                          caught.exception.message)
+
+    def test_no_forge_role_tool_is_a_tracker_write_tool(self):
+        # the GitHub MCP issue writes match under any server name, so a forge granting a
+        # role create_issue or update_issue under its own server would be refused
+        fixtures.install_harness("example-generic")
+        fixtures.install_variant("example-generic", "gh-render", **fixtures.GITHUB_ISSUES)
+        for name in ("example-maven", "example-generic", "gh-render"):
+            doc = harness.load(name)
+            writes = trackers.role_write_patterns(doc["tracker"])
+            for role in routing.REQUIRED_ROLES:
+                composed = routing.role_tools(role, doc)
+                for tool in forges.get(doc["forge"]["kind"]).role_tools(role, doc["forge"]):
+                    self.assertFalse(any(p.match(tool) for p in writes), (name, role, tool))
+                    self.assertIn(tool, composed, (name, role))
 
     def test_a_hand_edited_read_tool_list_is_refused_at_render(self):
         # rule: R-JIRA-NO-ROLE-TOOL

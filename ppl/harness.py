@@ -145,14 +145,14 @@ def _check_granted_tools(doc, knowledge, source):
     and its tools line is a comma-joined list: an entry must be exactly one tool
     name, so one string cannot smuggle a second tool, a newline or a key past
     the write-tool check. A harness grants MCP tools only, never a built-in
-    one, and never a tracker write tool."""
-    pattern = trackers.get(doc["tracker"]["kind"]).mcp_write_regex(doc["tracker"])
+    one, and never a write tool of any known tracker."""
+    writes = trackers.role_write_patterns(doc["tracker"])
     for index, tool in enumerate(knowledge.get("extra_tools", [])):
         if not _MCP_TOOL_RE.fullmatch(tool):
             _fail(source, "knowledge.extra_tools[%d] %r is not an MCP tool name "
                   "(mcp__<server>__<tool>), a harness cannot grant a built-in tool or a list"
                   % (index, tool))
-        if pattern.match(tool):
+        if any(pattern.match(tool) for pattern in writes):
             _fail(source, "knowledge.extra_tools[%d] %r is a tracker write tool, "
                   "no role may hold one" % (index, tool))
 

@@ -330,10 +330,10 @@ def role_tools(name, harness_doc):
         composed += adapter.mcp_read_tools(tracker)
         composed += (harness_doc.get("knowledge") or {}).get("extra_tools") or []
     composed += forges.get(forge["kind"]).role_tools(name, forge)
-    writes = adapter.mcp_write_regex(tracker)
+    writes = trackers.role_write_patterns(tracker)
     tools = []
     for tool in composed:
-        if writes.match(tool):
+        if any(pattern.match(tool) for pattern in writes):
             raise PplError("SCHEMA_INVALID", "role %r would hold tracker write tool %r"
                            % (name, tool))
         if not _TOOL_TOKEN.fullmatch(tool):

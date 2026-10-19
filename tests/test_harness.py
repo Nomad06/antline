@@ -631,6 +631,31 @@ class TestMalformedInputIsRefusedNotATraceback(HarnessTestCase):
         self.assertIn("knowledge.extra_tools[1] 'mcp__github__add_issue_comment' is a tracker "
                       "write tool", caught.exception.message)
 
+    def test_a_jira_harness_cannot_grant_a_github_mcp_issue_write(self):
+        # rule: R-JIRA-NO-ROLE-TOOL
+        # every adapter's write tools under its defaults, whatever tracker the harness names
+        for bad in ("mcp__github__add_issue_comment", "mcp__corp_github__create_issue"):
+            name = self.mutate("example-maven", "extra_tools = []",
+                               'extra_tools = ["mcp__corp__code_search", "%s"]' % bad)
+            with self.assertRaises(PplError) as caught:
+                harness.load(name)
+            self.assertEqual(caught.exception.code, "HARNESS_INVALID", bad)
+            self.assertIn("knowledge.extra_tools[1] %r is a tracker write tool" % bad,
+                          caught.exception.message)
+
+    def test_a_github_issues_harness_cannot_grant_a_jira_write_tool(self):
+        # rule: R-JIRA-NO-ROLE-TOOL
+        for bad in ("mcp__atlassian__editJiraIssue",
+                    "mcp__claude_ai_Atlassian_Rovo_2__transitionJiraIssue"):
+            knowledge = {"skills": [], "extra_tools": ["mcp__corp__code_search", bad]}
+            fixtures.install_variant("example-generic", "gh-jira-tool", knowledge=knowledge,
+                                     **fixtures.GITHUB_ISSUES)
+            with self.assertRaises(PplError) as caught:
+                harness.load("gh-jira-tool")
+            self.assertEqual(caught.exception.code, "HARNESS_INVALID", bad)
+            self.assertIn("knowledge.extra_tools[1] %r is a tracker write tool" % bad,
+                          caught.exception.message)
+
     def test_an_extra_tool_that_is_not_a_tracker_write_tool_is_accepted(self):
         name = self.mutate("example-maven", "extra_tools = []",
                            'extra_tools = ["mcp__corp__code_search", "mcp__GitLab-MCP__get_file.v2"]')

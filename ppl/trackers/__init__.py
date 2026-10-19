@@ -35,6 +35,16 @@ def usable(table):
     return bool(get(kind).usable(table))
 
 
+def role_write_patterns(table):
+    """The MCP write tool patterns no role may hold: the tracker's own under its table,
+    then every adapter's under that adapter's defaults, as the guard denies a role's
+    call to any of them."""
+    patterns = [get(table["kind"]).mcp_write_regex(table)]
+    for kind in KINDS:
+        patterns.append(get(kind).mcp_write_regex(dict(get(kind).DEFAULTS, kind=kind)))
+    return patterns
+
+
 def is_mcp_prefix(prefix):
     """True for a prefix shaped mcp__<name>__, the form Claude Code gives a server's tools."""
     return isinstance(prefix, str) and bool(_MCP_PREFIX.fullmatch(prefix))
