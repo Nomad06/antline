@@ -381,7 +381,7 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
              "echo 5 | xargs -n1 gh ic", "bash -c 'gh ic 5 -b x'", "gh pr view {7,8}"])
         # a gh that is no program, only a word another command reads
         self.assert_allowed(["grep -rn gh .", "rg gh src", "grep gh *.py", "mkdir gh docs",
-                             "cp /opt/homebrew/bin/gh /tmp/", "echo gh foo", "echo gh${IFS}a",
+                             "file /opt/homebrew/bin/gh", "echo gh foo", "echo gh${IFS}a",
                              "git log --grep gh -- docs"])
         self.assertIn("issue", self.adapter.BUILTINS)
         self.assertNotIn("co", self.adapter.BUILTINS)
@@ -405,6 +405,61 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
              "curl https://api.github.com/repositories/1/issues/5/comments -d x",
              "curl https://api.github.com/repos/o/r/pulls/7/../../issues/5/comments -d x",
              "curl https://api.github.com/repos/o/r/%69ssues/5/comments -d x"])
+
+    def test_copying_or_linking_the_gh_binary_under_another_name_is_denied(self):
+        self.assert_denied(
+            ["cp /opt/homebrew/bin/gh /tmp/g", "cp \"$(which gh)\" ~/bin/g",
+             "ln -s $(command -v gh) /tmp/g", "install -m 755 `which gh` /tmp/g",
+             "rsync -a /usr/local/bin/gh /tmp/x", "mv /opt/homebrew/bin/gh /opt/homebrew/bin/g",
+             "cat /opt/homebrew/bin/gh > /tmp/g", "tee /tmp/g < /opt/homebrew/bin/gh",
+             "dd if=/opt/homebrew/bin/gh of=/tmp/g", "sudo cp $(which gh) /usr/local/bin/g",
+             "ditto /opt/homebrew/bin/GH /tmp/g", "bash -c 'cp $(which gh) /tmp/g'",
+             "$(which gh) co 7", "\"$(command -v gh)\" co 7"])
+        self.assert_allowed(["which gh", "command -v gh", "ls -l /opt/homebrew/bin/gh",
+                             "cp README.md /tmp/", "gh --version", "type -p gh"])
+
+    def test_a_string_a_runner_hands_to_a_shell_is_read_as_a_command(self):
+        # gh co is a user alias, denied only where the string is read as a command
+        self.assert_denied(
+            ["watch -n1 'gh co 7'", "env -S 'gh co 7'", "env --split-string='gh co 7'",
+             "env -S'gh co 7'", "script -q -c 'gh co 7' /dev/null", "flock /tmp/l -c 'gh co 7'",
+             "ssh host 'gh co 7'", "su -c 'gh co 7' me", "runuser -u me -c 'gh co 7'",
+             "sudo -s 'gh co 7'", "sudo sh -c 'gh co 7'", "bash -c \"gh${IFS}co${IFS}7\"",
+             "watch 'gh issue close 5'", "ssh host 'gh issue comment 5 -b x'",
+             "env -S 'gh api repos/o/r/issues/5/comments -f body=x'"])
+        self.assert_allowed(["watch -n5 'gh pr checks 7'", "ssh host 'ls /tmp'",
+                             "env -S 'echo hi'", "echo 'gh co 7'"])
+
+    def test_a_write_to_the_gh_config_or_gh_config_set_is_denied(self):
+        self.assert_denied(
+            ["gh config set editor vim", "gh config set -h github.com git_protocol ssh",
+             "echo 'aliases: {}' > ~/.config/gh/config.yml",
+             "printf x >> \"$HOME/.config/gh/config.yml\"", "tee ~/.config/gh/config.yml < x",
+             "cp /tmp/c.yml ~/.config/gh/config.yml", "mv /tmp/c.yml $GH_CONFIG_DIR/config.yml",
+             "sed -i '' 's/a/b/' ~/.config/gh/config.yml",
+             "cp x \"${XDG_CONFIG_HOME}/gh/config.yml\"", "cd ~/.config/gh && echo x > config.yml",
+             "> ~/.config/gh/hosts.yml", "sudo tee -a /Users/me/.config/gh/config.yml < x"])
+        self.assert_denied(["cp /tmp/x.yml ~/.config/gh/", "rm -rf ~/.config/gh",
+                            "cp -t ~/.config/gh /tmp/c.yml", "touch ~/.config/gh/x",
+                            "perl -pi -e 's/a/b/' ~/.config/gh/config.yml"])
+        self.assert_allowed(["gh config get editor", "gh config list", "gh config clear-cache",
+                             "cat ~/.config/gh/config.yml", "ls ~/.config/gh",
+                             "sed -n 1p ~/.config/gh/config.yml",
+                             "cp ~/.config/gh/config.yml /tmp/backup.yml",
+                             "mkdir -p ~/.config/other", "cat file > out"])
+
+    def test_the_api_host_is_read_in_any_case_and_with_a_trailing_dot(self):
+        self.assert_denied(["curl https://api.github.com./repos/o/r/issues/5/comments -d x",
+                            "curl https://API.GITHUB.COM/repos/o/r/issues/5/comments -d x",
+                            "curl https://Api.GitHub.Com.:443/graphql -d x",
+                            "wget api.github.com./repos/o/r/issues/1"])
+
+    def test_the_module_states_the_lexical_limit(self):
+        self.assertIn("The check reads the command's words, so a renamed gh binary, an API "
+                      "host held in a variable, an interpreter or a script file, and a gh "
+                      "config the session changed outside Bash are not seen. The boundary that "
+                      "would close them is a GitHub credential the role sessions never hold.",
+                      " ".join(self.adapter.__doc__.split()))
 
     def test_a_blank_bash_does_not_split_on_is_part_of_the_word(self):
         # bash splits on space, tab and newline only, so these stay inside the word

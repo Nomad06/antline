@@ -1,6 +1,11 @@
 """GitHub Issues through the gh CLI. The briefer reads no tracker tool, the
 orchestrator writes the issue with gh after the merge, and write_denials holds the
-check the guard runs on a whole Bash command to tell an issue write from a read."""
+check the guard runs on a whole Bash command to tell an issue write from a read.
+
+The check reads the command's words, so a renamed gh binary, an API host held in a
+variable, an interpreter or a script file, and a gh config the session changed
+outside Bash are not seen. The boundary that would close them is a GitHub
+credential the role sessions never hold."""
 import re
 from urllib.parse import unquote
 
@@ -49,16 +54,37 @@ _MUTATION = re.compile(r"(?<![A-Za-z0-9_])(?:%s)(?![A-Za-z0-9_])" % "|".join(MUT
 # An issues route or the GraphQL endpoint of github.com or of a GitHub Enterprise
 # host, named by any client.
 _API_URL = re.compile(
-    r"(?:api\.github\.com(?::[0-9]+)?|/api/v3)/+(?:(?:repos/+[^/\s?#]+/+[^/\s?#]+"
+    r"(?:api\.github\.com\.?(?::[0-9]+)?|/api/v3)/+(?:(?:repos/+[^/\s?#]+/+[^/\s?#]+"
     r"|repositories/+[0-9]+)/+(?:[^\s?#]*?/+)?issues(?![A-Za-z0-9_-])|graphql(?![A-Za-z0-9_-]))"
     r"|/api/graphql(?![A-Za-z0-9_-])", re.IGNORECASE)
 _GH_NAME = re.compile(r"(?<![A-Za-z0-9_.-])gh(?![A-Za-z0-9_.-])")
 _SHELL_TEXT = re.compile(r"[\s;&|()<>`$'\"\\]")
 # A word after an unreadable program word that makes it worth reading as gh.
 _SENSITIVE = frozenset(("issue", "api", "alias", "extension", "extensions", "ext", "auth",
-                        "copilot"))
-# Programs that run a word of theirs as a script, so that word is read as a command.
-_SHELLS = frozenset(("bash", "sh", "zsh", "dash", "ksh", "mksh", "fish", "eval"))
+                        "copilot", "config"))
+# Programs that run a word of theirs as a script, so that word is read as a command:
+# always, or when given one of the listed flags.
+_SHELLS = frozenset(("bash", "sh", "zsh", "dash", "ksh", "mksh", "fish", "eval", "watch",
+                     "ssh"))
+_SCRIPT_FLAGS = {"env": ("-S", "--split-string"), "script": ("-c", "--command"),
+                 "flock": ("-c", "--command"), "su": ("-c", "--command"),
+                 "runuser": ("-c", "--command"), "sudo": ("-s", "--shell", "-i", "--login")}
+# The gh binary found by a lookup, as a substitution spells it.
+_WHICH_GH = re.compile(r"\b(?:which|command\s+-[vV]|type\s+-[aptP]+|whence|whereis)\s+[\"']?"
+                       r"gh(?![A-Za-z0-9_.-])")
+# Programs that copy, link or install a file, so the gh binary given to one may come
+# back under a name the check does not read as gh.
+_COPIERS = frozenset(("cp", "ln", "install", "rsync", "mv", "tee", "cat", "ditto", "dd", "scp",
+                      "gcp", "gln", "gmv", "ginstall"))
+# gh's config directory under the names the shell gives it, the programs that write,
+# move or enter what a later word names, and the in-place editors.
+_GH_CONFIG = re.compile(r"(?:^|/)\.config/+gh(?:/|$)|GH_CONFIG_DIR|XDG_CONFIG_HOME\}?/+gh(?:/|$)")
+_CONFIG_WRITERS = frozenset(("tee", "cp", "mv", "install", "ln", "rsync", "dd", "touch",
+                             "truncate", "ditto", "rm", "unlink", "chmod", "mkdir", "cd", "pushd",
+                             "patch", "gcp", "gmv", "sed", "gsed", "perl"))
+_IN_PLACE = frozenset(("sed", "gsed", "perl"))
+_COPY_TARGET_LAST = frozenset(("cp", "gcp", "rsync", "ditto", "install", "ln"))
+_WRITE_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "<>")
 _BOOLS = ("--help", "-h", "--version")
 # Nesting deeper than this, or more gh programs in one command, is no command the
 # pipeline runs, and such a command is refused rather than read at length.
@@ -70,13 +96,22 @@ class _Unreadable(Exception):
     """The text cannot be split into words the way the shell splits it."""
 
 
+class _Command(list):
+    """A simple command's words, with its redirections as (operator, target word)."""
+
+    def __init__(self, words=()):
+        list.__init__(self, words)
+        self.redirects = []
+
+
 class _Word(object):
     """One shell word after quote removal, an expansion kept as written. `expanded`
     is set by any expansion, `loose` by one outside double quotes (it can split
     into several words), `globbed` by an unquoted glob character or a brace
     expansion, and `plain` while the word is unquoted text only. `script` is the
     text another shell would read if handed the word, each expansion of this shell
-    standing as `$_` there, since its own commands are read already."""
+    standing as `${_}` there (braced, so a letter after it stays its own), since its
+    own commands are read already."""
     __slots__ = ("parts", "script_parts", "expanded", "loose", "globbed", "plain", "braces")
 
     def __init__(self):
@@ -113,7 +148,7 @@ class _Word(object):
 
     def expansion(self, raw, loose):
         self.parts.append(raw)
-        self.script_parts.append("$_")
+        self.script_parts.append("${_}")
         self.expanded = True
         self.loose = self.loose or loose
         self.plain = False
@@ -159,7 +194,7 @@ class _Lexer(object):
 
     def _list(self, closing):
         s = self.s
-        words = []
+        words = _Command()
         parens = 0
         while True:
             if self.i >= self.n:
@@ -193,7 +228,7 @@ class _Lexer(object):
                 parens += 1
                 self.i += 1
             elif (c in "<>" and not s.startswith("(", self.i + 1)) or s.startswith("&>", self.i):
-                self._redirect()
+                self._redirect(words)
             elif c in ";&|":
                 words = self._emit(words)
                 self.i += 1
@@ -201,16 +236,16 @@ class _Lexer(object):
                 word = self._word()
                 if (word.plain and word.text.isdigit() and self.i < self.n
                         and s[self.i] in "<>" and not s.startswith("(", self.i + 1)):
-                    self._redirect()
+                    self._redirect(words)
                 else:
                     words.append(word.close())
 
     def _emit(self, words):
-        if words:
+        if words or words.redirects:
             self.commands.append(words)
-        return []
+        return _Command()
 
-    def _redirect(self):
+    def _redirect(self, words):
         op = self._REDIRECT.match(self.s, self.i).group(0)
         self.i += len(op)
         while self.i < self.n and self.s[self.i] in " \t":
@@ -220,6 +255,7 @@ class _Lexer(object):
                 raise _Unreadable()
             return
         target = self._word().close()
+        words.redirects.append((op, target))
         if op in ("<<", "<<-"):
             self.heredocs.append((target.text, op == "<<-"))
         elif op == "<<<":
@@ -404,7 +440,7 @@ def _segments(text):
     """(as written, dot segments resolved) path segments of an API endpoint,
     lower-cased, without its scheme, host, /api/v3 prefix, query and fragment."""
     path = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/]*", "", text)
-    path = re.sub(r"^api\.github\.com(?::[0-9]+)?(?=/|$)", "", path, flags=re.IGNORECASE)
+    path = re.sub(r"^api\.github\.com\.?(?::[0-9]+)?(?=/|$)", "", path, flags=re.IGNORECASE)
     path = re.split(r"[?#]", path, maxsplit=1)[0].lower()
     written = [part for part in path.split("/") if part]
     if written[:2] == ["api", "v3"]:
@@ -636,6 +672,8 @@ def _check_gh(argv, run, appended=False):
             reason = _check_api(argv[:index] + rest)
         elif name == "copilot":
             reason = "gh copilot runs an agent that can write the tracker"
+        elif name == "config" and verb == "set":
+            reason = "gh config set can turn a read into a write"
         elif name == "alias" and verb in ("set", "import"):
             reason = "gh alias %s makes a name gh runs as any command" % verb
         elif name in ("extension", "extensions", "ext") and verb in ("install", "exec"):
@@ -655,6 +693,8 @@ def _is_gh_program(words, index):
         # a case-insensitive file system runs GH as gh
         name = word.text.lower()
         return name == "gh" or name.endswith("/gh")
+    if word.expanded and _WHICH_GH.search(word.text):
+        return True
     following = words[index + 1].text if index + 1 < len(words) else ""
     return following in _SENSITIVE
 
@@ -679,6 +719,68 @@ def _head(words):
             continue
         return index
     return None
+
+
+def _program(words, names):
+    """The index of the word among `names` that the command runs: its program, or a
+    later word when the program is a runner such as sudo. None if it runs none."""
+    head = _head(words)
+    if head is None:
+        return None
+    for index in range(head, len(words)):
+        if words[index].text.rsplit("/", 1)[-1] in names:
+            return index
+        if index == head and words[head].text.rsplit("/", 1)[-1] not in _RUNNERS:
+            return None
+    return None
+
+
+def _names_gh_binary(word):
+    if word.expanded and _WHICH_GH.search(word.text):
+        return True
+    name = word.text.rsplit("=", 1)[-1].lower()
+    return name == "gh" or name.endswith("/gh")
+
+
+def _check_files(words):
+    """Why a command copies the gh binary or writes gh's config, or None."""
+    copier = _program(words, _COPIERS)
+    if copier is not None and (any(_names_gh_binary(word) for word in words[copier + 1:]) or any(
+            op in ("<", "<>") and _names_gh_binary(target) for op, target in words.redirects)):
+        return "copying the gh binary hides it from the tracker gate"
+    if any(op in _WRITE_REDIRECTS and _GH_CONFIG.search(target.text)
+           for op, target in words.redirects):
+        return "a write to gh's config can turn a read into a write"
+    writer = _program(words, _CONFIG_WRITERS)
+    if writer is not None:
+        name = words[writer].text.rsplit("/", 1)[-1]
+        rest = words[writer + 1:]
+        if name in _COPY_TARGET_LAST:
+            # a copy reads its sources, only the target is written
+            targets = rest[-1:] + [word for index, word in enumerate(rest) if index and (
+                rest[index - 1].text in ("-t", "--target-directory"))] + [
+                word for word in rest if word.text.startswith("--target-directory=")]
+        elif name in _IN_PLACE and not any(
+                re.match(r"-[A-Za-z]*i|--in-place", word.text) for word in rest):
+            targets = []
+        else:
+            targets = rest
+        if any(_GH_CONFIG.search(word.text) for word in targets):
+            return "a write to gh's config can turn a read into a write"
+    return None
+
+
+def _script_runner(words):
+    """True when the command hands a word of its own to a shell as a script."""
+    for word in words:
+        name = word.text.rsplit("/", 1)[-1]
+        if name in _SHELLS:
+            return True
+        for flag in _SCRIPT_FLAGS.get(name, ()):
+            if any(other.text == flag or other.text.startswith(flag + "=") or (
+                    len(flag) == 2 and other.text.startswith(flag)) for other in words):
+                return True
+    return False
 
 
 def _split_words(text):
@@ -716,21 +818,53 @@ def _check_command(words, run, depth, respace=True):
                                         + words[index + 1:], run, depth, False)
                 if reason:
                     return reason
-    script = run and any(word.text.rsplit("/", 1)[-1] in _SHELLS for word in words)
+    if run:
+        reason = _check_files(_command_of(words))
+        if reason:
+            return reason
+    script = run and _script_runner(words)
     for word in words:
         if id(word) not in in_gh and _names_api(word.text):
             return "a client other than gh names a GitHub issues or GraphQL endpoint"
-        text = word.script
-        if _GH_NAME.search(text) and _SHELL_TEXT.search(text):
-            reason = _check_text(text, script, depth + 1)
-            if reason:
-                return reason
+        texts = [word.script]
+        glued = re.match(r"(?:-[A-Za-z]|--[A-Za-z-]+=)(.+)", word.script, re.DOTALL)
+        if script and glued:
+            # the script glued to its flag, `env -S'...'` or `--split-string=...`
+            texts.append(glued.group(1))
+        for text in texts:
+            if _GH_NAME.search(text) and _SHELL_TEXT.search(text):
+                reason = _check_text(text, script, depth + 1)
+                if reason:
+                    return reason
     return None
+
+
+def _command_of(words):
+    if isinstance(words, _Command):
+        return words
+    command = _Command(words)
+    return command
+
+
+# The texts read during one search, each with its answer, so a text met again (a
+# word whose script is the word itself) is read once. While a text is being read
+# its answer is None here: the reading in progress gives the real one.
+_SEEN = {}
 
 
 def _check_text(text, run, depth):
     """Why `text` may write the tracker, or None. `run` is True for a command the
     shell runs and False for a word or a here-document body, prose or a script."""
+    key = (text, run)
+    if key in _SEEN:
+        return _SEEN[key]
+    _SEEN[key] = None
+    reason = _read_text(text, run, depth)
+    _SEEN[key] = reason
+    return reason
+
+
+def _read_text(text, run, depth):
     try:
         if depth > _MAX_DEPTH:
             raise _Unreadable()
@@ -786,6 +920,7 @@ class _WriteCheck(object):
     def search(self, command):
         if not isinstance(command, str):
             return None
+        _SEEN.clear()
         try:
             reason = _check_text(command, True, 0)
         except Exception:
@@ -794,6 +929,8 @@ class _WriteCheck(object):
             flat = re.sub(r"[\"'\\`]", "", command)
             reason = ("the tracker write check failed on a command naming gh"
                       if _GH_NAME.search(flat) or _names_api(flat) else None)
+        finally:
+            _SEEN.clear()
         return _Hit(reason) if reason else None
 
 
