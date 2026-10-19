@@ -425,9 +425,10 @@ commit`; `ls`; and reading a test source with `cat`/`head`/`tail`/`grep`/`rg`
 [R-TEST-WORKER-BASH-READS]. `sed`, `awk` and `less` are not on that list: a sed script reads
 (`r`), writes (`w`) and runs (GNU `e`) files, awk's `getline` reads any file, and less runs
 `LESSOPEN` preprocessors and opens another file on `+:e`. Each read verb takes only the options
-the guard classifies, read getopt-style (bundled, glued, or in the next word), and a
-file-valued option's value - `grep -f`/`--file`/`--exclude-from`, `rg -f`/`--file`/
-`--ignore-file` - is judged as a path; any other option denies, because `grep` is GNU, BSD or
+the guard classifies, read getopt-style (bundled, glued, or in the next word), and none whose
+value names a file - `grep -f`/`--file`/`--exclude-from`, `rg -f`/`--file`/`--ignore-file` -
+so a pattern comes only from `-e` or the first positional and every other operand is a path the
+guard judges; any other option denies, because `grep` is GNU, BSD or
 ugrep depending on the machine and the unlisted options include ones that read a file (ugrep
 `--config`) or run a program (ugrep `--filter`, rg `--pre`) [R-TEST-WORKER-BASH-READS]. An
 export, or a build shape's env prefix, of `IFS`, `GREP_OPTIONS` or `RIPGREP_CONFIG_PATH`

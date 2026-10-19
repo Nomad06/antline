@@ -286,35 +286,34 @@ class TestPythonRun(unittest.TestCase):
             with self.subTest(command=command):
                 self.assert_denied("BOUNDARY_VIOLATION", command)
 
-    def test_grep_file_option_values_are_judged_as_paths(self):
+    def test_file_valued_options_are_refused(self):
         # rule: R-TEST-WORKER-BASH-READS
-        for command in ("grep -f src/shop/cart.py tests/x.py",
-                        "grep --file=src/shop/cart.py tests/x.py",
-                        "grep --file src/shop/cart.py tests/x.py",
-                        "grep -fsrc/shop/cart.py tests/x.py",
-                        "grep -nf src/shop/cart.py tests/x.py"):
+        # A pattern or ignore file read from a test path still left the first
+        # positional to be swallowed as the pattern (src/shop/cart.py never
+        # judged), or filled the path list so the tree read went unnoticed
+        # (rg -f tests/p.txt walks cwd). The options are refused outright.
+        swallowed = ("grep -f tests/p.txt src/shop/cart.py",
+                     "grep --file tests/p.txt src/shop/cart.py",
+                     "grep --file=tests/p.txt src/shop/cart.py",
+                     "grep -ftests/p.txt src/shop/cart.py",
+                     "grep -rf tests/p.txt src/shop/cart.py",
+                     "grep -nf tests/p.txt src/shop/cart.py",
+                     "rg -f tests/p.txt src/shop/cart.py",
+                     "rg --file=tests/p.txt src/shop/cart.py",
+                     "rg -ftests/p.txt src/shop/cart.py",
+                     "rg --ignore-file tests/p.txt src/shop/cart.py")
+        tree_reads = ("rg -f tests/p.txt", "grep -rf tests/p.txt", "grep -r -f tests/p.txt",
+                      "grep -r --file=tests/p.txt",
+                      "grep -r --exclude-from=tests/p.txt total",
+                      "rg --ignore-file tests/p.txt total")
+        product_files = ("grep -f src/shop/cart.py tests/x.py",
+                         "grep --exclude-from=src/shop/cart.py -r total tests",
+                         "rg --ignore-file=src/shop/cart.py total tests",
+                         "grep -f tests/patterns.txt tests/x.py",
+                         "rg -f tests/patterns.txt tests")
+        for command in swallowed + tree_reads + product_files:
             with self.subTest(command=command):
-                self.assert_denied("BOUNDARY_VIOLATION", command)
-
-    def test_grep_exclude_from_values_are_judged_as_paths(self):
-        # rule: R-TEST-WORKER-BASH-READS
-        for command in ("grep --exclude-from=src/shop/cart.py -r total tests",
-                        "grep --exclude-from src/shop/cart.py -r total tests"):
-            with self.subTest(command=command):
-                self.assert_denied("BOUNDARY_VIOLATION", command)
-
-    def test_rg_file_option_values_are_judged_as_paths(self):
-        # rule: R-TEST-WORKER-BASH-READS
-        for command in ("rg -f src/shop/cart.py tests", "rg --file=src/shop/cart.py tests"):
-            with self.subTest(command=command):
-                self.assert_denied("BOUNDARY_VIOLATION", command)
-
-    def test_rg_ignore_file_values_are_judged_as_paths(self):
-        # rule: R-TEST-WORKER-BASH-READS
-        for command in ("rg --ignore-file src/shop/cart.py total tests",
-                        "rg --ignore-file=src/shop/cart.py total tests"):
-            with self.subTest(command=command):
-                self.assert_denied("BOUNDARY_VIOLATION", command)
+                self.assert_denied("BOUNDARY_VIOLATION", command, "option")
 
     def test_a_pattern_glued_to_its_option_does_not_hide_a_path(self):
         # rule: R-TEST-WORKER-BASH-READS
@@ -360,11 +359,11 @@ class TestPythonRun(unittest.TestCase):
                 self.assert_denied("BOUNDARY_VIOLATION", command)
 
     def test_the_read_verbs_keep_their_ordinary_options(self):
-        for command in ("grep -f tests/patterns.txt tests/x.py",
+        for command in ("echo x | grep -e total", "grep -e total tests/x.py",
                         "grep -n -e total -e count tests/unit/test_cart.py",
                         "grep -rn --include='*.py' total tests",
                         "grep -C 2 total tests/unit/test_cart.py",
-                        "rg -n total tests", "rg -f tests/patterns.txt tests",
+                        "rg -n total tests", "rg -e total tests",
                         "head -n 5 tests/unit/test_cart.py", "tail -n5 tests/unit/test_cart.py",
                         "cat -n tests/unit/test_cart.py", "echo x | grep -c total"):
             with self.subTest(command=command):

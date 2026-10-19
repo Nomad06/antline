@@ -234,6 +234,12 @@ def run_python_cases(cage):
         "BOUNDARY_VIOLATION", reason=".. paths are not resolved")
 
     cage.check(
+        "python layout: ppl-test-worker grep -f of a test file over product code is denied",
+        cage.payload("ppl-test-worker", "Bash",
+                     {"command": "grep -f tests/p.txt src/shop/cart.py"}, wt),
+        "BOUNDARY_VIOLATION")
+
+    cage.check(
         "python layout: ppl-test-worker brace read that expands into src/ is denied",
         cage.payload("ppl-test-worker", "Bash",
                      {"command": "cat tests/{x,../src/shop/cart.py}"}, wt),

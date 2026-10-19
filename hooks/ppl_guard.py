@@ -938,12 +938,12 @@ def _ls_allowed(tokens):
 # path from disk, and is allowed on that basis - a definite classification,
 # not an unclassifiable one. ---
 
-def _options(flags="", files="", patterns="", values="", dirs="", glued=""):
+def _options(flags="", patterns="", values="", dirs="", glued=""):
     """An option table: each argument a space-separated list of option names
     of one kind, see _READ_VERB_OPTIONS."""
     table = {}
-    for kind, names in (("flag", flags), ("file", files), ("pattern", patterns),
-                        ("value", values), ("dirs", dirs), ("glued", glued)):
+    for kind, names in (("flag", flags), ("pattern", patterns), ("value", values),
+                        ("dirs", dirs), ("glued", glued)):
         for name in names.split():
             table[name] = kind
     return table
@@ -954,13 +954,16 @@ def _options(flags="", files="", patterns="", values="", dirs="", glued=""):
 # whose script can read a file (sed r, awk getline), write one (sed w) or run
 # a command (GNU sed e). Nor is less, which runs LESSOPEN preprocessors and
 # opens another file on +:e. An option is listed by what its value is: "flag"
-# takes none, "file" names a file the verb opens and is judged as a path,
-# "pattern" fills the pattern slot, "dirs" is grep's -d whose action other than
-# read or skip walks the tree, "value" is a number, a glob filter or a mode,
-# and "glued" takes a value only as --opt=value. An unlisted option is refused,
-# not guessed at: grep is GNU, BSD or ugrep depending on the machine, and the
-# unlisted ones include options that read a file (ugrep --config,
-# --include-from) or run a program (ugrep --filter, rg --pre).
+# takes none, "pattern" fills the pattern slot, "dirs" is grep's -d whose
+# action other than read or skip walks the tree, "value" is a number, a glob
+# filter or a mode, and "glued" takes a value only as --opt=value. No option
+# whose value names a file is listed (grep -f/--file/--exclude-from, rg
+# -f/--file/--ignore-file): judging the file as a path still left the pattern
+# slot and the tree-read check to a parser that got them wrong twice, so the
+# operands are positional only. An unlisted option is refused, not guessed at:
+# grep is GNU, BSD or ugrep depending on the machine, and the unlisted ones
+# include options that read a file (ugrep --config, --include-from) or run a
+# program (ugrep --filter, rg --pre).
 _READ_VERB_OPTIONS = {
     "cat": _options(flags="-A -b -e -E -n -s -t -T -u -v -l --show-all --number-nonblank "
                           "--number --squeeze-blank --show-ends --show-tabs --show-nonprinting"),
@@ -978,7 +981,6 @@ _READ_VERB_OPTIONS = {
                            "--only-matching --quiet --silent --no-messages --extended-regexp "
                            "--fixed-strings --basic-regexp --perl-regexp --text --null "
                            "--byte-offset --initial-tab",
-                     files="-f --file --exclude-from",
                      patterns="-e --regexp",
                      values="-m -A -B -C -D --max-count --after-context --before-context "
                             "--devices --include --exclude --exclude-dir --include-dir --label",
@@ -992,7 +994,6 @@ _READ_VERB_OPTIONS = {
                          "--with-filename --no-filename --text --search-zip --byte-offset "
                          "--pretty --heading --no-heading --vimgrep --json --hidden "
                          "--no-ignore --multiline --files",
-                   files="-f --file --ignore-file",
                    patterns="-e --regexp",
                    values="-A -B -C -m -g -t -T -j -E -M -d -r --after-context "
                           "--before-context --context --max-count --glob --iglob --type "
@@ -1019,12 +1020,11 @@ _GREP_RECURSIVE = frozenset({"-r", "-R", "--recursive", "--dereference-recursive
 
 def _read_verb_operands(tokens):
     """(paths, whole, walks_tree, refused) for a read-verb invocation, or None
-    when `tokens` is not one. `paths` are the operands and file-option values
-    the verb opens, `whole` the indices of tokens that are one of them in
-    full, `walks_tree` whether it reads the tree from cwd without a path, and
-    `refused` the first option the guard does not classify. Short options are
-    read getopt-style: bundled (-nf), with a value glued (-fFILE) or in the
-    next token, and `--` ends the options."""
+    when `tokens` is not one. `paths` are the positional operands the verb
+    opens, `whole` their token indices, `walks_tree` whether it reads the tree
+    from cwd without a path, and `refused` the first option the guard does not
+    classify. Short options are read getopt-style: bundled (-in), with a value
+    glued (-etotal) or in the next token, and `--` ends the options."""
     if not tokens or tokens[0] not in _READ_VERB_OPTIONS:
         return None
     verb = tokens[0]
@@ -1057,14 +1057,13 @@ def _read_verb_operands(tokens):
             if kind in ("flag", "glued"):
                 recursive = recursive or (verb == "grep" and name in _GREP_RECURSIVE)
                 continue
-            index = None
             if not eq:
                 if i >= len(tokens):
                     continue
-                value, index = tokens[i], i
+                value = tokens[i]
                 i += 1
         else:
-            kind = value = index = None
+            kind = value = None
             for j in range(1, len(tok)):
                 char = tok[j]
                 if char.isdigit() and verb in ("grep", "head", "tail"):
@@ -1079,16 +1078,12 @@ def _read_verb_operands(tokens):
                     continue
                 value = tok[j + 1:]
                 if not value and i < len(tokens):
-                    value, index = tokens[i], i
+                    value = tokens[i]
                     i += 1
                 break
             if kind is None:
                 continue
-        if kind == "file":
-            paths.append(value)
-            if index is not None:
-                whole.add(index)
-        elif kind == "pattern":
+        if kind == "pattern":
             pattern_due = False
         elif kind == "dirs" and value not in ("read", "skip"):
             recursive = True
@@ -1183,7 +1178,7 @@ def _read_segment_problem(segment, tokens, body):
     operands = _read_verb_operands(body)
     if operands is None:
         return None
-    paths, whole, _, refused = operands
+    _, whole, _, refused = operands
     if refused:
         return refused, ("is an option the guard does not classify, which may read a file "
                          "or run a program")
@@ -1196,10 +1191,6 @@ def _read_segment_problem(segment, tokens, body):
                    else _word_expansion_problem(token, masks[index]))
         if problem:
             return token, "uses shell expansion the guard cannot resolve (%s)" % problem
-    for path in paths:
-        problem = _expansion_problem(path)
-        if problem:
-            return path, "uses shell expansion the guard cannot resolve (%s)" % problem
     return None
 
 
