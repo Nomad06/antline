@@ -383,7 +383,7 @@ hook_or_check = "ppl/cli.py:cmd_brief, ppl/run.py:record_tracker_fetch"
 deny_test = "tests/test_cli.py::TestTrackerFetch::test_brief_set_is_refused_for_a_cli_tracker_before_the_issue_is_fetched"
 allow_test = "tests/test_cli.py::TestTrackerFetch::test_brief_set_is_accepted_after_the_fetch, tests/test_cli.py::TestTrackerFetch::test_brief_set_for_a_jira_tracker_needs_no_fetch"
 owner = "ppl"
-residual = "the fetch proves the issue was read, not that the brief used it. A parent 404 cannot be told apart from having no parent. The sub-issue list is the first page gh api returns. The fetched text is evidence a model reads, so an instruction written into an issue is stopped by the briefer's lack of tools and the rendered data line, not by any filter"
+residual = "the fetch proves the issue was read, not that the brief used it. A parent 404 cannot be told apart from having no parent. The sub-issue list is the first page gh api returns. The fetched text is evidence a model reads, so an instruction written into an issue is stopped by the briefer's lack of tools and the rendered data line, not by any filter. A comment body can imitate the rendered `### author, date` structure below the data line"
 
 [[rule]]
 id = "R-MERGE-OBSERVED-ONCE"

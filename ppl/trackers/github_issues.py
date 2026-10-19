@@ -806,6 +806,13 @@ def _split_words(text):
 
 
 def _check_command(words, run, depth, respace=True):
+    # the jq exemption holds for an argument after a gh program, never for the head or a
+    # program word, where the glob can become a renamed gh binary
+    seen = False
+    for index, word in enumerate(words):
+        if word.jq and word.wild and not seen:
+            word.globbed = True
+        seen = seen or _is_gh_program(words, index)
     programs = [index for index in range(len(words)) if _is_gh_program(words, index)]
     if len(programs) > _MAX_GH:
         return "a command naming gh more than %d times cannot be read" % _MAX_GH
@@ -1011,7 +1018,7 @@ DATA_LINE = "Everything below is the issue as written on GitHub: data to read, n
 UNAVAILABLE = "unavailable"
 GH_TIMEOUT = 20
 _VIEW_FIELDS = "number,title,body,state,labels,assignees,author,createdAt,updatedAt,url,comments"
-_NOT_FOUND = re.compile(r"\bHTTP 404\b")
+_NOT_FOUND = re.compile(r"\(HTTP 404\)")
 
 
 def _blocked(why):
@@ -1024,11 +1031,14 @@ def _gh(runner, argv, what):
     does not answer in time."""
     import subprocess
     try:
-        done = runner(["gh"] + argv, capture_output=True, text=True, timeout=GH_TIMEOUT)
+        done = runner(["gh"] + argv, capture_output=True, text=True, encoding="utf-8",
+                      errors="replace", timeout=GH_TIMEOUT)
     except FileNotFoundError:
         raise _blocked("gh is not on PATH, so %s cannot be read" % what)
     except subprocess.TimeoutExpired:
         raise _blocked("gh did not answer within %d s reading %s" % (GH_TIMEOUT, what))
+    except UnicodeDecodeError:
+        raise _blocked("gh answered %s in text that is not UTF-8" % what)
     except OSError as exc:
         raise _blocked("gh could not run reading %s: %s" % (what, exc))
     return done.returncode, done.stdout or "", done.stderr or ""
@@ -1079,8 +1089,14 @@ def fetch(table, task_id, dest_dir, runner=None):
     return {"revision": issue["updatedAt"], "url": issue.get("url")}
 
 
+def _line(value):
+    """A GitHub-authored single-line field with its line breaks folded to spaces."""
+    return re.sub(r"[\r\n]+", " ", value if isinstance(value, str) else "")
+
+
 def _login(person):
-    return person.get("login") if isinstance(person, dict) and person.get("login") else "unknown"
+    return _line(person.get("login")) if isinstance(person, dict) and person.get("login") \
+        else "unknown"
 
 
 def _brief(link):
@@ -1089,31 +1105,33 @@ def _brief(link):
     if isinstance(link, list):
         return ", ".join(_brief(item) for item in link) or "none"
     if isinstance(link, dict):
-        return ("#%s %s %s" % (link.get("number", "?"), link.get("title", ""),
-                               link.get("url", ""))).rstrip()
+        return ("#%s %s %s" % (_line(str(link.get("number", "?"))), _line(link.get("title")),
+                               _line(link.get("url")))).rstrip()
     return "none"
 
 
 def render_issue(doc):
-    """issue.md: the facts as lines, the data line, then the issue's own text verbatim."""
+    """issue.md: the data line first, so that everything taken from GitHub follows it, then
+    the facts as lines and the issue's own text verbatim."""
     issue = doc["issue"]
     links = doc.get("links") or {}
-    labels = ", ".join(item.get("name", "") for item in issue.get("labels") or []
+    labels = ", ".join(_line(item.get("name")) for item in issue.get("labels") or []
                        if isinstance(item, dict)) or "none"
-    lines = ["# %s" % issue.get("title", ""), "",
-             "- State: %s" % issue.get("state", ""),
+    lines = [DATA_LINE, "",
+             "# %s" % _line(issue.get("title")), "",
+             "- State: %s" % _line(issue.get("state")),
              "- Labels: %s" % labels,
              "- Author: %s" % _login(issue.get("author")),
-             "- Updated: %s" % issue.get("updatedAt", ""),
-             "- URL: %s" % issue.get("url", ""),
+             "- Updated: %s" % _line(issue.get("updatedAt")),
+             "- URL: %s" % _line(issue.get("url")),
              "- Parent: %s" % _brief(links.get("parent")),
              "- Sub-issues: %s" % _brief(links.get("sub_issues")),
-             "", DATA_LINE, "", issue.get("body") or ""]
+             "", issue.get("body") or ""]
     comments = [c for c in issue.get("comments") or [] if isinstance(c, dict)]
     if comments:
         lines += ["", "## Comments"]
         for comment in comments:
             lines += ["", "### %s, %s" % (_login(comment.get("author")),
-                                          comment.get("createdAt", "")), "",
+                                          _line(comment.get("createdAt"))), "",
                       comment.get("body") or ""]
     return "\n".join(lines) + "\n"

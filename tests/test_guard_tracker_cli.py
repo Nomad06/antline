@@ -263,6 +263,12 @@ class TestTrackerCliGate(GhRunCase):
         for command in JQ_READS:
             self.assertIsNone(bash(None, command, ELSEWHERE), command)
 
+    def test_a_jq_prefixed_glob_as_the_program_word_is_gated(self):
+        # rule: R-TRACKER-CLI-GATE
+        for command in ("-q=/g? issue comment 5", "env -q=/g? issue comment 5"):
+            reason = self.deny_reason(bash(None, command, ELSEWHERE))
+            self.assertIn("OWNER_DECISION", reason, command)
+
     def test_a_brace_or_a_glob_outside_the_jq_word_is_still_gated(self):
         # rule: R-TRACKER-CLI-GATE
         for command in GLOB_WRITES:
@@ -359,6 +365,14 @@ class TestTrackerCliNoRole(GhRunCase):
             self.assertIn("may not write the tracker, the orchestrator does after the merge is "
                           "observed (a glob or brace expansion in a gh call can become any "
                           "word)", reason, command)
+
+    def test_a_jq_prefixed_glob_as_the_program_word_is_denied(self):
+        # rule: R-TRACKER-CLI-NO-ROLE
+        for command in ("-q=/g? issue comment 5", "--jq=/g? issue comment 5 -b x",
+                        "env -q=/g? issue comment 5"):
+            reason = self.deny_reason(bash("ppl-code-worker", command))
+            self.assertIn("BOUNDARY_VIOLATION", reason, command)
+            self.assertIn("may not write the tracker", reason, command)
 
     def test_a_role_keeps_its_own_commands(self):
         for command in ("gh api repos/o/r/pulls/12/comments --paginate",
