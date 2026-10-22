@@ -36,10 +36,13 @@ class TranscriptError(Exception):
         self.code = code
 
 
+def _is_count(value):
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value))
+
+
 def _number(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0
-    return int(value)
+    return int(value) if _is_count(value) else 0
 
 
 def _counts_of(use):
@@ -56,7 +59,10 @@ def _assistant_usage(event):
     message = event.get("message")
     if not isinstance(message, dict) or not isinstance(message.get("usage"), dict):
         return None
-    return message.get("id"), message.get("model"), message["usage"]
+    use = message["usage"]
+    if not any(_is_count(use.get(field)) for _, field in _FIELDS):
+        return None
+    return message.get("id"), message.get("model"), use
 
 
 def _parse(raw):
@@ -104,10 +110,10 @@ def sum_transcript(path, deadline=None):
                 continue
             seen_usage = True
             msg_id, model, use = found
-            if not isinstance(model, str) or model.startswith("<"):
+            if (not isinstance(model, str) or model.startswith("<")
+                    or not isinstance(msg_id, str)):
                 continue
-            key = msg_id if isinstance(msg_id, str) else ("line", number)
-            last[key] = (model, _counts_of(use))
+            last[msg_id] = (model, _counts_of(use))
     if not seen_usage:
         raise TranscriptError("schema_unknown", "no assistant line carries a usage dict")
     models = {}
@@ -151,10 +157,10 @@ def read_increment(path, offset, since, seen_ids, deadline=None,
                 break
             position += len(raw)
             number += 1
-            found = _assistant_usage(_parse(raw))
+            event = _parse(raw)
+            found = _assistant_usage(event)
             if found is None:
                 continue
-            event = _parse(raw)
             if event.get("isSidechain") is True:
                 continue
             try:
@@ -164,17 +170,16 @@ def read_increment(path, offset, since, seen_ids, deadline=None,
             if stamp < floor:
                 continue
             msg_id, model, use = found
-            if not isinstance(model, str) or model.startswith("<") or msg_id in known:
+            if (not isinstance(model, str) or model.startswith("<")
+                    or not isinstance(msg_id, str) or msg_id in known):
                 continue
-            key = msg_id if isinstance(msg_id, str) else ("line", position)
-            last[key] = (model, _counts_of(use))
+            last[msg_id] = (model, _counts_of(use))
     models = {}
     for key, (model, got) in last.items():
         bucket = _bucket(models, model)
         for name, value in got.items():
             bucket[name] += value
-        if isinstance(key, str):
-            seen.append(key)
+        seen.append(key)
     return models, position, seen[-50:]
 
 
@@ -233,7 +238,10 @@ def prices():
 
 
 def dollars(models, price_table):
-    """(usd, unpriced): usd is None when any model has no price."""
+    """(usd, unpriced). usd is None in two cases: no models at all (no data,
+    unpriced is empty) and any model without a price (unpriced names them)."""
+    if not models:
+        return None, []
     unpriced = sorted(model for model in models if model not in price_table)
     if unpriced:
         return None, unpriced
@@ -245,6 +253,7 @@ def dollars(models, price_table):
 
 
 def run_dollars(directory):
+    """(usd, unpriced) over every role. (None, []) when no usage was recorded."""
     models = {}
     for role_models in run_usage(directory).values():
         models = add(models, role_models)

@@ -250,6 +250,41 @@ class TestUsage(unittest.TestCase):
         self.assertEqual(usage.prices(), {"m1": {
             "input": 3.0, "cache_write": 3.75, "cache_read": 0.3, "output": 15.0}})
 
+    def test_dollars_of_no_usage_is_undefined_not_zero(self):
+        self.assertEqual(usage.dollars({}, {"m": {k: 1.0 for k in usage.COUNTS}}),
+                         (None, []))
+
+    def test_run_dollars_without_usage_is_undefined_not_zero(self):
+        self.log([{"event": "usage", "agent_id": "a1", "role": "r1", "error": "deadline"}])
+        self.assertEqual(usage.run_dollars(self.dir), (None, []))
+
+    def test_a_usage_without_any_count_is_not_counted(self):
+        write_transcript(self.path, [line("m1", OPUS, {"service_tier": "standard"})])
+        with self.assertRaises(usage.TranscriptError) as ctx:
+            usage.sum_transcript(self.path)
+        self.assertEqual(ctx.exception.code, "schema_unknown")
+        write_transcript(self.path, [line("m1", OPUS, {"output_tokens": 4})])
+        self.assertEqual(usage.sum_transcript(self.path)[OPUS]["cache_read"], 0)
+
+    def test_a_malformed_message_id_skips_the_line_not_the_transcript(self):
+        write_transcript(self.path, [
+            line({"x": 1}, OPUS, counts(50)), line(["y"], OPUS, counts(60)),
+            line("m1", OPUS, counts(10))])
+        self.assertEqual(usage.sum_transcript(self.path)[OPUS]["output"], 10)
+        models, _, seen = usage.read_increment(self.path, 0, "2026-10-22T00:00:00Z", [])
+        self.assertEqual(models[OPUS]["output"], 10)
+        self.assertEqual(seen, ["m1"])
+
+    def test_a_non_finite_count_does_not_crash_the_read(self):
+        self.path.write_text(
+            '{"type":"assistant","isSidechain":false,"timestamp":"2026-10-22T12:00:00Z",'
+            '"message":{"id":"m1","model":"%s","usage":{"input_tokens":1e999,'
+            '"output_tokens":7}}}\n' % OPUS, encoding="utf-8")
+        self.assertEqual(usage.sum_transcript(self.path)[OPUS]["input"], 0)
+        self.assertEqual(usage.sum_transcript(self.path)[OPUS]["output"], 7)
+        models, _, _ = usage.read_increment(self.path, 0, "2026-10-22T00:00:00Z", [])
+        self.assertEqual(models[OPUS]["output"], 7)
+
     def test_run_dollars_sum_every_role(self):
         self.write_config('[prices."m"]\ninput = 0\ncache_write = 0\n'
                           'cache_read = 0\noutput = 10\n')
