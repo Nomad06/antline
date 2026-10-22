@@ -122,7 +122,7 @@ the test writer tries to `cat` product code and the hook denies it
 - Independent tests by construction, not by a line in a prompt.
 - The limits that matter are code. `ppl/_assets/rules.toml` holds 174 rules, 130 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 2323 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 2344 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - Irreversible steps stay with people: merging, resolving threads, approving, and any
   disagreement with a reviewer.
@@ -151,7 +151,6 @@ the test writer tries to `cat` product code and the hook denies it
 - More tokens than one agent. Six roles, high effort on the brief and the verification,
   and long runs can hit subscription rate limits and park.
 - It ends at approval and a human merges. That is deliberate, and it is not hands-off.
-- No packaged installer: a git clone plus `ppl setup`.
 - The cage is proven at hook level. An end-to-end run against your own tracker, forge and
   reviewers is yours to make.
 
@@ -170,15 +169,48 @@ the test writer tries to `cat` product code and the hook denies it
 ## Install
 
 ```bash
+pipx install git+https://github.com/Nomad06/antline
+ppl demo
+```
+
+`pipx install` needs Python 3.11 or newer, the same floor as the rest of antline.
+There is no PyPI package yet, so the install reads the repository.
+
+`ppl demo` plays one issue through the real `ppl` and the real guard hook in a few
+seconds. It runs offline in a throwaway sandbox (its own `HOME`, data root, workspace,
+sample git repo and a stand-in for `gh`), and the agents are scripted stand-ins, so it
+spends no tokens and leaves your `~/.ppl` and your `~/.claude` alone. Each step prints
+one line: who acts, what they do, the answer and the rule behind it. Three of the
+answers are refusals:
+
+- The code worker edits a test file and the guard says no [R-ROLE-CODE-WORKER-TESTS].
+- The orchestrator dispatches the test worker with the implementation pasted into the
+  prompt and the dispatch is denied [R-TEST-WORKER-DISPATCH-LEAK].
+- `gh issue close` runs before the merge is observed and the guard holds it back
+  [R-TRACKER-CLI-GATE].
+
+`ppl demo --keep` leaves the sandbox in place and prints where it is.
+
+Then set up for real with `ppl serve --open` (the studio) or `ppl setup` (the terminal).
+
+### Upgrading
+
+After `pipx upgrade antline`, or a `git pull` that moves files, run `ppl setup claude`
+again. The hook commands in your `settings.local.json` hold absolute paths, and
+`ppl doctor` names a hook path that no longer exists.
+
+### From a clone (contributors)
+
+```bash
 git clone https://github.com/Nomad06/antline ~/antline
 export PATH="$HOME/antline/bin:$PATH"     # add this line to your shell profile
 ppl setup
 ```
 
-The supported install is the clone with `bin/` on `PATH`: `bin/ppl` points ppl at
-the checkout, whose `ppl/_assets/` holds `defaults/`, `templates/`
-and `skill/`. An editable dev
-install (`pip install -e .`) also works from the clone.
+`bin/ppl` runs the checkout, whose `ppl/_assets/` holds `defaults/`, `templates/`
+and `skill/`. An editable install (`pip install -e .`) also works from the clone.
+
+### The setup steps
 
 `ppl setup` walks six steps - paths, claude, models, harness, forge, apply -
 each skippable with `s` and re-runnable with `ppl setup <step>`: the data root

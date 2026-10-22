@@ -97,6 +97,8 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     panel/server.py              stdlib HTTP server, `ppl serve`
     panel/index.html             single-page dashboard
     studio/                      setup wizard, stack presets, md extraction, harness drafts
+    demo/                        `ppl demo`: sandbox.py (throwaway HOME, data root, workspace, gh stand-in),
+                                 sample.py (the sample repo and harness), script.py (the 24 steps)
     (no adapters/ package)       out of scope for v1 (section 2): a non-subagent role has no
                                   code path at all, `routing.dispatch` raises `SCHEMA_INVALID`
     _assets/                     the runtime assets the package reads, found by ppl/paths.py
@@ -977,6 +979,9 @@ timed-out worker still carries what it had), not a gap in it.
 ### 6.3 `ppl` CLI surface
 
 ```
+ppl --version                    # prints `antline <version>`
+ppl demo [--keep]                # one issue through the real CLI and guard, offline, in a throwaway
+                                 # sandbox, with stand-ins for the agents and gh. --keep leaves it
 ppl setup [<step> ...]           # the onboarding wizard: paths, claude, models, harness, forge,
                                  # apply - every step skippable and re-runnable
 ppl harness validate|list|show|add|apply [<name>] [--source <directory or git url>] [--json]
