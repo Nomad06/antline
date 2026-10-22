@@ -235,6 +235,8 @@ drafts the gates, the commands the test writer may run and the build environment
 cents). Otherwise, or when that call fails, the draft starts from a preset for the stack your
 build files name: npm, Python, Maven, Gradle, Go, Cargo or Make. You review every field in a
 form before anything is installed, with the source of each field shown beside it.
+A draft made from the same files, model and Claude version is reused at no cost, the screen
+says so, and "Draft again (new call)" asks Claude again.
 
 The Models screen offers three presets, a tier and an effort per role: Economy, Balanced
 and Max quality. The same presets are `ppl routing preset economy|balanced|max`.
@@ -392,6 +394,9 @@ export PPL_AGENTS_DIR=$PPL_HOME/workspace/.claude/agents
 export PPL_SKILLS_DIR=$PPL_HOME/workspace/.claude/skills
 ppl setup --answer workspace=$PPL_HOME/workspace
 ```
+
+`PPL_HOME/studio/cache/` holds the Claude drafts the studio reuses. Removing it with `rm -rf`
+is always safe, the next draft asks Claude again, and `ppl destroy` leaves it in place.
 
 A `claude` session started in that workspace sees the sandbox agents and skill.
 Export `PPL_HOME` in the shell that launches `claude` too, or the hooks read a

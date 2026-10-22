@@ -26,12 +26,14 @@ def _extract(params, body, query):
         raise PplError("EXTRACTION_FAILED", "none of the chosen files could be read: %s"
                        % "; ".join("%s (%s)" % (item["path"], item["reason"]) for item in skipped))
     preset = stacks.draft(info["stack"]["stack"], info)
+    fresh = body.get("fresh") is True
 
     def work(emit):
-        result = extract.extract(files, emit)
+        result = extract.extract(files, emit, fresh=fresh)
         merged = extract.merge(preset, result["extracted"])
         merged.update({"dropped": result["dropped"], "skipped": skipped,
-                       "model": result["model"], "cost_usd": result["cost_usd"]})
+                       "model": result["model"], "cost_usd": result["cost_usd"],
+                       "cached": result["cached"], "cached_at": result.get("cached_at")})
         return merged
     return {"job": JOBS.start("extract", work)}
 

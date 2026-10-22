@@ -956,6 +956,26 @@ class TestExtractRoute(panel_client.StudioTestCase):
         self.assertEqual(job["state"], "failed")
         self.assertEqual(job["error"]["error_code"], "EXTRACTION_FAILED")
 
+    def test_extract_passes_fresh_through_and_returns_the_cache_fields(self):
+        seen = []
+
+        def fake_extract(files, emit=None, fresh=False):
+            seen.append(fresh)
+            return {"extracted": dict(GOOD_DRAFT), "dropped": [], "model": "m", "cost_usd": 0.0,
+                    "cached": True, "cached_at": "2026-10-22T00:00:00+00:00"}
+        results = []
+        with mock.patch.object(extract, "extract", fake_extract):
+            for fresh in (True, "yes"):
+                _, payload, _ = panel_client.call(
+                    "POST", "/api/harness/extract",
+                    body={"path": str(self.repo), "md": ["CLAUDE.md"], "fresh": fresh})
+                results.append(self.wait(payload))
+        self.assertEqual(seen, [True, False])
+        for job in results:
+            self.assertEqual(job["state"], "done", job)
+            self.assertIs(job["result"]["cached"], True)
+            self.assertEqual(job["result"]["cached_at"], "2026-10-22T00:00:00+00:00")
+
     def test_an_extraction_with_no_readable_file_is_refused_at_once(self):
         status, payload, _ = panel_client.call(
             "POST", "/api/harness/extract", body={"path": str(self.repo), "md": ["nope.md"]})

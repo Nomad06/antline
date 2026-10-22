@@ -72,6 +72,11 @@ class TestStaticFiles(unittest.TestCase):
             self.assertNotIn(b"\r", data, rel)
             self.assertNotIn(b"\t", data, rel)
 
+    def test_the_harness_page_offers_a_draft_again_that_bypasses_the_cache(self):
+        text = (STATIC / "pages" / "setup-harness.js").read_text(encoding="utf-8")
+        self.assertIn("Draft again (new call)", text)
+        self.assertIn("fresh: true", text)
+
     @unittest.skipUnless(shutil.which("node"), "node is not installed, the syntax check needs it")
     def test_every_module_parses(self):
         scratch = Path(tmphome.mkdtemp(prefix="pplnode-"))
