@@ -127,6 +127,31 @@ class TestDemoFailure(unittest.TestCase):
         self.assertTrue(lines[-1].startswith("10 "), lines[-1])
         self.assertEqual(list(self.tmp.iterdir()), [])
 
+    def test_a_failing_gate_stops_the_walk_at_the_gates_step(self):
+        wrong = script.TEST.replace("90)", "91)")
+        self.assertNotEqual(wrong, script.TEST)
+        lines = []
+        with mock.patch.object(script, "TEST", wrong):
+            with self.assertRaises(PplError) as caught:
+                demo.run(emit=lines.append)
+        self.assertEqual(caught.exception.code, "IMPLEMENTATION_FAILURE")
+        self.assertTrue(lines[-1].startswith("15 "), lines[-1])
+        self.assertTrue(lines[-1].endswith("UNEXPECTED, expected ok"), lines[-1])
+        self.assertIn("demo step 15", caught.exception.message)
+        self.assertIn("focused-tests", caught.exception.message)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_the_retry_step_answers_ok_only_for_the_budget_it_reads_back(self):
+        for used, limit, answer in ((1, 3, "ok"), (0, 3, "retry budget 0 of 3"),
+                                    (1, 5, "retry budget 1 of 5")):
+            with self.subTest(used=used, limit=limit):
+                walk = mock.Mock()
+                walk.ppl.side_effect = lambda *args: (
+                    json.dumps({"budgets": {"retry_used": used, "retry_max": limit}})
+                    if args == ("show", "--json") else "")
+                self.assertEqual(script.verdict_rework(walk), answer)
+                self.assertIn(mock.call("budget", "spend", "retry"), walk.ppl.call_args_list)
+
     def test_no_git_on_path_exits_two_and_creates_nothing(self):
         empty = Path(tempfile.mkdtemp(prefix="nopath-", dir=str(self.tmp.parent))).resolve()
         self.addCleanup(shutil.rmtree, empty, ignore_errors=True)

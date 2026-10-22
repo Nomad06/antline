@@ -102,11 +102,16 @@ class Walk:
         self.ppl("evidence", "add", "--check", check, "--result", "pass" if code == 0 else "fail",
                  "--log", str(log), "--rc", str(rc), "--generation", self.generation,
                  "--from", "orchestrator")
+        return code
 
     def gates(self):
+        """"ok" when every gate exited 0, else the failed gates, an answer no step expects."""
         self.stage("gates")
-        self.run_gate("focused-tests", [sys.executable, "-m", "unittest", "-q", "tests.test_discount"])
-        self.run_gate("secret-scan", None, scan=True)
+        tests = [sys.executable, "-m", "unittest", "-q", "tests.test_discount"]
+        codes = [("focused-tests", self.run_gate("focused-tests", tests)),
+                 ("secret-scan", self.run_gate("secret-scan", None, scan=True))]
+        failed = ["%s failed (rc %d)" % (check, code) for check, code in codes if code != 0]
+        return ", ".join(failed) or "ok"
 
     def verdict(self, name, verdict, acceptance):
         doc = {"task_id": sandbox.TASK, "candidate_sha": self.head, "spec_revision": self.revision,
@@ -208,23 +213,23 @@ def dispatch_clean(walk):
 
 
 def gates_first(walk):
-    walk.gates()
-    return "ok"
+    return walk.gates()
 
 
 def verdict_rework(walk):
     walk.stage("verification")
     walk.verdict("verdict-rework.json", "REWORK", {})
     walk.ppl("budget", "spend", "retry")
-    return "ok"
+    budgets = json.loads(walk.ppl("show", "--json"))["budgets"]
+    used, limit = budgets["retry_used"], budgets["retry_max"]
+    return "ok" if (used, limit) == (1, 3) else "retry budget %s of %s" % (used, limit)
 
 
 def fix(walk):
     walk.stage("implementation")
     walk.commit_file("shop/cart.py", FIXED, "reject a discount outside 0-100")
     walk.stage("tests")
-    walk.gates()
-    return "ok"
+    return walk.gates()
 
 
 def verdict_pass(walk):
@@ -312,7 +317,8 @@ STEPS = [
     ("code worker", "fix: reject a discount outside 0-100, gates again", "ok", ""),
     ("verifier", "`ppl verdict record` PASS, AC1 proven by focused-tests", "ok",
      "R-DONE-ACCEPTANCE-EVIDENCE"),
-    ("orchestrator", "`ppl mr set` and `ppl review approved` (forge stand-in)", "ok", ""),
+    ("orchestrator", "`ppl mr set` and `ppl review approved` (no forge: recorded directly)", "ok",
+     ""),
     ("orchestrator", "`ppl stage enter closure` with no simplification receipt",
      ("refuse", "ILLEGAL_TRANSITION", "simplification"), "R-CLOSURE-ONLY-WHEN-DONE-PASSES"),
     ("orchestrator", "simplification `skip` receipt, closure, `ppl transition done`", "ok",
