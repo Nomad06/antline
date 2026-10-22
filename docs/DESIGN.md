@@ -42,7 +42,7 @@ Out of scope for v1 (book P2/P3, deferred):
 - adapter *implementations* for non-Claude-Code providers. The contract, the routing config
   and the patch-based enforcement path are built in v1; the API and CLI adapters are written
   when a second provider actually exists.
-- a packaged installer: v1 runs from a git clone and `ppl setup` configures one machine
+- a PyPI release: v1 installs from the git repository (pipx or a clone) and `ppl setup` configures one machine
 
 ## 3. Authoritative decisions
 
@@ -55,7 +55,7 @@ These were decided by the owner and override any generic doctrine below.
 | Autonomous: reply to reviewer threads | yes |
 | Autonomous: resolve reviewer threads | NO. Only the remark author may resolve [R-MCP-RESOLVE-THREAD]. Globally denied by hook [R-MCP-RESOLVE-THREAD]. |
 | Autonomous: tracker writes | only after merge is observed, in plain English. No pre-merge tracker writes. |
-| Install location | code in a git checkout, data under `~/.ppl`, the generated agents and skill in an isolated workspace's `.claude/`. Nothing is committed to the project repository. |
+| Install location | code in a pipx venv or a git checkout, data under `~/.ppl`, the generated agents and skill in an isolated workspace's `.claude/`. Nothing is committed to the project repository. |
 | Model routing | frontier on top, rails at the bottom (section 12) |
 | Panel `destroy` | always prompts. Owner picks local-only or full cleanup (close MR, delete remote branch) per run, with typed confirmation for the remote half. |
 | Panel spawning sessions | NO. The panel queues a resume request; it never starts a Claude session [R-PANEL-NO-SPAWN n/a]. |
@@ -79,7 +79,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
 ### 5.1 Layout
 
 ```
-<checkout>/                      the code root, a git clone
+<checkout>/                      the code root, a git clone or the installed package
   bin/ppl                        shim on PATH
   ppl/                           the state machine package (the real controller)
     __main__.py cli.py           CLI entry point

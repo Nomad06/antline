@@ -54,8 +54,8 @@ test suite fails if a blocking row has no test that asserts the refusal.
   project's harness from its `CLAUDE.md` for a fraction of a cent, and lets you fire
   tool calls at the real guard hook.
 - **Nothing installed into your project.** Python 3.11 standard library only. The code lives
-  in a git clone, the data under `~/.ppl`, the agents in a separate workspace. Your
-  repository gets a branch and a merge request.
+  in the installed package or a git clone, the data under `~/.ppl`, the agents in a
+  separate workspace. Your repository gets a branch and a merge request.
 
 ## Why it is different
 
@@ -180,8 +180,8 @@ There is no PyPI package yet, so the install reads the repository.
 seconds. It runs offline in a throwaway sandbox (its own `HOME`, data root, workspace,
 sample git repo and a stand-in for `gh`), and the agents are scripted stand-ins, so it
 spends no tokens and leaves your `~/.ppl` and your `~/.claude` alone. Each step prints
-one line: who acts, what they do, the answer and the rule behind it. Three of the
-answers are refusals:
+one line: who acts, what they do, the answer and the rule behind it. Several of the
+answers are refusals, among them:
 
 - The code worker edits a test file and the guard says no [R-ROLE-CODE-WORKER-TESTS].
 - The orchestrator dispatches the test worker with the implementation pasted into the
