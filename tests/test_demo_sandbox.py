@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 from ppl import paths
+from ppl.errors import PplError
 from ppl.demo import sandbox
 
 
@@ -66,6 +68,29 @@ class TestSandbox(unittest.TestCase):
             else:
                 self.assertNotIn(name, other.env)
         self.assertEqual(Path(other.env["HOME"]).parent, other.root)
+
+    def test_a_hostile_xdg_git_config_of_the_caller_is_never_read(self):
+        xdg = Path(tmphome.mkdtemp(prefix="xdg-"))
+        (xdg / "git").mkdir()
+        (xdg / "git" / "config").write_text(
+            "[init]\n\tdefaultBranch = trunk\n[core]\n\thooksPath = /nonexistent-hooks\n")
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}):
+            other = sandbox.Sandbox.create()
+        self.addCleanup(other.remove)
+        self.assertEqual(Path(other.env["XDG_CONFIG_HOME"]), other.home / ".config")
+        self.assertEqual(other.env["GIT_CONFIG_GLOBAL"], "/dev/null")
+        other.build()
+        other.repo.joinpath("extra.txt").write_text("x")
+        self.assertEqual(len(other.commit(["extra.txt"], "extra")), 40)
+        read = subprocess.run(["git", "-C", str(other.repo), "config", "--get", "init.defaultBranch"],
+                              env=other.env, capture_output=True, text=True)
+        self.assertNotEqual(read.stdout.strip(), "trunk")
+
+    def test_a_failing_git_step_raises_a_ppl_error_naming_its_stderr(self):
+        with self.assertRaises(PplError) as caught:
+            self.box.commit(["no-such-file.txt"], "never")
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("no-such-file.txt", caught.exception.message)
 
     def test_remove_deletes_the_whole_sandbox(self):
         other = sandbox.Sandbox.create()

@@ -47,19 +47,29 @@ class Sandbox:
         env.update(
             HOME=str(self.home), PPL_HOME=str(self.ppl_home),
             PPL_CLAUDE_HOME=str(self.home / ".claude"), GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL="/dev/null", XDG_CONFIG_HOME=str(self.home / ".config"),
             PATH=os.pathsep.join([str(self.bin), env.get("PATH", "")]),
             PYTHONPATH=os.pathsep.join(filter(None, [parent, env.get("PYTHONPATH")])))
         return env
 
-    def ppl(self, *args):
-        return subprocess.run([sys.executable, "-m", "ppl", *args], cwd=self.workspace,
-                              env=self.env, capture_output=True, text=True,
-                              timeout=TIMEOUT_SECONDS)
+    def _run(self, argv, **kwargs):
+        try:
+            return subprocess.run(argv, env=self.env, capture_output=True, text=True,
+                                  timeout=TIMEOUT_SECONDS, **kwargs)
+        except subprocess.TimeoutExpired as error:
+            raise PplError("SCHEMA_INVALID", "demo sandbox: `%s` timed out after %d s"
+                           % (" ".join(map(str, argv)), TIMEOUT_SECONDS)) from error
 
-    def git(self, *args):
-        return subprocess.run(["git", *_GIT_FLAGS, "-C", str(self.repo), *args], env=self.env,
-                              capture_output=True, text=True, check=True,
-                              timeout=TIMEOUT_SECONDS).stdout
+    def ppl(self, *args):
+        return self._run([sys.executable, "-m", "ppl", *args], cwd=self.workspace)
+
+    def git(self, *args, cwd=None):
+        argv = ["git", *_GIT_FLAGS, *(() if cwd else ("-C", str(self.repo))), *args]
+        done = self._run(argv, cwd=cwd)
+        if done.returncode != 0:
+            raise PplError("SCHEMA_INVALID", "demo sandbox: `git %s` failed: %s"
+                           % (" ".join(args), (done.stderr or done.stdout).strip()[:500]))
+        return done.stdout
 
     def commit(self, paths_, message):
         self.git("add", "--", *paths_)
@@ -69,9 +79,10 @@ class Sandbox:
     def guard(self, payload):
         settings = json.loads((self.workspace / ".claude" / "settings.local.json").read_text())
         command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-        done = subprocess.run(shlex.split(command), cwd=self.workspace, env=self.env,
-                              input=json.dumps(payload), capture_output=True, text=True,
-                              timeout=TIMEOUT_SECONDS)
+        try:
+            done = self._run(shlex.split(command), cwd=self.workspace, input=json.dumps(payload))
+        except PplError as error:
+            return {"decision": "error", "code": None, "reason": error.message}
         if done.returncode != 0 or done.stderr.strip():
             return {"decision": "error", "code": None,
                     "reason": "exit %d: %s" % (done.returncode,
@@ -94,8 +105,7 @@ class Sandbox:
 
     def build(self):
         self.repo.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", *_GIT_FLAGS, "init", "-q", "-b", "main", str(self.repo)],
-                       env=self.env, check=True, capture_output=True, timeout=TIMEOUT_SECONDS)
+        self.git("init", "-q", "-b", "main", str(self.repo), cwd=self.workspace)
         for rel, text in sample.FILES.items():
             target = self.repo / rel
             target.parent.mkdir(parents=True, exist_ok=True)
