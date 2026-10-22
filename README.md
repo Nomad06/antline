@@ -122,7 +122,7 @@ the test writer tries to `cat` product code and the hook denies it
 - Independent tests by construction, not by a line in a prompt.
 - The limits that matter are code. `ppl/_assets/rules.toml` holds 174 rules, 130 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 2344 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 2369 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - Irreversible steps stay with people: merging, resolving threads, approving, and any
   disagreement with a reviewer.
@@ -195,9 +195,15 @@ Then set up for real with `ppl serve --open` (the studio) or `ppl setup` (the te
 
 ### Upgrading
 
-After `pipx upgrade antline`, or a `git pull` that moves files, run `ppl setup claude`
-again. The hook commands in your `settings.local.json` hold absolute paths, and
-`ppl doctor` names a hook path that no longer exists.
+Upgrade with `pipx reinstall antline`, which installs the current `main` again.
+`pipx upgrade antline` can answer "already at latest version" and change nothing, since
+the version number stays the same between merges. After the reinstall, or a `git pull`
+that moves files, run `ppl setup claude` again. The hook commands in your
+`settings.local.json` hold absolute paths, so an old registration makes every tool call in
+the workspace fail with `can't open file '.../hooks/ppl_guard.py'`, and `ppl doctor` names
+the hook path that no longer exists. If you answered `global` or `manual`,
+`ppl setup claude` prints the new entries: paste them over the old ones in `~/.claude/settings.json`
+(or the file you chose).
 
 ### From a clone (contributors)
 
@@ -236,7 +242,8 @@ cents). Otherwise, or when that call fails, the draft starts from a preset for t
 build files name: npm, Python, Maven, Gradle, Go, Cargo or Make. You review every field in a
 form before anything is installed, with the source of each field shown beside it.
 A draft made from the same files, model and Claude version is reused at no cost, the screen
-says so, and "Draft again (new call)" asks Claude again.
+says so, and "Draft again (new call)" asks Claude again. Reuse needs the model of the lightest
+tier verified by `ppl models verify`, otherwise every draft is a new call.
 
 The Models screen offers three presets, a tier and an effort per role: Economy, Balanced
 and Max quality. The same presets are `ppl routing preset economy|balanced|max`.
@@ -267,10 +274,15 @@ another tab or a terminal since the page loaded it is refused [R-STUDIO-CHANGED-
 ```json
 {"hooks": {
   "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/antline/ppl/_assets/hooks/ppl_guard.py", "timeout": 5}]}],
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_guard.py", "timeout": 5}]}],
   "SubagentStart": [{"matcher": "", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/antline/ppl/_assets/hooks/ppl_dispatch.py", "timeout": 5}]}]}}
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_dispatch.py", "timeout": 5}]}]}}
 ```
+
+The paths are the ones `ppl setup claude` finds for your install, so use what it writes or
+prints rather than this example: under pipx the scripts sit in its venv, at
+`.../site-packages/ppl/_assets/hooks/ppl_guard.py`, and in a clone under the checkout's
+`ppl/_assets/hooks/`.
 
 The interpreter in those commands has to be Python 3.11 or newer, and `ppl setup
 claude` writes the one that ran it, so the hooks do not depend on which `python3`
@@ -395,13 +407,13 @@ export PPL_SKILLS_DIR=$PPL_HOME/workspace/.claude/skills
 ppl setup --answer workspace=$PPL_HOME/workspace
 ```
 
-`PPL_HOME/studio/cache/` holds the Claude drafts the studio reuses. Removing it with `rm -rf`
-is always safe, the next draft asks Claude again, and `ppl destroy` leaves it in place.
-
 A `claude` session started in that workspace sees the sandbox agents and skill.
 Export `PPL_HOME` in the shell that launches `claude` too, or the hooks read a
 different data root than the CLI. Check that `data_root` in `ppl doctor`'s JSON
 line is your temp dir.
+
+`PPL_HOME/studio/cache/` holds the Claude drafts the studio reuses. Removing it with `rm -rf`
+is always safe, the next draft asks Claude again, and `ppl destroy` leaves it in place.
 
 ## Tests
 

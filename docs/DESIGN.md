@@ -2033,7 +2033,12 @@ An answer that is unusable as a whole (not JSON, no structured output, a draft o
 shape) is asked for once more with the same input and the reason added to the system prompt
 (`extract.RETRY_PROMPT`), in `ppl`'s own words without Claude's echoed text. A failed process
 or a timeout is not asked again, and items dropped one by one are shown in the form, not asked
-again. The job log shows each call and its cost. With no md file, or when the extraction
+again. The job log shows each call and its cost. A successful answer is kept under
+`PPL_HOME/studio/cache/extract/`, keyed on the sha256 of the exact input together with the
+prompt, schema, resolved model id, Claude version and extraction code. A later extraction with
+that key reuses it at no cost once the checks above pass it again, and an unverified or stale
+model in `models.json`, or an unreadable Claude version, turns the reuse off for that call.
+With no md file, or when the extraction
 fails, the draft comes from the preset of the stack the build files name, and its note quotes
 the failure, both reasons when the second answer failed too. Presets and the extraction also
 carry the test globs (`[tests] sources`), one per alternative: a preset names its stack's own,
