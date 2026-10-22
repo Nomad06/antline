@@ -5,7 +5,7 @@ import re
 import stat
 import sys
 
-from . import (boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
+from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
                harness, metrics, models, paths, recover, refusals, review, routing, run, schema,
                setup, status, store, trackers, verdict, watchdog)
 from .errors import PplError, role_output
@@ -1027,6 +1027,7 @@ def add_from(parser, default=None):
 
 def build_parser():
     parser = JsonArgumentParser(prog="ppl")
+    parser.add_argument("--version", action="version", version="antline %s" % __version__)
     # --task belongs to each subparser only. A parent-level copy would be silently
     # overwritten by the subparser default, so `ppl --task X status` would lose X.
     # parser_class is passed explicitly so every subparser (a bad `stage`, a bad

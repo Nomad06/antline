@@ -29,6 +29,7 @@ os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 os.environ["PPL_LOCAL_SETTINGS_DIR"] = tmphome.mkdtemp(prefix="ppllocalsettings-")
 
 import fixtures
+import ppl
 from ppl.errors import PplError
 from ppl import boundary, cli, config, doctor, models as ppl_models, paths, setup
 
@@ -3686,6 +3687,13 @@ class TestRefusalRetryCap(unittest.TestCase):
                                           "--from", "ppl-briefer")
         self.assertEqual(code, 0, err)
         self.assertEqual(err.strip(), "warning: refusal count not updated: disk full")
+
+
+class TestVersion(unittest.TestCase):
+    def test_version_prints_the_distribution_and_version(self):
+        code, out, _ = call("--version")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "antline %s\n" % ppl.__version__)
 
 
 if __name__ == "__main__":

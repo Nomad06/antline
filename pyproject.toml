@@ -1,13 +1,14 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "antline"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Drive an issue through briefing, isolated implementation, independent tests, gates and review to an approved merge request, with Claude Code subagents in a cage."
 readme = "README.md"
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{name = "Nomad06", email = "fortune06@yandex.ru"}]
 dependencies = []
@@ -16,10 +17,20 @@ dependencies = []
 ppl = "ppl.cli:main"
 
 [tool.setuptools]
-packages = ["ppl", "ppl.panel", "ppl.forges", "ppl.trackers", "ppl.studio"]
 include-package-data = true
 
+[tool.setuptools.dynamic]
+version = {attr = "ppl.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["ppl", "ppl.*"]
+namespaces = true
+
 [tool.setuptools.package-data]
+"ppl" = ["_assets/**/*"]
 "ppl.forges" = ["fragments/*/*.md"]
 "ppl.trackers" = ["fragments/*/*.md"]
 "ppl.panel" = ["index.html", "static/*", "static/*/*"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["__pycache__", "*.pyc"]

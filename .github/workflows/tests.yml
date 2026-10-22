@@ -14,7 +14,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - run: pip install "setuptools>=77"
       - run: python -m unittest discover -s tests -q
+        env:
+          PPL_REQUIRE_PACKAGING: "1"
       - run: python tools/cage_check.py
   python-floor:
     # The interpreter floor under Python 3.9: both hooks deny a role and exit 0,
