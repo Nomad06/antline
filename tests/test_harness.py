@@ -1424,7 +1424,7 @@ class TestRenderSkill(HarnessTestCase):
         fixtures.install_harness("example-maven")
         offered = set(harness._values(harness.load("example-maven")))
         sources = list((fixtures.SOURCE / "skill").rglob("*.skeleton"))
-        sources += list((fixtures.SOURCE / "ppl" / "forges" / "fragments").rglob("*.md"))
+        sources += list((fixtures.SOURCE.parent / "forges" / "fragments").rglob("*.md"))
         used = set()
         for path in sources:
             used.update(harness._INCLUDE_RE.findall(path.read_text(encoding="utf-8")))

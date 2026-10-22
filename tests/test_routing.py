@@ -17,7 +17,7 @@ AGENTS_DIR = tmphome.mkdtemp(prefix="pplagents-")
 os.environ["PPL_HOME"] = HOME
 os.environ["PPL_AGENTS_DIR"] = AGENTS_DIR
 
-SOURCE = Path(__file__).resolve().parents[1]
+SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
 shutil.copy(SOURCE / "defaults" / "routing.example.toml", Path(HOME) / "routing.toml")
 
 import fixtures
@@ -775,12 +775,16 @@ class TestProviderAgnosticWorkflow(unittest.TestCase):
 
     def test_no_model_name_appears_outside_routing_toml(self):
         offenders = []
-        for folder in ("ppl", "hooks", "templates", "tools"):
-            for path in sorted((SOURCE / folder).rglob("*")):
+        repo = SOURCE.parents[1]
+        unscanned = (SOURCE / "defaults", SOURCE / "skill", SOURCE / "rules.toml")
+        for folder in ("ppl", "tools"):
+            for path in sorted((repo / folder).rglob("*")):
                 if not path.is_file() or path.suffix == ".pyc" or "__pycache__" in str(path):
+                    continue
+                if any(path == item or item in path.parents for item in unscanned):
                     continue
                 lowered = path.read_text(encoding="utf-8", errors="replace").lower()
                 for name in self.MODEL_NAMES:
                     if name in lowered:
-                        offenders.append("%s names %r" % (path.relative_to(SOURCE), name))
+                        offenders.append("%s names %r" % (path.relative_to(repo), name))
         self.assertEqual(offenders, [], "\n".join(offenders))

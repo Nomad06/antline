@@ -398,7 +398,7 @@ STAGE_NEXT_ACTION = {
     "review": "run the review loop (references/review-loop.md)",
     "closure": "transition the run to done (ppl transition done)",
     "merge_watch": ("watch for the merge, record it (ppl merge observed), then write the "
-                    "post-merge Jira update"),
+                    "post-merge tracker update"),
     # "parking" and "escalation" are not keyed here: `run.park` sets
     # `next_safe_action` from the caller's own `safe_next` (a real, specific
     # answer to "what do I do about this blocker"), and stage_enter never

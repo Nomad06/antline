@@ -71,9 +71,13 @@ def _environment(home):
     """The environment of both subprocesses: the throwaway data root is the
     only PPL_ variable that names a place to keep data. The Claude home, the
     agents and skills directories and any other PPL_ variable are dropped, and
-    PPL_ROOT, the code checkout, is pinned to the one this process runs."""
+    PPL_ROOT, the assets directory, and PYTHONPATH are pinned to the package this
+    process runs."""
     inherited = {key: item for key, item in os.environ.items() if not key.startswith("PPL_")}
-    return dict(inherited, PPL_HOME=home, PPL_ROOT=str(paths.root()))
+    parent = str(paths.package_parent())
+    if inherited.get("PYTHONPATH"):
+        parent = parent + os.pathsep + inherited["PYTHONPATH"]
+    return dict(inherited, PPL_HOME=home, PPL_ROOT=str(paths.root()), PYTHONPATH=parent)
 
 
 def parse(returncode, stdout, stderr):
@@ -114,7 +118,7 @@ def check(name, doc, fragments, role, tool, value, boundary=None):
         try:
             child = subprocess.run([sys.executable, "-m", "ppl.studio.playground_child"],
                                    input=json.dumps(spec), capture_output=True, text=True,
-                                   env=environment, cwd=str(paths.root()), timeout=TIMEOUT_SECONDS)
+                                   env=environment, cwd=str(paths.package_parent()), timeout=TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             raise PplError("SCHEMA_INVALID", "the playground could not build its run within %d "
                            "seconds" % TIMEOUT_SECONDS)

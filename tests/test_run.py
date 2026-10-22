@@ -329,6 +329,11 @@ class TestRun(unittest.TestCase):
         self.assertEqual(event["tracker_url"], "https://j/DEMO-110")
 
 
+class TestNextActionText(unittest.TestCase):
+    def test_the_merge_watch_next_action_names_no_tracker_product(self):
+        self.assertNotIn("Jira", run.STAGE_NEXT_ACTION["merge_watch"])
+
+
 class TestMergeWatchAfterDone(unittest.TestCase):
     """closure -> merge_watch is a legal edge of the stage graph, but a run that took it
     before `ppl transition done` sat in merge_watch with status in_progress, with no way

@@ -1,6 +1,6 @@
 """The rule matrix: one row per control rule, loaded and validated.
 
-`rules.toml` is the register of every rule this pipeline claims to hold -
+`ppl/_assets/rules.toml` is the register of every rule this pipeline claims to hold -
 what the rule says, where it is checked, which test proves it denies, and,
 when nothing checks it, what the residual actually is. `tests/
 test_rule_matrix.py` reads the table through this module and fails the suite

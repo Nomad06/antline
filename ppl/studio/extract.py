@@ -5,6 +5,7 @@ JSON schema, then checked again here item by item. An answer refused as a
 whole is asked for once more with the reason. The result only ever fills the
 review form: nothing here writes a file."""
 import copy
+import hashlib
 import json
 import math
 import os
@@ -12,9 +13,9 @@ import re
 import subprocess
 import tempfile
 
-from .. import boundary, config, harness, models, routing
+from .. import boundary, config, harness, models, routing, store
 from ..errors import PplError
-from . import stacks
+from . import extract_cache, stacks
 
 TIMEOUT_SECONDS = 120
 MAX_TURNS = 3
@@ -23,6 +24,9 @@ MAX_SHAPES = 12
 MAX_ENV = 20
 MAX_TEST_SOURCES = 12
 MAX_NOTES = 10
+# Bump whenever check(), SYSTEM_PROMPT or SCHEMA change meaning, so a draft made
+# under the old ones is never reused.
+EXTRACT_VERSION = 1
 LIGHT_FIRST = ("light", "average", "good", "heavy")
 ZERO_WIDTH_SPACE = "\u200b"
 # Test seam: fn(command, stdin_text) -> (returncode, stdout, stderr).
@@ -243,8 +247,8 @@ def check(draft):
 
     clean = {"gates": [], "test_shapes": [], "test_sources": [], "env": [], "default_branch": None,
              "task_key_pattern": None, "notes": []}
-    for index, item in enumerate(draft["gates"]):
-        if index >= MAX_GATES:
+    for item in draft["gates"]:
+        if len(clean["gates"]) >= MAX_GATES:
             drop("gate", item, "more than %d gates" % MAX_GATES)
         elif not _strings(item, ("name", "command", "source")):
             drop("gate", item, "not a {name, command, source} object of strings")
@@ -259,9 +263,9 @@ def check(draft):
             clean["gates"].append({"name": item["name"].strip()[:60],
                                    "command": item["command"].strip(),
                                    "source": item["source"].strip()[:200]})
-    for index, item in enumerate(draft["test_shapes"]):
+    for item in draft["test_shapes"]:
         goals = item.get("goals") if isinstance(item, dict) else None
-        if index >= MAX_SHAPES:
+        if len(clean["test_shapes"]) >= MAX_SHAPES:
             drop("shape", item, "more than %d shapes" % MAX_SHAPES)
         elif not (_strings(item, ("argv0", "example", "source")) and isinstance(goals, list)
                   and all(isinstance(goal, str) for goal in goals)):
@@ -281,8 +285,8 @@ def check(draft):
             clean["test_shapes"].append({"argv0": item["argv0"], "goals": list(dict.fromkeys(goals)),
                                          "example": item["example"].strip(),
                                          "source": item["source"].strip()[:200]})
-    for index, item in enumerate(draft["test_sources"]):
-        if index >= MAX_TEST_SOURCES:
+    for item in draft["test_sources"]:
+        if len(clean["test_sources"]) >= MAX_TEST_SOURCES:
             drop("test_source", item, "more than %d test source globs" % MAX_TEST_SOURCES)
         elif not _strings(item, ("glob", "source")):
             drop("test_source", item, "not a {glob, source} object of strings")
@@ -293,8 +297,8 @@ def check(draft):
         else:
             clean["test_sources"].append({"glob": item["glob"].strip(),
                                           "source": item["source"].strip()[:200]})
-    for index, item in enumerate(draft["env"]):
-        if index >= MAX_ENV:
+    for item in draft["env"]:
+        if len(clean["env"]) >= MAX_ENV:
             drop("env", item, "more than %d variables" % MAX_ENV)
         elif not _strings(item, ("name", "value", "source")):
             drop("env", item, "not a {name, value, source} object of strings")
@@ -336,8 +340,8 @@ def check(draft):
 
 
 def _ask(runner, cmd, text, emit):
-    """(clean, dropped, cost) of one call. A refused answer is logged with its cost
-    before it is raised, so the job log shows every call."""
+    """(raw_draft, clean, dropped, cost) of one call. A refused answer is logged with
+    its cost before it is raised, so the job log shows every call."""
     returncode, stdout, stderr = runner(cmd, text)
     cost = None
     try:
@@ -351,31 +355,92 @@ def _ask(runner, cmd, text, emit):
         raise
     emit("read %d gate(s) and %d shape(s), dropped %d item(s), cost %.4f USD"
          % (len(clean["gates"]), len(clean["test_shapes"]), len(dropped), cost))
-    return clean, dropped, cost
+    return draft, clean, dropped, cost
 
 
-def extract(files, emit=lambda line: None):
+def cache_key(text, model_id, claude_version):
+    """sha256 of everything a draft depends on: the exact input, the prompt, the
+    schema, the resolved model, the claude version and the extraction code."""
+    canonical = json.dumps({"bundle": text, "system_prompt": SYSTEM_PROMPT, "schema": SCHEMA,
+                            "model": model_id, "claude_version": claude_version,
+                            "extract_version": EXTRACT_VERSION},
+                           sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _identity(model, binary, emit):
+    """(resolved_id, claude_version) the cache keys on, or None with one log line
+    when the call is not reusable."""
+    try:
+        identity = models.verified_identity(model, binary)
+        unreadable = identity is None and models.claude_version(binary) == "unknown"
+    except PplError as exc:
+        emit("drafts are not reused: models.json cannot be read (%s)" % exc.message)
+        return None
+    if identity is None:
+        emit("drafts are not reused: %s" % ("the claude version cannot be read" if unreadable
+                                            else "%s is not a verified model" % model))
+    return identity
+
+
+def _reused(key, emit):
+    """The result of a cached draft that today's checks still pass, else None."""
+    try:
+        entry = extract_cache.load(key, models.ttl_days())
+    except Exception as exc:
+        emit("the draft cache cannot be read: %s" % exc)
+        return None
+    if entry is None:
+        return None
+    try:
+        clean, dropped = check(entry["raw"])
+    except AnswerRefused:
+        emit("the cached draft no longer passes the checks, asking Claude again")
+        return None
+    emit("reused a draft from %s, no cost" % entry["created_at"])
+    return {"extracted": clean, "dropped": dropped, "cost_usd": 0.0, "cached": True,
+            "cached_at": entry["created_at"]}
+
+
+def extract(files, emit=lambda line: None, fresh=False):
     """One call, and one more with the reason when the answer itself is refused. A
     failed process or a timeout is not asked again, and dropped items are shown in
-    the form instead."""
+    the form instead. A draft made from the same input, resolved model, claude
+    version and extraction code is reused, unless `fresh`. A cache that cannot be
+    read or written is logged and never fails the extraction."""
     if not files:
         raise PplError("EXTRACTION_FAILED", "no md file to read")
     model = light_model()
     binary = config.section("claude").get("binary") or "claude"
+    identity = _identity(model, binary, emit)
+    text = bundle(files)
+    key = cache_key(text, *identity) if identity else None
+    if key and not fresh:
+        hit = _reused(key, emit)
+        if hit:
+            hit["model"] = model
+            return hit
     emit("asking %s to read %s" % (model, ", ".join(item["path"] for item in files)))
     runner = RUNNER or _run_claude
-    text = bundle(files)
     try:
-        clean, dropped, cost = _ask(runner, command(model, binary), text, emit)
+        raw, clean, dropped, cost = _ask(runner, command(model, binary), text, emit)
     except AnswerRefused as first:
         emit("asking %s once more with the reason" % model)
         try:
-            clean, dropped, cost = _ask(runner, command(model, binary, first.reason), text, emit)
+            raw, clean, dropped, cost = _ask(runner, command(model, binary, first.reason), text,
+                                             emit)
         except PplError as second:
             raise PplError("EXTRACTION_FAILED", "Claude's answer was refused (%s) and the "
                            "second call failed too (%s)" % (first.message, second.message))
         cost += first.cost or 0.0
-    return {"extracted": clean, "dropped": dropped, "model": model, "cost_usd": cost}
+    if key:
+        try:
+            extract_cache.save(key, {"created_at": store.now(), "model": identity[0],
+                                     "cost_usd": cost, "raw": raw})
+        except (OSError, PplError) as exc:
+            emit("the draft was not kept for reuse: %s" % getattr(exc, "message", exc))
+    return {"extracted": clean, "dropped": dropped, "model": model, "cost_usd": cost,
+            "cached": False}
 
 
 def _slug(name):

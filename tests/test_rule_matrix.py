@@ -28,7 +28,7 @@ os.environ.setdefault("PPL_HOME", tmphome.mkdtemp(prefix="pplhome-"))
 from ppl import rules, run
 from ppl.errors import PplError
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
 import ppl_guard
 
 REPO = Path(__file__).resolve().parents[1]
@@ -920,7 +920,7 @@ class TestTheRuleMatrix(PplHomeTestCase):
         self.assertEqual(self.ids["R-TEST-WORKER-READ-TOOLS"]["enforcement"], "blocking")
 
     def test_the_table_is_ascii_without_tabs_or_crlf(self):
-        raw = (REPO / "rules.toml").read_bytes()
+        raw = (REPO / "ppl" / "_assets" / "rules.toml").read_bytes()
         self.assertEqual(raw, raw.decode("ascii", "ignore").encode("ascii"))
         self.assertNotIn(b"\t", raw)
         self.assertNotIn(b"\r", raw)
@@ -953,7 +953,7 @@ class TestLoad(PplHomeTestCase):
         real = rules.load()
         checkout = Path(tmphome.mkdtemp(prefix="pplroot-"))
         (checkout / "defaults").mkdir()
-        head, last = (REPO / "rules.toml").read_text(encoding="utf-8").rsplit("[[rule]]", 1)
+        head, last = (REPO / "ppl" / "_assets" / "rules.toml").read_text(encoding="utf-8").rsplit("[[rule]]", 1)
         (checkout / "rules.toml").write_text(head, encoding="utf-8")
         with mock.patch.dict(os.environ, {"PPL_ROOT": str(checkout)}):
             self.assertEqual(rules.default_path(), checkout / "rules.toml")

@@ -29,10 +29,11 @@ os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 os.environ["PPL_LOCAL_SETTINGS_DIR"] = tmphome.mkdtemp(prefix="ppllocalsettings-")
 
 import fixtures
+import ppl
 from ppl.errors import PplError
 from ppl import boundary, cli, config, doctor, models as ppl_models, paths, setup
 
-ROUTING_EXAMPLE = Path(__file__).resolve().parents[1] / "defaults" / "routing.example.toml"
+ROUTING_EXAMPLE = Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "defaults" / "routing.example.toml"
 MODULE_HOME = os.environ["PPL_HOME"]
 
 
@@ -225,7 +226,7 @@ class TestCli(unittest.TestCase):
         for name in ["init", "show", "status", "stage", "brief", "boundary", "baseline",
                      "evidence", "verdict", "transition", "park", "escalate", "budget",
                      "approval", "recover", "serve", "control", "routing", "dispatch",
-                     "apply-patch", "mr", "merge", "review"]:
+                     "apply-patch", "mr", "merge", "review", "demo"]:
             self.assertIn(name, cli.COMMANDS)
 
     # --- carried-forward requirement 1: recover is gated by control.enforce ---
@@ -2130,7 +2131,7 @@ class TestInitIsolatedFlag(unittest.TestCase):
 
 # The entry ppl setup claude writes: this interpreter, then the real guard script.
 GUARD_COMMAND = "%s %s" % (shlex.quote(sys.executable),
-                           shlex.quote(str(Path(__file__).resolve().parents[1] / "hooks"
+                           shlex.quote(str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"
                                            / "ppl_guard.py")))
 
 
@@ -3686,6 +3687,13 @@ class TestRefusalRetryCap(unittest.TestCase):
                                           "--from", "ppl-briefer")
         self.assertEqual(code, 0, err)
         self.assertEqual(err.strip(), "warning: refusal count not updated: disk full")
+
+
+class TestVersion(unittest.TestCase):
+    def test_version_prints_the_distribution_and_version(self):
+        code, out, _ = call("--version")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "antline %s\n" % ppl.__version__)
 
 
 if __name__ == "__main__":

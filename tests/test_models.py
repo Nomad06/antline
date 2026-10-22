@@ -16,7 +16,7 @@ import tmphome
 
 HOME = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_HOME"] = HOME
-SOURCE = Path(__file__).resolve().parents[1]
+SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
 shutil.copy(SOURCE / "defaults" / "routing.example.toml", Path(HOME) / "routing.toml")
 
 from ppl import cli, models, paths, routing
@@ -116,6 +116,30 @@ class TestVerify(ModelsTestCase):
         runner = fake_runner({target: ok("id")})
         models.verify(models_to_check=[target], runner=runner)
         self.assertEqual(runner.calls, [target])
+
+
+class TestVerifiedIdentity(ModelsTestCase):
+    def test_verified_identity_is_the_resolved_id_and_version_of_a_verified_model(self):
+        models.verify(models_to_check=["haiku"], runner=fake_runner({"haiku": ok("claude-haiku-x")}))
+        self.assertEqual(models.verified_identity("haiku"), ("claude-haiku-x", "9.9.9"))
+
+    def test_verified_identity_is_none_for_a_stale_or_unknown_model(self):
+        self.assertIsNone(models.verified_identity("haiku"))
+        models.verify(models_to_check=["haiku"], runner=fake_runner({"haiku": ok("claude-haiku-x")}))
+        self.assertIsNone(models.verified_identity("sonnet"))
+        self.use_claude_version("9.9.10")
+        self.assertIsNone(models.verified_identity("haiku"))
+        self.use_claude_version("unknown")
+        models.verify(models_to_check=["haiku"], runner=fake_runner({"haiku": ok("claude-haiku-x")}))
+        self.assertIsNone(models.verified_identity("haiku"))
+
+    def test_verified_identity_reads_the_claude_version_once(self):
+        models.verify(models_to_check=["haiku"], runner=fake_runner({"haiku": ok("claude-haiku-x")}))
+        seen = []
+        with mock.patch.object(models, "claude_version",
+                               lambda binary="claude": seen.append(binary) or "9.9.9"):
+            models.verified_identity("haiku", "my-claude")
+        self.assertEqual(seen, ["my-claude"])
 
 
 class TestStatusAndRequire(ModelsTestCase):

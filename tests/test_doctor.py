@@ -865,6 +865,12 @@ class TestHookShape(unittest.TestCase):
                           % shlex.quote(sys.executable)}, dispatch={})
         self.assertIn("/nonexistent/hooks/ppl_guard.py", self.local()["hook_shape"])
 
+    def test_a_guard_registered_at_the_old_hooks_path_names_ppl_setup_claude(self):
+        old = os.path.join(tmphome.mkdtemp(prefix="oldroot-"), "hooks", "ppl_guard.py")
+        self.write(guard={"command": "%s %s" % (shlex.quote(sys.executable), shlex.quote(old))},
+                   dispatch={})
+        self.assertIn("ppl setup claude", doctor.guard_shape_problem(cwd=self.local_dir))
+
     def test_a_guard_run_as_a_bare_script_is_reported(self):
         self.write(guard={"command": str(fixtures.SOURCE / "hooks" / "ppl_guard.py")}, dispatch={})
         self.assertIn("names no ppl_guard.py script", self.local()["hook_shape"])

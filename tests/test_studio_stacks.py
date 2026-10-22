@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "hooks"))
+sys.path.insert(0, str(REPO / "ppl" / "_assets" / "hooks"))
 import ppl_guard
 from ppl import boundary, harness, tomlout, trackers
 from ppl.errors import PplError

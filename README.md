@@ -9,7 +9,7 @@ is done: deterministic code checks the evidence before the run moves on. The age
 work inside a cage. A PreToolUse hook denies every write outside a role's boundary
 [R-ROLE-CODE-WORKER-BOUNDARY], every read the test worker must not make
 [R-TEST-WORKER-READ-TOOLS], and the forge actions a human must perform
-[R-MCP-RESOLVE-THREAD]. A bracketed ID like these names a row of `rules.toml`, and the
+[R-MCP-RESOLVE-THREAD]. A bracketed ID like these names a row of `ppl/_assets/rules.toml`, and the
 test suite fails if a blocking row has no test that asserts the refusal.
 
 <picture>
@@ -54,8 +54,8 @@ test suite fails if a blocking row has no test that asserts the refusal.
   project's harness from its `CLAUDE.md` for a fraction of a cent, and lets you fire
   tool calls at the real guard hook.
 - **Nothing installed into your project.** Python 3.11 standard library only. The code lives
-  in a git clone, the data under `~/.ppl`, the agents in a separate workspace. Your
-  repository gets a branch and a merge request.
+  in the installed package or a git clone, the data under `~/.ppl`, the agents in a
+  separate workspace. Your repository gets a branch and a merge request.
 
 ## Why it is different
 
@@ -78,7 +78,7 @@ test suite fails if a blocking row has no test that asserts the refusal.
 </picture>
 
 The cells are the guard hook's own answers: each call was sent through
-`hooks/ppl_guard.py` from the studio's cage playground. The orchestrator's tracker
+`ppl/_assets/hooks/ppl_guard.py` from the studio's cage playground. The orchestrator's tracker
 writes open once the run reaches the merge watch and `ppl merge observed` has recorded the
 merge [R-JIRA-GATE]. The read-only agents
 also get no Edit, Write or Bash tool in their agent files [R-ROLE-TOOLS-READONLY].
@@ -120,9 +120,9 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `rules.toml` holds 174 rules, 130 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 174 rules, 130 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 2323 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 2369 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - Irreversible steps stay with people: merging, resolving threads, approving, and any
   disagreement with a reviewer.
@@ -151,7 +151,6 @@ the test writer tries to `cat` product code and the hook denies it
 - More tokens than one agent. Six roles, high effort on the brief and the verification,
   and long runs can hit subscription rate limits and park.
 - It ends at approval and a human merges. That is deliberate, and it is not hands-off.
-- No packaged installer: a git clone plus `ppl setup`.
 - The cage is proven at hook level. An end-to-end run against your own tracker, forge and
   reviewers is yours to make.
 
@@ -170,14 +169,54 @@ the test writer tries to `cat` product code and the hook denies it
 ## Install
 
 ```bash
+pipx install git+https://github.com/Nomad06/antline
+ppl demo
+```
+
+`pipx install` needs Python 3.11 or newer, the same floor as the rest of antline.
+There is no PyPI package yet, so the install reads the repository.
+
+`ppl demo` plays one issue through the real `ppl` and the real guard hook in a few
+seconds. It runs offline in a throwaway sandbox (its own `HOME`, data root, workspace,
+sample git repo and a stand-in for `gh`), and the agents are scripted stand-ins, so it
+spends no tokens and leaves your `~/.ppl` and your `~/.claude` alone. Each step prints
+one line: who acts, what they do, the answer and the rule behind it. Several of the
+answers are refusals, among them:
+
+- The code worker edits a test file and the guard says no [R-ROLE-CODE-WORKER-TESTS].
+- The orchestrator dispatches the test worker with the implementation pasted into the
+  prompt and the dispatch is denied [R-TEST-WORKER-DISPATCH-LEAK].
+- `gh issue close` runs before the merge is observed and the guard holds it back
+  [R-TRACKER-CLI-GATE].
+
+`ppl demo --keep` leaves the sandbox in place and prints where it is.
+
+Then set up for real with `ppl serve --open` (the studio) or `ppl setup` (the terminal).
+
+### Upgrading
+
+Upgrade with `pipx reinstall antline`, which installs the current `main` again.
+`pipx upgrade antline` can answer "already at latest version" and change nothing, since
+the version number stays the same between merges. After the reinstall, or a `git pull`
+that moves files, run `ppl setup claude` again. The hook commands in your
+`settings.local.json` hold absolute paths, so an old registration makes every tool call in
+the workspace fail with `can't open file '.../hooks/ppl_guard.py'`, and `ppl doctor` names
+the hook path that no longer exists. If you answered `global` or `manual`,
+`ppl setup claude` prints the new entries: paste them over the old ones in `~/.claude/settings.json`
+(or the file you chose).
+
+### From a clone (contributors)
+
+```bash
 git clone https://github.com/Nomad06/antline ~/antline
 export PATH="$HOME/antline/bin:$PATH"     # add this line to your shell profile
 ppl setup
 ```
 
-The supported install is the clone with `bin/` on `PATH`: `bin/ppl` points ppl at
-the checkout, where `defaults/`, `templates/` and `skill/` live. An editable dev
-install (`pip install -e .`) also works from the clone.
+`bin/ppl` runs the checkout, whose `ppl/_assets/` holds `defaults/`, `templates/`
+and `skill/`. An editable install (`pip install -e .`) also works from the clone.
+
+### The setup steps
 
 `ppl setup` walks six steps - paths, claude, models, harness, forge, apply -
 each skippable with `s` and re-runnable with `ppl setup <step>`: the data root
@@ -202,6 +241,9 @@ drafts the gates, the commands the test writer may run and the build environment
 cents). Otherwise, or when that call fails, the draft starts from a preset for the stack your
 build files name: npm, Python, Maven, Gradle, Go, Cargo or Make. You review every field in a
 form before anything is installed, with the source of each field shown beside it.
+A draft made from the same files, model and Claude version is reused at no cost, the screen
+says so, and "Draft again (new call)" asks Claude again. Reuse needs the model of the lightest
+tier verified by `ppl models verify`, otherwise every draft is a new call.
 
 The Models screen offers three presets, a tier and an effort per role: Economy, Balanced
 and Max quality. The same presets are `ppl routing preset economy|balanced|max`.
@@ -232,10 +274,15 @@ another tab or a terminal since the page loaded it is refused [R-STUDIO-CHANGED-
 ```json
 {"hooks": {
   "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/antline/hooks/ppl_guard.py", "timeout": 5}]}],
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_guard.py", "timeout": 5}]}],
   "SubagentStart": [{"matcher": "", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/antline/hooks/ppl_dispatch.py", "timeout": 5}]}]}}
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_dispatch.py", "timeout": 5}]}]}}
 ```
+
+The paths are the ones `ppl setup claude` finds for your install, so use what it writes or
+prints rather than this example: under pipx the scripts sit in its venv, at
+`.../site-packages/ppl/_assets/hooks/ppl_guard.py`, and in a clone under the checkout's
+`ppl/_assets/hooks/`.
 
 The interpreter in those commands has to be Python 3.11 or newer, and `ppl setup
 claude` writes the one that ran it, so the hooks do not depend on which `python3`
@@ -266,7 +313,7 @@ A harness is a directory under `~/.ppl/harnesses/<name>/` holding everything
 that belongs to one project: `harness.toml` (repo path, task key pattern,
 tracker and forge settings, build gates, the command shapes the test worker
 may run), `skill/` fragments and `templates/` overlays. Two examples ship in
-`defaults/harnesses/`: `example-maven` (GitLab, Maven) and `example-generic`
+`ppl/_assets/defaults/harnesses/`: `example-maven` (GitLab, Maven) and `example-generic`
 (GitHub, make). Keep yours in its own git repository and install it with
 `ppl harness add <name> --source <directory or git url>`.
 
@@ -308,7 +355,7 @@ with `repo` (owner/name) and an optional `task_prefix` (default `GH`, so tasks r
 ## Models
 
 `~/.ppl/routing.toml` names a model per tier (`heavy`, `good`, `average`,
-`light`) and a tier per role, see `defaults/routing.example.toml`. `ppl models
+`light`) and a tier per role, see `ppl/_assets/defaults/routing.example.toml`. `ppl models
 status` shows what is verified. `ppl init` refuses to start a run while a model
 it would route to is unverified or stale, `ppl models verify` fixes that, and
 `--skip-model-check` records that you chose not to [R-INIT-MODELS-VERIFIED].
@@ -365,6 +412,9 @@ Export `PPL_HOME` in the shell that launches `claude` too, or the hooks read a
 different data root than the CLI. Check that `data_root` in `ppl doctor`'s JSON
 line is your temp dir.
 
+`PPL_HOME/studio/cache/` holds the Claude drafts the studio reuses. Removing it with `rm -rf`
+is always safe, the next draft asks Claude again, and `ppl destroy` leaves it in place.
+
 ## Tests
 
 ```bash
@@ -372,7 +422,7 @@ python3 -m unittest discover -s tests -q
 python3 tools/cage_check.py
 ```
 
-The rule matrix (`rules.toml`, `tests/test_rule_matrix.py`) ties every
+The rule matrix (`ppl/_assets/rules.toml`, `tests/test_rule_matrix.py`) ties every
 enforcement claim in the documents to a row and every blocking row to a test
 that asserts a refusal. Keep it green. `tools/cage_check.py` drives the guard
 hook as a subprocess, the way Claude Code does.

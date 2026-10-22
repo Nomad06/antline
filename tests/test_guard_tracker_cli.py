@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
 
 import fixtures
 from ppl import boundary, doctor, harness, paths, run, setup, store

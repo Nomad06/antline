@@ -108,9 +108,10 @@ class Prompter:
 
 def hook_entries(code_root):
     """The PreToolUse guard entry and the SubagentStart dispatch entry, both
-    on absolute paths into the code checkout, run by the interpreter running
-    this setup. Bare python3 is whatever the PATH Claude Code spawns hooks with
-    finds first, and one older than 3.11 cannot run the hooks."""
+    on absolute paths into the assets directory of the installed package or
+    the clone, run by the interpreter running this setup. Bare python3 is
+    whatever the PATH Claude Code spawns hooks with finds first, and one older
+    than 3.11 cannot run the hooks."""
     hooks_dir = Path(os.path.abspath(code_root)) / "hooks"
 
     def entry(matcher, script):

@@ -156,7 +156,7 @@ def _load_all(task_id):
     refusing them - "an unpopulated registry gated nothing" walking back in
     through a different door. The guard hook's `active_state()` was
     hardened to fail CLOSED on exactly this class in cycle 1
-    (`hooks/ppl_guard.py:active_state`); this registry gets the same
+    (`ppl/_assets/hooks/ppl_guard.py:active_state`); this registry gets the same
     treatment now: a finding file this function cannot trust makes every
     caller - `list_all`, `list_open`, `open_blocking_on_own_diff` - refuse
     with SCHEMA_INVALID rather than silently proceed as if the file did not

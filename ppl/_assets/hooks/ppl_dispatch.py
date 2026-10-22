@@ -17,7 +17,23 @@ if __name__ == "__main__" and ppl_python_floor.refuse_old_python(
         sys.version_info, "ppl_dispatch", "SubagentStart", sys.stdin, sys.stdout, sys.stderr):
     sys.exit(0)
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# parents[3] holds the ppl package this hook ships in. It goes first on sys.path
+# for the import of ppl alone, so that copy wins over any other installed ppl,
+# and comes off again before anything else is imported. Installed, parents[3]
+# is site-packages, where a top-level module named like a stdlib one (an old
+# backport) would shadow the stdlib for every later import and crash the hook,
+# and Claude Code allows the call when a hook crashes. The modules of ppl
+# resolve through ppl.__path__, not sys.path.
+_PACKAGE_PARENT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_PACKAGE_PARENT))
+try:
+    import ppl
+finally:
+    sys.path.remove(str(_PACKAGE_PARENT))
+_PPL_FILE = getattr(ppl, "__file__", None)
+if not _PPL_FILE or not Path(_PPL_FILE).resolve().is_relative_to(_PACKAGE_PARENT):
+    sys.stderr.write("ppl_dispatch: imported ppl from %s, not the one beside this hook in %s\n"
+                     % (_PPL_FILE, _PACKAGE_PARENT))
 
 from ppl import boundary, budget, run
 from ppl.errors import PplError
@@ -41,7 +57,7 @@ def on_start(payload):
     (ppl/cli.py:check_dispatch_budget, self-described as "the whole of" the
     enforcement) compared against zero for the life of the run - the same bug
     class cycle 1 fixed for the write boundary. A ppl-* agent_type is
-    pipeline-internal wherever its session sits (hooks/ppl_guard.py:decide
+    pipeline-internal wherever its session sits (ppl/_assets/hooks/ppl_guard.py:decide
     already scopes on that), and ppl runs one active run at a time, so a role
     dispatch anywhere this hook fires is this run's dispatch.
     """

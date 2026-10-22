@@ -7,25 +7,32 @@ from .errors import PplError
 TASK_ID_RE = re.compile(r"^[A-Z][A-Z0-9]+-[0-9]+$")
 
 
+PACKAGE_ASSETS = Path(__file__).resolve().parent / "_assets"
+
+
+def package_parent():
+    """The directory holding the ppl package, for a child's PYTHONPATH."""
+    return Path(__file__).resolve().parents[1]
+
+
 def root():
-    """The code checkout. bin/ppl sets PPL_ROOT, a plain `python3 -m ppl` falls
-    back to the package's own parent. A root with no defaults/ is not a checkout,
-    and is refused here, naming the fix, rather than step by step later."""
+    """The assets directory: PPL_ROOT when set, else the package's own. A root
+    with no defaults/ is refused here, naming the fix, rather than step by step
+    later."""
     configured = os.environ.get("PPL_ROOT")
-    checkout = Path(configured or Path(__file__).resolve().parents[1])
-    if (checkout / "defaults").is_dir():
-        return checkout
+    assets = Path(configured) if configured else PACKAGE_ASSETS
+    if (assets / "defaults").is_dir():
+        return assets
     if configured:
-        raise PplError("SCHEMA_INVALID",
-                       "PPL_ROOT=%s has no defaults/ directory, so it is not an antline "
-                       "checkout. Point PPL_ROOT at the clone, or unset it and run bin/ppl "
-                       "from the clone." % configured)
+        message = ("PPL_ROOT=%s has no defaults/ directory, so it is not an assets directory. "
+                   "Point PPL_ROOT at a directory holding defaults/, or unset it." % configured)
+        if (assets / "ppl" / "_assets" / "defaults").is_dir():
+            message += (" It looks like a clone: the assets moved into the package, so use "
+                        "PPL_ROOT=%s or unset it." % (assets / "ppl" / "_assets"))
+        raise PplError("SCHEMA_INVALID", message)
     raise PplError("SCHEMA_INVALID",
-                   "ppl's code root %s has no defaults/ directory: a non-editable install "
-                   "(pip install . or pipx install .) copies the ppl package alone, without the "
-                   "defaults, templates, skill and hooks it reads. Run ppl from a clone with "
-                   "bin/ on PATH, install the clone with pip install -e ., or set PPL_ROOT to "
-                   "the clone." % checkout)
+                   "ppl's assets directory %s has no defaults/ directory: the installation "
+                   "is incomplete. Reinstall ppl." % assets)
 
 
 def home():
