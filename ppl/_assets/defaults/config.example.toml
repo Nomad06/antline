@@ -17,3 +17,12 @@ verify_ttl_days = 30
 
 [harness]
 active = ""
+
+# Dollar figures need prices. antline ships no built-in prices: it never states
+# a cost it cannot source. A model with no price here is listed as unpriced.
+# Use the exact model id and USD per million tokens, all four keys, numbers >= 0.
+# [prices."claude-sonnet-5-5"]
+# input = 3.0
+# cache_write = 3.75
+# cache_read = 0.3
+# output = 15.0
