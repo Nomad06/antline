@@ -7,7 +7,7 @@ write attempts. This script cannot dispatch subagents, and registering the
 guard hook in ~/.claude/settings.json would arm it for every Claude Code
 session on the machine, which is the operator's decision, not this script's.
 So instead: build the exact stdin payload Claude Code would send,
-invoke hooks/ppl_guard.py as a subprocess against a temporary PPL_HOME and a
+invoke ppl/_assets/hooks/ppl_guard.py as a subprocess against a temporary PPL_HOME and a
 real temporary git worktree, and check the JSON (or its absence) on stdout -
 the same contract the harness itself uses.
 
@@ -23,7 +23,8 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GUARD_HOOK = REPO_ROOT / "hooks" / "ppl_guard.py"
+ASSETS = REPO_ROOT / "ppl" / "_assets"
+GUARD_HOOK = ASSETS / "hooks" / "ppl_guard.py"
 
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -126,7 +127,7 @@ class Cage:
         # The test worker's build shapes and the test globs come from the run's
         # harness snapshot, so the sandbox run carries an example harness's one.
         name = "example-generic" if python else "example-maven"
-        source = REPO_ROOT / "defaults" / "harnesses" / name
+        source = ASSETS / "defaults" / "harnesses" / name
         target = paths.harness_dir(name)
         if not target.exists():
             shutil.copytree(source, target)

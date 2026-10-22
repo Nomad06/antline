@@ -193,7 +193,8 @@ def hook_runs(cwd=None, workspace=None):
 
 
 def _hooks_on_path():
-    hooks_dir = str(Path(__file__).resolve().parents[1] / "hooks")
+    from . import paths
+    hooks_dir = str(paths.PACKAGE_ASSETS / "hooks")
     if hooks_dir not in sys.path:
         # Appended, not inserted: the hooks directory must never shadow a ppl module.
         sys.path.append(hooks_dir)
@@ -201,7 +202,7 @@ def _hooks_on_path():
 
 def guarded_tool_names():
     """Every tool name the guard hook acts on, read from the hook file itself
-    (hooks/ppl_guard.py:GUARDED_TOOL_NAMES) so this check cannot drift from the cage."""
+    (ppl/_assets/hooks/ppl_guard.py:GUARDED_TOOL_NAMES) so this check cannot drift from the cage."""
     _hooks_on_path()
     import ppl_guard
     return tuple(ppl_guard.GUARDED_TOOL_NAMES)

@@ -16,19 +16,30 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 class TestRoots(unittest.TestCase):
-    def test_root_is_the_checkout_when_ppl_root_is_unset(self):
+    def test_root_is_the_packages_assets_directory_when_ppl_root_is_unset(self):
         saved = os.environ.pop("PPL_ROOT", None)
         try:
-            self.assertEqual(paths.root(), REPO)
+            self.assertEqual(paths.root(), REPO / "ppl" / "_assets")
+            for entry in ("defaults", "templates", "skill", "hooks", "rules.toml"):
+                self.assertTrue((paths.root() / entry).exists(), entry)
         finally:
             if saved is not None:
                 os.environ["PPL_ROOT"] = saved
 
-    def test_root_honours_ppl_root(self):
-        checkout = Path(tmphome.mkdtemp(prefix="pplroot-"))
-        (checkout / "defaults").mkdir()
-        with mock.patch.dict(os.environ, {"PPL_ROOT": str(checkout)}):
-            self.assertEqual(paths.root(), checkout)
+    def test_root_honours_a_ppl_root_holding_defaults(self):
+        assets = Path(tmphome.mkdtemp(prefix="pplroot-"))
+        (assets / "defaults").mkdir()
+        with mock.patch.dict(os.environ, {"PPL_ROOT": str(assets)}):
+            self.assertEqual(paths.root(), assets)
+
+    def test_a_ppl_root_that_is_a_clone_is_refused_naming_its_assets_directory(self):
+        clone = tmphome.mkdtemp(prefix="pplroot-")
+        (Path(clone) / "ppl" / "_assets" / "defaults").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"PPL_ROOT": clone}):
+            with self.assertRaises(PplError) as caught:
+                paths.root()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn(os.path.join(clone, "ppl", "_assets"), caught.exception.message)
 
     def test_a_ppl_root_without_defaults_is_a_schema_error_naming_the_fix(self):
         bare = tmphome.mkdtemp(prefix="pplroot-")
@@ -39,22 +50,8 @@ class TestRoots(unittest.TestCase):
         self.assertIn(bare, caught.exception.message)
         self.assertIn("PPL_ROOT", caught.exception.message)
 
-    def test_a_non_editable_install_is_a_schema_error_naming_the_fix(self):
-        # pip install . copies the ppl package into site-packages, without the
-        # defaults, templates, skill and hooks beside it
-        package = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplsite-"))) / "site-packages" / "ppl"
-        package.mkdir(parents=True)
-        environment = {k: v for k, v in os.environ.items() if k != "PPL_ROOT"}
-        with mock.patch.dict(os.environ, environment, clear=True), \
-                mock.patch.object(paths, "__file__", str(package / "paths.py")):
-            with self.assertRaises(PplError) as caught:
-                paths.root()
-        message = caught.exception.message
-        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
-        self.assertIn(str(package.parent), message)
-        self.assertIn("pip install .", message)
-        self.assertIn("pip install -e .", message)
-        self.assertIn("clone", message)
+    def test_package_parent_is_the_directory_holding_the_ppl_package(self):
+        self.assertTrue((paths.package_parent() / "ppl" / "__init__.py").is_file())
 
     def test_home_default_is_dot_ppl(self):
         saved = os.environ.pop("PPL_HOME")

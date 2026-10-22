@@ -79,7 +79,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
 ### 5.1 Layout
 
 ```
-<checkout>/                      the code root, a git clone (bin/ppl sets PPL_ROOT to it)
+<checkout>/                      the code root, a git clone
   bin/ppl                        shim on PATH
   ppl/                           the state machine package (the real controller)
     __main__.py cli.py           CLI entry point
@@ -99,14 +99,15 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     studio/                      setup wizard, stack presets, md extraction, harness drafts
     (no adapters/ package)       out of scope for v1 (section 2): a non-subagent role has no
                                   code path at all, `routing.dispatch` raises `SCHEMA_INVALID`
-  hooks/ppl_guard.py             PreToolUse cage
-  hooks/ppl_dispatch.py          SubagentStart dispatch counter (telemetry only, cannot block - see 12.1)
-  skill/                         SKILL.md and references/ skeletons, rendered per harness
-  templates/ppl-*.md.body        the fixed body each generated agent file is rendered around
-  defaults/                      config.example.toml, routing.example.toml, harnesses/example-*
+    _assets/                     the runtime assets the package reads, found by ppl/paths.py
+      hooks/ppl_guard.py         PreToolUse cage
+      hooks/ppl_dispatch.py      SubagentStart dispatch counter (telemetry only, cannot block - see 12.1)
+      skill/                     SKILL.md and references/ skeletons, rendered per harness
+      templates/ppl-*.md.body    the fixed body each generated agent file is rendered around
+      defaults/                  config.example.toml, routing.example.toml, harnesses/example-*
+      rules.toml                 the rule matrix (5.5)
   tests/                         stdlib unittest suite
   tools/cage_check.py            subprocess-level proof of the guard hook
-  rules.toml                     the rule matrix (5.5)
   docs/DESIGN.md                 this document
 ~/.ppl/                          the data root (PPL_HOME)
   config.toml                    per-machine settings, written by ppl setup
@@ -200,7 +201,7 @@ issue write tools match its `mcp_write_regex`).
 Rationale for routing: chapter 8. The stronger tier is used where the solution space is wide
 (briefing, verification). The `average` tier executes on rails. The subscription window is
 the real budget - workers are the token hogs, so they stay on `average`. Which model a tier
-names is the operator's choice in `routing.toml`, see `defaults/routing.example.toml` and
+names is the operator's choice in `routing.toml`, see `ppl/_assets/defaults/routing.example.toml` and
 12.2.
 
 ### 5.4 The cage
@@ -213,7 +214,7 @@ returning nothing for the rest. An explicit tool list is the fragile alternative
 server registered under a prefix the list does not name, or a read tool it leaves out, is a
 denial the hook never sees, and a denial the hook never sees cannot fire, however correct the
 code behind it reads [R-GUARD-MATCHER]. So `ppl doctor` judges whatever matcher is registered:
-every tool name the cage acts on (`hooks/ppl_guard.py:GUARDED_TOOL_NAMES` - the four editing
+every tool name the cage acts on (`ppl/_assets/hooks/ppl_guard.py:GUARDED_TOOL_NAMES` - the four editing
 tools, the three read tools, Bash, the forge adapters' denied tools, the tracker write tools
 under every default prefix) must be a full regex match of some registered guard entry's
 matcher, the names left uncovered are reported per settings file as `uncovered` under a
@@ -316,7 +317,7 @@ for each row, exactly what `ppl_guard.py` requires before it fires:
 | a Bash command that writes a tracker through its CLI - every CLI adapter's write check, today GitHub Issues through `gh` (an issue write verb, a `gh api` call that writes an issues route, a GraphQL issue mutation) - whatever tracker the run names, until the run is in `merge_watch` and the merge is recorded with `ppl merge observed` [R-TRACKER-CLI-GATE] | owner rule: tracker writes only after merge, through a CLI as through MCP | requires an active run; scoped like the tracker write tools above - **not** global |
 | a tracker write, when `agent_type` is one of the roles in `boundary.ROLE_RULES`, before or after the merge: a Bash command that writes a tracker through its CLI [R-TRACKER-CLI-NO-ROLE], or a call to a tracker MCP write tool of any known tracker, every adapter's defaults and the run's own prefixes [R-JIRA-NO-ROLE-TOOL] | the tracker is the orchestrator's, and a worker holding `Bash` could otherwise comment on or close the issue before anyone reviewed the change; issue reads and tracker read tools stay allowed | global, no run required - fires by `agent_type` alone, before `active_state()` is even looked up |
 | every state-changing `ppl` CLI subcommand, when `agent_type` is one of the roles in `boundary.ROLE_RULES` [R-GUARD-PPL-CLI-DENIED] | `ppl-code-worker` and `ppl-test-worker` both hold `Bash`, and none of the write checks above sees a `ppl <command>` invocation - it writes through ppl's own API, not a shell redirect or a tracked path, so a worker driving its own CLI could mark its own blocking finding fixed or open its own done gate. Read-only lookups (`ppl show`, with `--task <id>` and not a positional id, `ppl status`, `ppl doctor`, `ppl metrics`, `ppl findings list`, `ppl control get`, `ppl routing show`, `ppl approval check`, `ppl mr state`, `ppl review pending`) stay allowed | global, no run required - fires by `agent_type` alone, before `active_state()` is even looked up |
-| a write-shaped Bash construct (a redirect - `>`, `>>`, `&>`, `>|`, glued to a word like `echo x>f` or spaced, a `cd`'s own redirect included - `tee`, `sed -i`, `cp`, `mv`, `dd`, `rm`, `touch`, `truncate`, `ln`, `install`, `rsync`, `git rm`/`git mv`/`git checkout <ref> -- <path>`/`git restore`; `patch`, `git apply` and the whole-tree git rewriters fail closed as unnameable) whose target resolves inside the active run's repo [R-GUARD-BASH-WRITE-BOUNDARY] | the structured write boundary (`is_role` / `hits_repo` / `boundary.check_path`) covers Edit/Write/MultiEdit/NotebookEdit only, and both workers hold Bash, so `hooks/ppl_guard.py:bash_write_boundary_deny` extracts the target out of every such construct and runs it through the same per-role decision `check_path` makes | active run, any writing role or an unroled session - fires whenever the resolved target lands inside the repo, whatever the session's cwd, mirroring R-UNROLED-REPO-WRITE's own "the target path is the honest question" |
+| a write-shaped Bash construct (a redirect - `>`, `>>`, `&>`, `>|`, glued to a word like `echo x>f` or spaced, a `cd`'s own redirect included - `tee`, `sed -i`, `cp`, `mv`, `dd`, `rm`, `touch`, `truncate`, `ln`, `install`, `rsync`, `git rm`/`git mv`/`git checkout <ref> -- <path>`/`git restore`; `patch`, `git apply` and the whole-tree git rewriters fail closed as unnameable) whose target resolves inside the active run's repo [R-GUARD-BASH-WRITE-BOUNDARY] | the structured write boundary (`is_role` / `hits_repo` / `boundary.check_path`) covers Edit/Write/MultiEdit/NotebookEdit only, and both workers hold Bash, so `ppl/_assets/hooks/ppl_guard.py:bash_write_boundary_deny` extracts the target out of every such construct and runs it through the same per-role decision `check_path` makes | active run, any writing role or an unroled session - fires whenever the resolved target lands inside the repo, whatever the session's cwd, mirroring R-UNROLED-REPO-WRITE's own "the target path is the honest question" |
 
 **How the `ppl`-CLI row reads a command.** Every occurrence of the word `ppl` in the command
 is scanned, not only the first, and the command denies if ANY of them does not parse into a
@@ -332,7 +333,7 @@ shell-quoting or encoding trick) is left uncaught on purpose: a lexical matcher 
 arms race, and chasing one instance would buy a longer regex and a false sense of completeness,
 not a closed class [R-GUARD-PPL-CLI-DENIED].
 
-**Bash write boundary.** `hooks/ppl_guard.py:bash_write_boundary_deny` extracts the target out
+**Bash write boundary.** `ppl/_assets/hooks/ppl_guard.py:bash_write_boundary_deny` extracts the target out
 of every write-shaped Bash construct `BASH_WRITE_SHAPES` knows how to spot - a redirect (`>`,
 `>>`, `>|`, `&>`, `&>>`, the csh-style `>&`, found outside quotes on the raw segment text so a
 word-glued form like `echo x>f` is a target and a quoted `>` or a `>(` process substitution is
@@ -626,10 +627,10 @@ repo is untouched whether or not the run is isolated.
 A document that claims enforcement drifts from the code silently: prose and code move apart
 and nothing mechanical notices, so a claim that the dispatch cap holds at stage boundaries, or
 that `ppl apply-patch` validates every worker patch, reads true long after it stopped being
-true. `rules.toml` and `tests/test_rule_matrix.py` exist to make that drift fail the suite. The
+true. `ppl/_assets/rules.toml` and `tests/test_rule_matrix.py` exist to make that drift fail the suite. The
 matrix is deliberately not a document - a document would drift the same way.
 
-`rules.toml` carries one row per rule: its `statement`, what `scope` it applies to, the
+`ppl/_assets/rules.toml` carries one row per rule: its `statement`, what `scope` it applies to, the
 `event` that fires it, whether `enforcement` is `blocking`, `soft` or `n/a`, the
 `hook_or_check` that performs it, a `deny_test` proving the refusal, an `allow_test` proving
 the legitimate case still passes, an `owner`, and the `residual`. `ppl/rules.py` loads and
@@ -725,7 +726,7 @@ beyond the worktree's own files (5.4), and seven rules only prose or a conventio
 content of a tracker write, the panel's own state writes, the studio's write surface,
 write/forbid disjointness at `ppl boundary set`, the USD spend coming before a dispatch, the
 briefer returning `SPEC_GAP` instead of inventing, and the keys inside a provider's `params`.
-These counts are read back out of `rules.toml` by the suite, so this paragraph cannot drift
+These counts are read back out of `ppl/_assets/rules.toml` by the suite, so this paragraph cannot drift
 from the table it describes [R-DOC-RULE-IDS].
 
 ### 5.6 Harness
@@ -734,7 +735,7 @@ A harness is everything project-specific, kept outside the project repository in
 directory `~/.ppl/harnesses/<name>/`: `harness.toml` (repo path and default branch, task key
 pattern and URL template, `[tracker]`, `[forge]`, `[tests]`, `[knowledge]`, `[env]`, the `[[gate]]` build
 recipes and the `[[guard.shape]]` command shapes), `skill/` fragments and `templates/` role
-overlays. Two examples ship in `defaults/harnesses/`: `example-maven` (GitLab, Maven gates) and
+overlays. Two examples ship in `ppl/_assets/defaults/harnesses/`: `example-maven` (GitLab, Maven gates) and
 `example-generic` (GitHub, make gates). `ppl harness add` installs one from a directory or a
 git URL, `ppl harness validate` checks it.
 
@@ -803,7 +804,7 @@ skill small are tests: on both examples `tests/test_skill_contract.py` holds the
 `SKILL.md` to at most 14,000 bytes and each stage reference to at most 10,000 bytes.
 
 `ppl harness apply <name>` renders the agent files and the orchestrator skill for that harness
-and records it as the active one. The skill is rendered from the `skill/` skeletons plus the
+and records it as the active one. The skill is rendered from the `ppl/_assets/skill/` skeletons plus the
 forge and harness fragments, carries a generated notice, and the render refuses while any
 include marker is unresolved [R-SKILL-GENERATED]. The harness fragments are `skill/gates.md`,
 `skill/extra-gates.md`, `skill/baseline.md` and `skill/tracker-close.md`, the last one the
@@ -1255,7 +1256,7 @@ Links point at the tracker and spec page revisions, so a spec change makes the b
 automatically.
 
 `name_contract` is the frozen method signatures, DTO field names, error codes, units and
-boundary rules the briefer compiles before dispatch (`templates/ppl-briefer.md.body`). It
+boundary rules the briefer compiles before dispatch (`ppl/_assets/templates/ppl-briefer.md.body`). It
 exists for one specific risk: the test worker's own reads of the implementation are
 denied [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS] (5.3, modulo the execution-shaped
 channel R-TEST-WORKER-EXECUTION-CHANNEL discloses), so
@@ -1400,7 +1401,7 @@ blocking finding's file rewritten to `[]` - still valid JSON, just the wrong sha
 from `open_blocking_on_own_diff` and open the done gate for free, and invalid JSON would crash
 the process. Both are the same refusal: `list_all`, `list_open` and
 `open_blocking_on_own_diff` all raise `SCHEMA_INVALID` when any finding file on disk cannot
-be read as a finding object, the same fail-closed treatment `hooks/ppl_guard.py:active_state`
+be read as a finding object, the same fail-closed treatment `ppl/_assets/hooks/ppl_guard.py:active_state`
 already gives an unreadable `state.json` [R-FINDINGS-FAILS-CLOSED-ON-MALFORMED].
 
 ### 6.7 Authority order
@@ -2070,13 +2071,13 @@ through to its target, which must stay inside the harness directory [R-STUDIO-NO
 while `routing.toml` may be a symlink to anywhere. What the studio writes at all is held by its
 routes, not by a check [R-STUDIO-WRITE-SURFACE n/a].
 
-**Agents page.** For each role, the base prompt (`templates/<role>.md.body`) is shown
+**Agents page.** For each role, the base prompt (`ppl/_assets/templates/<role>.md.body`) is shown
 read-only beside the harness overlay and the agent file `routing.render` would produce from
 the active harness with the notes and routing as edited on the page. The blocking rows of the
 rule table whose scope covers the role are listed with them; the rows that act through the guard
 hook fire only once it is registered [R-GUARD-NOT-ARMED n/a].
 
-**Playground.** One tool call goes through the real `hooks/ppl_guard.py` in a subprocess,
+**Playground.** One tool call goes through the real `ppl/_assets/hooks/ppl_guard.py` in a subprocess,
 against a fake active run built under a temporary data root: `harness.json` is the draft's
 snapshot and `boundary.json` a default boundary. The draft itself is written inside that
 temporary root, and the directory is deleted when the hook has answered
@@ -2127,7 +2128,7 @@ params = { effort = "high" }
 by_risk = { high = "good" }
 ```
 
-The models the tiers name ship in `defaults/routing.example.toml`. A model name is a claim
+The models the tiers name ship in `ppl/_assets/defaults/routing.example.toml`. A model name is a claim
 until `ppl models verify` proves it: one cheap probe per model through the Claude Code binary,
 recorded in `models.json` and stale again after `[models] verify_ttl_days` or a change of the
 Claude Code version. `ppl init` refuses `MODELS_UNVERIFIED` while any model a role can route to
@@ -2155,7 +2156,7 @@ v1 workflow calls it: the only provider is the Claude Code subagent, whose worke
 tree directly under the `PreToolUse` guard. So in v1 the hook is not "the early cut" beside
 a stronger check - it is the only check a worker's write passes. The `apply-patch` guarantee
 [R-APPLY-PATCH-BOUNDARY] becomes real the day a non-subagent adapter exists, and the workflow that routes worker
-output through it has to be written then. `templates/ppl-code-worker.md.body` does not tell
+output through it has to be written then. `ppl/_assets/templates/ppl-code-worker.md.body` does not tell
 the worker its patch is validated again after the fact, because the code does not keep that
 promise.
 
@@ -2165,7 +2166,7 @@ it was given. The v1 subagent path has no such payload - the orchestrator compos
 prompt itself. The test worker still holds `Read`, `Grep`, `Glob` and `Bash`, and the guard
 hook denies all four of them when aimed at a main source inside the active run's repo
 [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS] - what remains an instruction in
-`templates/ppl-test-worker.md.body` and nothing structural is narrow: the
+`ppl/_assets/templates/ppl-test-worker.md.body` and nothing structural is narrow: the
 orchestrator's own dispatch prompt is checked only lexically, a verbatim diff or added lines
 in it are denied [R-TEST-WORKER-DISPATCH-LEAK] while a paraphrase passes
 [R-TEST-WORKER-NO-DIFF n/a], and running the worker's own tests
@@ -2231,7 +2232,7 @@ project, not to this pipeline. They are declared in the harness: the `[env]` tab
 every build command needs, rendered into the worker overlays), the `[[gate]]` table (the named
 build recipes rendered into the skill's gates reference, `focused-tests` among them) and the
 `[[guard.shape]]` table (the build shapes the test worker's Bash may run, 5.6). See the example
-harnesses in `defaults/harnesses/`. What a Maven monorepo harness typically encodes:
+harnesses in `ppl/_assets/defaults/harnesses/`. What a Maven monorepo harness typically encodes:
 
 | Gate | Rule |
 |---|---|
@@ -2298,7 +2299,7 @@ a different model to finish the job.
 | ppl-verifier | good | xhigh |
 | ppl-review-responder | average | high |
 
-This table is the v1 content of `defaults/routing.example.toml`, which `ppl setup` copies to
+This table is the v1 content of `ppl/_assets/defaults/routing.example.toml`, which `ppl setup` copies to
 `~/.ppl/routing.toml`, the single source of truth. The operator picks the model each tier
 names, and the agent files are generated from it by `ppl harness apply` (section 10.1). The
 orchestrator is the operator's own session and is not routed. A role can carry a per-risk
@@ -2361,7 +2362,7 @@ The build is finished when all of these are demonstrably true:
 2. `ppl-code-worker` physically cannot write a test file [R-ROLE-CODE-WORKER-TESTS];
    `ppl-test-worker` physically cannot write a main source file
    [R-ROLE-TEST-WORKER-MAIN]. Verified by an attempt, not by reading the prompt.
-   **Verified** at hook level (`tools/cage_check.py`): `hooks/ppl_guard.py` was
+   **Verified** at hook level (`tools/cage_check.py`): `ppl/_assets/hooks/ppl_guard.py` was
    driven as a subprocess, exactly the way Claude Code's `PreToolUse` hook contract invokes
    it - JSON payload on stdin, decision read off stdout - against a real temporary git
    worktree, and denied both attempts with `BOUNDARY_VIOLATION`
@@ -2469,6 +2470,6 @@ The build is finished when all of these are demonstrably true:
 2. The specification outranks the brief and the chat history.
 3. One agent, one functional role.
 4. Rights are minimal and enforced by code, and every such claim in this document names
-   its row in `rules.toml` [R-DOC-RULE-IDS].
+   its row in `ppl/_assets/rules.toml` [R-DOC-RULE-IDS].
 5. The checker does not repair the checked.
 6. Strictness is proportional to the cost of an error.

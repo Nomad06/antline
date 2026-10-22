@@ -17,7 +17,9 @@ if __name__ == "__main__" and ppl_python_floor.refuse_old_python(
         sys.version_info, "ppl_dispatch", "SubagentStart", sys.stdin, sys.stdout, sys.stderr):
     sys.exit(0)
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# parents[3] is the directory holding the ppl package beside this hook, so it
+# wins over any other installed ppl.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from ppl import boundary, budget, run
 from ppl.errors import PplError
@@ -41,7 +43,7 @@ def on_start(payload):
     (ppl/cli.py:check_dispatch_budget, self-described as "the whole of" the
     enforcement) compared against zero for the life of the run - the same bug
     class cycle 1 fixed for the write boundary. A ppl-* agent_type is
-    pipeline-internal wherever its session sits (hooks/ppl_guard.py:decide
+    pipeline-internal wherever its session sits (ppl/_assets/hooks/ppl_guard.py:decide
     already scopes on that), and ppl runs one active run at a time, so a role
     dispatch anywhere this hook fires is this run's dispatch.
     """

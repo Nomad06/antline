@@ -4,7 +4,7 @@ from pathlib import Path
 
 from ppl import tomlout
 
-SOURCE = Path(__file__).resolve().parents[1]
+SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
 
 
 def harness_doc(name):

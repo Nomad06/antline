@@ -16,7 +16,7 @@ import tmphome
 
 HOME = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_HOME"] = HOME
-SOURCE = Path(__file__).resolve().parents[1]
+SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
 shutil.copy(SOURCE / "defaults" / "routing.example.toml", Path(HOME) / "routing.toml")
 
 from ppl import cli, models, paths, routing

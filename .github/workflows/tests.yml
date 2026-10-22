@@ -34,7 +34,7 @@ jobs:
           payload='{"hook_event_name": "PreToolUse", "agent_type": "ppl-code-worker", "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": "/tmp"}'
           for hook in ppl_guard ppl_dispatch; do
             status=0
-            out=$(printf '%s' "$payload" | python3 "hooks/$hook.py" 2> stderr.txt) || status=$?
+            out=$(printf '%s' "$payload" | python3 "ppl/_assets/hooks/$hook.py" 2> stderr.txt) || status=$?
             echo "$hook exit=$status stdout=$out"
             cat stderr.txt
             test "$status" -eq 0

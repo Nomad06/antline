@@ -12,7 +12,7 @@ import panel_client
 from ppl import config, harness, paths
 from ppl.studio import drafts, files
 
-EXAMPLE = str(Path(__file__).resolve().parents[1] / "defaults" / "harnesses" / "example-generic")
+EXAMPLE = str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "defaults" / "harnesses" / "example-generic")
 
 
 class HarnessApiTestCase(panel_client.StudioTestCase):

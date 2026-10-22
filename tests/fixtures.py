@@ -9,7 +9,7 @@ from pathlib import Path
 import tmphome
 from ppl import paths, tomlout
 
-SOURCE = Path(__file__).resolve().parents[1]
+SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
 
 # The tables that turn an example harness into a GitHub Issues one.
 GITHUB_ISSUES = {"tracker": {"kind": "github-issues", "repo": "o/r", "task_prefix": "GH"},

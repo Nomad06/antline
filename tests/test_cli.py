@@ -32,7 +32,7 @@ import fixtures
 from ppl.errors import PplError
 from ppl import boundary, cli, config, doctor, models as ppl_models, paths, setup
 
-ROUTING_EXAMPLE = Path(__file__).resolve().parents[1] / "defaults" / "routing.example.toml"
+ROUTING_EXAMPLE = Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "defaults" / "routing.example.toml"
 MODULE_HOME = os.environ["PPL_HOME"]
 
 
@@ -2130,7 +2130,7 @@ class TestInitIsolatedFlag(unittest.TestCase):
 
 # The entry ppl setup claude writes: this interpreter, then the real guard script.
 GUARD_COMMAND = "%s %s" % (shlex.quote(sys.executable),
-                           shlex.quote(str(Path(__file__).resolve().parents[1] / "hooks"
+                           shlex.quote(str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"
                                            / "ppl_guard.py")))
 
 

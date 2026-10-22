@@ -18,7 +18,7 @@ os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 from ppl import cli, config, harness, models, paths, setup
 from ppl.errors import PplError
 
-SOURCE = Path(__file__).resolve().parents[1]
+SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
 _DIR_VARS = ("PPL_AGENTS_DIR", "PPL_SKILLS_DIR")
 
 

@@ -121,7 +121,7 @@ export function HarnessPage({ mode }) {
       <button class=${creating ? "primary" : ""} onClick=${() => setCreating(true)}>New, for another project</button></div>
     ${list.names.length ? null : html`<p class="muted">No harness is installed yet. Add one below, or create one for a project.</p>`}
     <div class="grid">
-      <${Field} label="Add from a git URL or a directory" help="A git URL, or the absolute path of a harness directory, for example ~/src/antline/defaults/harnesses/example-maven">
+      <${Field} label="Add from a git URL or a directory" help="A git URL, or the absolute path of a harness directory, for example ~/src/antline/ppl/_assets/defaults/harnesses/example-maven">
         <input value=${source} onInput=${(e) => setSource(e.target.value)} /><//>
     </div>
     <${Button} busy=${busy === "add"} disabled=${!source.trim() || Boolean(busy)} onClick=${add}>Add<//>

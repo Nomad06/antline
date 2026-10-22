@@ -9,7 +9,7 @@ is done: deterministic code checks the evidence before the run moves on. The age
 work inside a cage. A PreToolUse hook denies every write outside a role's boundary
 [R-ROLE-CODE-WORKER-BOUNDARY], every read the test worker must not make
 [R-TEST-WORKER-READ-TOOLS], and the forge actions a human must perform
-[R-MCP-RESOLVE-THREAD]. A bracketed ID like these names a row of `rules.toml`, and the
+[R-MCP-RESOLVE-THREAD]. A bracketed ID like these names a row of `ppl/_assets/rules.toml`, and the
 test suite fails if a blocking row has no test that asserts the refusal.
 
 <picture>
@@ -78,7 +78,7 @@ test suite fails if a blocking row has no test that asserts the refusal.
 </picture>
 
 The cells are the guard hook's own answers: each call was sent through
-`hooks/ppl_guard.py` from the studio's cage playground. The orchestrator's tracker
+`ppl/_assets/hooks/ppl_guard.py` from the studio's cage playground. The orchestrator's tracker
 writes open once the run reaches the merge watch and `ppl merge observed` has recorded the
 merge [R-JIRA-GATE]. The read-only agents
 also get no Edit, Write or Bash tool in their agent files [R-ROLE-TOOLS-READONLY].
@@ -120,7 +120,7 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `rules.toml` holds 174 rules, 130 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 174 rules, 130 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
   refusal. The suite has 2323 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
@@ -176,7 +176,8 @@ ppl setup
 ```
 
 The supported install is the clone with `bin/` on `PATH`: `bin/ppl` points ppl at
-the checkout, where `defaults/`, `templates/` and `skill/` live. An editable dev
+the checkout, whose `ppl/_assets/` holds `defaults/`, `templates/`
+and `skill/`. An editable dev
 install (`pip install -e .`) also works from the clone.
 
 `ppl setup` walks six steps - paths, claude, models, harness, forge, apply -
@@ -232,9 +233,9 @@ another tab or a terminal since the page loaded it is refused [R-STUDIO-CHANGED-
 ```json
 {"hooks": {
   "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/antline/hooks/ppl_guard.py", "timeout": 5}]}],
+    "command": "/path/to/python3.11 /path/to/antline/ppl/_assets/hooks/ppl_guard.py", "timeout": 5}]}],
   "SubagentStart": [{"matcher": "", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/antline/hooks/ppl_dispatch.py", "timeout": 5}]}]}}
+    "command": "/path/to/python3.11 /path/to/antline/ppl/_assets/hooks/ppl_dispatch.py", "timeout": 5}]}]}}
 ```
 
 The interpreter in those commands has to be Python 3.11 or newer, and `ppl setup
@@ -266,7 +267,7 @@ A harness is a directory under `~/.ppl/harnesses/<name>/` holding everything
 that belongs to one project: `harness.toml` (repo path, task key pattern,
 tracker and forge settings, build gates, the command shapes the test worker
 may run), `skill/` fragments and `templates/` overlays. Two examples ship in
-`defaults/harnesses/`: `example-maven` (GitLab, Maven) and `example-generic`
+`ppl/_assets/defaults/harnesses/`: `example-maven` (GitLab, Maven) and `example-generic`
 (GitHub, make). Keep yours in its own git repository and install it with
 `ppl harness add <name> --source <directory or git url>`.
 
@@ -308,7 +309,7 @@ with `repo` (owner/name) and an optional `task_prefix` (default `GH`, so tasks r
 ## Models
 
 `~/.ppl/routing.toml` names a model per tier (`heavy`, `good`, `average`,
-`light`) and a tier per role, see `defaults/routing.example.toml`. `ppl models
+`light`) and a tier per role, see `ppl/_assets/defaults/routing.example.toml`. `ppl models
 status` shows what is verified. `ppl init` refuses to start a run while a model
 it would route to is unverified or stale, `ppl models verify` fixes that, and
 `--skip-model-check` records that you chose not to [R-INIT-MODELS-VERIFIED].
@@ -372,7 +373,7 @@ python3 -m unittest discover -s tests -q
 python3 tools/cage_check.py
 ```
 
-The rule matrix (`rules.toml`, `tests/test_rule_matrix.py`) ties every
+The rule matrix (`ppl/_assets/rules.toml`, `tests/test_rule_matrix.py`) ties every
 enforcement claim in the documents to a row and every blocking row to a test
 that asserts a refusal. Keep it green. `tools/cage_check.py` drives the guard
 hook as a subprocess, the way Claude Code does.

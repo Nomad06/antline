@@ -21,7 +21,9 @@ if __name__ == "__main__" and ppl_python_floor.refuse_old_python(
         sys.version_info, "ppl_guard", "PreToolUse", sys.stdin, sys.stdout, sys.stderr):
     sys.exit(0)
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# parents[3] is the directory holding the ppl package beside this hook, so it
+# wins over any other installed ppl.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from ppl import boundary, control, gitfacts, paths, run, store, trackers
 from ppl import forges as _forges
