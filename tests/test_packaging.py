@@ -183,6 +183,8 @@ class TestWheel(unittest.TestCase):
             input=json.dumps(payload), cwd=str(scratch), env=env, capture_output=True,
             text=True, timeout=TIMEOUT)
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        # Empty: the guard found ppl beside itself in the venv's site-packages.
+        self.assertEqual(proc.stderr, "")
         decision = json.loads(proc.stdout)["hookSpecificOutput"]
         self.assertEqual(decision["permissionDecision"], "deny")
         self.assertTrue(decision["permissionDecisionReason"].startswith("BOUNDARY_VIOLATION"),

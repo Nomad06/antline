@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -3345,6 +3346,61 @@ class TestPythonFloor(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn(version, result.stderr)
 
+
+class TestHookBootstrap(unittest.TestCase):
+    """Each hook imports the ppl package it ships in from the directory above
+    ppl/, which is site-packages when installed."""
+
+    FORCE_PUSH = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                  "tool_input": {"command": "git push --force origin main"}, "cwd": "/tmp"}
+    ROLE_START = {"hook_event_name": "SubagentStart", "agent_type": "ppl-code-worker",
+                  "cwd": "/tmp"}
+
+    def site_with_ppl(self):
+        site = Path(tmphome.mkdtemp(prefix="pplsite-"))
+        shutil.copytree(Path(__file__).resolve().parents[1] / "ppl", site / "ppl",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        return site
+
+    def assert_both_hooks_work(self, site, **extra):
+        env = fixtures.isolated_env()
+        env.pop("PYTHONPATH", None)
+        env.pop("PPL_ROOT", None)
+        env.update(extra)
+        cases = (("ppl_guard.py", self.FORCE_PUSH, "BOUNDARY_VIOLATION"),
+                 ("ppl_dispatch.py", self.ROLE_START, None))
+        for hook, hook_payload, refusal in cases:
+            with self.subTest(hook=hook):
+                result = subprocess.run(
+                    [sys.executable, str(site / "ppl" / "_assets" / "hooks" / hook)],
+                    input=json.dumps(hook_payload), capture_output=True, text=True, env=env,
+                    cwd="/tmp", timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                if refusal is None:
+                    self.assertEqual(result.stdout, "")
+                else:
+                    decision = json.loads(result.stdout)["hookSpecificOutput"]
+                    self.assertEqual(decision["permissionDecision"], "deny")
+                    self.assertTrue(decision["permissionDecisionReason"].startswith(refusal),
+                                    decision["permissionDecisionReason"])
+
+    def test_a_stdlib_name_beside_the_package_does_not_crash_the_hooks(self):
+        # An old backport in site-packages can ship a top-level module named
+        # like a stdlib one. Here every stdlib name sits beside the copy of ppl
+        # and fails on import. A hook that kept that directory first on
+        # sys.path imported them and crashed, and Claude Code allows the call
+        # when a hook crashes.
+        site = self.site_with_ppl()
+        for name in sys.stdlib_module_names:
+            (site / (name + ".py")).write_text('raise ImportError("shadowed stdlib")\n')
+        self.assert_both_hooks_work(site)
+
+    def test_the_ppl_beside_the_hook_wins_over_another_one_on_the_path(self):
+        other = Path(tmphome.mkdtemp(prefix="pplother-"))
+        (other / "ppl").mkdir()
+        (other / "ppl" / "__init__.py").write_text('raise ImportError("the other ppl")\n')
+        self.assert_both_hooks_work(self.site_with_ppl(), PYTHONPATH=str(other))
 
 if __name__ == "__main__":
     unittest.main()
