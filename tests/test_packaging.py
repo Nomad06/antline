@@ -188,6 +188,16 @@ class TestWheel(unittest.TestCase):
         self.assertTrue(decision["permissionDecisionReason"].startswith("BOUNDARY_VIOLATION"),
                         decision["permissionDecisionReason"])
 
+    def test_the_installed_demo_passes(self):
+        scratch = Path(tempfile.mkdtemp(prefix="pplrun-")).resolve()
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        tmp = scratch / "tmp"
+        tmp.mkdir()
+        env = dict(self.env, TMPDIR=str(tmp), HOME=str(scratch), PPL_HOME=str(scratch / "pplhome"))
+        done = _run([self.ppl, "demo"], scratch, env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(list(tmp.iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -761,6 +761,12 @@ def cmd_serve(args):
     return 0
 
 
+def cmd_demo(args):
+    from . import demo
+    demo.run(keep=args.keep)
+    return 0
+
+
 def cmd_control(args):
     task_id = resolve_task(args)
     if args.action == "set":
@@ -994,7 +1000,7 @@ COMMANDS = {
     "evidence": cmd_evidence, "verdict": cmd_verdict, "findings": cmd_findings,
     "transition": cmd_transition,
     "park": cmd_park, "escalate": cmd_escalate, "budget": cmd_budget,
-    "approval": cmd_approval, "recover": cmd_recover, "serve": cmd_serve,
+    "approval": cmd_approval, "recover": cmd_recover, "serve": cmd_serve, "demo": cmd_demo,
     "control": cmd_control, "routing": cmd_routing, "models": cmd_models,
     "dispatch": cmd_dispatch, "harness": cmd_harness,
     "apply-patch": cmd_apply_patch, "destroy": cmd_destroy,
@@ -1207,6 +1213,9 @@ def build_parser():
     p = sub.add_parser("serve")
     p.add_argument("--port", type=int, default=8787)
     p.add_argument("--open", action="store_true", help="open the studio in the default browser")
+
+    p = sub.add_parser("demo", help="play one issue through the pipeline offline, in a sandbox")
+    p.add_argument("--keep", action="store_true")
 
     p = sub.add_parser("control")
     p.add_argument("action", choices=["set", "get"])

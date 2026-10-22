@@ -226,7 +226,7 @@ class TestCli(unittest.TestCase):
         for name in ["init", "show", "status", "stage", "brief", "boundary", "baseline",
                      "evidence", "verdict", "transition", "park", "escalate", "budget",
                      "approval", "recover", "serve", "control", "routing", "dispatch",
-                     "apply-patch", "mr", "merge", "review"]:
+                     "apply-patch", "mr", "merge", "review", "demo"]:
             self.assertIn(name, cli.COMMANDS)
 
     # --- carried-forward requirement 1: recover is gated by control.enforce ---
