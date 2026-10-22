@@ -6,6 +6,7 @@ import subprocess
 import sys
 import unicodedata
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -14,11 +15,11 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "hooks"))
+sys.path.insert(0, str(REPO / "ppl" / "_assets" / "hooks"))
 import ppl_guard
-from ppl import config, harness, paths, routing
+from ppl import config, harness, models, paths, routing, store
 from ppl.errors import PplError
-from ppl.studio import drafts, extract, project, stacks
+from ppl.studio import drafts, extract, extract_cache, project, stacks
 
 GOOD_DRAFT = {
     "gates": [{"name": "Install dependencies", "command": "npm ci", "source": "CLAUDE.md:3"},
@@ -288,6 +289,30 @@ class TestExtract(panel_client.StudioTestCase):
         result, _ = self.run_with(answer(dict(GOOD_DRAFT, test_sources=items)))
         self.assertEqual(len(result["extracted"]["test_sources"]), 1)
         self.assertEqual(len(result["dropped"]), 3)
+
+    def test_the_caps_count_kept_items_not_dropped_ones(self):
+        # rule: R-STUDIO-EXTRACT-LEAN
+        cases = {
+            "gates": ({"name": "", "command": "make", "source": "x"},
+                      lambda n: {"name": "g%d" % n, "command": "make %d" % n, "source": "x"},
+                      extract.MAX_GATES, "the gate has no name"),
+            "test_shapes": (shape("bash -c"), lambda n: shape("tool%d" % n),
+                            extract.MAX_SHAPES, "argv0 is not one program name (letters, "
+                            "digits, _ . / - only)"),
+            "test_sources": ({"glob": 3, "source": "x"},
+                             lambda n: {"glob": "t%d/**" % n, "source": "x"},
+                             extract.MAX_TEST_SOURCES,
+                             "not a {glob, source} object of strings"),
+            "env": ({"name": "lower-case", "value": "1", "source": "x"},
+                    lambda n: {"name": "V%d" % n, "value": "1", "source": "x"},
+                    extract.MAX_ENV, "the name is not a shell variable name"),
+        }
+        for key, (bad, good, cap, reason) in cases.items():
+            with self.subTest(key=key):
+                items = [bad] + [good(n) for n in range(cap)]
+                result, _ = self.run_with(answer(dict(GOOD_DRAFT, **{key: items})))
+                self.assertEqual(len(result["extracted"][key]), cap)
+                self.assertEqual([item["reason"] for item in result["dropped"]], [reason])
 
     def test_more_than_twelve_globs_are_dropped(self):
         # rule: R-STUDIO-EXTRACT-LEAN
@@ -587,6 +612,201 @@ class TestExtractRetry(panel_client.StudioTestCase):
         checked = drafts.check("demo", merged["doc"], merged["fragments"])
         self.assertFalse(checked["ok"], checked)
         self.assertIn("<project>", checked["errors"][0])
+
+
+def seed_verified(version="9.9.9", resolved="claude-haiku-x"):
+    """models.json holding the light tier's model as verified, the way `models verify` writes it."""
+    models.verify([extract.light_model()], force=True,
+                  runner=lambda model, binary="claude", env=None:
+                  {"ok": True, "resolved_id": resolved, "cost_usd": 0.0, "detail": ""})
+
+
+def other_answer():
+    return answer(dict(GOOD_DRAFT, default_branch="trunk"))
+
+
+class TestExtractCache(panel_client.StudioTestCase):
+    def setUp(self):
+        super().setUp()
+        config.ensure()
+        seed_verified()
+        self.lines = []
+
+    def run_with(self, *answers, files=FILES, **options):
+        runner, calls = fake_answers(*answers)
+        with mock.patch.object(extract, "RUNNER", runner):
+            result = extract.extract(files, self.lines.append, **options)
+        return result, calls
+
+    def entries(self):
+        directory = extract_cache.directory()
+        return sorted(directory.glob("*.json")) if directory.is_dir() else []
+
+    def key(self, model_id="claude-haiku-x", version="9.9.9"):
+        return extract.cache_key(extract.bundle(FILES), model_id, version)
+
+    def entry(self, raw=GOOD_DRAFT, created_at=None):
+        return {"created_at": created_at or store.now(), "model": "claude-haiku-x",
+                "cost_usd": 0.003, "raw": raw}
+
+    def days_ago(self, days):
+        return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+
+    def test_the_second_identical_call_makes_no_runner_call(self):
+        first, calls = self.run_with(answer())
+        second, again = self.run_with()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(again, [])
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertEqual(second["cost_usd"], 0.0)
+        self.assertTrue(second["cached_at"])
+        self.assertEqual(second["extracted"], first["extracted"])
+        line = [line for line in self.lines if line.startswith("reused a draft from")]
+        self.assertEqual(len(line), 1)
+        self.assertIn("no cost", line[0])
+
+    def test_a_one_byte_change_in_a_file_misses(self):
+        self.run_with(answer())
+        changed = [dict(FILES[0], text=FILES[0]["text"] + "x")]
+        result, calls = self.run_with(answer(), files=changed)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(result["cached"])
+
+    def test_another_resolved_model_misses(self):
+        self.run_with(answer())
+        seed_verified(resolved="claude-haiku-y")
+        result, calls = self.run_with(answer())
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(result["cached"])
+
+    def test_another_claude_version_misses(self):
+        self.run_with(answer())
+        with mock.patch.object(models, "claude_version", lambda binary="claude": "9.9.10"):
+            seed_verified()
+            result, calls = self.run_with(answer())
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(result["cached"])
+
+    def test_a_bumped_extract_version_misses(self):
+        self.run_with(answer())
+        with mock.patch.object(extract, "EXTRACT_VERSION", extract.EXTRACT_VERSION + 1):
+            result, calls = self.run_with(answer())
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(result["cached"])
+
+    def test_the_key_covers_every_input(self):
+        base = extract.cache_key("text", "id", "1.0")
+        self.assertEqual(base, extract.cache_key("text", "id", "1.0"))
+        self.assertEqual(len(base), 64)
+        for other in (extract.cache_key("text2", "id", "1.0"), extract.cache_key("text", "id2", "1.0"),
+                      extract.cache_key("text", "id", "1.1")):
+            self.assertNotEqual(base, other)
+        with mock.patch.object(extract, "SYSTEM_PROMPT", "other"):
+            self.assertNotEqual(base, extract.cache_key("text", "id", "1.0"))
+        with mock.patch.object(extract, "SCHEMA", {"type": "object"}):
+            self.assertNotEqual(base, extract.cache_key("text", "id", "1.0"))
+
+    def test_fresh_calls_the_runner_and_replaces_the_entry(self):
+        self.run_with(answer())
+        second, calls = self.run_with(other_answer(), fresh=True)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(second["cached"])
+        self.assertEqual(second["extracted"]["default_branch"], "trunk")
+        third, again = self.run_with()
+        self.assertEqual(again, [])
+        self.assertTrue(third["cached"])
+        self.assertEqual(third["extracted"]["default_branch"], "trunk")
+
+    def test_a_failed_call_leaves_no_entry(self):
+        failures = [[PplError("EXTRACTION_FAILED", "Claude did not answer within 120 seconds")],
+                    [(1, "", "boom")],
+                    [answer(structured=False, result="prose"), answer(structured=False, result="prose")]]
+        for answers in failures:
+            with self.subTest(answers=len(answers)), self.assertRaises(PplError):
+                self.run_with(*answers)
+            self.assertEqual(self.entries(), [])
+
+    def test_a_cached_draft_runs_through_todays_check(self):
+        gates = [{"name": "bad", "command": "ma\u202eke", "source": "x"},
+                 {"name": "ok", "command": "make", "source": "x"}]
+        extract_cache.save(self.key(), self.entry(dict(GOOD_DRAFT, gates=gates)))
+        result, calls = self.run_with()
+        self.assertEqual(calls, [])
+        self.assertTrue(result["cached"])
+        self.assertEqual([gate["name"] for gate in result["extracted"]["gates"]], ["ok"])
+        self.assertEqual(len(result["dropped"]), 1)
+        self.assertIn("control or format character", result["dropped"][0]["reason"])
+
+    def test_a_cached_draft_todays_check_refuses_is_asked_again(self):
+        extract_cache.save(self.key(), self.entry(dict(GOOD_DRAFT, gates="npm ci")))
+        result, calls = self.run_with(answer())
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(result["cached"])
+        self.assertTrue(any("no longer passes the checks, asking Claude again" in line
+                            for line in self.lines))
+        self.assertEqual(extract_cache.load(self.key(), 30)["raw"], GOOD_DRAFT)
+
+    def test_a_corrupt_entry_is_a_miss_and_is_overwritten(self):
+        good = json.dumps(self.entry())
+        corrupt = {"truncated": good[:20], "a list": "[1, 2]",
+                   "raw missing": json.dumps({"created_at": store.now(), "model": "m", "cost_usd": 0}),
+                   "created_at not a date": json.dumps(dict(self.entry(), created_at="yesterday"))}
+        for name, text in corrupt.items():
+            with self.subTest(name):
+                extract_cache.directory().mkdir(parents=True, exist_ok=True)
+                (extract_cache.directory() / (self.key() + ".json")).write_text(text)
+                result, calls = self.run_with(answer())
+                self.assertEqual(len(calls), 1)
+                self.assertFalse(result["cached"])
+                self.assertEqual(extract_cache.load(self.key(), 30)["raw"], GOOD_DRAFT)
+
+    def test_an_entry_older_than_the_ttl_is_a_miss(self):
+        extract_cache.save(self.key(), self.entry(created_at=self.days_ago(31)))
+        result, calls = self.run_with(answer())
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(result["cached"])
+        extract_cache.save(self.key(), self.entry(created_at=self.days_ago(29)))
+        self.assertIsNotNone(extract_cache.load(self.key(), 30))
+        self.assertIsNone(extract_cache.load(self.key(), 28))
+
+    def test_only_the_fifty_newest_entries_are_kept(self):
+        keys = ["%064x" % number for number in range(extract_cache.KEEP + 1)]
+        for number, key in enumerate(keys):
+            extract_cache.save(key, self.entry())
+            os.utime(extract_cache.directory() / (key + ".json"), (1_000_000 + number,) * 2)
+        names = {path.name for path in self.entries()}
+        self.assertEqual(len(names), extract_cache.KEEP)
+        self.assertNotIn(keys[0] + ".json", names)
+        self.assertIn(keys[-1] + ".json", names)
+
+    def test_an_unverified_model_or_unknown_version_turns_the_cache_off(self):
+        paths.models_file().unlink()
+        first, calls = self.run_with(answer())
+        _, more = self.run_with(answer())
+        self.assertEqual((len(calls), len(more)), (1, 1))
+        self.assertEqual(self.entries(), [])
+        self.assertEqual(len([line for line in self.lines if "drafts are not reused" in line]), 2)
+        self.assertTrue(any("is not a verified model" in line for line in self.lines))
+        self.assertFalse(first["cached"])
+        self.lines.clear()
+        seed_verified()
+        with mock.patch.object(models, "claude_version", lambda binary="claude": "unknown"):
+            self.run_with(answer())
+            self.run_with(answer())
+        self.assertEqual(self.entries(), [])
+        self.assertEqual(len([line for line in self.lines if "drafts are not reused" in line]), 2)
+        self.assertTrue(any("claude version cannot be read" in line for line in self.lines))
+
+    def test_a_cache_that_cannot_be_written_still_returns_the_draft(self):
+        extract_cache.directory().parent.mkdir(parents=True)
+        extract_cache.directory().write_text("not a directory")
+        result, calls = self.run_with(answer())
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(result["extracted"]["gates"]), 3)
+        self.assertFalse(result["cached"])
+        self.assertTrue(any(line.startswith("the draft was not kept for reuse:")
+                            for line in self.lines))
 
 
 class TestMerge(unittest.TestCase):

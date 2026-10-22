@@ -112,6 +112,19 @@ def _entry_state(entry, version):
     return "verified"
 
 
+def verified_identity(model, binary="claude"):
+    """(resolved_id, claude_version) of `model` when models.json holds it as
+    verified for the current claude version, else None. A version that cannot be
+    read never counts, so nothing is keyed on "unknown"."""
+    version = claude_version(binary)
+    if version == "unknown":
+        return None
+    entry = _load().get(model)
+    if _entry_state(entry, version) != "verified" or not entry.get("resolved_id"):
+        return None
+    return str(entry["resolved_id"]), version
+
+
 def verify(models_to_check=None, force=False, dry_run=False, runner=None, binary="claude"):
     runner = runner or probe
     targets = sorted(set(models_to_check or routing.models_in_use()))
