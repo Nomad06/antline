@@ -3975,6 +3975,30 @@ class TestRefusalRetryCap(unittest.TestCase):
         self.assertEqual(err.strip(), "warning: refusal count not updated: disk full")
 
 
+class TestTrailExport(unittest.TestCase):
+    def test_trail_export_writes_the_trail_and_prints_its_size(self):
+        from ppl import run as run_module
+        run_module.init("DEMO-9801", "https://example.test/issues/9801", make_repo())
+        out = Path(tmphome.mkdtemp(prefix="ppltrail-")) / "trail"
+        code, stdout, err = call("trail", "export", "--task", "DEMO-9801", "--out", str(out))
+        self.assertEqual(code, 0, err)
+        written = [p for p in out.rglob("*") if p.is_file()]
+        self.assertEqual(stdout, "trail written to %s: %d files\n" % (out, len(written)))
+        manifest = json.loads((out / "MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(manifest["files"]), len(written) - 1)
+        self.assertIs(manifest["redactions"]["urls"], False)
+
+    def test_trail_export_without_paths_redaction_is_refused(self):
+        from ppl import run as run_module
+        run_module.init("DEMO-9802", "https://example.test/issues/9802", make_repo())
+        out = Path(tmphome.mkdtemp(prefix="ppltrail-")) / "trail"
+        code, _, err = call("trail", "export", "--task", "DEMO-9802", "--out", str(out),
+                            "--redact", "people,urls")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err.strip().splitlines()[-1])["error_code"], "SCHEMA_INVALID")
+        self.assertFalse(out.exists())
+
+
 class TestVersion(unittest.TestCase):
     def test_version_prints_the_distribution_and_version(self):
         code, out, _ = call("--version")

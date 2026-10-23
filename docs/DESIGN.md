@@ -718,7 +718,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 178 rows: 132 `blocking`, 19 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 179 rows: 133 `blocking`, 19 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -1040,6 +1040,9 @@ ppl metrics                      # fleet-wide rates and durations, sliced by pro
 ppl label --sha <sha> --actual defective|correct
                                  # records human ground truth for a past candidate SHA (6.11);
                                  # takes no --generation and does not refresh the deadline
+ppl trail export --task <id> --out <dir> [--redact paths,people,urls]
+                                 # one run, live or archived, as a redacted static trail
+                                 # with a manifest (6.12)
 
 ppl mr set --iid <n> --url <url> [--author <username>]   # records the MR, sticky author
 ppl mr state                     # none|current|stale, compares approved SHA against head
@@ -1708,6 +1711,44 @@ the watchdog (6.9) changed what "wiring a command through a shared gate" means:
 `--sha` and `--actual` are validated the same way every other write in this design validates
 untrusted input: hexadecimal only, no path traversal, and `--actual` restricted to
 `defective`/`correct` [R-LABEL-VALUE-VOCAB].
+
+### 6.12 Trails
+
+`ppl trail export --task <id> --out <dir> [--redact paths,people,urls]` writes one run, live or
+archived, as a static trail to publish: `index.html`, the run's documents under `docs/` and
+`MANIFEST.json`. It only reads the run, so it takes no `--generation` and does not refresh the
+deadline.
+
+- **Documents come from an allowlist**: `state.json` (without `orchestrator`), `log.jsonl`,
+  `brief.json`, `challenge.json`, `boundary.json`, `baseline.json`, `harness.json`,
+  `threads.json`, `parking.json`, `tracker/issue.json`, `tracker/issue.md`,
+  `evidence/<sha>/*.json` (without the build `log` path), `verdicts/<sha>.json`,
+  `verdicts/<sha>/<n>.json` and `findings/*.json`. Any other file, `usage.json` with its
+  transcript paths among them, is left out and listed under `skipped`. Build logs are not
+  copied: a receipt keeps its result and exit code.
+- **Paths are always redacted.** The run's repo, `PPL_HOME`, the home directory and the temp
+  roots, each as given and resolved, longest first, become `<repo>`, `<ppl-home>`, `<home>` and
+  `<tmp>`. A `--redact` list without `paths` is `SCHEMA_INVALID`.
+- **People are redacted by default.** Every string under the keys `author`, `assignee`,
+  `assignees`, `reporter`, `creator`, `by`, `login` and `displayName` (or the `login`, `name`
+  or `displayName` of a dict there) becomes `@person-<n>` in the order of a sorted walk, in
+  every file, markdown included. The mapping is written nowhere, and the order makes two
+  exports of the same run identical.
+- **URLs are kept unless `urls` is asked for**, then each becomes `<url-<n>>`.
+
+After redaction every written file is checked, and `ppl trail export` refuses with
+`SCHEMA_INVALID`, naming the file, while one still holds the repo path, the home directory,
+`PPL_HOME`, a redacted person or one of the trail's own token patterns [R-TRAIL-REDACTED]. The
+trail is built in a temporary directory beside `--out` and renamed onto it once that check
+passes, so a refusal leaves nothing behind. An existing `--out` is `SCHEMA_INVALID`. A name in
+free text under no known key, or a secret in a format the patterns do not list, passes the
+check, so the owner reads a trail before publishing it.
+
+`MANIFEST.json` holds the task id, the base and head SHA, the antline version, the redactions
+applied, the skipped files, every other file with its sha256, and the run's measures:
+`wall_clock_seconds` (init to `done`, else to the last event), `tokens_by_role`, `usd` (priced
+with the live `[prices]`), `denials`, `rework_rounds` and `verdicts` (a count per outcome). A
+measure with no data is null, not 0, and `reasons` says why.
 
 ## 7. Stage flow: task link to MR
 

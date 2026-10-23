@@ -7,7 +7,7 @@ import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
                harness, metrics, models, paths, recover, refusals, review, routing, run, schema,
-               setup, status, store, trackers, usage, verdict, watchdog)
+               setup, status, store, trackers, trail, usage, verdict, watchdog)
 from .errors import PplError, role_output
 
 
@@ -1024,6 +1024,15 @@ def cmd_metrics(args):
     return 0
 
 
+def cmd_trail(args):
+    # A reference run is normally archived by the time it is published, so the
+    # task is named explicitly and nothing here touches the run.
+    redact = tuple(part.strip() for part in args.redact.split(",") if part.strip())
+    manifest = trail.export(args.task, args.out, redact=redact)
+    print("trail written to %s: %d files" % (args.out, len(manifest["files"]) + 1))
+    return 0
+
+
 def cmd_label(args):
     # Deliberately no control.enforce and no require_current_generation - see
     # ppl/metrics.py:record_label for both rulings (R-LABEL-NO-LIVENESS-REFRESH,
@@ -1068,7 +1077,7 @@ COMMANDS = {
     "apply-patch": cmd_apply_patch, "destroy": cmd_destroy,
     "mr": cmd_mr, "merge": cmd_merge, "review": cmd_review, "doctor": cmd_doctor,
     "watchdog": cmd_watchdog, "metrics": cmd_metrics, "label": cmd_label,
-    "setup": cmd_setup, "tracker": cmd_tracker,
+    "setup": cmd_setup, "tracker": cmd_tracker, "trail": cmd_trail,
 }
 
 
@@ -1349,6 +1358,13 @@ def build_parser():
 
     p = sub.add_parser("metrics")
     p.add_argument("--text", action="store_true")
+
+    p = sub.add_parser("trail")
+    p.add_argument("action", choices=["export"])
+    p.add_argument("--task", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--redact", default="paths,people",
+                   help="comma list of %s, paths always included" % ", ".join(trail.REDACTIONS))
 
     p = sub.add_parser("label")
     p.add_argument("--sha", required=True)

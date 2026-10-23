@@ -120,12 +120,16 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `ppl/_assets/rules.toml` holds 178 rules, 132 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 179 rules, 133 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
   refusal. The suite has 2369 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
+- `ppl trail export --task <id> --out <dir>` writes one run as a static trail to publish: its
+  documents from an allowlist, paths and people redacted (URLs on request), and a `MANIFEST.json`
+  with hashes, wall-clock, tokens per role, denials and rework rounds. It refuses a trail that
+  still holds the repo path, the home directory, a person or a token [R-TRAIL-REDACTED].
 - Irreversible steps stay with people: merging, resolving threads, approving, and any
   disagreement with a reviewer.
 - Crash-safe and resumable, and it parks with a question instead of guessing.
