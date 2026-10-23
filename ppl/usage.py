@@ -12,6 +12,7 @@ import json
 import math
 import os
 import stat
+import sys
 import time
 from datetime import datetime
 
@@ -37,12 +38,13 @@ class TranscriptError(Exception):
 
 
 def _is_count(value):
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    # an int too large for a float makes math.isfinite raise OverflowError
-    if isinstance(value, int):
-        return True
-    return isinstance(value, float) and math.isfinite(value)
+    # an int too large for a float is no count: pricing it would overflow
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
 
 
 def _number(value):
@@ -230,7 +232,8 @@ def refresh_orchestrator(task_id, deadline=None):
     """Reads the increment of every noted orchestrator transcript, counting the
     lines written since the run's init, saves the offsets and logs the
     cumulative usage of each transcript whose totals changed. A transcript that
-    can no longer be read is left as it was."""
+    can no longer be read is left as it was and named on stderr, never logged:
+    every later refresh would log it again."""
     target = _usage_file(task_id)
     doc = store.read_json(target, default={})
     entries = _orchestrator_entries(doc)
@@ -248,7 +251,9 @@ def refresh_orchestrator(task_id, deadline=None):
         try:
             models, new_offset, new_seen = read_increment(path, offset, since, seen,
                                                           deadline=deadline)
-        except TranscriptError:
+        except TranscriptError as err:
+            sys.stderr.write("ppl usage: orchestrator transcript %s skipped: %s\n"
+                             % (path, err.code))
             continue
         after = add(before, models)
         if new_offset == offset and after == before:
@@ -328,7 +333,8 @@ def dollars(models, price_table):
     usd = 0.0
     for model, counts in models.items():
         for key in COUNTS:
-            usd += counts.get(key, 0) * price_table[model][key] / 1000000
+            value = counts.get(key, 0)
+            usd += (value if _is_count(value) else 0) * price_table[model][key] / 1000000
     return usd, []
 
 

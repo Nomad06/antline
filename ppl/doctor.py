@@ -358,40 +358,39 @@ def guard_shape_problem(cwd=None):
             "3.11." % "; ".join(problems))
 
 
-def dispatch_warning(cwd=None):
-    """None unless a guard is registered while the SubagentStart dispatch hook
-    is in no settings file, or is there in the wrong shape: the dispatch cap
-    then counts only the dispatches recorded by hand. `ppl init` warns."""
+def _hook_warning(cwd, event, marker, name, consequence):
+    """None unless a guard is registered while the `event` hook (`marker`) is
+    in no settings file, or is there in the wrong shape, else the problems,
+    `consequence` and the fix."""
     settings = _readable_settings(cwd)
     if not any(_hooks_of(doc, "PreToolUse", GUARD_MARKER) for _, doc in settings):
         return None
     problems = [text for path, doc in settings
-                for marker, text in _shape_problems(doc, path) if marker == DISPATCH_MARKER]
-    if not any(_hooks_of(doc, "SubagentStart", DISPATCH_MARKER) for _, doc in settings):
-        problems.append("the SubagentStart dispatch hook (%s) is registered in neither %s nor %s"
-                        % (DISPATCH_MARKER, local_settings_path(cwd), global_settings_path()))
+                for found, text in _shape_problems(doc, path) if found == marker]
+    if not any(_hooks_of(doc, event, marker) for _, doc in settings):
+        problems.append("the %s %s hook (%s) is registered in neither %s nor %s"
+                        % (event, name, marker, local_settings_path(cwd), global_settings_path()))
     if not problems:
         return None
-    return ("%s. The dispatch cap counts only the dispatches recorded by hand until it fires: run "
-            "`ppl setup claude` to write the hook entries again." % "; ".join(problems))
+    return ("%s. %s: run `ppl setup claude` to write the hook entries again."
+            % ("; ".join(problems), consequence))
+
+
+def dispatch_warning(cwd=None):
+    """None unless a guard is registered while the SubagentStart dispatch hook
+    is in no settings file, or is there in the wrong shape: the dispatch cap
+    then counts only the dispatches recorded by hand. `ppl init` warns."""
+    return _hook_warning(cwd, "SubagentStart", DISPATCH_MARKER, "dispatch",
+                         "The dispatch cap counts only the dispatches recorded by hand until "
+                         "it fires")
 
 
 def usage_warning(cwd=None):
     """None unless a guard is registered while the SubagentStop usage hook is
     in no settings file, or is there in the wrong shape: no tokens are then
     recorded and every cost number stays undefined. `ppl init` warns."""
-    settings = _readable_settings(cwd)
-    if not any(_hooks_of(doc, "PreToolUse", GUARD_MARKER) for _, doc in settings):
-        return None
-    problems = [text for path, doc in settings
-                for marker, text in _shape_problems(doc, path) if marker == USAGE_MARKER]
-    if not any(_hooks_of(doc, "SubagentStop", USAGE_MARKER) for _, doc in settings):
-        problems.append("the SubagentStop usage hook (%s) is registered in neither %s nor %s"
-                        % (USAGE_MARKER, local_settings_path(cwd), global_settings_path()))
-    if not problems:
-        return None
-    return ("%s. The tokens are not recorded, so the cost metrics stay undefined: run "
-            "`ppl setup claude` to write the hook entries again." % "; ".join(problems))
+    return _hook_warning(cwd, "SubagentStop", USAGE_MARKER, "usage",
+                         "The tokens are not recorded, so the cost metrics stay undefined")
 
 
 def _hook_scripts(command, marker):
@@ -408,18 +407,24 @@ def hook_location_warning(cwd=None):
     """None unless a registered guard, dispatch or usage command runs a script
     outside the hooks directory of this install (`paths.root()/hooks`): a
     clone or an older install left behind keeps running its own copy of the
-    hook. `ppl init` and `ppl doctor` warn."""
+    hook. `ppl init` and `ppl doctor` warn. It never raises: `ppl init` prints
+    it after the run exists. A path that does not resolve (a symlink loop
+    raises RuntimeError on Python 3.11 and 3.12) is skipped."""
     from . import paths
     try:
         hooks_dir = (paths.root() / "hooks").resolve()
-    except PplError:
+    except (PplError, OSError, RuntimeError):
         return None
     found = []
     for path, doc in _readable_settings(cwd):
         for event, marker in HOOK_EVENTS:
             for hook in _hooks_of(doc, event, marker):
                 for script in _hook_scripts(str(hook.get("command", "")), marker):
-                    if not Path(script).resolve().is_relative_to(hooks_dir):
+                    try:
+                        inside = Path(script).resolve().is_relative_to(hooks_dir)
+                    except (OSError, RuntimeError):
+                        continue
+                    if not inside:
                         found.append("%s: the %s hook runs %s" % (path, marker, script))
     if not found:
         return None

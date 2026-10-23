@@ -2,7 +2,10 @@ import io
 import json
 import os
 import runpy
+import stat
 import sys
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -238,10 +241,85 @@ class TestUsageHook(unittest.TestCase):
         handled = ppl_python_floor.refuse_old_python(
             (3, 9, 0), hook, event, io.StringIO(json.dumps(self.payload())), out, err)
         self.assertTrue(handled)
-        if out.getvalue():
-            self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["hookEventName"],
-                             "SubagentStop")
+        # the payload is a ppl- role, so the floor always writes its deny
+        decision = json.loads(out.getvalue())["hookSpecificOutput"]
+        self.assertEqual(decision["hookEventName"], "SubagentStop")
+        self.assertEqual(decision["permissionDecision"], "deny")
+        self.assertIn("ppl_usage", decision["permissionDecisionReason"])
+        self.assertIn("3.9.0", decision["permissionDecisionReason"])
         self.assertIn("ppl_usage", err.getvalue())
+
+    def test_a_fifo_log_is_skipped_without_blocking(self):
+        # rule: R-USAGE-HOOK-CANNOT-BLOCK
+        # opening a FIFO blocks until the other end opens: the hook would hang
+        # until Claude Code's timeout
+        for name in ("log.jsonl", "usage.json"):
+            with self.subTest(name=name):
+                os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+                at = self.start()
+                write_lines(self.role_path, [line("m1", OPUS, 10)])
+                write_lines(self.main_path, [line("o1", OPUS, 7, ts=shifted(at, 60))])
+                fifo = paths.run_dir(TASK) / name
+                if fifo.exists():
+                    fifo.unlink()
+                os.mkfifo(str(fifo))
+                result = {}
+                out, err = io.StringIO(), io.StringIO()
+                # a daemon thread, so a hook stuck on the FIFO cannot hold the
+                # suite, and the patches are undone here whatever it does
+                worker = threading.Thread(
+                    target=lambda: result.setdefault("code", ppl_usage.main()), daemon=True)
+                with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(self.payload()))), \
+                        mock.patch.object(sys, "stdout", out), \
+                        mock.patch.object(sys, "stderr", err):
+                    started = time.monotonic()
+                    worker.start()
+                    worker.join(1.0)
+                    elapsed = time.monotonic() - started
+                self.assertFalse(worker.is_alive(), "the hook blocked on the FIFO %s" % name)
+                self.assertLess(elapsed, 1.0)
+                self.assertEqual((result["code"], out.getvalue()), (0, ""))
+                self.assertTrue(stat.S_ISFIFO(os.lstat(str(fifo)).st_mode))
+                if name != "log.jsonl":
+                    self.assertEqual(self.usage_events(), [])
+
+    def test_a_vanished_orchestrator_transcript_is_named_on_stderr(self):
+        at = self.start()
+        write_lines(self.main_path, [line("o1", OPUS, 7, ts=shifted(at, 60))])
+        usage.note_orchestrator(TASK, str(self.main_path), "s1")
+        self.main_path.unlink()
+        stored = store.read_json(paths.run_dir(TASK) / "usage.json")
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            usage.refresh_orchestrator(TASK)
+        self.assertEqual(len(err.getvalue().splitlines()), 1, err.getvalue())
+        self.assertIn(str(self.main_path), err.getvalue())
+        self.assertIn("transcript_missing", err.getvalue())
+        self.assertEqual(self.usage_events(), [])
+        self.assertEqual(store.read_json(paths.run_dir(TASK) / "usage.json"), stored)
+
+    def test_a_role_read_past_the_deadline_logs_deadline_and_keeps_the_orchestrator_offset(self):
+        # rule: R-USAGE-HOOK-CANNOT-BLOCK
+        at = self.start()
+        write_lines(self.role_path, [line("m1", OPUS, 10)])
+        write_lines(self.main_path, [line("o1", OPUS, 7, ts=shifted(at, 60))])
+        ppl_usage.on_stop(self.payload())
+        usage_file = paths.run_dir(TASK) / "usage.json"
+        kept = store.read_json(usage_file)["orchestrator"][str(self.main_path)]["offset"]
+        self.assertEqual(kept, self.main_path.stat().st_size)
+        write_lines(self.main_path, [line("o2", OPUS, 5, ts=shifted(at, 120))], mode="a")
+        with mock.patch.object(ppl_usage, "DEADLINE_SECONDS", 0):
+            code, out, err = self.main(self.payload(agent_id="a2"))
+        self.assertEqual((code, out), (0, ""))
+        late = self.usage_events()[-1]
+        self.assertEqual((late["agent_id"], late.get("error")), ("a2", "deadline"))
+        self.assertNotIn("models", late)
+        self.assertEqual(len(self.orchestrator_events()), 1)
+        self.assertEqual(store.read_json(usage_file)["orchestrator"][str(self.main_path)]
+                         ["offset"], kept)
+        # the next stop in time picks the lines up where the late one left them
+        ppl_usage.on_stop(self.payload(agent_id="a3"))
+        self.assertEqual(self.orchestrator_events()[-1]["models"][OPUS]["output"], 12)
 
     def test_invalid_payloads_are_ignored(self):
         self.start()

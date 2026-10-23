@@ -286,16 +286,27 @@ class TestUsage(unittest.TestCase):
         self.assertEqual(models[OPUS]["output"], 7)
 
     def test_a_huge_integer_count_does_not_crash_the_read(self):
-        # math.isfinite raises OverflowError on an int too large for a float
+        # an int too large for a float is no count, it reads 0 like 1e999
         self.path.write_text(
             '{"type":"assistant","isSidechain":false,"timestamp":"2026-10-22T12:00:00Z",'
             '"message":{"id":"m1","model":"%s","usage":{"input_tokens":1%s,'
             '"output_tokens":7}}}\n' % (OPUS, "0" * 400), encoding="utf-8")
         got = usage.sum_transcript(self.path)
-        self.assertEqual(got[OPUS]["input"], 10 ** 400)
+        self.assertEqual(got[OPUS]["input"], 0)
         self.assertEqual(got[OPUS]["output"], 7)
         models, _, _ = usage.read_increment(self.path, 0, "2026-10-22T00:00:00Z", [])
+        self.assertEqual(models[OPUS]["input"], 0)
         self.assertEqual(models[OPUS]["output"], 7)
+
+    def test_dollars_never_raise_on_a_logged_huge_count(self):
+        # the log is append-only: one such event must not break every later read
+        self.write_config('[prices."m"]\ninput = 1\ncache_write = 1\n'
+                          'cache_read = 1\noutput = 10\n')
+        self.log([
+            {"event": "usage", "agent_id": "a1", "role": "r1",
+             "models": {"m": {"input": 10 ** 400, "output": 1000000}}}])
+        self.assertEqual(usage.run_dollars(self.dir), (10.0, []))
+        self.assertEqual(usage.dollars({"m": {"output": 10 ** 400}}, usage.prices()), (0.0, []))
 
     def test_run_dollars_sum_every_role(self):
         self.write_config('[prices."m"]\ninput = 0\ncache_write = 0\n'

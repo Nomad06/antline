@@ -966,9 +966,30 @@ class TestHookShape(unittest.TestCase):
         self.assertEqual(self.local()["hook_shape"], "ok")
         warning = doctor.hook_location_warning(cwd=self.local_dir)
         self.assertIn(str(elsewhere), warning)
-        self.assertIn(str(paths.root() / "hooks"), warning)
+        # the warning names the resolved directory, a symlinked checkout included
+        self.assertIn(str((paths.root() / "hooks").resolve()), warning)
         self.assertIn("ppl setup claude", warning)
         self.assertNotIn("ppl_dispatch.py", warning)
+
+    def test_a_symlink_loop_in_a_hook_path_does_not_crash_the_warning(self):
+        # ppl init prints this warning after the run exists, so it must not raise
+        loop = Path(tmphome.mkdtemp(prefix="pplloop-")) / "loop"
+        os.symlink(str(loop), str(loop))
+        script = loop / "ppl_guard.py"
+        self.write(guard={"command": "%s %s" % (shlex.quote(sys.executable),
+                                                shlex.quote(str(script)))},
+                   dispatch={}, usage={})
+        real = Path.resolve
+        # Python 3.11 and 3.12 raise RuntimeError on a loop, a strict resolve OSError
+        for error in (RuntimeError("Symlink loop from %r" % str(loop)),
+                      OSError(62, "Too many levels of symbolic links")):
+            def resolve(path, *args, **kwargs):
+                if str(path).startswith(str(loop)):
+                    raise error
+                return real(path, *args, **kwargs)
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(Path, "resolve", resolve):
+                self.assertIsNone(doctor.hook_location_warning(cwd=self.local_dir))
 
     def test_hooks_from_this_install_raise_no_location_warning(self):
         self.assertEqual(fixtures.SOURCE.resolve(), paths.root().resolve())

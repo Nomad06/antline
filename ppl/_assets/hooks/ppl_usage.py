@@ -1,5 +1,6 @@
 """SubagentStop usage recorder. It records tokens and never decides anything."""
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -37,6 +38,8 @@ if not _PPL_FILE or not Path(_PPL_FILE).resolve().is_relative_to(_PACKAGE_PARENT
 from ppl import boundary, run, store, usage
 
 DEADLINE_SECONDS = 2.0
+# the run files the hook reads or appends besides state.json
+_RUN_FILES = ("log.jsonl", "usage.json")
 
 
 def _effort(value):
@@ -111,8 +114,16 @@ def on_stop(payload):
     if not task_id:
         return None
     try:
-        if not run.state_path(task_id).is_file():
+        state = run.state_path(task_id)
+        if not state.is_file():
             return None
+        # A FIFO, or anything else that is not a regular file, blocks the open
+        # that reads or appends it until Claude Code's timeout, so nothing is
+        # recorded then (ppl_guard.log_denial skips such a log the same way).
+        for name in _RUN_FILES:
+            target = state.parent / name
+            if os.path.lexists(target) and not os.path.isfile(target):
+                return None
     except Exception:
         return None
     deadline = time.monotonic() + DEADLINE_SECONDS
