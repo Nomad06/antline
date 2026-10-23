@@ -538,6 +538,15 @@ def _write(root, rel, text):
         handle.write(text)
 
 
+def _umask_modes(root):
+    """mkdtemp makes the build directory 0700, so before it is published every
+    directory in it gets the mode a plain mkdir gives under the current umask."""
+    mask = os.umask(0)
+    os.umask(mask)
+    for folder, _, _ in os.walk(root):
+        os.chmod(folder, 0o777 & ~mask)
+
+
 def export(task_id, out, redact=("paths", "people")):
     """Writes the trail to `out` and returns its manifest. Nothing is left behind
     on a refusal [R-TRAIL-REDACTED]."""
@@ -568,8 +577,12 @@ def export(task_id, out, redact=("paths", "people")):
     texts.update(_readable(redacted))
     run_measures = redactor.apply(measures(directory))
     texts["index.html"] = _page(task_id, redacted, run_measures, set(texts))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    building = tempfile.mkdtemp(dir=str(out.parent), prefix=".trail-")
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        building = tempfile.mkdtemp(dir=str(out.parent), prefix=".trail-")
+    except OSError as exc:
+        raise PplError("SCHEMA_INVALID", "the trail could not be built beside %s: %s"
+                       % (out, exc))
     try:
         for rel in sorted(texts):
             _write(building, rel, texts[rel])
@@ -600,6 +613,7 @@ def export(task_id, out, redact=("paths", "people")):
                            "trail for %s refused, nothing was written: %s. Remove the value "
                            "from the run's documents and export again"
                            % (task_id, "; ".join(found)))
+        _umask_modes(building)
         # os.rename replaces an empty directory, so one created meanwhile is checked
         if os.path.lexists(out):
             raise PplError("SCHEMA_INVALID", "%s appeared while the trail was being written: "

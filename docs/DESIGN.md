@@ -1770,8 +1770,9 @@ applied, the skipped files, every other file with its sha256, and the run's meas
 `wall_clock_seconds` (init to `done`, else to the last event), `tokens_by_role`, `usd`,
 `denials`, `rework_rounds` and `verdicts` (a count per outcome). `usd` is priced with the prices
 `ppl init` froze into the run, so a later export quotes the same number, and with the live
-`[prices]` only for a run that froze none. A measure with no data is null, not 0, and `reasons`
-says why. The skipped names and the measures go through the same redaction as the documents.
+`[prices]` only for a run that froze none. It is the priced usage alone: the manual `usd_used`
+(`ppl budget spend usd`), which the dollars spent on the status card include, is left out.
+A measure with no data is null, not 0, and `reasons` says why. The skipped names and the measures go through the same redaction as the documents.
 
 ## 7. Stage flow: task link to MR
 

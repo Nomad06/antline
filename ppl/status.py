@@ -19,6 +19,8 @@ Next:     {next_action}
 
 
 def _short(count):
+    # a logged count can be a float, and 412.0 tokens reads as 412
+    count = int(round(count))
     if count < 1000:
         return str(count)
     thousands = round(count / 1000, 1 if count < 10000 else 0)

@@ -456,7 +456,8 @@ def _parse(ts):
 
 def _event(events, name, **match):
     for ev in events:
-        if ev.get("event") != name:
+        # a log line can be valid JSON and still no object
+        if not isinstance(ev, dict) or ev.get("event") != name:
             continue
         if all(ev.get(key) == value for key, value in match.items()):
             return ev
@@ -594,7 +595,8 @@ def _pass_dates(run_records):
         except OSError:
             continue
         for ev in events:
-            if ev.get("event") != "verdict" or ev.get("verdict") != "PASS":
+            if not isinstance(ev, dict) or ev.get("event") != "verdict" \
+                    or ev.get("verdict") != "PASS":
                 continue
             try:
                 at = _parse(ev["at"])
@@ -658,6 +660,8 @@ def _run_warnings(limits, run_records):
             budgeted += 1
             spent += 1 if used >= cap else 0
         for ev in events:
+            if not isinstance(ev, dict):
+                continue
             kind = ev.get("event")
             if kind == "park" and isinstance(ev.get("blocker"), str):
                 parks[ev["blocker"]] = parks.get(ev["blocker"], 0) + 1

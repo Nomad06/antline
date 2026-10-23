@@ -337,6 +337,11 @@ class TestStatusUsage(unittest.TestCase):
         run.init("USG-436", "u", "/tmp/repo")
         self.assertEqual(status.usd_text("USG-436"), "usd 0.0 (no cap), no usage recorded")
 
+    def test_a_float_count_prints_as_a_whole_number(self):
+        run.init("USG-440", "u", "/tmp/repo")
+        self._usage("USG-440", "ppl-a", "a1", "m", input=405.0, output=7.0)
+        self.assertEqual(status.tokens_line("USG-440"), "a 412 (out 7)")
+
 
 class TestDestroyRemovesTheWorktree(unittest.TestCase):
     """I1: the removal used to run without -C, so git executed it against ppl's

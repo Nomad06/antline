@@ -627,6 +627,15 @@ class TestPresetCosts(IsolatedFleet):
         self.assertIsNone(entry["usd_mean"])
         self.assertIn("prices.m", entry["usd_reason"])
 
+    def test_a_log_line_that_is_not_an_object_is_skipped(self):
+        write_prices(PRICED)
+        task = done_preset_run("balanced", 1, input=4)
+        log = paths.run_dir(task) / "log.jsonl"
+        log.write_text("123\n" + log.read_text(encoding="utf-8"), encoding="utf-8")
+        self.assertEqual(metrics.preset_costs()["balanced"]["runs"], 1)
+        report = metrics.compute()
+        self.assertAlmostEqual(report["overall"]["cost_per_accepted_task"]["value"], 4.0)
+
 WARN_COUNTER = itertools.count(9000)
 OLD = "2026-09-01T00:00:00+00:00"
 YOUNG = "2026-10-20T00:00:00+00:00"

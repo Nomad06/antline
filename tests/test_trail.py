@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -555,6 +556,26 @@ class TestTrailExport(unittest.TestCase):
         paths.config_file().write_text(PRICES % (30, 37.5, 3, 150), encoding="utf-8")
         measures = trail.measures(trail.find_run("GH-600"))
         self.assertAlmostEqual(measures["usd"], priced(frozen))
+
+    def test_the_exported_directory_honours_a_022_umask(self):
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        self.export()
+        for folder in (self.out, self.out / "docs", self.out / "docs" / "verdicts"):
+            self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o755, folder)
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes into a read-only directory")
+    def test_an_unwritable_parent_is_refused_as_schema_invalid(self):
+        locked = self.parent / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        self.addCleanup(locked.chmod, 0o700)
+        for out in (locked / "trail", locked / "deeper" / "trail"):
+            with self.assertRaises(PplError) as caught:
+                self.export(out=out)
+            self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+            self.assertIn(str(out), caught.exception.message)
+        self.assertEqual(list(locked.iterdir()), [])
 
     def test_a_relative_repo_is_refused(self):
         state = run.load(self.task)

@@ -2215,7 +2215,7 @@ hook_or_check = "ppl/metrics.py:compute"
 deny_test = ""
 allow_test = "tests/test_cli.py::TestMetricsWarnings::test_a_warning_never_changes_the_exit_code"
 owner = "ppl"
-residual = "the thresholds are starting points, recalibrate them after the first 20 real runs. A warning needs its minimum sample, so a small fleet prints none"
+residual = "the thresholds are starting points, recalibrate them after the first 20 real runs. A warning needs its minimum sample, so a small fleet prints none. A malformed [metrics] table in config.toml (an unknown key, a non-number or a negative number) refuses the whole command with SCHEMA_INVALID, numbers included, since the thresholds are read before anything is computed"
 
 [[rule]]
 id = "R-TRAIL-REDACTED"
