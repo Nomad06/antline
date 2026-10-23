@@ -72,6 +72,18 @@ class TestDestroy(unittest.TestCase):
         self.assertTrue(any(paths.runs_dir().glob("_archive/DEMO-430-*")))
         self.assertIsNone(run.active())
 
+    def test_local_destroy_removes_the_scratch_dir(self):
+        from ppl import os_sandbox
+        run.init("DEMO-432", "u", "/tmp/repo")
+        scratch = os_sandbox.scratch_dir("DEMO-432")
+        scratch.mkdir(parents=True)
+        (scratch / "install.log").write_text("x", encoding="utf-8")
+        other = os_sandbox.scratch_dir("DEMO-433")
+        other.mkdir(parents=True)
+        run.destroy("DEMO-432", "local")
+        self.assertFalse(scratch.exists())
+        self.assertTrue(other.exists())
+
     def test_full_destroy_queues_remote_cleanup_and_keeps_the_run(self):
         # rule: R-DESTROY-REMOTE-QUEUED
         run.init("DEMO-431", "u", "/tmp/repo")

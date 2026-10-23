@@ -16,7 +16,7 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
 
 import fixtures
-from ppl import boundary, doctor, harness, paths, run, setup, store
+from ppl import boundary, doctor, harness, os_sandbox, paths, run, setup, store
 from ppl.trackers import github_issues, jira
 import ppl_guard
 
@@ -167,7 +167,7 @@ class TestTrackerCliGate(GhRunCase):
 
     def test_the_close_note_is_written_and_posted_once_the_merge_is_recorded(self):
         # the stage 8 close: the note in the run's scratch directory, then gh issue comment
-        note = "/tmp/ppl-GH-7/note.md"
+        note = str(os_sandbox.scratch_dir("GH-7") / "note.md")
         with self.at_merge_watch():
             self.assertIsNone(ppl_guard.decide(payload(None, "Write", {"file_path": note,
                                                                        "content": "Done."},

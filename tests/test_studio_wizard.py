@@ -183,16 +183,19 @@ class TestSameResultAsTheTerminal(WizardTestCase):
     def snapshot(self):
         agents = self.workspace / ".claude" / "agents"
         settings = (self.workspace / ".claude" / "settings.local.json").read_text(encoding="utf-8")
-        for home in (os.path.realpath(paths.home()), str(paths.home())):
-            settings = settings.replace(home, "<PPL_HOME>")
+        def unhome(text):
+            for home in (os.path.realpath(paths.home()), str(paths.home())):
+                text = text.replace(home, "<PPL_HOME>")
+            return text
+        settings = unhome(settings)
         files = {"settings": settings,
                  "config": paths.config_file().read_text(encoding="utf-8"),
                  "routing": paths.routing_file().read_text(encoding="utf-8"),
                  "harness": (paths.harness_dir("mine") / "harness.toml").read_text(encoding="utf-8"),
-                 "skill": (self.workspace / ".claude" / "skills" / "pipeline" / "SKILL.md")
-                 .read_text(encoding="utf-8")}
+                 "skill": unhome((self.workspace / ".claude" / "skills" / "pipeline" / "SKILL.md")
+                                 .read_text(encoding="utf-8"))}
         for path in sorted(agents.glob("*.md")):
-            files["agent:" + path.name] = path.read_text(encoding="utf-8")
+            files["agent:" + path.name] = unhome(path.read_text(encoding="utf-8"))
         return files
 
     def test_the_browser_wizard_writes_what_the_terminal_wizard_writes(self):

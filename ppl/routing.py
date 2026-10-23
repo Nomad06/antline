@@ -15,7 +15,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from . import boundary, forges, paths, trackers
+from . import boundary, forges, os_sandbox, paths, trackers
 from .errors import PplError
 
 REQUIRED_ROLES = ("ppl-briefer", "ppl-brief-challenger", "ppl-code-worker",
@@ -378,6 +378,7 @@ def render(name, harness_doc, config=None):
     entry = role(name, config)
     meta = BASE_TOOLS[name]
     body = (paths.root() / "templates" / ("%s.md.body" % name)).read_text(encoding="utf-8")
+    body = body.replace("<scratch>", str(os_sandbox.scratch_root()))
     lines = ["---", GENERATED_NOTICE,
              "name: %s" % name,
              "description: %s" % meta["description"],

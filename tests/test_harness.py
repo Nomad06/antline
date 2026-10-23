@@ -1521,11 +1521,27 @@ class TestRenderSkill(HarnessTestCase):
         for relative in forge_files:
             self.assertNotIn("merge request", generic[relative].lower(), relative)
 
+    def test_no_rendered_file_mentions_tmp_ppl_dash(self):
+        from ppl import routing
+        fixtures.install_routing()
+        for name in ("example-maven", "example-generic"):
+            fixtures.install_harness(name)
+            doc = harness.load(name)
+            rendered = dict(harness.render_skill(doc))
+            for role in routing.REQUIRED_ROLES:
+                rendered["agent/%s" % role] = routing.render(role, doc)
+            for relative, text in rendered.items():
+                self.assertNotIn("/tmp/ppl-", text, "%s %s" % (name, relative))
+                self.assertNotIn("<scratch>", text, "%s %s" % (name, relative))
+        self.assertIn("%s/<TASK-ID>/build.log" % os_sandbox.scratch_root(),
+                      rendered["agent/ppl-code-worker"])
+
     def test_gate_recipes_render_with_rc_files_and_evidence_lines(self):
         fixtures.install_harness("example-maven")
         gates = harness.render_skill(harness.load("example-maven"))["references/gates.md"]
+        scratch = "%s/<TASK-ID>" % os_sandbox.scratch_root()
         self.assertIn("mvn install -pl :<module> -am -DskipTests -Dmaven.gitcommitid.skip=true "
-                      "> /tmp/ppl-<TASK-ID>/install.log 2>&1; echo $? > /tmp/ppl-<TASK-ID>/install.rc", gates)
+                      "> %(d)s/install.log 2>&1; echo $? > %(d)s/install.rc" % {"d": scratch}, gates)
         self.assertIn("ppl evidence add --check install --result <pass|fail from install.rc>", gates)
         self.assertIn("ppl evidence add --check focused-tests", gates)
         self.assertIn("ppl evidence add --check secret-scan", gates)
@@ -1593,8 +1609,8 @@ class TestRenderSkill(HarnessTestCase):
         generic = self.render("example-generic")
         self.assertIn("git fetch origin main\n", generic["references/stage-1-baseline.md"])
         self.assertIn("diff origin/main...HEAD", generic["references/gates.md"])
-        self.assertIn("make test TEST=<test_class> > /tmp/ppl-<TASK-ID>/focused-tests.log 2>&1",
-                      generic["references/gates.md"])
+        self.assertIn("make test TEST=<test_class> > %s/<TASK-ID>/focused-tests.log 2>&1"
+                      % os_sandbox.scratch_root(), generic["references/gates.md"])
 
     def test_the_harness_name_in_the_skill_is_the_installed_directory(self):
         # The document inside "mine" still says name = "example-maven", and

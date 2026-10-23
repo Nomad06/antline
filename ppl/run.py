@@ -523,6 +523,8 @@ def destroy(task_id, scope):
             worktree = "left_behind"
             worktree_error = (removal.stderr.strip() or removal.stdout.strip()
                               or "git worktree remove exited %d" % removal.returncode)
+    from . import os_sandbox
+    shutil.rmtree(os_sandbox.scratch_dir(task_id), ignore_errors=True)
     # Logged before the move: append_log would otherwise recreate the run
     # directory it has just archived.
     store.append_log(task_id, {"event": "destroy", "scope": "local",

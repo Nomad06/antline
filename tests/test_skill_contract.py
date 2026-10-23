@@ -551,10 +551,13 @@ class TestTrackerNeutralSkill(unittest.TestCase):
         found = re.findall(r"`(gh issue comment [^`]+)`", stage8)
         self.assertEqual(len(found), 1, found)
         # the run's scratch directory, since a write into the worktree or runs/ is denied
-        self.assertIn("write the note to `/tmp/ppl-<TASK-ID>/note.md`", stage8)
+        written = re.search(r"write the note to `(/[^`]*)/<TASK-ID>/note\.md`", stage8)
+        self.assertTrue(written, stage8)
+        scratch = written.group(1)
+        self.assertEqual(os.path.basename(scratch), "scratch")
         command = (found[0].replace("<number>", "45").replace("<owner/name>", "o/r")
                    .replace("<TASK-ID>", "GH-45"))
-        self.assertEqual(command, "gh issue comment 45 -R o/r --body-file /tmp/ppl-GH-45/note.md")
+        self.assertEqual(command, "gh issue comment 45 -R o/r --body-file %s/GH-45/note.md" % scratch)
         self.assertNotIn("$", found[0])
         self.assertTrue(ppl_guard.tracker_cli_write(command), "the close is not read as a write")
         for stage in ("review", "closure", "merge_watch"):
