@@ -68,6 +68,7 @@ STACKS = {
     "node": {
         "label": "Node.js (npm)", "markers": ("package.json",), "base": "example-generic",
         "build": "npm ci", "tests": NODE_TESTS,
+        "allowed_domains": ["registry.npmjs.org"], "allow_write": ["~/.npm"],
         "gates": [{"name": "install", "command": "npm ci"},
                   {"name": "focused-tests", "command": "npm test -- <test_class>"},
                   {"name": "integration-tests", "command": "npm test"}],
@@ -78,6 +79,8 @@ STACKS = {
         "label": "Python (pytest)",
         "markers": ("pyproject.toml", "setup.cfg", "setup.py", "requirements.txt"),
         "base": "example-generic", "build": INSTALL_EDITABLE, "tests": PYTHON_TESTS,
+        "allowed_domains": ["pypi.org", "files.pythonhosted.org"],
+        "allow_write": ["~/.cache/pip"],
         "gates": [{"name": "install", "command": INSTALL_EDITABLE},
                   {"name": "focused-tests", "command": "pytest -q <test_class>"},
                   {"name": "integration-tests", "command": "pytest -q"}],
@@ -85,12 +88,16 @@ STACKS = {
                     "one_goal_of": [], "free_args": SAFE_FREE_ARGS}],
     },
     "maven": {"label": "Java (Maven)", "markers": ("pom.xml",), "base": "example-maven",
-              "tests": list(boundary.TEST_PATTERNS)},
+              "tests": list(boundary.TEST_PATTERNS),
+              "allowed_domains": ["repo.maven.apache.org", "repo1.maven.org"],
+              "allow_write": ["~/.m2"]},
     "gradle": {
         "label": "Java or Kotlin (Gradle)",
         "markers": ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"),
         "base": "example-generic", "build": "./gradlew assemble", "naming": NAMING_GRADLE,
         "tests": list(boundary.TEST_PATTERNS),
+        "allowed_domains": ["repo.maven.apache.org", "repo1.maven.org", "plugins.gradle.org"],
+        "allow_write": ["~/.gradle"],
         "gates": [{"name": "build", "command": "./gradlew assemble"},
                   {"name": "focused-tests", "command": "./gradlew test --tests <test_class>"},
                   {"name": "integration-tests", "command": "./gradlew check"}],
@@ -100,6 +107,8 @@ STACKS = {
     "go": {
         "label": "Go", "markers": ("go.mod",), "base": "example-generic", "build": "go build ./...",
         "naming": NAMING_GO, "tests": ["**/*_test.go", "**/testdata/**"],
+        "allowed_domains": ["proxy.golang.org", "sum.golang.org"],
+        "allow_write": ["~/go/pkg/mod"],
         "gates": [{"name": "build", "command": "go build ./..."},
                   {"name": "lint", "command": "go vet ./..."},
                   {"name": "focused-tests", "command": "go test ./... -run <test_class>"},
@@ -259,6 +268,9 @@ def draft(stack, project):
                    "worktrees": repo_path.rstrip("/") + "/.worktrees"}
     doc["env"] = {}
     doc["tests"] = {"sources": list(spec["tests"])}
+    if spec.get("allowed_domains") or spec.get("allow_write"):
+        doc["os_sandbox"] = {"allowed_domains": list(spec.get("allowed_domains", [])),
+                             "allow_write": list(spec.get("allow_write", []))}
     sources["tests.sources"] = label
     kind = project.get("forge_hint")
     if kind in harness.FORGES:

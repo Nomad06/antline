@@ -1125,6 +1125,62 @@ class TestTestGlobs(HarnessTestCase):
         self.assertEqual(harness.validate(harness.load(name), name), [])
 
 
+class TestOsSandboxTable(HarnessTestCase):
+    def install(self, text, base="example-generic"):
+        path = fixtures.install_harness(base) / "harness.toml"
+        path.write_text(path.read_text(encoding="utf-8") + "\n[os_sandbox]\n" + text,
+                        encoding="utf-8")
+        return base
+
+    def refused(self, text, base="example-generic"):
+        name = self.install(text, base)
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        return caught.exception.message
+
+    def test_os_sandbox_is_a_known_table(self):
+        name = self.install('enabled = true\nallowed_domains = ["pypi.org", "*.example.com"]\n'
+                            'allow_write = ["/var/cache/x", "~/.npm"]\n')
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
+    def test_os_sandbox_unknown_key_is_refused(self):
+        message = self.refused("allowed_domain = []\n")
+        self.assertIn("os_sandbox.allowed_domain", message)
+        self.assertIn("os_sandbox.allowed_domains", message)
+
+    def test_allowed_domains_refuse_a_scheme_or_path(self):
+        for host in ("https://pypi.org", "pypi.org/simple", "pypi.org:443", "", "a b"):
+            with self.subTest(host=host):
+                message = self.refused('allowed_domains = ["%s"]\n' % host)
+                self.assertIn("os_sandbox.allowed_domains[0]", message)
+        self.assertIn("os_sandbox.allowed_domains must", self.refused('allowed_domains = "x"\n'))
+
+    def test_allow_write_refuses_a_relative_path(self):
+        message = self.refused('allow_write = ["cache/x"]\n')
+        self.assertIn("os_sandbox.allow_write[0]", message)
+
+    def test_enabled_must_be_a_bool(self):
+        self.assertIn("os_sandbox.enabled", self.refused('enabled = "yes"\n'))
+
+    def test_enabled_false_on_a_github_harness_is_refused(self):
+        message = self.refused("enabled = false\n")
+        self.assertIn("os_sandbox.enabled", message)
+        self.assertIn("--no-os-sandbox", message)
+
+    def test_enabled_false_on_a_gitlab_jira_harness_is_accepted(self):
+        path = fixtures.install_harness("example-generic") / "harness.toml"
+        text = path.read_text(encoding="utf-8").replace('kind = "github"', 'kind = "gitlab"\n'
+                                                       'mcp_server = "GitLab-MCP"')
+        path.write_text(text + "\n[os_sandbox]\nenabled = false\n", encoding="utf-8")
+        self.assertEqual(harness.validate(harness.load("example-generic"), "x"), [])
+
+    def test_the_snapshot_records_whether_the_profile_is_needed(self):
+        fixtures.install_harness("example-generic")
+        self.assertEqual(harness.snapshot(harness.load("example-generic"))["os_sandbox"],
+                         {"needed": True})
+
+
 class TestSnapshotAndApplied(HarnessTestCase):
     def activate(self, name):
         paths.config_file().write_text('[harness]\nactive = "%s"\n' % name, encoding="utf-8")
@@ -1133,7 +1189,8 @@ class TestSnapshotAndApplied(HarnessTestCase):
         fixtures.install_harness("example-maven")
         doc = harness.load("example-maven")
         snap = harness.snapshot(doc)
-        self.assertEqual(set(snap), {"format", "name", "task", "tracker", "forge", "shapes", "tests"})
+        self.assertEqual(set(snap), {"format", "name", "task", "tracker", "forge", "os_sandbox", "shapes",
+                                    "tests"})
         self.assertEqual(snap["format"], harness.FORMAT)
         self.assertEqual(snap["name"], "example-maven")
         self.assertEqual(snap["task"], {"key_pattern": doc["task"]["key_pattern"]})

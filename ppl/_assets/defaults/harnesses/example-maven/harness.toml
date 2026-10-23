@@ -21,6 +21,12 @@ read_tools = ["getJiraIssue", "getConfluenceContent", "getConfluencePage", "sear
 kind = "gitlab"
 mcp_server = "GitLab-MCP"
 
+# The OS sandbox profile is on for a GitHub forge or tracker. List the hosts and the
+# cache directories the build needs, nothing else is reachable or writable.
+# [os_sandbox]
+# allowed_domains = ["pypi.org", "files.pythonhosted.org"]
+# allow_write = ["~/.cache/pip"]
+
 [knowledge]
 skills = []
 extra_tools = []

@@ -14,7 +14,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from . import boundary, forges, paths, routing, sequences, trackers
+from . import boundary, forges, os_sandbox, paths, routing, sequences, trackers
 from .errors import PplError
 
 FORMAT = 1
@@ -57,6 +57,7 @@ KNOWN_KEYS = {
                                    for key in trackers.get(kind).KEYS)),
     "forge": ("kind", "mcp_server"),
     "tests": ("sources",),
+    "os_sandbox": ("enabled", "allowed_domains", "allow_write"),
     "knowledge": ("skills", "extra_tools"),
     "env": None,
     "gate": ("name", "command"),
@@ -80,6 +81,8 @@ AGENT_SOFT_BYTES = AGENT_MEASURED_BYTES * 3 // 2
 AGENT_HARD_BYTES = AGENT_MEASURED_BYTES * 3
 REFERENCE_SOFT_BYTES = REFERENCE_MEASURED_BYTES * 3 // 2
 REFERENCE_HARD_BYTES = REFERENCE_MEASURED_BYTES * 3
+_HOST_RE = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?"
+                      r"(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*")
 _ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _CLONE_TIMEOUT_SECONDS = 120
 _KIND_WORDS = {str: "a non-empty string", int: "an integer", list: "a list"}
@@ -269,6 +272,36 @@ def _check_test_sources(doc, source):
             _fail(source, "tests.sources[%d] %r %s" % (index, glob, problem))
 
 
+def _check_os_sandbox(doc, source):
+    """A present [os_sandbox] table holds a bool, bare host names and absolute paths. A
+    GitHub harness cannot switch the profile off, since the guard's github rules rest on it."""
+    if "os_sandbox" not in doc:
+        return
+    table = doc["os_sandbox"]
+    if not isinstance(table, dict):
+        _fail(source, "[os_sandbox] must be a table")
+    if "enabled" in table and not isinstance(table["enabled"], bool):
+        _fail(source, "os_sandbox.enabled must be true or false")
+    if table.get("enabled") is False and os_sandbox.needed(dict(doc, os_sandbox={})):
+        _fail(source, "os_sandbox.enabled = false is refused for a GitHub forge or tracker: the "
+              "OS sandbox keeps GitHub credentials from the roles. Run ppl init --no-os-sandbox "
+              "for a run without it")
+    domains = table.get("allowed_domains", [])
+    if not _strings(domains):
+        _fail(source, "os_sandbox.allowed_domains must be a list of host names")
+    for index, host in enumerate(domains):
+        if not _HOST_RE.fullmatch(host):
+            _fail(source, "os_sandbox.allowed_domains[%d] %r must be a bare host name, "
+                  "optionally starting with '*.', with no scheme, path or port" % (index, host))
+    writable = table.get("allow_write", [])
+    if not _strings(writable):
+        _fail(source, "os_sandbox.allow_write must be a list of paths")
+    for index, entry in enumerate(writable):
+        if not (entry.startswith("/") or entry.startswith("~/")):
+            _fail(source, "os_sandbox.allow_write[%d] %r must be an absolute path or start "
+                  "with '~/'" % (index, entry))
+
+
 def validate(doc, source):
     """Raise HARNESS_INVALID on a structural error, return a list of warnings.
     The checks of the harness directory run when the document carries its _dir,
@@ -332,6 +365,7 @@ def validate(doc, source):
             _fail(source, "gate[%d].command is required" % index)
     _check_gate_commands(doc, gates, source)
     _check_test_sources(doc, source)
+    _check_os_sandbox(doc, source)
     if doc.get("_dir"):
         warnings.extend(_check_files(doc, source))
     for index, row in enumerate(shape_rows(doc, source)):
@@ -485,6 +519,7 @@ def snapshot(doc):
             "task": {"key_pattern": doc["task"]["key_pattern"]},
             "tracker": copy.deepcopy(doc["tracker"]),
             "forge": copy.deepcopy(doc["forge"]),
+            "os_sandbox": {"needed": os_sandbox.needed(doc)},
             "shapes": shape_rows(doc),
             "tests": {"sources": list((doc.get("tests") or {}).get("sources")
                                       or boundary.TEST_PATTERNS)}}
