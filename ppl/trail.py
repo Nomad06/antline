@@ -11,7 +11,6 @@ built in a sibling temporary directory and renamed onto `--out` only once
 that check passes [R-TRAIL-REDACTED].
 """
 import hashlib
-import html
 import json
 import os
 import re
@@ -22,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import __version__, metrics, paths, store, usage
+from . import __version__, metrics, paths, store, trail_render, usage
 from .errors import PplError
 
 # Relative paths under runs/<task>, in a readable form. `<sha>` is hexadecimal,
@@ -84,9 +83,6 @@ _NOT_PEOPLE = ("cli", "panel")
 
 _URL_RE = re.compile(r"https?://[^\s<>\"'`(){}\[\]]*[^\s<>\"'`(){}\[\].,;:!?]")
 _FORGE_HOSTS = ("github.com", "gitlab.com")
-
-RENDERED = ("brief.md", "verdicts.md", "threads.md")
-
 
 def temp_roots():
     return (tempfile.gettempdir(), "/tmp", "/private/tmp", "/var/folders")
@@ -489,35 +485,50 @@ def _serialize(rel, value):
     return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
-_PAGE_STYLE = """
-:root { --paper: #f6f6f3; --ink: #211915; --muted: #6b5f56; --trail: #b4a89c;
-        --amber-ink: #8a5800; color-scheme: light; }
-@media (prefers-color-scheme: dark) {
-  :root { --paper: #17120e; --ink: #f1ebe4; --muted: #b3a698; --trail: #6e6055;
-          --amber-ink: #f3c260; color-scheme: dark; }
-}
-* { box-sizing: border-box; }
-body { margin: 0; padding: 24px 16px; background: var(--paper); color: var(--ink);
-       font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 760px; margin: 0 auto; }
-h1 { margin: 0 0 16px; padding-bottom: 8px; border-bottom: 3px dotted var(--trail); }
-ul { padding-left: 20px; }
-li { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 14px;
-     overflow-wrap: anywhere; }
-a { color: var(--amber-ink); }
-"""
+def _verdict_history(redacted):
+    """The redacted verdict documents `docs/verdicts/<sha>/<n>.json`, oldest first.
+    Each carries the findings the run recorded against its SHA, as the registry
+    holds them, since the verdict document itself lists none."""
+    by_sha = {}
+    for rel, doc in redacted.items():
+        match = re.fullmatch(r"verdicts/([^/]+)/(\d+)\.json", rel)
+        if match and isinstance(doc, dict):
+            by_sha.setdefault(match.group(1), {})[int(match.group(2))] = doc
+    found = [d for rel, d in sorted(redacted.items())
+             if rel.startswith("findings/") and isinstance(d, dict)]
+    history = []
+    seen = Counter()
+    events = redacted.get("log.jsonl") or []
+    for event in events:
+        if event.get("event") == "verdict":
+            sha = event.get("sha")
+            seen[sha] += 1
+            doc = by_sha.get(sha, {}).pop(seen[sha], None)
+            if doc is not None:
+                history.append(doc)
+    for sha in sorted(by_sha):
+        history.extend(by_sha[sha][n] for n in sorted(by_sha[sha]))
+    return [dict(doc, findings=[f for f in found if f.get("affected_sha") == doc.get("candidate_sha")])
+            for doc in history]
 
 
-def _plain_page(docs):
-    """index.html: the exported documents as relative links, nothing else."""
-    items = "\n".join('<li><a href="%s">%s</a></li>' % (html.escape(rel, quote=True),
-                                                       html.escape(rel))
-                      for rel in sorted(docs))
-    return ("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            "<title>antline trail</title>\n<style>%s</style>\n</head>\n<body>\n<main>\n"
-            "<h1>antline trail</h1>\n<ul>\n%s\n</ul>\n</main>\n</body>\n</html>\n"
-            % (_PAGE_STYLE, items))
+def _readable(redacted):
+    """{relative path: text} for the three readable documents."""
+    return {
+        "docs/brief.md": trail_render.brief_md(redacted.get("brief.json"),
+                                               redacted.get("challenge.json")),
+        "docs/verdicts.md": trail_render.verdicts_md(_verdict_history(redacted)),
+        "docs/threads.md": trail_render.threads_md(redacted.get("threads.json")),
+    }
+
+
+def _page(task_id, redacted, run_measures, files):
+    """index.html. A timeline link to a document the run never wrote is dropped."""
+    state = redacted.get("state.json")
+    head = state.get("candidate_sha") if isinstance(state, dict) else None
+    entries = [dict(e, link=e["link"] if e["link"] in files else None)
+               for e in trail_render.timeline(redacted.get("log.jsonl") or [])]
+    return trail_render.page(task_id, entries, run_measures, head)
 
 
 def _write(root, rel, text):
@@ -550,11 +561,13 @@ def export(task_id, out, redact=("paths", "people")):
                         urls="urls" in redact)
     redactor.find_people(docs)
     texts = {}
+    redacted = {}
     for rel, value in docs.items():
-        texts["docs/" + rel] = _serialize(rel, redactor.apply(value))
-    for name in RENDERED:
-        texts["docs/" + name] = "# %s\n" % name[:-len(".md")]
-    texts["index.html"] = _plain_page(sorted(texts))
+        redacted[rel] = redactor.apply(value)
+        texts["docs/" + rel] = _serialize(rel, redacted[rel])
+    texts.update(_readable(redacted))
+    run_measures = redactor.apply(measures(directory))
+    texts["index.html"] = _page(task_id, redacted, run_measures, set(texts))
     out.parent.mkdir(parents=True, exist_ok=True)
     building = tempfile.mkdtemp(dir=str(out.parent), prefix=".trail-")
     try:
@@ -564,7 +577,6 @@ def export(task_id, out, redact=("paths", "people")):
                   "sha256": hashlib.sha256(Path(building, rel).read_bytes()).hexdigest()}
                  for rel in sorted(texts)]
         listed_skipped = redactor.apply(skipped)
-        run_measures = redactor.apply(measures(directory))
         manifest = {
             "task_id": task_id,
             "base_sha": state.get("base_sha"),

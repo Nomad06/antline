@@ -21,7 +21,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import ppl
-from ppl import evidence, findings, paths, review, run, store, trail, usage, verdict
+from ppl import evidence, findings, paths, review, run, store, trail, trail_render, usage, verdict
 from ppl.errors import PplError
 from ppl.trackers import github_issues
 
@@ -570,13 +570,101 @@ class TestTrailExport(unittest.TestCase):
     def test_the_page_links_only_relative_docs(self):
         self.export(redact=("paths", "people"))
         page = (self.out / "index.html").read_text(encoding="utf-8")
-        for needle in ("http://", "https://", "//cdn", "<script", " src="):
+        for needle in ("<script", " src="):
             self.assertNotIn(needle, page)
         links = re.findall(r'href="([^"]*)"', page)
         self.assertTrue(links)
         for link in links:
-            self.assertTrue(link.startswith("docs/"), link)
+            self.assertTrue(link.startswith("docs/") or link == "MANIFEST.json", link)
             self.assertTrue((self.out / link).is_file(), link)
+
+
+class TestTrailPage(unittest.TestCase):
+    """index.html and the three readable documents of an exported run."""
+
+    setUp = TestTrailExport.setUp
+    export = TestTrailExport.export
+
+    def exported(self, brief=None, **kwargs):
+        if brief is not None:
+            store.write_json(paths.run_dir(self.task) / "brief.json", brief)
+        self.export(**kwargs)
+        return texts(self.out)
+
+    def test_the_page_lists_the_timeline_with_links_into_docs(self):
+        out = self.exported()
+        page = out["index.html"]
+        self.assertIn("REWORK", page)
+        self.assertIn("PASS", page)
+        self.assertIn("ppl-test-worker", page)
+        self.assertIn('href="docs/verdicts/%s/1.json"' % self.rework, page)
+        self.assertIn('href="docs/verdicts/%s/1.json"' % self.passed, page)
+        links = re.findall(r'href="([^"]*)"', page)
+        self.assertTrue(links)
+        for link in links:
+            self.assertTrue((self.out / link).is_file(), link)
+
+    def test_the_page_has_no_external_resource_and_no_script(self):
+        out = self.exported()
+        for rel in ("index.html", "docs/brief.md", "docs/verdicts.md", "docs/threads.md"):
+            text = out[rel]
+            self.assertNotIn("<script", text.lower())
+            self.assertNotIn("\t", text)
+            self.assertNotIn("\r", text)
+            text.encode("ascii")
+        page = out["index.html"]
+        for value in re.findall(r'(?:src|href)="([^"]*)"', page):
+            self.assertNotIn("://", value)
+        self.assertIn("prefers-color-scheme: dark", page)
+        self.assertIn("https://github.com/acme/shop/pull/7", page)
+
+    def test_the_page_escapes_a_hostile_brief(self):
+        hostile = "<script>alert(1)</script>"
+        out = self.exported(brief={"task_id": self.task, "purpose": hostile,
+                                   "success_outcome": "ok", "acceptance": ["AC1"]})
+        for rel in ("index.html", "docs/brief.md"):
+            self.assertNotIn(hostile, out[rel])
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", out["docs/brief.md"])
+
+    def test_the_verdicts_markdown_shows_rework_then_pass(self):
+        text = self.exported()["docs/verdicts.md"]
+        self.assertLess(text.index("REWORK"), text.index("PASS"))
+        self.assertIn(self.rework, text)
+        self.assertIn(self.passed, text)
+        self.assertIn("claude-test", text)
+
+    def test_the_threads_markdown_lists_both_replies(self):
+        text = self.exported()["docs/threads.md"]
+        for needle in ("thread-1", "thread-2", "NEEDS_CODE_CHANGE", "NEEDS_REPLY_ONLY",
+                       self.passed):
+            self.assertIn(needle, text)
+
+    def test_the_measures_table_shows_tokens_and_undefined_dollars_without_prices(self):
+        page = self.exported()["index.html"]
+        self.assertIn("ppl-code-worker", page)
+        self.assertIn("1,160", page)
+        row = re.search(r"<tr><th[^>]*>dollars</th><td>(.*?)</td></tr>", page)
+        self.assertIsNotNone(row)
+        self.assertIn("undefined", row.group(1))
+        self.assertNotRegex(row.group(1), r"\b0\b")
+
+    def test_a_hostile_value_in_the_page_is_escaped(self):
+        hostile = '<img src="x"> "q"'
+        entries = [{"at": hostile, "kind": "park", "text": hostile, "link": 'docs/a"b.json'}]
+        text = trail_render.page(hostile, entries, {"reasons": {"usd": hostile}}, hostile)
+        self.assertNotIn("<img", text)
+        self.assertEqual(re.findall(r'href="([^"]*)"', text)[-1], "docs/a&quot;b.json")
+        text.encode("ascii")
+
+    def test_a_verdict_is_numbered_per_sha_in_log_order(self):
+        events = [{"event": "verdict", "sha": "aa", "verdict": "REWORK", "at": "t1"},
+                  {"event": "verdict", "sha": "bb", "verdict": "PASS", "at": "t2"},
+                  {"event": "verdict", "sha": "aa", "verdict": "PASS", "at": "t3"},
+                  {"event": "init", "at": "t0"}]
+        entries = trail_render.timeline(events)
+        self.assertEqual([e["link"] for e in entries],
+                         ["docs/verdicts/aa/1.json", "docs/verdicts/bb/1.json",
+                          "docs/verdicts/aa/2.json"])
 
 
 class TestRedactor(unittest.TestCase):
