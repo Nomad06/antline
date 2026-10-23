@@ -94,6 +94,19 @@ class TestBudget(unittest.TestCase):
             budget.spend("DEMO-304", "usd", 1.5)
         self.assertEqual(ctx.exception.code, "BUDGET_EXHAUSTED")
 
+    def test_spend_refuses_a_non_finite_or_non_positive_amount(self):
+        # rule: R-BUDGET-USD
+        run.init("DEMO-306", "u", "/tmp/repo")
+        cases = [("usd", float("nan")), ("usd", float("inf")), ("usd", -1.0), ("usd", 0),
+                 ("dispatch", -1)]
+        for kind, amount in cases:
+            with self.subTest(kind=kind, amount=amount):
+                with self.assertRaises(PplError) as ctx:
+                    budget.spend("DEMO-306", kind, amount)
+                self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+        budgets = run.load("DEMO-306")["budgets"]
+        self.assertEqual((budgets["usd_used"], budgets["dispatch_used"]), (0.0, 0))
+
     def test_remaining_reflects_spend(self):
         state = run.init("DEMO-305", "u", "/tmp/repo")
         cap = state["budgets"]["dispatch_hard"]

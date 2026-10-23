@@ -338,20 +338,35 @@ def dollars(models, price_table):
     return usd, []
 
 
-def run_dollars(directory):
-    """(usd, unpriced) over every role. (None, []) when no usage was recorded."""
+def run_dollars(directory, price_table=None):
+    """(usd, unpriced) over every role. (None, []) when no usage was recorded.
+    Priced with `price_table`, or with the live config.toml prices when None."""
     models = {}
     for role_models in run_usage(directory).values():
         models = add(models, role_models)
-    return dollars(models, prices())
+    return dollars(models, prices() if price_table is None else price_table)
+
+
+def valid_usd_used(value):
+    """True for a usd_used the cap can trust: a finite number >= 0."""
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value) and value >= 0)
 
 
 def spent_usd(task_id):
-    """(usd, unpriced): the manual usd_used plus the run's priced usage. usd is
-    None only when a recorded model has no price (unpriced names them). A run
-    with no usage recorded has spent its usd_used alone."""
-    used = run.load(task_id)["budgets"]["usd_used"]
-    priced, unpriced = run_dollars(paths.run_dir(task_id))
+    """(usd, unpriced): the manual usd_used plus the run's usage priced with the
+    table ppl init froze into the run, never the live config.toml, which a
+    session can edit mid-run. usd is None only when a recorded model is missing
+    from that table (unpriced names them). A run with no usage recorded has
+    spent its usd_used alone, and a usd_used that is not a finite number >= 0 is
+    infinite, so any cap is spent."""
+    budgets = run.load(task_id)["budgets"]
+    used = budgets.get("usd_used")
+    if not valid_usd_used(used):
+        return math.inf, []
+    table = budgets.get("prices")
+    priced, unpriced = run_dollars(paths.run_dir(task_id),
+                                   price_table=table if isinstance(table, dict) else {})
     if unpriced:
         return None, unpriced
     return used + (priced or 0.0), []

@@ -291,11 +291,11 @@ records each role's and the orchestrator's tokens in the run's `log.jsonl` when 
 stops, never refusing or delaying a dispatch [R-USAGE-HOOK-CANNOT-BLOCK].
 
 A dollar cap is opt-in: set `usd_max` under `[budgets]` in `~/.ppl/config.toml` and a price
-for each model under `[prices."<model id>"]`. `ppl init` copies the cap into the run, and
-`ppl stage enter` and `ppl transition` refuse with `BUDGET_EXHAUSTED` once the manual
-`usd_used` plus the run's priced usage reaches it [R-BUDGET-USD-CAP], or with
-`OWNER_DECISION` while a model it used has no price [R-BUDGET-USD-UNPRICED]. `ppl park`
-stays available.
+for each model under `[prices."<model id>"]`. `ppl init` copies the cap and the prices into
+the run, so an edit to either applies from the next run, and `ppl stage enter` and
+`ppl transition` refuse with `BUDGET_EXHAUSTED` once the manual `usd_used` plus the run's
+priced usage reaches it [R-BUDGET-USD-CAP], or with `OWNER_DECISION` while a model it used
+has no price [R-BUDGET-USD-UNPRICED]. `ppl park` stays available.
 
 The interpreter in those commands has to be Python 3.11 or newer, and `ppl setup
 claude` writes the one that ran it, so the hooks do not depend on which `python3`

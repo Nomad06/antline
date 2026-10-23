@@ -370,6 +370,35 @@ class TestUsdMaxFromConfig(unittest.TestCase):
                 self.assertIn("budgets.usd_max", ctx.exception.message)
                 self.assertFalse(run.state_path(task_id).exists())
 
+    def test_an_unknown_budgets_key_is_refused_naming_usd_max(self):
+        # rule: R-BUDGET-USD-CAP
+        self.write_config("[budgets]\nusd_mx = 2\n")
+        with self.assertRaises(PplError) as ctx:
+            run.init("DEMO-140", "https://j/DEMO-140", "/tmp/repo")
+        self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+        self.assertIn("usd_mx", ctx.exception.message)
+        self.assertIn("usd_max", ctx.exception.message)
+        self.assertFalse(run.state_path("DEMO-140").exists())
+
+    def test_init_snapshots_the_price_table(self):
+        state = run.init("DEMO-141", "https://j/DEMO-141", "/tmp/repo")
+        self.assertEqual(state["budgets"]["prices"], {})
+        self.write_config('[budgets]\nusd_max = 1\n\n[prices."m"]\ninput = 3\ncache_write = 3.75\n'
+                          'cache_read = 0.3\noutput = 15\n')
+        state = run.init("DEMO-142", "https://j/DEMO-142", "/tmp/repo")
+        table = {"m": {"input": 3.0, "cache_write": 3.75, "cache_read": 0.3, "output": 15.0}}
+        self.assertEqual(state["budgets"]["prices"], table)
+        self.write_config('[prices."m"]\ninput = 0\ncache_write = 0\ncache_read = 0\noutput = 0\n')
+        self.assertEqual(run.load("DEMO-142")["budgets"]["prices"], table)
+
+    def test_an_invalid_price_table_is_refused_at_init(self):
+        self.write_config('[prices."m"]\ninput = 3\ncache_write = 3\noutput = 15\n')
+        with self.assertRaises(PplError) as ctx:
+            run.init("DEMO-143", "https://j/DEMO-143", "/tmp/repo")
+        self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+        self.assertIn("cache_read", ctx.exception.message)
+        self.assertFalse(run.state_path("DEMO-143").exists())
+
 
 class TestNextActionText(unittest.TestCase):
     def test_the_merge_watch_next_action_names_no_tracker_product(self):

@@ -1237,7 +1237,7 @@ Task state (`state.json`):
   "acceptance": ["AC-1", "AC-2"],
   "budgets": {"dispatch_used": 9, "dispatch_norm": 21, "dispatch_hard": 34,
               "retry_used": 0, "retry_max": 3,
-              "usd_used": 0.0, "usd_max": 0.0},
+              "usd_used": 0.0, "usd_max": 0.0, "prices": {}},
   "orchestrator": {"pid": 41233, "started_at": "2026-08-31T11:58:02Z"},
   "mr": {"iid": null, "url": null, "approved_sha": null,
          "merged_sha": null, "merged_url": null},
@@ -2287,17 +2287,24 @@ Only the exit-code rule has code behind it, the rest are recipes rendered into t
 - retry budget: 3 full rework cycles per task, then escalate. Three failed convergences is
   not bad luck.
 - cost budget: `usd_max` per task, a number `>= 0` in `config.toml` `[budgets]` that `ppl init`
-  copies into the run's budgets, so a changed cap applies from the next run. Zero means no cap.
+  copies into the run's budgets, so a changed cap applies from the next run, and an unknown
+  key in that table is refused rather than leaving a misspelt cap unset [R-BUDGET-USD-CAP].
+  Zero means no cap. `ppl init` also copies the `config.toml` `[prices."<model id>"]` table into
+  the run's budgets as `prices`: `config.toml` stays editable mid-run, `state.json` is
+  write-protected [R-RUNS-WRITE-PROTECTION], so the cap uses the prices in force at `ppl init`
+  and a price edited later applies from the next run [R-BUDGET-USD-CAP].
   The third hook, `ppl_usage.py` on `SubagentStop`, logs each role's cumulative tokens per
   model from its transcript and the orchestrator's, counted since `ppl init`, from the main
   session transcript, as `usage` events, and never refuses or delays a dispatch
-  [R-USAGE-HOOK-CANNOT-BLOCK]. `ppl transition` and `ppl park` first refresh the orchestrator's
-  count from the transcript path the hook stored, and a refresh that fails is a warning. Dollars
-  spent are `usd_used`, which `ppl budget spend usd` adds to by hand and refuses past the cap
-  [R-BUDGET-USD], plus the recorded usage priced from `config.toml` `[prices."<model id>"]`. With a
-  cap set, `ppl stage enter` and `ppl transition` refuse with `BUDGET_EXHAUSTED` once dollars spent
-  reach `usd_max` [R-BUDGET-USD-CAP], and with `OWNER_DECISION`, naming the model and its
-  `[prices."<model id>"]` table, while a recorded model has no price, since a cap that cannot be
+  [R-USAGE-HOOK-CANNOT-BLOCK]. `ppl stage enter`, `ppl transition` and `ppl park` first refresh
+  the orchestrator's count from the transcript path the hook stored, and a refresh that fails is
+  a warning. Dollars spent are `usd_used`, which `ppl budget spend usd` adds to by hand and
+  refuses past the cap or for an amount that is not a finite number above zero [R-BUDGET-USD],
+  plus the recorded usage priced with the run's `prices`, and a `usd_used` that is not a finite
+  number `>= 0` counts as spent. With a cap set, `ppl stage enter` and `ppl transition` refuse
+  with `BUDGET_EXHAUSTED` once dollars spent reach `usd_max` [R-BUDGET-USD-CAP], and with
+  `OWNER_DECISION`, naming the model and the `[prices."<model id>"]` table to add before a new
+  run, while a recorded model has no price in the run's `prices`, since a cap that cannot be
   computed is not a cap [R-BUDGET-USD-UNPRICED]. `ppl park` stays available. Like the dispatch cap
   the check comes after the fact: what a dispatch costs is known only once its role stops, so the
   dispatch that crosses the cap has already run when the next stage boundary refuses

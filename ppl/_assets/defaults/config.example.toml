@@ -22,13 +22,16 @@ active = ""
 # change applies to the next run. 0 is no cap. With a cap, ppl stage enter and
 # ppl transition stop once the manual usd_used plus the priced usage reaches it,
 # and a recorded model with no price below stops them too, since the cap cannot
-# be computed. ppl park stays available.
+# be computed. ppl park stays available. usd_max is the only key here: ppl init
+# refuses any other, so a misspelt cap cannot leave a run uncapped.
 [budgets]
 usd_max = 0
 
 # Dollar figures need prices. antline ships no built-in prices: it never states
 # a cost it cannot source. A model with no price here is listed as unpriced.
 # Use the exact model id and USD per million tokens, all four keys, numbers >= 0.
+# ppl init copies this table into the run for the cap, so a price changed here
+# counts toward the cap from the next run.
 # [prices."claude-sonnet-5-5"]
 # input = 3.0
 # cache_write = 3.75

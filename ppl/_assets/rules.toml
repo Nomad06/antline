@@ -1143,12 +1143,12 @@ residual = "same counter provenance as R-BUDGET-DISPATCH-CAP: nothing increments
 
 [[rule]]
 id = "R-BUDGET-USD"
-statement = "Spending past usd_max is refused, and a zero cap means unlimited."
+statement = "Spending past usd_max is refused, and a zero cap means unlimited. A spend of any budget whose amount is not a finite number above zero is refused SCHEMA_INVALID, so a NaN cannot poison a counter and a negative amount cannot rewind one."
 scope = "ppl CLI"
 event = "ppl budget spend usd"
 enforcement = "blocking"
 hook_or_check = "ppl/budget.py:spend, ppl/budget.py:KINDS"
-deny_test = "tests/test_verdict.py::TestBudget::test_usd_cap_enforced_when_set"
+deny_test = "tests/test_verdict.py::TestBudget::test_usd_cap_enforced_when_set, tests/test_verdict.py::TestBudget::test_spend_refuses_a_non_finite_or_non_positive_amount"
 allow_test = "tests/test_verdict.py::TestBudget::test_usd_unlimited_when_max_is_zero"
 owner = "ppl"
 residual = ""
@@ -1167,19 +1167,19 @@ residual = "GAP: before a dispatch, the cost of that dispatch is unknown, so the
 
 [[rule]]
 id = "R-BUDGET-USD-CAP"
-statement = "With usd_max above zero, ppl stage enter and ppl transition refuse with BUDGET_EXHAUSTED once usd_used plus the priced usage the run recorded reaches usd_max, and ppl park stays available. ppl init copies usd_max from config.toml [budgets], and zero means no cap."
+statement = "With usd_max above zero, ppl stage enter and ppl transition refuse with BUDGET_EXHAUSTED once usd_used plus the usage the run recorded, priced with the prices in force at ppl init, reaches usd_max, and a usd_used that is not a finite number >= 0 counts as spent. ppl park stays available. ppl init copies usd_max from config.toml [budgets], refusing an unknown key there, and the [prices] table into the run, and zero means no cap."
 scope = "ppl CLI"
 event = "ppl stage enter, ppl transition"
 enforcement = "blocking"
-hook_or_check = "ppl/cli.py:check_usd_budget"
-deny_test = "tests/test_cli.py::TestUsdCap::test_stage_enter_is_refused_once_priced_usage_reaches_the_cap, tests/test_cli.py::TestUsdCap::test_transition_is_refused_once_priced_usage_reaches_the_cap, tests/test_cli.py::TestUsdCap::test_manual_usd_used_counts_toward_the_cap"
-allow_test = "tests/test_cli.py::TestUsdCap::test_stage_enter_still_works_below_the_cap, tests/test_cli.py::TestUsdCap::test_park_still_works_past_the_cap, tests/test_cli.py::TestUsdCap::test_a_zero_cap_never_refuses, tests/test_run.py::TestUsdMaxFromConfig::test_init_copies_usd_max_from_config"
+hook_or_check = "ppl/cli.py:check_usd_budget, ppl/usage.py:spent_usd, ppl/config.py:budgets_usd_max"
+deny_test = "tests/test_cli.py::TestUsdCap::test_stage_enter_is_refused_once_priced_usage_reaches_the_cap, tests/test_cli.py::TestUsdCap::test_transition_is_refused_once_priced_usage_reaches_the_cap, tests/test_cli.py::TestUsdCap::test_manual_usd_used_counts_toward_the_cap, tests/test_cli.py::TestUsdCap::test_a_price_lowered_after_init_does_not_lower_the_spend, tests/test_cli.py::TestUsdCap::test_a_corrupt_usd_used_counts_as_exhausted, tests/test_run.py::TestUsdMaxFromConfig::test_an_unknown_budgets_key_is_refused_naming_usd_max"
+allow_test = "tests/test_cli.py::TestUsdCap::test_stage_enter_still_works_below_the_cap, tests/test_cli.py::TestUsdCap::test_park_still_works_past_the_cap, tests/test_cli.py::TestUsdCap::test_a_zero_cap_never_refuses, tests/test_run.py::TestUsdMaxFromConfig::test_init_copies_usd_max_from_config, tests/test_run.py::TestUsdMaxFromConfig::test_init_snapshots_the_price_table"
 owner = "ppl"
-residual = "after the fact: what a dispatch cost is known only once its role stops, so the dispatch that crosses usd_max has already run and the refusal comes at the next stage enter or transition. Only recorded usage counts: with the usage hook not registered, after a transcript error event, and for orchestrator turns since the last refresh (ppl transition and ppl park refresh, ppl stage enter does not) the spend is under-counted, see R-USAGE-HOOK-CANNOT-BLOCK"
+residual = "after the fact: what a dispatch cost is known only once its role stops, so the dispatch that crosses usd_max has already run and the refusal comes at the next stage enter or transition. Only recorded usage counts: with the usage hook not registered, after a transcript error event, and for orchestrator turns since the last refresh (ppl stage enter, ppl transition and ppl park refresh first, best effort) the spend is under-counted, see R-USAGE-HOOK-CANNOT-BLOCK. A price changed in config.toml applies from the next run, and the frozen prices are as safe as state.json, see R-RUNS-WRITE-PROTECTION"
 
 [[rule]]
 id = "R-BUDGET-USD-UNPRICED"
-statement = "With usd_max above zero, ppl stage enter and ppl transition refuse with OWNER_DECISION while a model the run recorded usage for has no price in config.toml, naming the model and its [prices.\"<id>\"] table: a cap that cannot be computed is not a cap. ppl park stays available."
+statement = "With usd_max above zero, ppl stage enter and ppl transition refuse with OWNER_DECISION while a model the run recorded usage for has no price in the [prices] table ppl init copied into the run, naming the model and its [prices.\"<id>\"] table to add to config.toml before a new run: a cap that cannot be computed is not a cap. ppl park stays available."
 scope = "ppl CLI"
 event = "ppl stage enter, ppl transition"
 enforcement = "blocking"
@@ -1187,7 +1187,7 @@ hook_or_check = "ppl/cli.py:check_usd_budget"
 deny_test = "tests/test_cli.py::TestUsdCap::test_an_unpriced_model_with_a_cap_refuses_owner_decision_naming_it"
 allow_test = "tests/test_cli.py::TestUsdCap::test_an_unpriced_model_without_a_cap_does_not_refuse"
 owner = "ppl"
-residual = "model ids match exactly: a price for claude-x does not price claude-x[1m], which stays named as unpriced until it has its own table"
+residual = "model ids match exactly: a price for claude-x does not price claude-x[1m], which stays named as unpriced until it has its own table. A price added to config.toml mid-run prices the next run only"
 
 [[rule]]
 id = "R-REFUSAL-RETRY-CAP"

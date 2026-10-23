@@ -58,10 +58,20 @@ def active_harness():
     return active or None
 
 
+BUDGET_KEYS = ("usd_max",)
+
+
 def budgets_usd_max():
     """[budgets] usd_max, the run's dollar cap that ppl init copies. 0.0, no cap,
-    when absent."""
-    value = _section(load(), "budgets").get("usd_max", 0.0)
+    when absent. An unknown key is refused: a misspelt cap must not leave the run
+    uncapped."""
+    table = _section(load(), "budgets")
+    unknown = sorted(key for key in table if key not in BUDGET_KEYS)
+    if unknown:
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: [budgets] has the unknown key %s, the known key is %s"
+                       % (paths.config_file(), ", ".join(unknown), ", ".join(BUDGET_KEYS)))
+    value = table.get("usd_max", 0.0)
     if (isinstance(value, bool) or not isinstance(value, (int, float))
             or not math.isfinite(value) or value < 0):
         raise PplError("SCHEMA_INVALID",

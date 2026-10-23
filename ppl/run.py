@@ -64,10 +64,11 @@ RISK_TIERS = ("low", "normal", "high")
 
 
 def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check="verified",
-               harness=None, usd_max=0.0):
+               harness=None, usd_max=0.0, prices=None):
     pid = os.getpid()
     budgets = dict(DEFAULT_BUDGETS)
     budgets["usd_max"] = usd_max
+    budgets["prices"] = prices or {}
     return {
         "task_id": task_id,
         "tracker_url": tracker_url,
@@ -106,9 +107,12 @@ def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="
         raise PplError("ILLEGAL_TRANSITION",
                        "run %s already exists. Use ppl show, or destroy it first." % task_id)
     # imported here so the hooks, which import this module on every call, never load tomllib
-    from . import config
+    from . import config, usage
+    # The cap and the prices it is computed with are frozen into state.json, which
+    # the guard write-protects (R-RUNS-WRITE-PROTECTION), since config.toml stays
+    # editable mid-run.
     state = _new_state(task_id, tracker_url, repo, isolated, risk, model_check, harness,
-                       usd_max=config.budgets_usd_max())
+                       usd_max=config.budgets_usd_max(), prices=usage.prices())
     save(state)
     set_active(task_id)
     store.append_log(task_id, {"event": "init", "tracker_url": tracker_url, "repo": repo,

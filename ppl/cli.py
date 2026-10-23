@@ -229,20 +229,29 @@ def check_usd_budget(task_id):
     logs it, so the dispatch that crosses usd_max has already run and this
     refusal at stage boundaries and lifecycle transitions is the whole of the
     enforcement [R-BUDGET-USD-CAP]. Spent is usd_used, the manual `ppl budget
-    spend usd`, plus the priced usage. A recorded model without a price leaves
-    the cap uncomputable, and a cap that cannot be computed is refused, never
-    read as zero [R-BUDGET-USD-UNPRICED]. A zero cap is no cap, and ppl park
-    stays available.
+    spend usd`, plus the usage priced with the table ppl init froze into the
+    run, so a price edited in config.toml mid-run moves nothing. A usd_used that
+    is not a finite number >= 0 counts as spent. A recorded model without a
+    frozen price leaves the cap uncomputable, and a cap that cannot be computed
+    is refused, never read as zero [R-BUDGET-USD-UNPRICED]. A zero cap is no cap,
+    and ppl park stays available.
     """
-    cap = run.load(task_id)["budgets"]["usd_max"]
+    budgets = run.load(task_id)["budgets"]
+    cap = budgets["usd_max"]
     if not cap > 0:
         return
+    if not usage.valid_usd_used(budgets.get("usd_used")):
+        raise PplError("BUDGET_EXHAUSTED",
+                       "usd_used is %r, not a finite number >= 0, so the dollar budget counts as "
+                       "spent. Park the task with a handoff (ppl park) instead of continuing."
+                       % (budgets.get("usd_used"),))
     spent, unpriced = usage.spent_usd(task_id)
     if unpriced:
         raise PplError("OWNER_DECISION",
-                       "the dollar cap (usd_max %s) cannot be checked: no price for the recorded "
-                       "model%s %s. Add %s with input, cache_write, cache_read and output in USD "
-                       "per million tokens to %s, or park the task (ppl park)."
+                       "the dollar cap (usd_max %s) cannot be checked: the prices this run took "
+                       "from config.toml at ppl init have none for the recorded model%s %s. Add "
+                       "%s with input, cache_write, cache_read and output in USD per million "
+                       "tokens to %s and start a new run, or park this one (ppl park)."
                        % (cap, "s" if len(unpriced) > 1 else "", ", ".join(unpriced),
                           ", ".join('[prices."%s"]' % model for model in unpriced),
                           paths.config_file()))
@@ -264,6 +273,7 @@ def refresh_orchestrator_usage(task_id):
 
 def cmd_stage(args):
     task_id = resolve_task(args)
+    refresh_orchestrator_usage(task_id)
     control.enforce(task_id)
     check_dispatch_budget(task_id)
     check_usd_budget(task_id)

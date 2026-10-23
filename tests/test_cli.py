@@ -1392,7 +1392,46 @@ class TestUsdCap(unittest.TestCase):
         self.assertEqual(code, 2, err)
         error = json.loads(err)
         self.assertEqual(error["error_code"], "OWNER_DECISION")
-        self.assertIn('[prices."claude-unpriced-9"]', error["message"])
+        for part in ('[prices."claude-unpriced-9"]', "config.toml", "new run", "ppl park"):
+            self.assertIn(part, error["message"])
+        # a price added to config.toml mid-run prices the next run, not this one
+        config.update("prices", {"claude-unpriced-9": {"input": 0, "cache_write": 0,
+                                                       "cache_read": 0, "output": 0}})
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-686")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "OWNER_DECISION")
+
+    def test_a_price_lowered_after_init_does_not_lower_the_spend(self):
+        # rule: R-BUDGET-USD-CAP
+        self.start("DEMO-691", 1.0)
+        self.record_usage("DEMO-691", 1200000)
+        config.update("prices", {"m": {"input": 0, "cache_write": 0, "cache_read": 0,
+                                       "output": 0}})
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-691")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "BUDGET_EXHAUSTED")
+
+    def test_a_corrupt_usd_used_counts_as_exhausted(self):
+        # rule: R-BUDGET-USD-CAP
+        for number, bad in enumerate((float("nan"), -1.0, "x")):
+            with self.subTest(usd_used=bad):
+                task_id = "DEMO-%d" % (692 + number)
+                self.start(task_id, 1.0)
+                self.set_usd_used(task_id, bad)
+                code, _, err = call("stage", "enter", "baseline", "--task", task_id)
+                self.assertEqual(code, 2, err)
+                error = json.loads(err)
+                self.assertEqual(error["error_code"], "BUDGET_EXHAUSTED")
+                self.assertIn("usd_used is %r" % bad, error["message"])
+
+    def test_stage_enter_refreshes_the_orchestrator_usage(self):
+        self.start("DEMO-695", 0)
+        self.noted_transcript("DEMO-695")
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-695")
+        self.assertEqual(code, 0, err)
+        events = self.orchestrator_events("DEMO-695")
+        self.assertEqual(len(events), 1, events)
+        self.assertEqual(events[0]["models"]["m"]["output"], 7)
 
     def test_an_unpriced_model_without_a_cap_does_not_refuse(self):
         self.start("DEMO-687", 0)
