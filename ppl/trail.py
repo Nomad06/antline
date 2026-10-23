@@ -68,6 +68,11 @@ _TOKEN_CUT_RE = re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_
                            r"|xox[abpr]-[A-Za-z0-9-]{4,})(?=\"|\Z)")
 # The shortest end of a value that is still taken for a path cut short.
 _CUT_MIN = 4
+# First path components that name no one. A value may stop at one of these and
+# still not be taken for a path cut short. Any other first component may itself
+# name a user (/alexsmith-work), so it is cut down to _CUT_MIN.
+GENERIC_ROOTS = ("/Users", "/home", "/var", "/tmp", "/private", "/srv", "/opt", "/mnt",
+                 "/Volumes", "/root", "/data", "/workspace")
 
 REDACTIONS = ("paths", "people", "urls")
 
@@ -149,13 +154,15 @@ def _forms(value):
 
 
 def _cut_minimum(form):
-    """The shortest end of a value taken for `form` cut short: one character past its
-    first component, so `/Users/a` is and `/Users`, `/home` or `/var` is not. None
-    when no proper prefix of `form` is that long."""
+    """The shortest end of a value taken for `form` cut short. Past a generic first
+    component it is one character past it, so `/Users/a` is taken and `/Users`,
+    `/home` or `/var` is not. Otherwise, a single component included, it is
+    _CUT_MIN characters. None when no proper prefix of `form` is that long."""
     second = form.find("/", 1)
-    if second == -1:
-        return None
-    minimum = max(_CUT_MIN, second + 2)
+    if second != -1 and form[:second] in GENERIC_ROOTS:
+        minimum = max(_CUT_MIN, second + 2)
+    else:
+        minimum = _CUT_MIN
     return minimum if minimum < len(form) else None
 
 
@@ -199,8 +206,10 @@ def _owner_logins(state):
 
 
 def _person_pattern(names):
+    """A name standing alone, or right after a %XX escape (`author%3Amonalisa`)."""
     alternatives = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))
-    return re.compile(r"@?(?<![\w-])(?P<name>%s)(?![\w-])" % alternatives, re.IGNORECASE)
+    return re.compile(r"@?(?:(?<![\w-])|(?<=%%[0-9A-Fa-f]{2}))(?P<name>%s)(?![\w-])"
+                      % alternatives, re.IGNORECASE)
 
 
 class Redactor:
@@ -319,13 +328,25 @@ class Redactor:
             value = self._people_re.sub(self._person, value)
         return value
 
+    def _alias_of(self, value):
+        """The alias of a dict that carries a redacted person's `login`, else None."""
+        login = value.get("login")
+        if not isinstance(login, str):
+            return None
+        return self._aliases.get(login.casefold())
+
     def apply(self, value):
-        """`value` with every string redacted, dict keys included, keys walked sorted."""
+        """`value` with every string redacted, dict keys included, keys walked sorted. A
+        person's object is reduced to its aliased login: its id, node id, avatar and
+        profile URLs each lead back to the person."""
         if isinstance(value, str):
             return self.text(value)
         if isinstance(value, list):
             return [self.apply(item) for item in value]
         if isinstance(value, dict):
+            alias = self._alias_of(value)
+            if alias is not None:
+                return {"login": alias}
             out = {}
             for key in sorted(value):
                 out[self.text(key) if isinstance(key, str) else key] = self.apply(value[key])

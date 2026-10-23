@@ -1730,15 +1730,19 @@ deadline.
   roots, each as given and resolved, longest first, become `<repo>`, `<ppl-home>`, `<home>` and
   `<tmp>`. A `--redact` list without `paths` is `SCHEMA_INVALID`.
   The guard logs the first 200 characters of a blocked call's target, so a value can end
-  inside a path: an end that starts the repo path, `PPL_HOME` or the home directory and reaches
-  past its first component (`/Users/a`, not `/Users`, `/home` or `/var`) becomes its
-  placeholder followed by `...`. A relative `repo` in state.json is `SCHEMA_INVALID`, since
+  inside a path: an end that starts the repo path, `PPL_HOME` or the home directory becomes its
+  placeholder followed by `...`. The end needs 4 characters, or, after a first component that
+  names no one (`/Users`, `/home`, `/var`, `/tmp` and the like), one character past it, so
+  `/Users/a` and `/alexs` are taken and `/Users` is not. A relative `repo` in state.json is `SCHEMA_INVALID`, since
   there is no absolute path to redact.
 - **People are redacted by default.** Every string under the keys `author`, `assignee`,
   `assignees`, `reporter`, `creator`, `by`, `login` and `displayName` (or the `login`, `name`
   or `displayName` of a dict there) becomes `@person-<n>` in the order of a sorted walk, in
   every file, markdown included. The mapping is written nowhere, and the order makes two
-  exports of the same run identical.
+  exports of the same run identical. A name right after a `%XX` escape (`author%3Amonalisa`)
+  counts as standing alone. A JSON object carrying a redacted person's `login` is reduced to
+  `{"login": "@person-<n>"}`, since its id, node id, avatar and profile URLs each lead back to
+  the person.
 - **URLs are kept unless `urls` is asked for**, then each becomes `<url-<n>>`. While URLs are
   kept, the login that owns the run's repository (the first path segment of the run's
   `tracker_url` and `mr.url` on github.com, gitlab.com or the host the two share) is not
@@ -1754,8 +1758,8 @@ trail is built in a temporary directory beside `--out` and renamed onto it once 
 passes, so a refusal leaves nothing behind. An existing `--out`, or one that appears while the
 trail is written, is `SCHEMA_INVALID`. A name in free text under no known key, a secret in a
 format the patterns do not list, Claude Code's dash-encoded project directory form of a path, a
-URL-encoded path and a checkout outside the home directory and the temp roots pass both the
-redaction and the check, and so does the repository owner's login while URLs are kept, so the
+URL-encoded path, a checkout outside the home directory and the temp roots and a login
+URL-encoded beyond a single `%XX` escape pass both the redaction and the check, and so does the repository owner's login while URLs are kept, so the
 owner reads a trail before publishing it.
 
 `MANIFEST.json` holds the task id, the base and head SHA, the antline version, the redactions

@@ -343,6 +343,7 @@ class TestTrailExport(unittest.TestCase):
         self.assertIn("tokens_by_role", measures["reasons"])
 
     def test_a_deny_target_cut_inside_the_home_path_is_redacted(self):
+        # rule: R-TRAIL-REDACTED
         target = cut_target("cat ", self.home[:-3])
         store.append_log(self.task, {"event": "deny", "role": "ppl-code-worker", "tool": "Bash",
                                      "code": "BOUNDARY_VIOLATION", "target": target})
@@ -388,7 +389,17 @@ class TestTrailExport(unittest.TestCase):
 
     def test_a_kept_url_keeps_the_owner_login(self):
         self.own_repository()
+        owner = {"login": "octocat", "id": 583231,
+                 "avatar_url": "https://avatars.githubusercontent.com/u/583231?v=4"}
+
+        def full_author(doc):
+            doc["issue"]["author"] = dict(owner)
+
+        rewrite_issue(self.task, full_author)
         manifest = self.export()
+        issue_doc = json.loads((self.out / "docs" / "tracker" / "issue.json")
+                               .read_text(encoding="utf-8"))
+        self.assertEqual(issue_doc["issue"]["author"], owner)
         state = json.loads((self.out / "docs" / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["tracker_url"], "https://github.com/octocat/shop/issues/1")
         self.assertEqual(state["mr"]["url"], "https://github.com/octocat/shop/pull/3")
@@ -403,6 +414,7 @@ class TestTrailExport(unittest.TestCase):
             self.assertNotIn("monalisa", text, rel)
 
     def test_the_owner_login_is_a_person_when_urls_are_redacted(self):
+        # rule: R-TRAIL-REDACTED
         self.own_repository()
         self.export(redact=("paths", "people", "urls"))
         for rel, text in texts(self.out).items():
@@ -411,6 +423,7 @@ class TestTrailExport(unittest.TestCase):
         self.assertEqual(state["mr"]["author"], "@person-1")
 
     def test_a_login_glued_to_a_kept_url_is_aliased(self):
+        # rule: R-TRAIL-REDACTED
         record = findings.add(self.task, "minor",
                               "see https://github.com/a/b/pull/3,monalisa and @monalisa",
                               self.rework, "shop/cart.py")
@@ -423,9 +436,10 @@ class TestTrailExport(unittest.TestCase):
                          "see https://github.com/a/b/pull/3,@person-2 and @person-2")
 
     def test_another_persons_profile_url_is_aliased(self):
+        # rule: R-TRAIL-REDACTED
         def parent(doc):
             doc["links"]["parent"] = {
-                "number": 1, "title": "Checkout epic",
+                "number": 1, "title": "Checkout epic, ask https://github.com/hubot",
                 "url": "https://github.com/acme/shop/issues/1",
                 "user": {"login": "hubot", "html_url": "https://github.com/hubot"}}
 
@@ -435,9 +449,51 @@ class TestTrailExport(unittest.TestCase):
             self.assertNotIn("hubot", text, rel)
         issue = json.loads((self.out / "docs" / "tracker" / "issue.json")
                            .read_text(encoding="utf-8"))
-        user = issue["links"]["parent"]["user"]
-        self.assertRegex(user["html_url"], r"^https://github\.com/@person-[0-9]+$")
-        self.assertEqual(user["html_url"], "https://github.com/" + user["login"])
+        parent = issue["links"]["parent"]
+        self.assertRegex(parent["user"]["login"], r"^@person-[0-9]+$")
+        self.assertEqual(parent["title"],
+                         "Checkout epic, ask https://github.com/" + parent["user"]["login"])
+
+    def test_a_login_after_a_percent_escape_is_aliased(self):
+        # rule: R-TRAIL-REDACTED
+        record = findings.add(self.task, "minor",
+                              "see https://github.com/acme/shop/issues?q=is%3Apr+author%3Amonalisa"
+                              " and cc %40monalisa", self.rework, "shop/cart.py")
+        self.export()
+        for rel, text in texts(self.out).items():
+            self.assertNotIn("monalisa", text, rel)
+        finding = json.loads((self.out / "docs" / "findings" / ("%s.json" % record["finding_id"]))
+                             .read_text(encoding="utf-8"))
+        self.assertEqual(finding["evidence"],
+                         "see https://github.com/acme/shop/issues?q=is%3Apr+author%3A@person-2"
+                         " and cc %40@person-2")
+
+    def test_a_person_object_is_reduced_to_its_alias(self):
+        # rule: R-TRAIL-REDACTED
+        user = {"login": "hubot", "id": 48151623, "node_id": "MDQ6VXNlcjQ4MTUxNjIz",
+                "avatar_url": "https://avatars.githubusercontent.com/u/48151623?v=4",
+                "gravatar_id": "", "html_url": "https://github.com/hubot",
+                "followers_url": "https://api.github.com/users/hubot/followers",
+                "type": "User", "site_admin": False}
+
+        def rest_shaped(doc):
+            doc["issue"]["author"] = {"id": "MDQ6VXNlcjU4MzIzMQ==", "is_bot": False,
+                                      "login": "octocat", "name": "The Octocat"}
+            doc["links"]["parent"] = {"number": 1, "title": "Checkout epic",
+                                      "url": "https://github.com/acme/shop/issues/1",
+                                      "user": user}
+
+        rewrite_issue(self.task, rest_shaped)
+        self.export()
+        issue = json.loads((self.out / "docs" / "tracker" / "issue.json")
+                           .read_text(encoding="utf-8"))
+        self.assertEqual(issue["issue"]["author"], {"login": "@person-1"})
+        self.assertRegex(issue["links"]["parent"]["user"]["login"], r"^@person-[0-9]+$")
+        self.assertEqual(list(issue["links"]["parent"]["user"]), ["login"])
+        for rel, text in texts(self.out).items():
+            for needle in ("48151623", "MDQ6VXNlcjQ4MTUxNjIz", "MDQ6VXNlcjU4MzIzMQ==",
+                           "avatars.githubusercontent.com", "hubot", "Octocat"):
+                self.assertNotIn(needle, text, rel)
 
     def test_a_value_ending_in_a_bare_root_component_is_kept(self):
         def body(doc):
@@ -554,6 +610,34 @@ class TestRedactor(unittest.TestCase):
         self.assertEqual(trail.leaks('Navigate to the "/home" page\n', linux), [])
         self.assertEqual(trail.leaks('{"target": "cd /var"}\n', linux), [])
         self.assertTrue(trail.leaks('{"target": "ls /home/al"}\n', linux))
+
+    def test_a_cut_inside_a_user_specific_first_component_is_redacted(self):
+        # rule: R-TRAIL-REDACTED
+        own = trail.Redactor({"repo": "/alexsmith-work/shop"}, home="/home/alexander",
+                             ppl_home="/home/alexander/.ppl", temp_roots=("/tmp",),
+                             people=False, urls=False)
+        self.assertEqual(own.text("cd /alexsm"), "cd <repo>...")
+        self.assertNotIn("/alexsm", own.text("cd /alexsm"))
+        self.assertTrue(trail.leaks('{"target": "cd /alexsm"}\n', own))
+        self.assertEqual(own.text("cd /data/x"), "cd /data/x")
+
+    def test_a_single_component_repo_is_cut_checked(self):
+        # rule: R-TRAIL-REDACTED
+        own = trail.Redactor({"repo": "/alexsmith"}, home="/home/alexander",
+                             ppl_home="/home/alexander/.ppl", temp_roots=("/tmp",),
+                             people=False, urls=False)
+        self.assertEqual(own.text("cd /alexs"), "cd <repo>...")
+        self.assertNotIn("/alexs", own.text("cd /alexs"))
+        self.assertTrue(trail.leaks('{"target": "cd /alexs"}\n', own))
+        self.assertEqual(own.text("cd /al"), "cd /al")
+
+    def test_a_login_after_a_percent_escape_is_a_leak(self):
+        people = trail.Redactor({}, home="/home/alexander", ppl_home="/home/alexander/.ppl",
+                                temp_roots=(), people=True, urls=False)
+        people.find_people({"issue.json": {"author": {"login": "monalisa"}}})
+        self.assertTrue(trail.leaks('{"q": "author%3Amonalisa"}\n', people))
+        self.assertTrue(trail.leaks('{"q": "cc %40monalisa"}\n', people))
+        self.assertEqual(trail.leaks('{"q": "author%3A@person-1"}\n', people), [])
 
     def test_a_very_long_home_path_does_not_crash(self):
         home = "/home/" + "a" * 1000
