@@ -4,12 +4,13 @@ import shutil
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
-from ppl import config, harness, paths
+from ppl import config, harness, os_sandbox, paths
 from ppl.studio import drafts, files
 
 EXAMPLE = str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "defaults" / "harnesses" / "example-generic")
@@ -21,6 +22,12 @@ class HarnessApiTestCase(panel_client.StudioTestCase):
         config.ensure()
         harness.add(EXAMPLE, name="demo")
         config.set_active_harness("demo")
+        config.update("claude", {"workspace": tmphome.mkdtemp(prefix="pplws-")})
+        pins = {name: {"path": "/usr/bin/" + name, "realpath": "/usr/bin/" + name}
+                for name in os_sandbox.PIN_NAMES}
+        patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: pins)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def get(self, name="demo"):
         status, data, _ = panel_client.call("GET", "/api/harnesses/" + name)

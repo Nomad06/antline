@@ -84,14 +84,25 @@ class TestProfile(Home):
         self.assertEqual(got["network"]["allowedDomains"], ["pypi.org"])
         self.assertEqual(got["filesystem"]["allowWrite"], os_sandbox.write_scope(doc()))
 
-    def test_profile_allow_entries_sit_on_the_pinned_paths(self):
-        allow = self.profile()["allow"]
-        self.assertIn("Bash(/opt/x/gh pr create *)", allow)
-        self.assertIn("Bash(/opt/x/gh auth status)", allow)
-        self.assertIn("Bash(/usr/bin/git -c core.hooksPath=/dev/null *)", allow)
-        self.assertIn("Bash(/opt/y/bin/ppl doctor --forge)", allow)
-        self.assertEqual(len(allow), 12)
-        self.assertFalse([e for e in allow if e.startswith(("Bash(gh ", "Bash(git ", "Bash(ppl "))])
+    def test_profile_allow_entries_are_exactly_the_nine_reads_on_the_pinned_paths(self):
+        d = doc(checkout="/srv/repo")
+        allow = os_sandbox.profile(d, "/srv/ws", PINS)["allow"]
+        self.assertEqual(allow, [
+            "Bash(/opt/x/gh issue view *)",
+            "Bash(/opt/x/gh pr view *)",
+            "Bash(/opt/x/gh pr checks *)",
+            "Bash(/opt/x/gh api user --jq .login)",
+            "Bash(/opt/x/gh auth status)",
+            "Bash(/usr/bin/git -c core.hooksPath=/dev/null -C %s fetch origin main)"
+            % os.path.realpath("/srv/repo"),
+            "Bash(/opt/y/bin/ppl tracker fetch --task *)",
+            "Bash(/opt/y/bin/ppl review fetch --pr *)",
+            "Bash(/opt/y/bin/ppl doctor --forge)"])
+
+    def test_no_allow_entry_covers_a_github_write(self):
+        text = " ".join(self.profile()["allow"])
+        for write in ("pr create", "issue comment", "pr close", "api *", "push"):
+            self.assertNotIn(write, text)
 
     def test_pin_dirs_are_write_denied_both_path_and_realpath(self):
         deny = self.profile()["sandbox"]["filesystem"]["denyWrite"]
@@ -114,6 +125,46 @@ class TestPins(Home):
         got = os_sandbox.pins(lambda name: str(base / "gh"))
         self.assertEqual(got["gh"], {"path": str(base / "gh"), "realpath": str(base / "real-gh")})
         self.assertEqual(sorted(got), ["gh", "git", "ppl"])
+
+    def test_a_relative_which_result_is_stored_absolute(self):
+        base = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplbin-")))
+        (base / "gh").write_text("")
+        old = os.getcwd()
+        os.chdir(base)
+        try:
+            got = os_sandbox.pins(lambda name: "./gh")
+        finally:
+            os.chdir(old)
+        self.assertEqual(got["gh"]["path"], str(base / "gh"))
+
+    def _fallback(self, name, executable=True):
+        base = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplbin-")))
+        script = base / name
+        script.write_text("")
+        script.chmod(0o755 if executable else 0o644)
+        which = lambda n: None if n == "ppl" else "/usr/bin/" + n
+        with mock.patch.object(sys, "argv", [str(script)]):
+            return script, which
+
+    def test_the_ppl_fallback_accepts_an_executable_file(self):
+        script, which = self._fallback("ppl")
+        with mock.patch.object(sys, "argv", [str(script)]):
+            self.assertEqual(os_sandbox.pins(which)["ppl"]["path"], str(script))
+
+    def test_the_ppl_fallback_refuses_a_py_file(self):
+        script, which = self._fallback("ppl.py")
+        with mock.patch.object(sys, "argv", [str(script)]):
+            with self.assertRaises(PplError) as caught:
+                os_sandbox.pins(which)
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertIn("PATH", caught.exception.message)
+
+    def test_the_ppl_fallback_refuses_a_file_that_is_not_executable(self):
+        script, which = self._fallback("ppl", executable=False)
+        with mock.patch.object(sys, "argv", [str(script)]):
+            with self.assertRaises(PplError) as caught:
+                os_sandbox.pins(which)
+        self.assertIn("PATH", caught.exception.message)
 
 
 class TestFacts(Home):

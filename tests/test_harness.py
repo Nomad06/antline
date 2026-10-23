@@ -15,7 +15,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import boundary, cli, config, forges, harness, models, paths
+from ppl import boundary, cli, config, forges, harness, models, os_sandbox, paths
 from ppl.errors import PplError
 from ppl.trackers import jira
 
@@ -1179,6 +1179,120 @@ class TestOsSandboxTable(HarnessTestCase):
         fixtures.install_harness("example-generic")
         self.assertEqual(harness.snapshot(harness.load("example-generic"))["os_sandbox"],
                          {"needed": True})
+
+
+PINS = {"gh": {"path": "/opt/x/gh", "realpath": "/opt/x/gh"},
+        "git": {"path": "/usr/bin/git", "realpath": "/usr/bin/git"},
+        "ppl": {"path": "/opt/y/bin/ppl", "realpath": "/opt/y/bin/ppl"}}
+
+
+class TestApplyOsSandbox(HarnessTestCase):
+    def setUp(self):
+        super().setUp()
+        self.workspace = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplws-")))
+        self.agents = tmphome.mkdtemp(prefix="pplagents-")
+        self.skills = tmphome.mkdtemp(prefix="pplskills-")
+        fixtures.install_routing()
+        config.update("claude", {"workspace": str(self.workspace)})
+        patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: PINS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.settings_path = self.workspace / ".claude" / "settings.local.json"
+        self.facts_path = paths.home() / os_sandbox.FACTS_FILE
+
+    def apply(self, name="example-generic"):
+        return harness.apply(name, agents_dir=self.agents, skills_dir=self.skills)
+
+    def settings(self):
+        return json.loads(self.settings_path.read_text(encoding="utf-8"))
+
+    def test_apply_writes_the_profile_and_the_facts_for_a_github_harness(self):
+        fixtures.install_harness("example-generic")
+        self.settings_path.parent.mkdir(parents=True)
+        hooks = {"PreToolUse": [{"matcher": "Bash", "hooks": []}]}
+        self.settings_path.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+        self.apply()
+        doc = self.settings()
+        self.assertEqual(doc["hooks"], hooks)
+        self.assertEqual(doc["sandbox"]["network"]["deniedDomains"], ["github.com", "*.github.com"])
+        self.assertNotIn("ppl", doc["sandbox"])
+        self.assertIn("Bash(/opt/x/gh auth status)", doc["permissions"]["allow"])
+        facts = json.loads(self.facts_path.read_text(encoding="utf-8"))
+        expected = os_sandbox.facts(harness.load("example-generic"), self.workspace, PINS)
+        self.assertEqual({k: v for k, v in facts.items() if k in expected}, expected)
+        self.assertEqual(facts["written_sandbox"], doc["sandbox"])
+        self.assertEqual(facts["written_allow"], doc["permissions"]["allow"])
+
+    def test_apply_removes_both_when_the_harness_no_longer_needs_them(self):
+        fixtures.install_harness("example-generic")
+        self.apply()
+        fixtures.install_harness("example-maven")
+        self.apply("example-maven")
+        self.assertFalse(self.facts_path.exists())
+        doc = self.settings()
+        self.assertNotIn("sandbox", doc)
+        self.assertEqual(doc.get("permissions", {}).get("allow", []), [])
+
+    def test_reapply_replaces_ppl_entries_and_keeps_others(self):
+        fixtures.install_harness("example-generic")
+        self.settings_path.parent.mkdir(parents=True)
+        self.settings_path.write_text(json.dumps(
+            {"model": "m", "permissions": {"allow": ["Bash(ls *)"]}}), encoding="utf-8")
+        self.apply()
+        self.apply()
+        doc = self.settings()
+        self.assertEqual(doc["model"], "m")
+        allow = doc["permissions"]["allow"]
+        self.assertEqual(allow.count("Bash(ls *)"), 1)
+        self.assertEqual(allow.count("Bash(/opt/x/gh auth status)"), 1)
+        self.assertEqual(len(allow), 10)
+
+    def test_a_foreign_sandbox_key_refuses_and_leaves_the_file(self):
+        fixtures.install_harness("example-generic")
+        self.settings_path.parent.mkdir(parents=True)
+        self.settings_path.write_text('{"sandbox": {"enabled": false}}', encoding="utf-8")
+        before = self.settings_path.read_bytes()
+        with self.assertRaises(PplError) as caught:
+            self.apply()
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertEqual(self.settings_path.read_bytes(), before)
+        self.assertFalse(self.facts_path.exists())
+        self.assertIsNone(config.active_harness())
+
+    def test_invalid_json_refuses_and_leaves_the_file(self):
+        fixtures.install_harness("example-generic")
+        self.settings_path.parent.mkdir(parents=True)
+        self.settings_path.write_text("{oops", encoding="utf-8")
+        with self.assertRaises(PplError) as caught:
+            self.apply()
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertEqual(self.settings_path.read_text(encoding="utf-8"), "{oops")
+
+    def test_global_hook_mode_still_writes_the_workspace_profile(self):
+        config.update("claude", {"hooks": "global"})
+        fixtures.install_harness("example-generic")
+        self.apply()
+        self.assertIn("sandbox", self.settings())
+
+    def test_apply_without_a_workspace_refuses_for_a_github_harness(self):
+        config.update("claude", {"workspace": ""})
+        fixtures.install_harness("example-generic")
+        with self.assertRaises(PplError) as caught:
+            self.apply()
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertIn("workspace", caught.exception.message)
+        self.assertIsNone(config.active_harness())
+
+    def test_apply_without_a_workspace_is_fine_for_a_gitlab_harness(self):
+        config.update("claude", {"workspace": ""})
+        fixtures.install_harness("example-maven")
+        self.apply("example-maven")
+        self.assertEqual(config.active_harness(), "example-maven")
+
+    def test_apply_creates_the_scratch_root(self):
+        fixtures.install_harness("example-generic")
+        self.apply()
+        self.assertTrue(os_sandbox.scratch_root().is_dir())
 
 
 class TestSnapshotAndApplied(HarnessTestCase):

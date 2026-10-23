@@ -14,11 +14,6 @@ FACTS_FILE = "os_sandbox.json"
 PIN_NAMES = ("gh", "git", "ppl")
 DENY_REASON = ("GitHub is reached only by the orchestrator's plain gh, git and ppl commands "
                "outside the sandbox. A role never reaches it.")
-ALLOW_SHAPES = (("gh", "issue view *"), ("gh", "issue comment *"), ("gh", "pr create *"),
-                ("gh", "pr view *"), ("gh", "pr checks *"), ("gh", "pr close *"),
-                ("gh", "api *"), ("gh", "auth status"),
-                ("git", "-c core.hooksPath=/dev/null *"),
-                ("ppl", "tracker fetch *"), ("ppl", "review fetch *"), ("ppl", "doctor --forge"))
 
 
 def _table(doc):
@@ -47,17 +42,22 @@ def _real(path):
 
 def pins(which=shutil.which):
     """Each pinned binary as {name: {"path": as found, "realpath": resolved}}.
-    A binary that cannot be found refuses SETUP_INCOMPLETE naming it."""
+    A binary that cannot be found refuses SETUP_INCOMPLETE naming it. The ppl fallback is
+    sys.argv[0] when it is an executable file that is not a .py script."""
     found = {}
     for name in PIN_NAMES:
         path = which(name)
-        if not path and name == "ppl" and sys.argv and sys.argv[0]:
+        if path:
+            path = os.path.abspath(path)
+        elif name == "ppl" and sys.argv and sys.argv[0]:
             candidate = os.path.abspath(sys.argv[0])
-            path = candidate if os.path.isfile(candidate) else None
+            if (os.path.isfile(candidate) and os.access(candidate, os.X_OK)
+                    and not candidate.endswith(".py")):
+                path = candidate
         if not path:
             raise PplError("SETUP_INCOMPLETE",
-                           "the OS sandbox profile pins %s but no %s is on PATH. Install it "
-                           "or fix PATH, then run ppl harness apply again." % (name, name))
+                           "the OS sandbox profile pins %s but no %s is on PATH. Put %s on "
+                           "PATH, then run ppl harness apply again." % (name, name, name))
         found[name] = {"path": path, "realpath": os.path.realpath(path)}
     return found
 
@@ -99,8 +99,17 @@ def facts(doc, workspace, pin_map):
             "pins": {name: dict(pin_map[name]) for name in PIN_NAMES}}
 
 
-def _allow_entries(pin_map):
-    return ["Bash(%s %s)" % (pin_map[name]["path"], shape) for name, shape in ALLOW_SHAPES]
+def _allow_entries(doc, pin_map):
+    """The nine read-only commands, no GitHub write: those go through the permission prompt."""
+    gh, git, ppl = (pin_map[name]["path"] for name in PIN_NAMES)
+    checkout, _ = _repo(doc)
+    fetch = "%s -c core.hooksPath=/dev/null -C %s fetch origin %s" % (
+        git, _real(checkout), doc["repo"]["default_branch"])
+    return ["Bash(%s)" % entry for entry in (
+        gh + " issue view *", gh + " pr view *", gh + " pr checks *",
+        gh + " api user --jq .login", gh + " auth status", fetch,
+        ppl + " tracker fetch --task *", ppl + " review fetch --pr *",
+        ppl + " doctor --forge")]
 
 
 def profile(doc, workspace, pin_map):
@@ -119,7 +128,7 @@ def profile(doc, workspace, pin_map):
                            "deniedDomainReasons": {d: DENY_REASON for d in DENIED_DOMAINS},
                            "allowedDomains": list(_table(doc).get("allowed_domains") or [])},
                "filesystem": {"allowWrite": write_scope(doc), "denyWrite": deny_write}}
-    return {"sandbox": sandbox, "allow": _allow_entries(pin_map)}
+    return {"sandbox": sandbox, "allow": _allow_entries(doc, pin_map)}
 
 
 def load_facts():

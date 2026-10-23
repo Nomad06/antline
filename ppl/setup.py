@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from . import config, doctor, forges, harness, models, paths, routing, tomlout, trackers
@@ -170,6 +171,76 @@ def write_local_settings(workspace, code_root):
     return path
 
 
+def _replace_file(path, doc):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".settings.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(doc, indent=2) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _planned_os_sandbox_doc(path, prof, recorded):
+    """The settings document to write, None when there is nothing to change. Refuses
+    SETUP_INCOMPLETE on invalid JSON, a wrong shape or a foreign sandbox key."""
+    doc = {}
+    if path.is_file():
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            _bad_settings(path, "could not be read as JSON (%s)" % exc)
+    elif prof is None:
+        return None
+    before = copy.deepcopy(doc)
+    permissions = doc.get("permissions", {}) if isinstance(doc, dict) else None
+    if not isinstance(permissions, dict) or not isinstance(permissions.get("allow", []), list):
+        _bad_settings(path, "is not a JSON object with a permissions.allow list")
+    owned = "sandbox" not in doc or doc["sandbox"] == recorded.get("written_sandbox")
+    if not owned and prof is not None:
+        _bad_settings(path, "holds a sandbox key ppl did not write (or you edited ppl's block), "
+                      "remove that key and run ppl harness apply again")
+    old = set(recorded.get("written_allow") or [])
+    allow = [e for e in permissions.get("allow", []) if e not in old]
+    if prof is None:
+        if owned:
+            doc.pop("sandbox", None)
+        if allow or "allow" in permissions:
+            permissions["allow"] = allow
+    else:
+        doc["sandbox"] = prof["sandbox"]
+        permissions["allow"] = allow + [e for e in prof["allow"] if e not in allow]
+    if permissions:
+        doc["permissions"] = permissions
+    return None if doc == before else doc
+
+
+def check_os_sandbox_settings(workspace, recorded):
+    """Refuse exactly when write_os_sandbox_settings would, writing nothing."""
+    _planned_os_sandbox_doc(Path(workspace) / ".claude" / "settings.local.json",
+                            {"sandbox": {}, "allow": []}, recorded)
+
+
+def write_os_sandbox_settings(workspace, prof, recorded=None):
+    """Own the sandbox key and ppl's allow entries in <workspace>/.claude/settings.local.json.
+    `prof` is os_sandbox.profile(...), or None to remove them. A sandbox key is ppl's only when
+    it equals the block recorded in os_sandbox.json (`recorded`, read from there when None), and
+    any other one refuses SETUP_INCOMPLETE with the file untouched, as does invalid JSON.
+    With None a foreign block is left alone."""
+    from . import os_sandbox
+    path = Path(workspace) / ".claude" / "settings.local.json"
+    doc = _planned_os_sandbox_doc(path, prof, os_sandbox.load_facts() or {}
+                                  if recorded is None else recorded)
+    if doc is not None:
+        _replace_file(path, doc)
+    return path
+
+
 def _derived_dir(current, key, old_workspace, workspace, *parts):
     """The workspace-relative agents or skills dir, unless the user pointed
     config.toml somewhere else by hand: that value is kept."""
@@ -200,6 +271,8 @@ def _step_claude(p):
         p.emit("hooks registered in %s" % write_local_settings(workspace, paths.root()))
     else:
         where = doctor.global_settings_path() if hooks == "global" else "the settings file you choose"
+        p.emit("the OS sandbox profile of a GitHub harness is always written to the workspace's "
+               "local settings, whatever the hooks mode")
         p.emit("add these entries to %s:" % where)
         p.emit(json.dumps({"hooks": {event: [entry] for event, entry in
                                      hook_entries(paths.root()).items()}}, indent=2))

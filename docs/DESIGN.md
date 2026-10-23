@@ -718,7 +718,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 179 rows: 133 `blocking`, 19 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 180 rows: 133 `blocking`, 20 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -905,6 +905,16 @@ registered but the dispatch hook is missing or malformed, since the dispatch cap
 only the spends recorded by hand, or the usage hook is, since no tokens are then recorded, and
 when a registered hook script is not under this install's `paths.root()/hooks` (a clone or an
 older install left behind keeps running its own copy) [R-DOCTOR-HOOK-SHAPE].
+
+For a GitHub forge or tracker, `ppl harness apply` also writes the OS sandbox profile into
+`<workspace>/.claude/settings.local.json`, whatever the hooks mode: a `sandbox` block that denies
+github.com and every subdomain to each sandboxed Bash command, the write scope, and the
+`permissions.allow` entries for nine read-only commands on the pinned `gh`, `git` and `ppl` paths
+[R-OS-SANDBOX-NETWORK]. It records the block and the entries it wrote, with the guard's facts
+(workspace, checkout, default branch, repositories, scratch root, pins), in `PPL_HOME/os_sandbox.json`.
+A `sandbox` key in the settings file is ppl's only when it equals the recorded block. Any other one,
+and invalid JSON, is a `SETUP_INCOMPLETE` that leaves the file as it was [R-OS-SANDBOX-NETWORK]. A harness that no
+longer needs the profile has the block, the entries and the facts file removed on the next apply.
 
 ## 6. State machine
 

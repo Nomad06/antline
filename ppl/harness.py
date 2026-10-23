@@ -710,7 +710,7 @@ def apply(name, agents_dir=None, skills_dir=None):
     """Render the six agents and the skill for an installed harness, then
     record it as the active one. Everything is rendered before anything is
     written, so a bad marker or a bad routing.toml leaves the disk as it was."""
-    from . import config
+    from . import config, setup, store
     doc = load(name)
     if os.path.dirname(os.path.abspath(doc["_dir"])) != os.path.abspath(paths.harnesses_dir()):
         _fail(name, "%s is not an installed harness, add it with `ppl harness add` and apply it "
@@ -718,7 +718,30 @@ def apply(name, agents_dir=None, skills_dir=None):
     config.active_harness()
     skill_files = render_skill(doc)
     _size_warnings(skill_files, {role: routing.render(role, doc) for role in routing.REQUIRED_ROLES})
+    workspace = config.section("claude").get("workspace") or ""
+    previous = os_sandbox.load_facts() or {}
+    sandbox_facts = prof = None
+    if os_sandbox.needed(doc):
+        if not workspace:
+            raise PplError("SETUP_INCOMPLETE", "the OS sandbox profile is written to the "
+                           "workspace's local settings and no [claude] workspace is configured. "
+                           "Run ppl setup claude, then ppl harness apply again.")
+        pin_map = os_sandbox.pins()
+        sandbox_facts = os_sandbox.facts(doc, workspace, pin_map)
+        prof = os_sandbox.profile(doc, workspace, pin_map)
+        sandbox_facts["written_sandbox"] = prof["sandbox"]
+        sandbox_facts["written_allow"] = prof["allow"]
+        setup.check_os_sandbox_settings(workspace, previous)
     skill_target = (Path(skills_dir) if skills_dir is not None else config.skills_dir()) / "pipeline"
+    facts_path = paths.home() / os_sandbox.FACTS_FILE
+    if sandbox_facts is not None:
+        store.write_json(facts_path, sandbox_facts)
+        os_sandbox.scratch_root().mkdir(parents=True, exist_ok=True)
+    if workspace and (prof or previous.get("written_sandbox") is not None
+                      or previous.get("written_allow")):
+        setup.write_os_sandbox_settings(workspace, prof, previous)
+    if sandbox_facts is None and facts_path.exists():
+        facts_path.unlink()
     agents = routing.apply(doc, agents_dir)
     skill = _write_files(skill_files, skill_target)
     active = installed_name(doc)

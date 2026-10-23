@@ -182,8 +182,10 @@ class TestWizardApi(WizardTestCase):
 class TestSameResultAsTheTerminal(WizardTestCase):
     def snapshot(self):
         agents = self.workspace / ".claude" / "agents"
-        files = {"settings": (self.workspace / ".claude" / "settings.local.json")
-                 .read_text(encoding="utf-8"),
+        settings = (self.workspace / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+        for home in (os.path.realpath(paths.home()), str(paths.home())):
+            settings = settings.replace(home, "<PPL_HOME>")
+        files = {"settings": settings,
                  "config": paths.config_file().read_text(encoding="utf-8"),
                  "routing": paths.routing_file().read_text(encoding="utf-8"),
                  "harness": (paths.harness_dir("mine") / "harness.toml").read_text(encoding="utf-8"),
