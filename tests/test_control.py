@@ -12,7 +12,7 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import control, run, status
+from ppl import control, run, status, store
 from ppl.errors import PplError
 
 
@@ -237,6 +237,68 @@ class TestStatus(unittest.TestCase):
         state["budgets"]["usd_used"] = 12.5
         run.save(state)
         self.assertIn("usd 12.5/50.0", status.card("DEMO-424"))
+
+
+class TestStatusUsage(unittest.TestCase):
+    PRICE = {"input": 1.0, "cache_write": 1.0, "cache_read": 1.0, "output": 1.0}
+
+    def _usage(self, task, role, agent, model, **counts):
+        full = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "thinking": 0}
+        full.update(counts)
+        store.append_log(task, {"event": "usage", "role": role, "agent_id": agent,
+                                "models": {model: full}})
+
+    def _set(self, task, **budgets):
+        state = run.load(task)
+        state["budgets"].update(budgets)
+        run.save(state)
+
+    def test_the_card_shows_tokens_per_role(self):
+        run.init("USG-430", "u", "/tmp/repo")
+        self._usage("USG-430", "ppl-code-worker", "a1", "claude-x", input=300000, output=112000)
+        self._usage("USG-430", "ppl-verifier", "a2", "claude-x", input=198000)
+        self._usage("USG-430", "orchestrator", "orchestrator:s", "claude-x",
+                    cache_read=1170000, output=30000)
+        line = [row for row in status.card("USG-430").splitlines()
+                if row.startswith("Tokens:")]
+        self.assertEqual(line, ["Tokens:   code-worker 412k, verifier 198k, "
+                                "orchestrator 1.2M (out 142k)"])
+
+    def test_the_card_says_none_recorded_without_usage(self):
+        run.init("USG-431", "u", "/tmp/repo")
+        self.assertIn("Tokens:   none recorded", status.card("USG-431"))
+        self.assertEqual(status.tokens_line("USG-431"), "none recorded")
+
+    def test_token_numbers_are_formatted_short(self):
+        run.init("USG-432", "u", "/tmp/repo")
+        self._usage("USG-432", "ppl-a", "a1", "m", input=999)
+        self._usage("USG-432", "ppl-b", "a2", "m", input=1200)
+        self._usage("USG-432", "ppl-c", "a3", "m", input=999600)
+        self.assertEqual(status.tokens_line("USG-432"),
+                         "a 999, b 1.2k, c 1.0M (out 0)")
+
+    def test_the_budget_line_shows_priced_dollars(self):
+        run.init("USG-433", "u", "/tmp/repo")
+        self._set("USG-433", usd_max=5.0, usd_used=0.2, prices={"claude-x": self.PRICE})
+        self._usage("USG-433", "ppl-code-worker", "a1", "claude-x", input=1000000)
+        self.assertIn("usd 1.2/5.0", status.card("USG-433"))
+        self.assertEqual(status.usd_text("USG-433"), "usd 1.2/5.0")
+
+    def test_the_budget_line_without_a_cap_says_no_cap(self):
+        run.init("USG-434", "u", "/tmp/repo")
+        self._set("USG-434", usd_used=0.2, prices={"claude-x": self.PRICE})
+        self._usage("USG-434", "ppl-code-worker", "a1", "claude-x", input=1000000)
+        self.assertEqual(status.usd_text("USG-434"), "usd 1.2 (no cap)")
+
+    def test_the_budget_line_names_an_unpriced_model(self):
+        run.init("USG-435", "u", "/tmp/repo")
+        self._set("USG-435", prices={})
+        self._usage("USG-435", "ppl-code-worker", "a1", "claude-x", input=10)
+        self.assertIn("usd 0.0 + unpriced claude-x", status.card("USG-435"))
+
+    def test_the_budget_line_does_not_pass_off_no_usage_as_measured(self):
+        run.init("USG-436", "u", "/tmp/repo")
+        self.assertEqual(status.usd_text("USG-436"), "usd 0.0 (no cap), no usage recorded")
 
 
 class TestDestroyRemovesTheWorktree(unittest.TestCase):

@@ -101,10 +101,10 @@ function mrLine(run) {
   return "MR !" + esc(run.mr.iid) + " (unsafe URL, not linked: " + esc(run.mr.url) + ")";
 }
 
-function budgetLine(b) {
+function budgetLine(b, usd) {
   return "dispatch " + b.dispatch_used + "/" + b.dispatch_hard +
-         ", retry " + b.retry_used + "/" + b.retry_max +
-         ", usd " + b.usd_used + "/" + (b.usd_max || "unlimited");
+         ", retry " + b.retry_used + "/" + b.retry_max + ", " +
+         (usd || "usd " + b.usd_used + "/" + (b.usd_max || "unlimited"));
 }
 
 function renderErrorRow(run) {
@@ -145,7 +145,8 @@ function renderRun(run) {
       "<span>next: " + esc(run.next_safe_action) + "</span>" +
       "<span>sha: " + esc(run.candidate_sha) + "</span>" +
       "<span>risk: " + esc(run.risk) + "</span>" +
-      "<span>" + esc(budgetLine(run.budgets)) + "</span>" +
+      "<span>" + esc(budgetLine(run.budgets, run.usd)) + "</span>" +
+      (run.tokens ? "<span>tokens: " + esc(run.tokens) + "</span>" : "") +
       "<span>" + mrLine(run) + "</span>" +
       "<span>open findings: " + esc(run.open_findings) + "</span>" +
     "</div>" +

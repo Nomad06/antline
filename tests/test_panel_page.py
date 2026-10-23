@@ -66,7 +66,7 @@ class TestPanelPage(unittest.TestCase):
         # therefore returns) before the budgetLine call inside renderRun
         # shows an error row can never reach it.
         error_check = self.text.index('run.status === "error"')
-        budget_call = self.text.index("budgetLine(run.budgets)")
+        budget_call = self.text.index("budgetLine(run.budgets")
         self.assertLess(error_check, budget_call)
 
     def test_error_row_shows_the_task_id_and_the_reason(self):
@@ -257,6 +257,22 @@ class TestPanelPageBehavior(unittest.TestCase):
         self.assertNotIn("<img src=x", html)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
         self.assertIn("&lt;img src=x onerror=alert(2)&gt;", html)
+
+    def test_render_run_shows_the_tokens_line_escaped(self):
+        run = self._base_run(tokens="verifier 7 (out 2) <b>", usd="usd 1.2/5.0")
+        html = self._node_eval("console.log(renderRun(%s));" % json.dumps(run))
+        self.assertIn("tokens: verifier 7 (out 2) &lt;b&gt;", html)
+
+    def test_render_run_prints_the_rows_usd_instead_of_the_raw_budget(self):
+        run = self._base_run(tokens="none recorded", usd="usd 1.2/5.0")
+        html = self._node_eval("console.log(renderRun(%s));" % json.dumps(run))
+        self.assertIn("retry 0/3, usd 1.2/5.0", html)
+        self.assertNotIn("0.1/", html)
+
+    def test_render_run_falls_back_to_the_raw_budget_without_a_usd_string(self):
+        html = self._node_eval("console.log(renderRun(%s));" % json.dumps(self._base_run()))
+        self.assertIn("usd 0.1/unlimited", html)
+        self.assertNotIn("undefined", html)
 
     def test_render_run_refuses_a_javascript_scheme_mr_url(self):
         run = self._base_run(mr={"url": "javascript:alert(1)", "iid": 7})

@@ -51,6 +51,8 @@ def _error_row(task_id, exc):
         "next_safe_action": None,
         "control": None,
         "open_findings": None,
+        "tokens": "",
+        "usd": "",
         "needs_you": "run state is unreadable: %s" % exc,
     }
 
@@ -99,6 +101,8 @@ def list_runs():
                 # signal for the fleet-wide row. run_detail below carries the
                 # full list for the one run an operator opens.
                 "open_findings": len(findings.list_open(state["task_id"])),
+                "tokens": status.tokens_line(state["task_id"]),
+                "usd": status.usd_text(state["task_id"]),
             })
         except (OSError, ValueError, KeyError, TypeError, PplError) as exc:
             # One run's corrupt state.json must not blank the whole panel:
