@@ -1016,7 +1016,11 @@ def cmd_destroy(args):
 
 
 def cmd_metrics(args):
-    print(json.dumps(metrics.compute(), indent=2, sort_keys=True))
+    report = metrics.compute()
+    if args.text:
+        print(metrics.text(report))
+    else:
+        print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
 
@@ -1344,6 +1348,7 @@ def build_parser():
     p.add_argument("--task")
 
     p = sub.add_parser("metrics")
+    p.add_argument("--text", action="store_true")
 
     p = sub.add_parser("label")
     p.add_argument("--sha", required=True)

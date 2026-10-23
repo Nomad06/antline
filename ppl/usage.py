@@ -37,7 +37,7 @@ class TranscriptError(Exception):
         self.code = code
 
 
-def _is_count(value):
+def is_count(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     # an int too large for a float is no count: pricing it would overflow
@@ -48,7 +48,7 @@ def _is_count(value):
 
 
 def _number(value):
-    return int(value) if _is_count(value) else 0
+    return int(value) if is_count(value) else 0
 
 
 def _counts_of(use):
@@ -66,7 +66,7 @@ def _assistant_usage(event):
     if not isinstance(message, dict) or not isinstance(message.get("usage"), dict):
         return None
     use = message["usage"]
-    if not any(_is_count(use.get(field)) for _, field in _FIELDS):
+    if not any(is_count(use.get(field)) for _, field in _FIELDS):
         return None
     return message.get("id"), message.get("model"), use
 
@@ -334,7 +334,7 @@ def dollars(models, price_table):
     for model, counts in models.items():
         for key in COUNTS:
             value = counts.get(key, 0)
-            usd += (value if _is_count(value) else 0) * price_table[model][key] / 1000000
+            usd += (value if is_count(value) else 0) * price_table[model][key] / 1000000
     return usd, []
 
 

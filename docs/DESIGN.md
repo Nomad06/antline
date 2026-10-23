@@ -718,7 +718,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 177 rows: 132 `blocking`, 18 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 178 rows: 132 `blocking`, 19 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -1659,6 +1659,31 @@ the same thing, the same principle the rule matrix itself holds `n/a` rows to (5
   - no event or field anywhere in this pipeline records a human's working minutes, though a
   human's *wait* time is inferable from timestamps and effort minutes are a different claim
   [R-METRIC-HUMAN-MINUTES-UNDEFINED].
+
+**Warnings.** `ppl metrics` adds a top-level `warnings` list and `ppl metrics --text` prints
+one line per number, then one `WARNING <code>[ <producer>]: <message>` line per warning.
+A warning is a tripwire for a human: it appears when the sample reaches its minimum and the
+value its threshold, and `ppl metrics` reports warnings and never refuses or changes its exit
+code over them [R-METRIC-WARNINGS-NEVER-REFUSE]. Each carries `evidence` with `n`, `value` and
+`threshold`.
+
+| Code | Fires when | Minimum sample |
+|---|---|---|
+| `VERIFIER_NEVER_REWORKS` | every recorded verdict is `PASS` | 10 verdicts |
+| `HIGH_INCOMPLETE_CHECKS` | at least 25% of recorded verdicts are incomplete | 8 verdicts |
+| `RETRY_BUDGET_OFTEN_SPENT` | at least 30% of runs have `retry_used` at `retry_max` | 6 runs |
+| `PARKS_ONE_CAUSE` | one blocker code is at least 50% of parks, named in the message | 6 parks |
+| `LABELS_MISSING` | at least 50% of `PASS` verdicts older than 14 days have no label | 6 verdicts |
+| `FORMAT_REFUSALS` | counted `refusal` events average at least 2 per run, the top role named | 5 runs |
+| `CAGE_HITS_HIGH` | one role's `deny` events average at least 5 per run, the role named | 5 runs |
+
+The three verdict-based warnings fire overall and per producer. The incomplete rate and the
+rubber-stamp check read every recorded verdict, a `PASS` is dated by its newest `verdict` log
+event, and a `PASS` with no such event has no age. The four run-based warnings fire overall only,
+because parks, refusals, denials and budgets carry no producer. A run that is unreadable is
+skipped. The thresholds and minimum samples are overridable in `config.toml`: the keys
+`[metrics] <code in lower case>_threshold` and `<code in lower case>_min_sample`, and an unknown
+key or a negative or non-number value is `SCHEMA_INVALID` naming the known keys.
 
 `ppl label --sha <sha> --actual defective|correct` records the one fact this system has no
 other way to observe: whether a given candidate SHA, in hindsight, was actually correct or

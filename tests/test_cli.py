@@ -2791,6 +2791,44 @@ class TestMetricsCommandPrintsUndefinedNotZero(unittest.TestCase):
                 self.assertTrue(entry["reason"])
 
 
+class TestMetricsWarnings(unittest.TestCase):
+    def setUp(self):
+        self._real_ppl_home = os.environ["PPL_HOME"]
+        os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+        paths.config_file().write_text(
+            "[metrics]\nverifier_never_reworks_min_sample = 1\n", encoding="utf-8")
+        from ppl import run as run_module, store
+        run_module.init("WARN-1", "u", "/tmp/repo")
+        store.write_json(paths.run_dir("WARN-1") / "verdicts" / "a1.json", {
+            "task_id": "WARN-1", "candidate_sha": "a1", "verdict": "PASS",
+            "producer": {"provider": "p", "model": "m"}})
+
+    def tearDown(self):
+        os.environ["PPL_HOME"] = self._real_ppl_home
+
+    def test_a_warning_never_changes_the_exit_code(self):
+        # rule: R-METRIC-WARNINGS-NEVER-REFUSE
+        for args in (("metrics",), ("metrics", "--text")):
+            with self.subTest(args=args):
+                code, out, err = call(*args)
+                self.assertEqual(code, 0, err)
+                self.assertIn("VERIFIER_NEVER_REWORKS", out)
+
+    def test_json_carries_the_warnings_at_the_top_level(self):
+        code, out, err = call("metrics")
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)
+        self.assertEqual([w["code"] for w in report["warnings"]],
+                         ["VERIFIER_NEVER_REWORKS", "VERIFIER_NEVER_REWORKS"])
+
+    def test_text_output_prints_undefined_with_its_reason_and_the_warning_line(self):
+        code, out, err = call("metrics", "--text")
+        self.assertEqual(code, 0, err)
+        self.assertRaises(ValueError, json.loads, out)
+        self.assertRegex(out, r"(?m)^cost_per_accepted_task: undefined \(.+\)$")
+        self.assertRegex(out, r"(?m)^WARNING VERIFIER_NEVER_REWORKS: .+$")
+
+
 class TestLabelAndMetricsSurviveDestroyThroughTheRealCli(unittest.TestCase):
     """The blocking defect found in review round 1, reproduced end to end
     through the real `ppl` CLI rather than through metrics.py directly:

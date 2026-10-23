@@ -58,10 +58,12 @@ could act on. Labels are therefore kept at `PPL_HOME/labels/<task_id>/<sha>.json
 untouched by `ppl destroy`, and every scan below walks both `runs/*` and
 `runs/_archive/*` rather than only the former.
 """
+import json
+import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-from . import paths, schema, store, usage
+from . import boundary, config, paths, schema, store, usage
 from .errors import PplError
 
 # "outcompeted": the accepted candidate was correct but a parallel
@@ -322,7 +324,7 @@ def _counts_of(models):
     for counts in models.values():
         for name in usage.COUNTS:
             value = counts.get(name, 0)
-            if usage._is_count(value):
+            if usage.is_count(value):
                 out[name] += value
     return out
 
@@ -342,7 +344,10 @@ def _usage_metrics(run_records, producer_key):
         why = ("%d accepted task(s) but no usage recorded - install the usage hook "
                "with `ppl setup claude`" % len(accepted))
         return tuple(_metric(None, why) for _ in range(3))
-    table = usage.prices()
+    try:
+        table, table_error = usage.prices(), None
+    except PplError as exc:
+        table, table_error = None, exc.message
     by_role = {}
     per_task = []
     costs = []
@@ -358,13 +363,16 @@ def _usage_metrics(run_records, producer_key):
                 task_total[name] += counts[name]
             models = usage.add(models, role_models)
         per_task.append(task_total)
-        usd, missing = usage.dollars(models, table)
-        unpriced.update(missing)
-        costs.append(usd)
+        if table is not None:
+            usd, missing = usage.dollars(models, table)
+            unpriced.update(missing)
+            costs.append(usd)
     tokens = _metric({name: sum(t[name] for t in per_task) / len(per_task)
                       for name in usage.COUNTS})
     roles_metric = _metric(by_role)
-    if unpriced:
+    if table is None:
+        cost = _metric(None, table_error)
+    elif unpriced:
         cost = _metric(None, "no price for model(s) %s - add a [prices.\"<model>\"] table "
                              "to config.toml" % ", ".join(sorted(unpriced)))
     else:
@@ -522,14 +530,194 @@ def _entry(records, run_records, producer_key, history=None):
     }
 
 
-def compute():
+WARNINGS = {
+    "VERIFIER_NEVER_REWORKS": (1.0, 10),
+    "HIGH_INCOMPLETE_CHECKS": (0.25, 8),
+    "RETRY_BUDGET_OFTEN_SPENT": (0.30, 6),
+    "PARKS_ONE_CAUSE": (0.50, 6),
+    "LABELS_MISSING": (0.50, 6),
+    "FORMAT_REFUSALS": (2.0, 5),
+    "CAGE_HITS_HIGH": (5.0, 5),
+}
+LABEL_AGE_DAYS = 14
+
+
+def thresholds():
+    """WARNINGS with the `[metrics]` table of config.toml laid over it: the keys
+    `<code in lower case>_threshold` and `<code in lower case>_min_sample`. An unknown
+    key, a non-number or a negative number is SCHEMA_INVALID naming the known keys."""
+    known = {}
+    for code in WARNINGS:
+        known[code.lower() + "_threshold"] = (code, 0)
+        known[code.lower() + "_min_sample"] = (code, 1)
+    table = config.section("metrics")
+    unknown = sorted(key for key in table if key not in known)
+    if unknown:
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: [metrics] has the unknown key %s, the known keys are %s"
+                       % (paths.config_file(), ", ".join(unknown), ", ".join(sorted(known))))
+    out = {code: list(pair) for code, pair in WARNINGS.items()}
+    for key, value in table.items():
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise PplError("SCHEMA_INVALID",
+                           "config.toml at %s: metrics.%s must be a number >= 0"
+                           % (paths.config_file(), key))
+        code, slot = known[key]
+        out[code][slot] = value
+    return {code: tuple(pair) for code, pair in out.items()}
+
+
+def _warning(limits, code, producer, n, value, message):
+    """The warning when `n` reaches the minimum sample and `value` the threshold, else None."""
+    threshold, min_sample = limits[code]
+    if n < min_sample or value < threshold:
+        return None
+    return {"code": code, "producer": producer, "message": message,
+            "evidence": {"n": n, "value": value, "threshold": threshold}}
+
+
+def _pass_dates(run_records):
+    """{(task_id, sha): newest `verdict` log event time with verdict PASS}. A PASS with
+    no such event has no date and counts for no age."""
+    dates = {}
+    for task_id, directory in run_records:
+        try:
+            events = store.read_log_at(directory)
+        except OSError:
+            continue
+        for ev in events:
+            if ev.get("event") != "verdict" or ev.get("verdict") != "PASS":
+                continue
+            try:
+                at = _parse(ev["at"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            key = (task_id, ev.get("sha"))
+            if key not in dates or at > dates[key]:
+                dates[key] = at
+    return dates
+
+
+def _verdict_warnings(limits, producer, records, history, dates, now):
+    out = []
+    if history:
+        n = len(history)
+        passed = sum(1 for r in history if r["verdict"] == "PASS") / n
+        incomplete = sum(1 for r in history if r["verdict"] in schema.INCOMPLETE_OUTCOMES) / n
+        out.append(_warning(
+            limits, "VERIFIER_NEVER_REWORKS", producer, n, passed,
+            "%d of %d verdicts are PASS, a verifier that passes everything may be "
+            "rubber-stamping" % (round(passed * n), n)))
+        out.append(_warning(
+            limits, "HIGH_INCOMPLETE_CHECKS", producer, n, incomplete,
+            "%d of %d verdicts did not finish (%s), verification is failing to finish, "
+            "not judging" % (round(incomplete * n), n, "/".join(schema.INCOMPLETE_OUTCOMES))))
+    cutoff = now - timedelta(days=LABEL_AGE_DAYS)
+    old = [r for r in records if r["verdict"] == "PASS"
+           and (r["task_id"], r["sha"]) in dates and dates[(r["task_id"], r["sha"])] <= cutoff]
+    if old:
+        missing = sum(1 for r in old if not r["actual"]) / len(old)
+        out.append(_warning(
+            limits, "LABELS_MISSING", producer, len(old), missing,
+            "%d of %d PASS verdicts older than %d days have no label, defect escape stays "
+            "undefined until someone runs `ppl label`"
+            % (round(missing * len(old)), len(old), LABEL_AGE_DAYS)))
+    return out
+
+
+def _top(counter):
+    return sorted(counter.items(), key=lambda item: (-item[1], item[0]))[0]
+
+
+def _run_warnings(limits, run_records):
+    """The four run-based warnings, over the whole fleet. A run whose files cannot be
+    read, or whose state.json carries no usable budgets, is skipped for what needs them."""
+    runs = budgeted = spent = 0
+    parks, refusals, denials = {}, {}, {}
+    for _, directory in run_records:
+        try:
+            events = store.read_log_at(directory)
+            state = store.read_json(directory / "state.json")
+        except (PplError, OSError):
+            continue
+        runs += 1
+        budgets = state.get("budgets") if isinstance(state, dict) else None
+        used = budgets.get("retry_used") if isinstance(budgets, dict) else None
+        cap = budgets.get("retry_max") if isinstance(budgets, dict) else None
+        if usage.is_count(used) and usage.is_count(cap):
+            budgeted += 1
+            spent += 1 if used >= cap else 0
+        for ev in events:
+            kind = ev.get("event")
+            if kind == "park" and isinstance(ev.get("blocker"), str):
+                parks[ev["blocker"]] = parks.get(ev["blocker"], 0) + 1
+            elif kind == "refusal" and ev.get("counted") is True:
+                role = ev.get("role") if isinstance(ev.get("role"), str) else "no role"
+                refusals[role] = refusals.get(role, 0) + 1
+            elif kind == "deny" and ev.get("role") in boundary.ROLE_RULES:
+                denials[ev["role"]] = denials.get(ev["role"], 0) + 1
+    out = []
+    if budgeted:
+        share = spent / budgeted
+        out.append(_warning(
+            limits, "RETRY_BUDGET_OFTEN_SPENT", None, budgeted, share,
+            "%d of %d runs used their whole retry budget, rework is not converging, "
+            "check the brief and the gates" % (spent, budgeted)))
+    if parks:
+        total = sum(parks.values())
+        blocker, count = _top(parks)
+        out.append(_warning(
+            limits, "PARKS_ONE_CAUSE", None, total, count / total,
+            "%d of %d parks are %s, a recurring setup problem" % (count, total, blocker)))
+    if runs:
+        total = sum(refusals.values())
+        if refusals:
+            role = _top(refusals)[0]
+            out.append(_warning(
+                limits, "FORMAT_REFUSALS", None, runs, total / runs,
+                "%d counted refusals over %d runs, most from %s, see the refusal log"
+                % (total, runs, role)))
+        for role in sorted(denials):
+            out.append(_warning(
+                limits, "CAGE_HITS_HIGH", None, runs, denials[role] / runs,
+                "%s was denied %d times over %d runs, its prompt or notes may contradict "
+                "its boundary" % (role, denials[role], runs)))
+    return out
+
+
+def compute(now=None):
+    limits = thresholds()
+    now = now or datetime.now(timezone.utc)
     run_records = _run_records()
     records = _gather(run_records)
     history = _gather(run_records, history=True)
+    dates = _pass_dates(run_records)
     producers = sorted(set(r["producer"] for r in history))
     result = {"overall": _entry(records, run_records, None, history), "producers": {}}
+    warnings = _verdict_warnings(limits, None, records, history, dates, now)
     for key in producers:
         sliced = [r for r in records if r["producer"] == key]
         sliced_history = [r for r in history if r["producer"] == key]
         result["producers"][key] = _entry(sliced, run_records, key, sliced_history)
+        warnings.extend(_verdict_warnings(limits, key, sliced, sliced_history, dates, now))
+    warnings.extend(_run_warnings(limits, run_records))
+    result["warnings"] = sorted((w for w in warnings if w),
+                                key=lambda w: (w["code"], w["producer"] or ""))
     return result
+
+
+def text(report):
+    """One line per overall metric, then one line per warning."""
+    lines = []
+    for name, entry in report["overall"].items():
+        if entry["defined"]:
+            lines.append("%s: %s" % (name, json.dumps(entry["value"], sort_keys=True)))
+        else:
+            lines.append("%s: undefined (%s)" % (name, entry["reason"]))
+    for warning in report["warnings"]:
+        who = " %s" % warning["producer"] if warning["producer"] else ""
+        lines.append("WARNING %s%s: %s" % (warning["code"], who, warning["message"]))
+    return "\n".join(lines)

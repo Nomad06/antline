@@ -37,3 +37,12 @@ usd_max = 0
 # cache_write = 3.75
 # cache_read = 0.3
 # output = 15.0
+
+# Thresholds and minimum samples of the ppl metrics warnings, for tuning them. The keys
+# are <warning code in lower case>_threshold and <warning code in lower case>_min_sample,
+# numbers >= 0, and any other key is refused. Defaults, threshold then minimum sample:
+# verifier_never_reworks 1.0 and 10, high_incomplete_checks 0.25 and 8,
+# retry_budget_often_spent 0.30 and 6, parks_one_cause 0.50 and 6, labels_missing 0.50
+# and 6, format_refusals 2.0 and 5, cage_hits_high 5.0 and 5.
+# [metrics]
+# verifier_never_reworks_min_sample = 20

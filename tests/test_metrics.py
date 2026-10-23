@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 # tests/ is not a package, so the helper next to this file is imported
@@ -593,6 +594,289 @@ class TestPresetCosts(IsolatedFleet):
         self.assertEqual(entry["tokens_mean"], 8)
         self.assertIsNone(entry["usd_mean"])
         self.assertIn("prices.m", entry["usd_reason"])
+
+WARN_COUNTER = itertools.count(9000)
+OLD = "2026-09-01T00:00:00+00:00"
+YOUNG = "2026-10-20T00:00:00+00:00"
+NOW = datetime(2026, 10, 22, tzinfo=timezone.utc)
+
+
+def warn_task():
+    task = "DEMO-%d" % next(WARN_COUNTER)
+    run.init(task, "u", "/tmp/repo")
+    return task
+
+
+def raw_log(task, event):
+    with open(paths.run_dir(task) / "log.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def verdicts(outcomes, producer=PRODUCER_A, at=None):
+    """One run holding one verdict per outcome, each on its own SHA. With `at`
+    the matching `verdict` log events are dated."""
+    task = warn_task()
+    for outcome in outcomes:
+        sha = "%x" % next(WARN_COUNTER)
+        write_verdict(task, sha, outcome, producer)
+        if at:
+            raw_log(task, {"event": "verdict", "sha": sha, "verdict": outcome, "at": at})
+    return task
+
+
+def park(task, blocker):
+    run.park(task, blocker, "next", [])
+
+
+def deny(task, role):
+    store.append_log(task, {"event": "deny", "role": role, "tool": "Edit",
+                            "code": "GUARD", "target": "a.py"})
+
+
+def refuse(task, role, counted=True):
+    store.append_log(task, {"event": "refusal", "command": "ppl x", "code": "SCHEMA_INVALID",
+                            "message": "m", "role": role, "lease_generation": 1,
+                            "counted": counted})
+
+
+def spend_retries(task):
+    state = run.load(task)
+    state["budgets"]["retry_used"] = state["budgets"]["retry_max"]
+    run.save(state)
+
+
+def found(report, code, producer=None):
+    return [w for w in report["warnings"] if w["code"] == code and w["producer"] == producer]
+
+
+class TestWarnings(IsolatedFleet):
+    def test_verifier_never_reworks_fires_at_its_minimum_sample(self):
+        verdicts(["PASS"] * 10)
+        got = found(metrics.compute(), "VERIFIER_NEVER_REWORKS")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["evidence"], {"n": 10, "value": 1.0, "threshold": 1.0})
+        self.assertTrue(got[0]["message"])
+
+    def test_verifier_never_reworks_is_silent_one_sample_below(self):
+        verdicts(["PASS"] * 9)
+        self.assertEqual(found(metrics.compute(), "VERIFIER_NEVER_REWORKS"), [])
+
+    def test_high_incomplete_checks_fires_at_its_minimum_sample(self):
+        verdicts(["PASS"] * 6 + ["TIMEOUT"] * 2)
+        got = found(metrics.compute(), "HIGH_INCOMPLETE_CHECKS")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["evidence"], {"n": 8, "value": 0.25, "threshold": 0.25})
+
+    def test_high_incomplete_checks_is_silent_one_sample_below(self):
+        verdicts(["PASS"] * 5 + ["TIMEOUT"] * 2)
+        self.assertEqual(found(metrics.compute(), "HIGH_INCOMPLETE_CHECKS"), [])
+
+    def test_retry_budget_often_spent_fires_at_its_minimum_sample(self):
+        tasks = [warn_task() for _ in range(6)]
+        for task in tasks[:2]:
+            spend_retries(task)
+        got = found(metrics.compute(), "RETRY_BUDGET_OFTEN_SPENT")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["evidence"]["n"], 6)
+        self.assertAlmostEqual(got[0]["evidence"]["value"], 2 / 6)
+        self.assertEqual(got[0]["evidence"]["threshold"], 0.30)
+
+    def test_retry_budget_often_spent_is_silent_one_sample_below(self):
+        for _ in range(5):
+            spend_retries(warn_task())
+        self.assertEqual(found(metrics.compute(), "RETRY_BUDGET_OFTEN_SPENT"), [])
+
+    def test_parks_one_cause_fires_at_its_minimum_sample(self):
+        for blocker in ["FORMAT_RETRY_EXHAUSTED"] * 3 + ["SPEC_GAP", "TEST_FAILURE", "TIMED_OUT"]:
+            park(warn_task(), blocker)
+        got = found(metrics.compute(), "PARKS_ONE_CAUSE")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["evidence"], {"n": 6, "value": 0.5, "threshold": 0.5})
+
+    def test_parks_one_cause_is_silent_one_sample_below(self):
+        for _ in range(5):
+            park(warn_task(), "SPEC_GAP")
+        self.assertEqual(found(metrics.compute(), "PARKS_ONE_CAUSE"), [])
+
+    def test_parks_one_cause_names_the_blocker_code(self):
+        for blocker in ["FORMAT_RETRY_EXHAUSTED"] * 3 + ["SPEC_GAP", "TEST_FAILURE", "TIMED_OUT"]:
+            park(warn_task(), blocker)
+        message = found(metrics.compute(), "PARKS_ONE_CAUSE")[0]["message"]
+        self.assertIn("FORMAT_RETRY_EXHAUSTED", message)
+
+    def test_labels_missing_fires_at_its_minimum_sample(self):
+        task = verdicts(["PASS"] * 6, at=OLD)
+        for sha in sorted(d["candidate_sha"] for d in metrics._verdicts(paths.run_dir(task)))[:3]:
+            metrics.record_label(task, sha, "correct")
+        got = found(metrics.compute(now=NOW), "LABELS_MISSING")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["evidence"], {"n": 6, "value": 0.5, "threshold": 0.5})
+
+    def test_labels_missing_is_silent_one_sample_below(self):
+        verdicts(["PASS"] * 5, at=OLD)
+        self.assertEqual(found(metrics.compute(now=NOW), "LABELS_MISSING"), [])
+
+    def test_labels_missing_ignores_passes_younger_than_fourteen_days(self):
+        verdicts(["PASS"] * 6, at=OLD)
+        verdicts(["PASS"] * 4, at=YOUNG)
+        got = found(metrics.compute(now=NOW), "LABELS_MISSING")
+        self.assertEqual(got[0]["evidence"]["n"], 6)
+
+    def test_labels_missing_cannot_date_a_pass_without_a_verdict_event(self):
+        verdicts(["PASS"] * 8)
+        self.assertEqual(found(metrics.compute(now=NOW), "LABELS_MISSING"), [])
+
+    def test_format_refusals_fires_at_its_minimum_sample(self):
+        tasks = [warn_task() for _ in range(5)]
+        for task in tasks:
+            refuse(task, "ppl-code-worker")
+            refuse(task, "ppl-code-worker")
+        for _ in range(3):
+            refuse(tasks[0], "ppl-code-worker", counted=False)
+        got = found(metrics.compute(), "FORMAT_REFUSALS")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["evidence"], {"n": 5, "value": 2.0, "threshold": 2.0})
+
+    def test_format_refusals_is_silent_one_sample_below(self):
+        for _ in range(4):
+            task = warn_task()
+            refuse(task, "ppl-code-worker")
+            refuse(task, "ppl-code-worker")
+        self.assertEqual(found(metrics.compute(), "FORMAT_REFUSALS"), [])
+
+    def test_format_refusals_names_the_role(self):
+        for _ in range(5):
+            task = warn_task()
+            refuse(task, "ppl-test-worker")
+            refuse(task, "ppl-test-worker")
+            refuse(task, "ppl-code-worker")
+        message = found(metrics.compute(), "FORMAT_REFUSALS")[0]["message"]
+        self.assertIn("ppl-test-worker", message)
+
+    def test_cage_hits_high_fires_at_its_minimum_sample(self):
+        tasks = [warn_task() for _ in range(5)]
+        for task in tasks:
+            for _ in range(5):
+                deny(task, "ppl-code-worker")
+        for _ in range(10):
+            deny(tasks[0], None)
+            deny(tasks[0], "not-a-role")
+        got = found(metrics.compute(), "CAGE_HITS_HIGH")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["evidence"], {"n": 5, "value": 5.0, "threshold": 5.0})
+
+    def test_cage_hits_high_is_silent_one_sample_below(self):
+        for _ in range(4):
+            task = warn_task()
+            for _ in range(5):
+                deny(task, "ppl-code-worker")
+        self.assertEqual(found(metrics.compute(), "CAGE_HITS_HIGH"), [])
+
+    def test_cage_hits_high_names_the_role(self):
+        for _ in range(5):
+            task = warn_task()
+            for _ in range(5):
+                deny(task, "ppl-verifier")
+        message = found(metrics.compute(), "CAGE_HITS_HIGH")[0]["message"]
+        self.assertIn("ppl-verifier", message)
+
+    def test_a_verdict_warning_fires_per_producer(self):
+        verdicts(["PASS"] * 10, PRODUCER_A)
+        verdicts(["REWORK"] * 5, PRODUCER_B)
+        report = metrics.compute()
+        self.assertEqual(found(report, "VERIFIER_NEVER_REWORKS"), [])
+        got = found(report, "VERIFIER_NEVER_REWORKS", "claude-code-subagent:opus")
+        self.assertEqual(len(got), 1)
+        self.assertEqual([w["producer"] for w in report["warnings"]],
+                         ["claude-code-subagent:opus"])
+
+    def test_run_based_warnings_carry_no_producer(self):
+        for _ in range(6):
+            park(warn_task(), "SPEC_GAP")
+        self.assertEqual([w["producer"] for w in metrics.compute()["warnings"]], [None])
+
+    def test_warnings_are_sorted_by_code_then_producer(self):
+        verdicts(["PASS"] * 10, PRODUCER_A)
+        verdicts(["PASS"] * 10, PRODUCER_B)
+        for _ in range(6):
+            park(warn_task(), "SPEC_GAP")
+        keys = [(w["code"], w["producer"] or "") for w in metrics.compute()["warnings"]]
+        self.assertEqual(keys, sorted(keys))
+        self.assertGreater(len(keys), 3)
+
+    def test_no_data_means_no_warnings(self):
+        self.assertEqual(metrics.compute()["warnings"], [])
+
+    def test_a_config_override_moves_a_threshold(self):
+        verdicts(["PASS"] * 3)
+        self.assertEqual(found(metrics.compute(), "VERIFIER_NEVER_REWORKS"), [])
+        paths.config_file().write_text(
+            "[metrics]\nverifier_never_reworks_min_sample = 3\n", encoding="utf-8")
+        self.assertEqual(metrics.thresholds()["VERIFIER_NEVER_REWORKS"], (1.0, 3))
+        got = found(metrics.compute(), "VERIFIER_NEVER_REWORKS")
+        self.assertEqual(got[0]["evidence"], {"n": 3, "value": 1.0, "threshold": 1.0})
+
+    def test_an_unknown_metrics_key_is_refused_naming_the_known_keys(self):
+        paths.config_file().write_text("[metrics]\nbogus = 1\n", encoding="utf-8")
+        with self.assertRaises(PplError) as ctx:
+            metrics.compute()
+        self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+        self.assertIn("bogus", ctx.exception.message)
+        self.assertIn("verifier_never_reworks_threshold", ctx.exception.message)
+
+    def test_a_negative_or_non_number_override_is_refused(self):
+        for line in ("cage_hits_high_threshold = -1", 'cage_hits_high_min_sample = "5"',
+                     "cage_hits_high_threshold = true"):
+            with self.subTest(line=line):
+                paths.config_file().write_text("[metrics]\n%s\n" % line, encoding="utf-8")
+                with self.assertRaises(PplError) as ctx:
+                    metrics.thresholds()
+                self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+
+    def test_warnings_skip_unreadable_runs(self):
+        for _ in range(4):
+            spend_retries(warn_task())
+        broken = warn_task()
+        state = store.read_json(paths.run_dir(broken) / "state.json")
+        del state["budgets"]
+        store.write_json(paths.run_dir(broken) / "state.json", state)
+        with open(paths.run_dir(broken) / "log.jsonl", "a", encoding="utf-8") as handle:
+            handle.write("{not json\n")
+        verdicts(["PASS"] * 10)
+        report = metrics.compute()
+        self.assertEqual(found(report, "RETRY_BUDGET_OFTEN_SPENT"), [])
+        self.assertEqual(len(found(report, "VERIFIER_NEVER_REWORKS")), 1)
+
+    def test_a_bad_prices_table_leaves_cost_undefined_and_the_rest_printed(self):
+        task = done_run("a1")
+        log_usage(task, "ppl-code-worker", "w", "m", input=4)
+        write_prices('[prices."m"]\ninput = "free"\n')
+        report = metrics.compute()
+        cost = report["overall"]["cost_per_accepted_task"]
+        self.assertFalse(cost["defined"])
+        self.assertIsNone(cost["value"])
+        self.assertIn("prices.m", cost["reason"])
+        self.assertTrue(report["overall"]["tokens_per_accepted_task"]["defined"])
+        self.assertIn("warnings", report)
+
+
+class TestMetricsText(IsolatedFleet):
+    def test_text_prints_a_line_per_metric_then_the_warnings(self):
+        verdicts(["PASS"] * 10)
+        report = metrics.compute()
+        lines = metrics.text(report).splitlines()
+        self.assertEqual(len(lines), len(report["overall"]) + len(report["warnings"]))
+        self.assertTrue(any(line.startswith("cost_per_accepted_task: undefined (")
+                            for line in lines))
+        self.assertIn("incomplete_check_rate: 0.0", lines)
+        self.assertTrue(lines[-1].startswith("WARNING VERIFIER_NEVER_REWORKS "))
+
+    def test_text_names_the_producer_of_a_producer_warning(self):
+        verdicts(["PASS"] * 10, PRODUCER_A)
+        verdicts(["REWORK"] * 5, PRODUCER_B)
+        line = metrics.text(metrics.compute()).splitlines()[-1]
+        self.assertTrue(line.startswith(
+            "WARNING VERIFIER_NEVER_REWORKS claude-code-subagent:opus: "), line)
 
 
 if __name__ == "__main__":
