@@ -12,7 +12,7 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import control, run, status, store
+from ppl import control, paths, run, status, store, trail
 from ppl.errors import PplError
 
 
@@ -294,7 +294,44 @@ class TestStatusUsage(unittest.TestCase):
         run.init("USG-435", "u", "/tmp/repo")
         self._set("USG-435", prices={})
         self._usage("USG-435", "ppl-code-worker", "a1", "claude-x", input=10)
-        self.assertIn("usd 0.0 + unpriced claude-x", status.card("USG-435"))
+        self.assertIn("usd 0.0 (no cap) + unpriced claude-x, not in config.toml [prices]",
+                      status.card("USG-435"))
+
+    def _live_prices(self, text):
+        target = paths.config_file()
+        if target.exists():
+            self.addCleanup(target.write_text, target.read_text(encoding="utf-8"),
+                            encoding="utf-8")
+        else:
+            self.addCleanup(target.unlink)
+        target.write_text(text, encoding="utf-8")
+
+    def test_an_uncapped_run_that_froze_no_prices_reads_the_live_prices(self):
+        run.init("USG-437", "u", "/tmp/repo")
+        self._set("USG-437", prices={})
+        self._usage("USG-437", "ppl-code-worker", "a1", "claude-x", input=1000000)
+        self._live_prices('[prices."claude-x"]\ninput = 3\ncache_write = 3\n'
+                          'cache_read = 3\noutput = 3\n')
+        self.assertEqual(status.usd_text("USG-437"), "usd 3.0 (no cap)")
+        self.assertEqual(trail.measures(paths.run_dir("USG-437"))["usd"], 3.0)
+
+    def test_a_capped_unpriced_line_keeps_the_cap_and_names_the_init_snapshot(self):
+        run.init("USG-438", "u", "/tmp/repo")
+        self._set("USG-438", usd_max=5.0, prices={})
+        self._usage("USG-438", "ppl-code-worker", "a1", "claude-x", input=1000000)
+        self._live_prices('[prices."claude-x"]\ninput = 3\ncache_write = 3\n'
+                          'cache_read = 3\noutput = 3\n')
+        self.assertEqual(status.usd_text("USG-438"),
+                         "usd 0.0/5.0 + unpriced claude-x, not in the prices frozen at ppl init")
+
+    def test_an_unreadable_live_price_table_reads_unknown(self):
+        run.init("USG-439", "u", "/tmp/repo")
+        self._set("USG-439", prices={})
+        self._usage("USG-439", "ppl-code-worker", "a1", "claude-x", input=10)
+        self._live_prices('[prices."claude-x"]\ninput = "x"\n')
+        text = status.usd_text("USG-439")
+        self.assertTrue(text.startswith("usd unknown (no cap), config.toml"), text)
+        self.assertIn("prices.claude-x", text)
 
     def test_the_budget_line_does_not_pass_off_no_usage_as_measured(self):
         run.init("USG-436", "u", "/tmp/repo")

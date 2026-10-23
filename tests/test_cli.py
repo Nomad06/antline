@@ -1401,6 +1401,21 @@ class TestUsdCap(unittest.TestCase):
         self.assertEqual(code, 2, err)
         self.assertEqual(json.loads(err)["error_code"], "OWNER_DECISION")
 
+    def test_a_capped_run_without_a_price_snapshot_fails_closed(self):
+        # rule: R-BUDGET-USD-UNPRICED
+        from ppl import run
+        self.start("DEMO-679", 1.0)
+        state = run.load("DEMO-679")
+        # a run from before ppl init froze prices: config.toml prices m, the run does not
+        del state["budgets"]["prices"]
+        run.save(state)
+        self.record_usage("DEMO-679", 10)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-679")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        self.assertIn('[prices."m"]', error["message"])
+
     def test_a_price_lowered_after_init_does_not_lower_the_spend(self):
         # rule: R-BUDGET-USD-CAP
         self.start("DEMO-691", 1.0)

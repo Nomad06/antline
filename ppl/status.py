@@ -1,4 +1,7 @@
+import math
+
 from . import control, paths, run, usage
+from .errors import PplError
 
 TEMPLATE = """Task:     {task_id}  {tracker_url}
 Outcome:  {outcome}
@@ -46,18 +49,41 @@ def tokens_line(task_id):
     return "%s (out %s)" % (", ".join(parts), _short(output))
 
 
-def usd_text(task_id):
-    budgets = run.load(task_id)["budgets"]
-    spent, unpriced = usage.spent_usd(task_id)
+def _live_spent(task_id, used):
+    """spent_usd priced with the live config.toml prices instead of the frozen ones."""
+    if not usage.valid_usd_used(used):
+        return math.inf, []
+    priced, unpriced = usage.run_dollars(paths.run_dir(task_id))
     if unpriced:
-        text = "usd %s + unpriced %s" % (budgets["usd_used"], ", ".join(unpriced))
-    elif spent == float("inf"):
+        return None, unpriced
+    return used + (priced or 0.0), []
+
+
+def usd_text(task_id):
+    """A capped run reads what the cap reads, the prices frozen at ppl init only. An
+    uncapped run reads what the trail reads, the frozen prices, or the live config.toml
+    prices when ppl init froze none."""
+    budgets = run.load(task_id)["budgets"]
+    # usd_max of 0 means unlimited by design (a subscription provider has no
+    # dollar meter), so say "no cap" rather than a bare number that reads as a cap
+    limit = "/%s" % budgets["usd_max"] if budgets["usd_max"] else " (no cap)"
+    frozen = budgets.get("prices")
+    if budgets["usd_max"] or (isinstance(frozen, dict) and frozen):
+        spent, unpriced = usage.spent_usd(task_id)
+        where = "not in the prices frozen at ppl init"
+    else:
+        try:
+            spent, unpriced = _live_spent(task_id, budgets.get("usd_used"))
+        except PplError as exc:
+            return "usd unknown%s, %s" % (limit, exc.message)
+        where = "not in config.toml [prices]"
+    if unpriced:
+        text = "usd %s%s + unpriced %s, %s" % (budgets["usd_used"], limit,
+                                               ", ".join(unpriced), where)
+    elif spent == math.inf:
         text = "usd unknown (usd_used is not a number >= 0)"
     else:
-        text = "usd %s" % round(spent, 4)
-        # usd_max of 0 means unlimited by design (a subscription provider has no
-        # dollar meter), so say "no cap" rather than a bare number that reads as a cap
-        text += "/%s" % budgets["usd_max"] if budgets["usd_max"] else " (no cap)"
+        text = "usd %s%s" % (round(spent, 4), limit)
     if not usage.run_usage(paths.run_dir(task_id)):
         text += ", no usage recorded"
     return text

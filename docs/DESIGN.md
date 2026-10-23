@@ -1650,8 +1650,11 @@ the same thing, the same principle the rule matrix itself holds `n/a` rows to (5
 - Cost per accepted task needs a price for every model the accepted runs used. A model with
   no `[prices."<model id>"]` table in `config.toml` leaves the cost undefined and the reason
   names the model, so the user can copy the exact id [R-METRIC-COST-NEEDS-PRICES]. ppl
-  carries no built-in price list, since it has no source for one. Reporting
-  reads the live prices, while the dollar cap reads the snapshot frozen into the run at init.
+  carries no built-in price list, since it has no source for one. Each surface prices
+  with one table: the dollar cap reads only the prices frozen into the run at
+  `ppl init`, the status card and the panel read those frozen prices too, or the live
+  `[prices]` for an uncapped run that froze none, `ppl metrics` reads the live `[prices]`,
+  and the trail reads the frozen prices, or the live ones for a run that froze none.
 - Tokens per accepted task and tokens by role need no prices, but they need the usage hook
   (`ppl setup claude`) to have logged usage for an accepted run. Without one they are
   undefined and the reason says so, and a producer slice counts only the runs whose

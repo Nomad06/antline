@@ -84,7 +84,7 @@ class TestPanelApi(unittest.TestCase):
                                                       "cache_read": 0, "output": 2}}})
         row = [r for r in server.list_runs() if r["task_id"] == self.task][0]
         self.assertEqual(row["tokens"], "verifier 7 (out 2)")
-        self.assertEqual(row["usd"], "usd 0.0 + unpriced m")
+        self.assertEqual(row["usd"], "usd 0.0 (no cap) + unpriced m, not in config.toml [prices]")
 
     def test_an_error_row_has_empty_tokens_and_usd(self):
         row = server._error_row("X-1", ValueError("bad"))
