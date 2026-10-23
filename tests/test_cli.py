@@ -1321,7 +1321,7 @@ class TestUsdCap(unittest.TestCase):
         return [e for e in store.read_log(task_id)
                 if e.get("event") == "usage" and e.get("role") == "orchestrator"]
 
-    def noted_transcript(self, task_id):
+    def noted_transcript(self, task_id, output=7):
         """A main session transcript noted in usage.json, then one new line in it."""
         from ppl import usage
         transcript = Path(tmphome.mkdtemp(prefix="pplmain-")) / "session.jsonl"
@@ -1329,7 +1329,7 @@ class TestUsdCap(unittest.TestCase):
         usage.note_orchestrator(task_id, str(transcript), "s1")
         line = {"type": "assistant", "isSidechain": False, "timestamp": "2099-01-01T00:00:00Z",
                 "message": {"id": "o1", "model": "m",
-                            "usage": {"input_tokens": 1, "output_tokens": 7}}}
+                            "usage": {"input_tokens": 1, "output_tokens": output}}}
         with open(transcript, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(line) + "\n")
 
@@ -1432,6 +1432,50 @@ class TestUsdCap(unittest.TestCase):
         events = self.orchestrator_events("DEMO-695")
         self.assertEqual(len(events), 1, events)
         self.assertEqual(events[0]["models"]["m"]["output"], 7)
+
+    def test_stage_enter_counts_orchestrator_usage_refreshed_in_the_same_call(self):
+        # rule: R-BUDGET-USD-CAP
+        # no role usage: only the orchestrator line this call refreshes reaches the cap
+        self.start("DEMO-696", 1.0)
+        self.noted_transcript("DEMO-696", output=1000000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-696")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "BUDGET_EXHAUSTED")
+        self.assertEqual(len(self.orchestrator_events("DEMO-696")), 1)
+
+    def test_transition_counts_orchestrator_usage_refreshed_in_the_same_call(self):
+        # rule: R-BUDGET-USD-CAP
+        self.start("DEMO-697", 1.0)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-697")
+        self.assertEqual(code, 0, err)
+        self.noted_transcript("DEMO-697", output=1000000)
+        code, _, err = call("transition", "done", "--task", "DEMO-697")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "BUDGET_EXHAUSTED")
+        self.assertEqual(len(self.orchestrator_events("DEMO-697")), 1)
+
+    def test_transition_refuses_owner_decision_for_an_unpriced_model_with_a_cap(self):
+        # rule: R-BUDGET-USD-UNPRICED
+        self.start("DEMO-698", 1.0)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-698")
+        self.assertEqual(code, 0, err)
+        self.record_usage("DEMO-698", 10, model="claude-unpriced-9")
+        code, _, err = call("transition", "done", "--task", "DEMO-698")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        self.assertIn('[prices."claude-unpriced-9"]', error["message"])
+
+    def test_a_halted_run_records_no_orchestrator_usage_before_its_refusal(self):
+        from ppl import control
+        self.start("DEMO-699", 0)
+        self.noted_transcript("DEMO-699")
+        control.set_command("DEMO-699", "pause")
+        for command in (("stage", "enter", "baseline"), ("transition", "done")):
+            with self.subTest(command=command):
+                code, _, err = call(*command, "--task", "DEMO-699")
+                self.assertEqual(code, 2, err)
+                self.assertEqual(self.orchestrator_events("DEMO-699"), [])
 
     def test_an_unpriced_model_without_a_cap_does_not_refuse(self):
         self.start("DEMO-687", 0)

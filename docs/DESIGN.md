@@ -726,10 +726,12 @@ stage 6 preconditions being unchecked before the push, the four isolation-check 
 5.4, the harness gate recipes of section 11, the three blind spots the matrix has as GAP rows
 of its own, a foreign finding's owner not actually being notified (6.6a), per-lane resources
 (test databases, ports, temp directories, queues, object storage) having no isolation at all
-beyond the worktree's own files (5.4), and seven rules only prose or a convention holds: the
-content of a tracker write, the panel's own state writes, the studio's write surface,
-write/forbid disjointness at `ppl boundary set`, the USD spend coming before a dispatch, the
-briefer returning `SPEC_GAP` instead of inventing, and the keys inside a provider's `params`.
+beyond the worktree's own files (5.4), the dollar budget being spent before a dispatch, whose
+cost is known only after it, so the cap is checked at the next stage boundary instead (12.1),
+and six rules only prose or a convention holds: the content of a tracker write, the panel's
+own state writes, the studio's write surface, write/forbid disjointness at `ppl boundary set`,
+the briefer returning `SPEC_GAP` instead of inventing, and the keys inside a provider's
+`params`.
 These counts are read back out of `ppl/_assets/rules.toml` by the suite, so this paragraph cannot drift
 from the table it describes [R-DOC-RULE-IDS].
 
@@ -2296,12 +2298,13 @@ Only the exit-code rule has code behind it, the rest are recipes rendered into t
   The third hook, `ppl_usage.py` on `SubagentStop`, logs each role's cumulative tokens per
   model from its transcript and the orchestrator's, counted since `ppl init`, from the main
   session transcript, as `usage` events, and never refuses or delays a dispatch
-  [R-USAGE-HOOK-CANNOT-BLOCK]. `ppl stage enter`, `ppl transition` and `ppl park` first refresh
-  the orchestrator's count from the transcript path the hook stored, and a refresh that fails is
-  a warning. Dollars spent are `usd_used`, which `ppl budget spend usd` adds to by hand and
+  [R-USAGE-HOOK-CANNOT-BLOCK]. `ppl stage enter` and `ppl transition`, once the run's control
+  check passes and before their budget checks, and `ppl park`, before it parks, refresh the
+  orchestrator's count from the transcript path the hook stored, and a refresh that fails is a
+  warning. Dollars spent are `usd_used`, which `ppl budget spend usd` adds to by hand and
   refuses past the cap or for an amount that is not a finite number above zero [R-BUDGET-USD],
   plus the recorded usage priced with the run's `prices`, and a `usd_used` that is not a finite
-  number `>= 0` counts as spent. With a cap set, `ppl stage enter` and `ppl transition` refuse
+  number `>= 0` counts as spent [R-BUDGET-USD-CAP]. With a cap set, `ppl stage enter` and `ppl transition` refuse
   with `BUDGET_EXHAUSTED` once dollars spent reach `usd_max` [R-BUDGET-USD-CAP], and with
   `OWNER_DECISION`, naming the model and the `[prices."<model id>"]` table to add before a new
   run, while a recorded model has no price in the run's `prices`, since a cap that cannot be

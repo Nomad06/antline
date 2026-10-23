@@ -273,8 +273,9 @@ def refresh_orchestrator_usage(task_id):
 
 def cmd_stage(args):
     task_id = resolve_task(args)
-    refresh_orchestrator_usage(task_id)
     control.enforce(task_id)
+    # before the cap check, so the orchestrator's turns up to this call count
+    refresh_orchestrator_usage(task_id)
     check_dispatch_budget(task_id)
     check_usd_budget(task_id)
     state = run.stage_enter(task_id, args.stage)
@@ -613,8 +614,9 @@ def _closure_hint(stage):
 
 def cmd_transition(args):
     task_id = resolve_task(args)
-    refresh_orchestrator_usage(task_id)
     control.enforce(task_id)
+    # before the cap check, so the orchestrator's turns up to this call count
+    refresh_orchestrator_usage(task_id)
     check_dispatch_budget(task_id)
     check_usd_budget(task_id)
     state = run.load(task_id)
