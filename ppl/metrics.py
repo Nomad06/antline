@@ -2,9 +2,9 @@
 
 `ppl metrics` reads every run's `log.jsonl` and `verdicts/` (the latest verdict per
 SHA, and for the incomplete check rate every recorded one) and computes
-seven numbers, sliced by `producer`: defect escape rate, outcompeted rate,
-false FAIL rate, incomplete check rate, cost per accepted task, time to
-acceptance, human minutes.
+nine numbers, sliced by `producer`: defect escape rate, outcompeted rate,
+false FAIL rate, incomplete check rate, cost per accepted task, tokens per
+accepted task, tokens by role, time to acceptance, human minutes.
 
 The one rule this module exists to hold: **a metric with no data prints that
 it is undefined, and never prints zero.** Zero is a claim ("we shipped no
@@ -13,8 +13,7 @@ it did. Every metric below returns an envelope - `{"value": ..., "defined":
 bool, "reason": ...}` - and `ppl metrics` prints that whole envelope as JSON,
 so `value` is `null` and `reason` explains why whenever `defined` is false,
 never a bare 0. This is deliberately the same shape whether the absence is
-temporary (no labels filed yet) or structural (this pipeline has no data
-source for it at all):
+temporary (no labels filed yet) or a gap (nothing records it at all):
 
 - **defect escape rate**, **outcompeted rate** and **false FAIL rate** need a
   human label (`ppl label`) on top of a verdict - undefined until at least one exists
@@ -22,14 +21,16 @@ source for it at all):
 - **incomplete check rate** and **time to acceptance** need at least one
   verdict, respectively one completed (`done`) task - undefined on an empty
   fleet or a fleet with nothing accepted yet [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED].
-- **cost per accepted task** is undefined always, for a structural reason
-  that will not change until routing does: v1 routing is entirely
-  subscription-billed Claude subagents (DESIGN 10.2), so `usd_used` is a
-  manual budget cap that nothing in the dispatch path spends automatically
-  and there is no dollar meter anywhere to read from - there is nothing to
-  build here yet, not merely nothing built [R-METRIC-STRUCTURALLY-UNDEFINED].
-- **human minutes** is undefined always too, but for the other reason: unlike
-  cost, this one IS buildable (a `--minutes` flag on `ppl label`, or a
+- **cost per accepted task** is the mean dollars over the accepted (`done`)
+  runs that have recorded usage, priced with the live `[prices]` table of
+  `config.toml`. It is undefined while any model in those runs has no price,
+  and the reason names the model [R-METRIC-COST-NEEDS-PRICES].
+- **tokens per accepted task** and **tokens by role** are the mean of the four
+  token counts per accepted run, and the counts summed per role over those
+  runs. They need no prices but do need the usage hook (`ppl setup claude`),
+  so they are undefined until an accepted run has recorded usage
+  [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED].
+- **human minutes** is undefined always: it IS buildable (a `--minutes` flag on `ppl label`, or a
   dedicated command) and simply has not been - no event or field anywhere in
   this pipeline records a human's working minutes today (a human's *wait*
   time is inferable from timestamps - effort minutes are a different claim
@@ -60,7 +61,7 @@ untouched by `ppl destroy`, and every scan below walks both `runs/*` and
 import re
 from datetime import datetime
 
-from . import paths, schema, store
+from . import paths, schema, store, usage
 from .errors import PplError
 
 # "outcompeted": the accepted candidate was correct but a parallel
@@ -316,15 +317,59 @@ def _incomplete_check_rate(records):
     return _metric(incomplete / len(records))
 
 
-def _cost_per_accepted_task():
-    """Always undefined: v1 has no billed adapter, so no task carries a real
-    dollar figure to average [R-METRIC-STRUCTURALLY-UNDEFINED]. See DESIGN
-    10.3 - cost tracking becomes meaningful only once an API-billed provider
-    exists."""
-    return _metric(None, "v1 routing is entirely subscription-billed (DESIGN 10.2) - "
-                         "usd_used is a manual budget cap nothing in the dispatch path "
-                         "spends automatically, so no accepted task carries a real "
-                         "dollar figure to average")
+def _counts_of(models):
+    out = dict.fromkeys(usage.COUNTS, 0)
+    for counts in models.values():
+        for name in usage.COUNTS:
+            value = counts.get(name, 0)
+            if usage._is_count(value):
+                out[name] += value
+    return out
+
+
+def _usage_metrics(run_records, producer_key):
+    """cost, tokens per task and tokens by role over the accepted runs that
+    have recorded usage. Undefined is never zero: each reason says what is
+    missing [R-METRIC-COST-NEEDS-PRICES] [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED]."""
+    accepted = _accepted_runs(run_records, producer_key)
+    if not accepted:
+        why = "no task in scope has reached done yet"
+        if producer_key is not None and _accepted_runs(run_records, None):
+            why = "no done task was accepted by producer %s yet" % producer_key
+        return tuple(_metric(None, why) for _ in range(3))
+    usages = [u for u in (usage.run_usage(directory) for _, directory in accepted) if u]
+    if not usages:
+        why = ("%d accepted task(s) but no usage recorded - install the usage hook "
+               "with `ppl setup claude`" % len(accepted))
+        return tuple(_metric(None, why) for _ in range(3))
+    table = usage.prices()
+    by_role = {}
+    per_task = []
+    costs = []
+    unpriced = set()
+    for roles in usages:
+        task_total = dict.fromkeys(usage.COUNTS, 0)
+        models = {}
+        for role, role_models in roles.items():
+            counts = _counts_of(role_models)
+            bucket = by_role.setdefault(role, dict.fromkeys(usage.COUNTS, 0))
+            for name in usage.COUNTS:
+                bucket[name] += counts[name]
+                task_total[name] += counts[name]
+            models = usage.add(models, role_models)
+        per_task.append(task_total)
+        usd, missing = usage.dollars(models, table)
+        unpriced.update(missing)
+        costs.append(usd)
+    tokens = _metric({name: sum(t[name] for t in per_task) / len(per_task)
+                      for name in usage.COUNTS})
+    roles_metric = _metric(by_role)
+    if unpriced:
+        cost = _metric(None, "no price for model(s) %s - add a [prices.\"<model>\"] table "
+                             "to config.toml" % ", ".join(sorted(unpriced)))
+    else:
+        cost = _metric(sum(costs) / len(costs))
+    return cost, tokens, roles_metric
 
 
 def _human_minutes():
@@ -350,6 +395,26 @@ def _event(events, name, **match):
     return None
 
 
+def _accepted_runs(run_records, producer_key):
+    """(task_id, directory) of every run that reached `done`, narrowed to
+    those whose accepted PASS verdict (the one at the run's `candidate_sha`)
+    has `producer_key`, or all of them when it is None. Reads state.json
+    directly so an archived run counts too [R-METRIC-SCANS-ARCHIVE]."""
+    accepted = []
+    for task_id, directory in run_records:
+        events = store.read_log_at(directory)
+        if not _event(events, "init") or not _event(events, "lifecycle", to="done"):
+            continue
+        if producer_key is not None:
+            state = store.read_json(directory / "state.json")
+            sha = (state or {}).get("candidate_sha")
+            doc = store.read_json(directory / "verdicts" / ("%s.json" % sha)) if sha else None
+            if _producer_key((doc or {}).get("producer")) != producer_key:
+                continue
+        accepted.append((task_id, directory))
+    return accepted
+
+
 def _time_to_acceptance(run_records, producer_key):
     """Elapsed wall-clock time from `ppl init` to the `done` transition,
     attributed to the producer of the PASS verdict that unlocked it.
@@ -369,21 +434,16 @@ def _time_to_acceptance(run_records, producer_key):
       for a producer slice, and says how many tasks did finish, so the
       reader is not left thinking the fleet is idle when it is not.
     """
+    done = _accepted_runs(run_records, None)
+    accepted_here = _accepted_runs(run_records, producer_key)
     all_durations = []
     matching_durations = []
-    for task_id, directory in run_records:
+    for task_id, directory in done:
         events = store.read_log_at(directory)
-        init_ev = _event(events, "init")
-        done_ev = _event(events, "lifecycle", to="done")
-        if not init_ev or not done_ev:
-            continue
-        state = store.read_json(directory / "state.json")
-        sha = (state or {}).get("candidate_sha")
-        doc = store.read_json(directory / "verdicts" / ("%s.json" % sha)) if sha else None
-        accepted_producer = _producer_key((doc or {}).get("producer"))
-        duration = (_parse(done_ev["at"]) - _parse(init_ev["at"])).total_seconds()
+        duration = (_parse(_event(events, "lifecycle", to="done")["at"])
+                    - _parse(_event(events, "init")["at"])).total_seconds()
         all_durations.append(duration)
-        if producer_key is None or accepted_producer == producer_key:
+        if producer_key is None or (task_id, directory) in accepted_here:
             matching_durations.append(duration)
     if not all_durations:
         return _metric(None, "no task in scope has reached done yet")
@@ -395,12 +455,15 @@ def _time_to_acceptance(run_records, producer_key):
 
 
 def _entry(records, run_records, producer_key, history=None):
+    cost, tokens, by_role = _usage_metrics(run_records, producer_key)
     return {
         "defect_escape_rate": _defect_escape_rate(records),
         "outcompeted_rate": _outcompeted_rate(records),
         "false_fail_rate": _false_fail_rate(records),
         "incomplete_check_rate": _incomplete_check_rate(records if history is None else history),
-        "cost_per_accepted_task": _cost_per_accepted_task(),
+        "cost_per_accepted_task": cost,
+        "tokens_per_accepted_task": tokens,
+        "tokens_by_role": by_role,
         "time_to_acceptance_seconds": _time_to_acceptance(run_records, producer_key),
         "human_minutes": _human_minutes(),
     }

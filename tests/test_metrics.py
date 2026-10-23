@@ -258,15 +258,118 @@ class TestLabelDependentRates(IsolatedFleet):
         self.assertNotIn("ppl label", entry["false_fail_rate"]["reason"])
 
 
-class TestStructurallyUndefinedMetrics(IsolatedFleet):
-    def test_cost_per_accepted_task_is_always_undefined(self):
-        # rule: R-METRIC-STRUCTURALLY-UNDEFINED
-        task = new_task()
-        write_verdict(task, "a1", "PASS", PRODUCER_A)
-        report = metrics.compute()
-        self.assertFalse(report["overall"]["cost_per_accepted_task"]["defined"])
-        self.assertIsNone(report["overall"]["cost_per_accepted_task"]["value"])
+PRICED = '[prices."m"]\ninput = 1000000\ncache_write = 0\ncache_read = 0\noutput = 0\n'
 
+
+def write_prices(text):
+    paths.config_file().write_text(text, encoding="utf-8")
+
+
+def log_usage(task, role, agent_id, model, **counts):
+    full = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "thinking": 0}
+    full.update(counts)
+    store.append_log(task, {"event": "usage", "role": role, "agent_id": agent_id,
+                            "effort": "high", "models": {model: full}})
+
+
+def done_run(sha, producer=PRODUCER_A):
+    task = new_task()
+    write_verdict(task, sha, "PASS", producer)
+    mark_done(task, sha)
+    return task
+
+
+class TestCostPerAcceptedTask(IsolatedFleet):
+    def test_cost_is_the_mean_dollars_of_accepted_runs_with_usage(self):
+        # rule: R-METRIC-COST-NEEDS-PRICES
+        write_prices(PRICED)
+        log_usage(done_run("a1"), "ppl-code-worker", "w", "m", input=1)
+        log_usage(done_run("b1"), "ppl-code-worker", "w", "m", input=3)
+        cost = metrics.compute()["overall"]["cost_per_accepted_task"]
+        self.assertTrue(cost["defined"])
+        self.assertAlmostEqual(cost["value"], 2.0)
+
+    def test_cost_is_undefined_naming_an_unpriced_model(self):
+        # rule: R-METRIC-COST-NEEDS-PRICES
+        log_usage(done_run("a1"), "ppl-code-worker", "w", "claude-x", input=1)
+        cost = metrics.compute()["overall"]["cost_per_accepted_task"]
+        self.assertFalse(cost["defined"])
+        self.assertIsNone(cost["value"])
+        self.assertIn("claude-x", cost["reason"])
+        self.assertIn("[prices", cost["reason"])
+
+    def test_cost_is_undefined_without_usage_naming_ppl_setup_claude(self):
+        # rule: R-METRIC-SAMPLE-DEPENDENT-UNDEFINED
+        write_prices(PRICED)
+        done_run("a1")
+        report = metrics.compute()["overall"]
+        for key in ("cost_per_accepted_task", "tokens_per_accepted_task", "tokens_by_role"):
+            self.assertFalse(report[key]["defined"], key)
+            self.assertIn("ppl setup claude", report[key]["reason"])
+
+    def test_cost_is_undefined_when_nothing_reached_done(self):
+        # rule: R-METRIC-SAMPLE-DEPENDENT-UNDEFINED
+        write_prices(PRICED)
+        task = new_task()
+        log_usage(task, "ppl-code-worker", "w", "m", input=5)
+        report = metrics.compute()["overall"]
+        for key in ("cost_per_accepted_task", "tokens_per_accepted_task", "tokens_by_role"):
+            self.assertFalse(report[key]["defined"], key)
+            self.assertIn("reached done", report[key]["reason"])
+
+    def test_tokens_are_defined_without_prices(self):
+        log_usage(done_run("a1"), "ppl-code-worker", "w", "m", input=4, output=2)
+        log_usage(done_run("b1"), "ppl-code-worker", "w", "m", input=2, cache_read=8)
+        report = metrics.compute()["overall"]
+        self.assertFalse(report["cost_per_accepted_task"]["defined"])
+        tokens = report["tokens_per_accepted_task"]
+        self.assertTrue(tokens["defined"])
+        self.assertEqual(tokens["value"], {"input": 3.0, "cache_write": 0.0,
+                                           "cache_read": 4.0, "output": 1.0})
+
+    def test_tokens_by_role_sums_each_role_over_accepted_runs(self):
+        first = done_run("a1")
+        log_usage(first, "ppl-code-worker", "w", "m", input=4)
+        log_usage(first, "ppl-verifier", "v", "m", output=7)
+        log_usage(first, "orchestrator", "orchestrator:s", "m", cache_write=1)
+        log_usage(done_run("b1"), "ppl-code-worker", "w", "n", input=6, thinking=5)
+        by_role = metrics.compute()["overall"]["tokens_by_role"]
+        self.assertTrue(by_role["defined"])
+        zero = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
+        self.assertEqual(by_role["value"], {
+            "ppl-code-worker": dict(zero, input=10),
+            "ppl-verifier": dict(zero, output=7),
+            "orchestrator": dict(zero, cache_write=1)})
+
+    def test_a_run_not_done_is_not_counted(self):
+        write_prices(PRICED)
+        log_usage(done_run("a1"), "ppl-code-worker", "w", "m", input=1)
+        open_task = new_task()
+        write_verdict(open_task, "z1", "PASS", PRODUCER_A)
+        log_usage(open_task, "ppl-code-worker", "w", "m", input=100)
+        report = metrics.compute()["overall"]
+        self.assertAlmostEqual(report["cost_per_accepted_task"]["value"], 1.0)
+        self.assertEqual(report["tokens_per_accepted_task"]["value"]["input"], 1.0)
+
+    def test_a_producer_slice_counts_only_runs_it_accepted(self):
+        write_prices(PRICED)
+        log_usage(done_run("a1", PRODUCER_A), "ppl-code-worker", "w", "m", input=1)
+        log_usage(done_run("b1", PRODUCER_B), "ppl-code-worker", "w", "m", input=5)
+        report = metrics.compute()
+        self.assertAlmostEqual(report["overall"]["cost_per_accepted_task"]["value"], 3.0)
+        sliced = report["producers"]["claude-code-subagent:sonnet"]
+        self.assertAlmostEqual(sliced["cost_per_accepted_task"]["value"], 5.0)
+        self.assertEqual(sliced["tokens_by_role"]["value"]["ppl-code-worker"]["input"], 5)
+
+    def test_cost_is_never_zero_for_no_data(self):
+        # rule: R-METRIC-COST-NEEDS-PRICES
+        report = metrics.compute()["overall"]
+        for key in ("cost_per_accepted_task", "tokens_per_accepted_task", "tokens_by_role"):
+            self.assertIsNone(report[key]["value"], key)
+            self.assertFalse(report[key]["defined"], key)
+
+
+class TestStructurallyUndefinedMetrics(IsolatedFleet):
     def test_human_minutes_is_always_undefined(self):
         # rule: R-METRIC-HUMAN-MINUTES-UNDEFINED
         task = new_task()
@@ -386,10 +489,6 @@ class TestArchivedRunsAreVisible(IsolatedFleet):
         self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestMetricsDocumentation(unittest.TestCase):
     def test_the_docstring_lists_exactly_the_metrics_entry_returns(self):
         listed = set()
@@ -399,3 +498,7 @@ class TestMetricsDocumentation(unittest.TestCase):
                               for name in re.findall(r"\*\*([A-Za-z ]+)\*\*", line))
         returned = set(key.removesuffix("_seconds") for key in metrics._entry([], [], None))
         self.assertEqual(listed, returned)
+
+
+if __name__ == "__main__":
+    unittest.main()

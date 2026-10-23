@@ -1585,7 +1585,7 @@ not the code's fault, which is the whole reason these outcomes exist. The routin
 ### 6.11 Metrics and labels
 
 `ppl metrics` reads every run's `log.jsonl` and `verdicts/*.json` under `PPL_HOME` and
-reports seven numbers, sliced by `producer` (`provider:model`) and once more as `overall`.
+reports nine numbers, sliced by `producer` (`provider:model`) and once more as `overall`.
 **Every reader scans `runs/_archive/` as well as the live runs under `runs/`**
 [R-METRIC-SCANS-ARCHIVE], because defect escape and false FAIL are only knowable after a
 task has actually merged - which in the normal flow (`done -> merge_watch ->
@@ -1609,19 +1609,24 @@ itself contain a hyphen).
   labelled, the fraction labelled `correct`
 - **incomplete check rate** - of every verdict recorded, the fraction whose outcome is one
   of `INCONCLUSIVE`/`ERROR`/`CANCELLED`/`TIMEOUT` (6.10)
-- **cost per accepted task**
+- **cost per accepted task** - the mean dollars of the accepted (`done`) runs that have
+  recorded usage, priced with the live `[prices]` table of `config.toml`
+- **tokens per accepted task** - the mean of the four token counts (`input`,
+  `cache_write`, `cache_read`, `output`) over the same runs
+- **tokens by role** - the same four counts summed per role (the orchestrator included) over
+  the same runs
 - **time to acceptance** - elapsed wall-clock time from `ppl init` to the `lifecycle: done`
   transition, attributed to the producer of the `PASS` verdict that unlocked it
 - **human minutes**
 
 **A metric with no data prints that it is undefined, and never prints zero**
 [R-METRIC-LABEL-DEPENDENT-UNDEFINED] [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED]
-[R-METRIC-STRUCTURALLY-UNDEFINED] [R-METRIC-HUMAN-MINUTES-UNDEFINED]. Zero is a claim - "we
+[R-METRIC-COST-NEEDS-PRICES] [R-METRIC-HUMAN-MINUTES-UNDEFINED]. Zero is a claim - "we
 shipped no defects" - and undefined is the honest report when nobody has told the pipeline
-whether that is true. Four different reasons produce "undefined" here, and the report says
-which one applies - deliberately kept as four and not folded together, because "nothing to
-build" and "needed and not built" are different states that should not read as the same
-thing, the same principle the rule matrix itself holds `n/a` rows to (5.5):
+whether that is true. Several different reasons produce "undefined" here, and the report says
+which one applies - deliberately kept apart and not folded together, because "needs a label",
+"needs a price", "needs usage" and "not built" are different states that should not read as
+the same thing, the same principle the rule matrix itself holds `n/a` rows to (5.5):
 
 - Defect escape rate, outcompeted rate and false FAIL rate need a human label on top of a verdict
   (`ppl label`, below); undefined until at least one exists for a verdict of the matching
@@ -1639,18 +1644,21 @@ thing, the same principle the rule matrix itself holds `n/a` rows to (5.5):
   (true for every slice alike), versus something has reached `done` under a different
   producer (the message says how many tasks did finish, rather than implying the whole fleet
   is idle when one producer's simply is not) [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED].
-- Cost per accepted task is undefined always, for a reason that will not change until
-  routing does: v1 routing is entirely subscription-billed Claude subagents (12), so
-  `usd_used` is a manual budget cap nothing in the dispatch path spends automatically, and
-  there is no dollar meter anywhere for this to read from. There is nothing to build here
-  yet, not merely nothing built [R-METRIC-STRUCTURALLY-UNDEFINED]. It becomes computable the
-  day an API-billed adapter exists (12).
-- Human minutes is undefined always too, but for the other reason: this one IS buildable
+- Cost per accepted task needs a price for every model the accepted runs used. A model with
+  no `[prices."<model id>"]` table in `config.toml` leaves the cost undefined and the reason
+  names the model, so the user can copy the exact id [R-METRIC-COST-NEEDS-PRICES]. ppl
+  carries no built-in price list, since it has no source for one. Reporting
+  reads the live prices, while the dollar cap reads the snapshot frozen into the run at init.
+- Tokens per accepted task and tokens by role need no prices, but they need the usage hook
+  (`ppl setup claude`) to have logged usage for an accepted run. Without one they are
+  undefined and the reason says so, and a producer slice counts only the runs whose
+  accepted `PASS` verdict has that producer, the attribution time to acceptance already
+  uses [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED].
+- Human minutes is undefined always: it IS buildable
   today (a `--minutes` flag on `ppl label`, or a dedicated command) and simply has not been
   - no event or field anywhere in this pipeline records a human's working minutes, though a
   human's *wait* time is inferable from timestamps and effort minutes are a different claim
-  [R-METRIC-HUMAN-MINUTES-UNDEFINED]. Unlike cost, this is a real gap, not a property of the
-  architecture.
+  [R-METRIC-HUMAN-MINUTES-UNDEFINED].
 
 `ppl label --sha <sha> --actual defective|correct` records the one fact this system has no
 other way to observe: whether a given candidate SHA, in hindsight, was actually correct or
@@ -2494,8 +2502,8 @@ The build is finished when all of these are demonstrably true:
 - panel: per-run cost and token charts, side-by-side routing-profile comparison, one-click
   re-run of a stage under a different profile
 - health dashboard: `ppl metrics` (6.11) delivers defect escape rate, false FAIL rate,
-  incomplete check rate, cost per accepted task, time to acceptance and human minutes,
-  sliced by `producer`, reading straight from `log.jsonl` and `verdicts/*.json`. Still
+  incomplete check rate, cost per accepted task, tokens per accepted task, tokens by role,
+  time to acceptance and human minutes, sliced by `producer`, reading straight from `log.jsonl` and `verdicts/*.json`. Still
   deferred: a panel visualization of it, accepted-per-attempt rate, hook-hit counts per
   role and code, and parking reasons
 

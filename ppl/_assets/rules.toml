@@ -1802,16 +1802,16 @@ owner = "ppl"
 residual = "incomplete check rate has one cause only, not two - the records passed in are already producer-scoped by compute(), so an empty list unambiguously means nothing of this producer's has a verdict yet. Corrected here: an earlier version of this residual claimed time to acceptance only sees undestroyed runs, which stopped being true once R-METRIC-SCANS-ARCHIVE landed"
 
 [[rule]]
-id = "R-METRIC-STRUCTURALLY-UNDEFINED"
-statement = "ppl metrics reports cost per accepted task as undefined always, never as zero: v1 has no billed adapter, so the metric has nothing to compute even in principle."
+id = "R-METRIC-COST-NEEDS-PRICES"
+statement = "ppl metrics reports cost per accepted task as undefined, never as zero, while any model in the accepted runs has no price in config.toml, and names the model."
 scope = "ppl CLI"
 event = "ppl metrics"
 enforcement = "blocking"
-hook_or_check = "ppl/metrics.py:_cost_per_accepted_task"
-deny_test = "tests/test_metrics.py::TestStructurallyUndefinedMetrics::test_cost_per_accepted_task_is_always_undefined"
-allow_test = ""
+hook_or_check = "ppl/metrics.py:_usage_metrics"
+deny_test = "tests/test_metrics.py::TestCostPerAcceptedTask::test_cost_is_undefined_naming_an_unpriced_model, tests/test_metrics.py::TestCostPerAcceptedTask::test_cost_is_never_zero_for_no_data"
+allow_test = "tests/test_metrics.py::TestCostPerAcceptedTask::test_cost_is_the_mean_dollars_of_accepted_runs_with_usage"
 owner = "ppl"
-residual = "a PROPERTY, not a GAP: becomes computable the day an API-billed adapter exists (DESIGN 10.3), but until then there is no dollar meter anywhere for this to read, not merely one nobody wrote"
+residual = "prices are the user's own and match a model id exactly: a model id with a suffix the user did not price is listed as unpriced, so the cost stays undefined until the exact id is added. Reporting reads the live config.toml prices, only the dollar cap reads the run's frozen snapshot"
 
 [[rule]]
 id = "R-METRIC-HUMAN-MINUTES-UNDEFINED"
@@ -1823,7 +1823,7 @@ hook_or_check = "ppl/metrics.py:_human_minutes"
 deny_test = "tests/test_metrics.py::TestStructurallyUndefinedMetrics::test_human_minutes_is_always_undefined"
 allow_test = ""
 owner = "ppl"
-residual = "unlike R-METRIC-STRUCTURALLY-UNDEFINED this is a real GAP, not a property: a data source (a --minutes flag on ppl label, or a dedicated command) is buildable today and simply has not been built"
+residual = "this is a real GAP: a data source (a --minutes flag on ppl label, or a dedicated command) is buildable today and simply has not been built"
 
 [[rule]]
 id = "R-LABEL-NO-LIVENESS-REFRESH"
