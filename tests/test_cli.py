@@ -2751,6 +2751,15 @@ class TestDoctorCommand(unittest.TestCase):
         self.assertEqual(doc["forge"]["kind"], "gitlab")
         self.assertEqual({row["state"] for row in doc["models"]}, {"verified"})
 
+    def test_doctor_forge_runs_only_the_gh_checks(self):
+        self.addCleanup(seed_setup)
+        code, out, err = call("doctor", "--forge")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(out.splitlines()), 1)
+        doc = json.loads(out)
+        self.assertEqual(set(doc), {"forge", "tracker"})
+        self.assertEqual(doc["forge"]["kind"], "gitlab")
+
     def test_doctor_exits_zero_on_an_unreadable_config(self):
         self.addCleanup(seed_setup)
         paths.config_file().write_text("[setup\n", encoding="utf-8")

@@ -30,13 +30,16 @@ empty) directory and report clear; and `_has_guard` matches the literal
 substring `ppl_guard.py` in a hook's command, so another pipeline checkout's
 guard hook at a different path would be read as this one's.
 """
+import base64
 import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from .errors import PplError
 
@@ -733,7 +736,7 @@ def setup_state():
     return report
 
 
-def inspect_setup():
+def inspect_setup(env=None):
     """What `ppl setup` left behind, for `ppl doctor` to report: the roots, the
     recorded steps (`setup_state`), the model rows, the active harness and its
     forge and tracker checks.
@@ -770,21 +773,7 @@ def inspect_setup():
         except Exception as exc:
             entry["problem"] = _problem(exc)
         if entry["valid"]:
-            settings = doc["forge"]
-            forge = {"kind": settings["kind"]}
-            try:
-                workspace = config.section("claude").get("workspace") or str(Path.home())
-                check = forges.get(settings["kind"]).doctor_check(
-                    settings, claude_home().parent / ".claude.json", workspace)
-                forge.update(check)
-            except Exception as exc:
-                forge.update(ok=False, detail="the forge check failed: %s" % _problem(exc))
-            table = doc["tracker"]
-            tracker = {"kind": table["kind"]}
-            try:
-                tracker.update(trackers.get(table["kind"]).doctor_check(table))
-            except Exception as exc:
-                tracker.update(ok=False, detail="the tracker check failed: %s" % _problem(exc))
+            forge, tracker = gh_checks(doc, env)
     report["harness"] = entry
     report["forge"] = forge
     report["tracker"] = tracker
@@ -821,7 +810,179 @@ def workspace():
         return os.getcwd()
 
 
-def report(task_id=None, cwd=None):
+SKIPPED_IN_SANDBOX = "skipped inside the OS sandbox, run ppl doctor --forge outside it"
+
+
+def _in_os_sandbox(env):
+    return (os.environ if env is None else env).get("SANDBOX_RUNTIME") == "1"
+
+
+def _gh_kinds(doc):
+    return doc["forge"]["kind"] == "github", doc["tracker"]["kind"] == "github-issues"
+
+
+def gh_checks(doc, env=None):
+    """(forge, tracker) check results of a loaded harness. Inside the OS sandbox the gh
+    checks are skipped, since GitHub is closed there by design."""
+    from . import config, forges, trackers
+    skipped = {"ok": None, "detail": SKIPPED_IN_SANDBOX}
+    forge_gh, tracker_gh = _gh_kinds(doc)
+    inside = _in_os_sandbox(env)
+    settings = doc["forge"]
+    forge = {"kind": settings["kind"]}
+    if inside and forge_gh:
+        forge.update(skipped)
+    else:
+        try:
+            workspace = config.section("claude").get("workspace") or str(Path.home())
+            forge.update(forges.get(settings["kind"]).doctor_check(
+                settings, claude_home().parent / ".claude.json", workspace))
+        except Exception as exc:
+            forge.update(ok=False, detail="the forge check failed: %s" % _problem(exc))
+    table = doc["tracker"]
+    tracker = {"kind": table["kind"]}
+    if inside and tracker_gh:
+        tracker.update(skipped)
+    else:
+        try:
+            tracker.update(trackers.get(table["kind"]).doctor_check(table))
+        except Exception as exc:
+            tracker.update(ok=False, detail="the tracker check failed: %s" % _problem(exc))
+    return forge, tracker
+
+
+def forge_report(env=None):
+    """What `ppl doctor --forge` prints: only the forge and tracker checks."""
+    from . import config, harness
+    result = {"forge": None, "tracker": None}
+    try:
+        active = config.active_harness()
+        if not active:
+            result["problem"] = "no active harness"
+            return result
+        result["forge"], result["tracker"] = gh_checks(harness.load(active), env)
+    except Exception as exc:
+        result["problem"] = _problem(exc)
+    return result
+
+
+def managed_settings_path():
+    if sys.platform == "darwin":
+        return Path("/Library/Application Support/ClaudeCode/managed-settings.json")
+    return Path("/etc/claude-code/managed-settings.json")
+
+
+def probe_github(env):
+    """"denied" on a 403 and "open" on a 200 from a CONNECT to api.github.com:443 through the
+    env's HTTPS_PROXY, else "unknown". The proxy URL is read here and never returned."""
+    url = env.get("HTTPS_PROXY") or env.get("https_proxy")
+    if not url:
+        return "unknown"
+    try:
+        parts = urlsplit(url)
+        request = "CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n"
+        if parts.username is not None:
+            user = "%s:%s" % (unquote(parts.username), unquote(parts.password or ""))
+            request += "Proxy-Authorization: Basic %s\r\n" % base64.b64encode(
+                user.encode("utf-8")).decode("ascii")
+        with socket.create_connection((parts.hostname, parts.port or 80), timeout=3) as conn:
+            conn.settimeout(3)
+            conn.sendall((request + "\r\n").encode("ascii"))
+            data = b""
+            while b"\n" not in data and len(data) < 1024:
+                chunk = conn.recv(256)
+                if not chunk:
+                    break
+                data += chunk
+    except (OSError, ValueError):
+        return "unknown"
+    words = data.split(b"\n", 1)[0].split()
+    status = words[1] if len(words) > 1 else b""
+    return {b"403": "denied", b"200": "open"}.get(status, "unknown")
+
+
+def _native_windows():
+    return os.name == "nt"
+
+
+def _under(path, scope):
+    scope = scope.rstrip(os.sep) or os.sep
+    return path == scope or path.startswith(scope + os.sep)
+
+
+def _exposed(facts, env):
+    scope = [e for e in facts.get("write_scope") or [] if isinstance(e, str)]
+    candidates = []
+    for pin in (facts.get("pins") or {}).values():
+        if isinstance(pin, dict):
+            candidates += [pin.get("path"), pin.get("realpath")]
+    candidates += [d for d in (env.get("PATH") or "").split(os.pathsep) if d]
+    found = []
+    for item in candidates:
+        if not isinstance(item, str) or not item or item in found:
+            continue
+        forms = {os.path.abspath(item), os.path.realpath(item)}
+        if any(_under(form, entry) for form in forms for entry in scope):
+            found.append(item)
+    return found
+
+
+def _undoing(cwd):
+    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd())
+    sources = (global_settings_path(), base / ".claude" / "settings.json",
+               local_settings_path(cwd), managed_settings_path())
+    found = []
+    for path in sources:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        block = doc.get("sandbox") if isinstance(doc, dict) else None
+        if not isinstance(block, dict):
+            continue
+        if block.get("excludedCommands"):
+            found.append("%s sets sandbox.excludedCommands" % path)
+        if block.get("enabled") is False:
+            found.append("%s sets sandbox.enabled to false" % path)
+        if block.get("allowUnsandboxedCommands") is False:
+            found.append("%s sets sandbox.allowUnsandboxedCommands to false" % path)
+    return found
+
+
+def os_sandbox_facts(cwd=None, env=None, probe=None):
+    """Whether Claude Code's OS sandbox closes GitHub for this session. `state` is "on" only
+    with the env marker, ppl's profile in the workspace local settings, a denied live probe
+    and nothing undoing it. Nothing here carries the proxy URL."""
+    from . import os_sandbox
+    env = dict(os.environ) if env is None else env
+    marker = env.get("SANDBOX_RUNTIME") == "1"
+    try:
+        recorded = os_sandbox.load_facts() or {}
+    except PplError:
+        recorded = {}
+    written = recorded.get("written_sandbox")
+    try:
+        local = json.loads(local_settings_path(cwd).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        local = None
+    profile = (isinstance(local, dict) and isinstance(written, dict)
+               and local.get("sandbox") == written)
+    windows = _native_windows()
+    live = "unknown"
+    if not windows:
+        live = (probe or (lambda: probe_github(env)))()
+    undoing = _undoing(cwd)
+    if windows:
+        state = "unavailable"
+    elif marker and profile and live == "denied" and not undoing:
+        state = "on"
+    else:
+        state = "off"
+    return {"state": state, "env_marker": marker, "profile": profile, "live": live,
+            "undoing": undoing, "exposed": _exposed(recorded, env)}
+
+
+def report(task_id=None, cwd=None, env=None, probe=None):
     """What `ppl doctor` prints as JSON: the hook registration, the setup
     report, the active run's isolation and whether the registered guard runs.
     `cwd` is the directory whose .claude/settings.local.json is read, the
@@ -836,7 +997,8 @@ def report(task_id=None, cwd=None):
         except PplError:
             task_id = None
     result = dict(inspected)
-    result.update(inspect_setup())
+    result.update(inspect_setup(env))
+    result["os_sandbox"] = os_sandbox_facts(cwd, env, probe)
     result["task"] = task_id
     result["isolated"] = isolated
     result["mismatch"] = mismatch(isolated, inspected) if isolated is not None else None

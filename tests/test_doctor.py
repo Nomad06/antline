@@ -1009,3 +1009,166 @@ class TestHookShape(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOsSandboxFacts(unittest.TestCase):
+    BLOCK = {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": True}
+
+    def setUp(self):
+        self.home = Path(tmphome.mkdtemp(prefix="pplhome-"))
+        self.claude = Path(tmphome.mkdtemp(prefix="pplclaude-"))
+        self.cwd = Path(tmphome.mkdtemp(prefix="pplcwd-"))
+        self.managed = self.home / "managed-settings.json"
+        for patcher in (mock.patch.dict(os.environ, {"PPL_HOME": str(self.home),
+                                                     "PPL_CLAUDE_HOME": str(self.claude)}),
+                        mock.patch.object(doctor, "managed_settings_path",
+                                          lambda: self.managed)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def write_facts(self, **extra):
+        facts = {"version": 1, "write_scope": [], "written_sandbox": self.BLOCK,
+                 "pins": {"gh": {"path": "/opt/gh/bin/gh", "realpath": "/opt/gh/bin/gh"}}}
+        facts.update(extra)
+        (self.home / "os_sandbox.json").write_text(json.dumps(facts), encoding="utf-8")
+
+    def write_settings(self, path, doc):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+    def set_profile(self):
+        self.write_facts()
+        self.write_settings(self.cwd / ".claude" / "settings.local.json", {"sandbox": self.BLOCK})
+
+    def facts(self, probe="denied", env=None):
+        env = {"SANDBOX_RUNTIME": "1", "PATH": "/usr/bin"} if env is None else env
+        return doctor.os_sandbox_facts(cwd=str(self.cwd), env=env, probe=lambda: probe)
+
+    def test_on_needs_marker_profile_and_a_denied_probe(self):
+        self.set_profile()
+        facts = self.facts()
+        self.assertEqual(facts["state"], "on", facts)
+        self.assertEqual((facts["env_marker"], facts["profile"], facts["live"]),
+                         (True, True, "denied"))
+        self.assertEqual(facts["undoing"], [])
+        for missing in ({"SANDBOX_RUNTIME": "0"}, {}):
+            self.assertEqual(self.facts(env=missing)["state"], "off")
+        (self.cwd / ".claude" / "settings.local.json").write_text(
+            json.dumps({"sandbox": dict(self.BLOCK, enabled=False)}), encoding="utf-8")
+        self.assertFalse(self.facts()["profile"])
+        self.assertEqual(self.facts()["state"], "off")
+
+    def test_an_open_probe_is_off(self):
+        self.set_profile()
+        facts = self.facts(probe="open")
+        self.assertEqual((facts["live"], facts["state"]), ("open", "off"))
+
+    def test_native_windows_is_unavailable(self):
+        self.set_profile()
+        with mock.patch.object(doctor, "_native_windows", lambda: True):
+            self.assertEqual(self.facts()["state"], "unavailable")
+
+    def test_excluded_commands_in_user_settings_undo_the_boundary(self):
+        self.set_profile()
+        path = doctor.global_settings_path()
+        self.write_settings(path, {"sandbox": {"excludedCommands": ["docker *"]}})
+        facts = self.facts()
+        self.assertEqual(facts["state"], "off")
+        self.assertEqual(len(facts["undoing"]), 1)
+        self.assertIn(str(path), facts["undoing"][0])
+        self.assertIn("sandbox.excludedCommands", facts["undoing"][0])
+
+    def test_project_local_and_managed_settings_are_scanned_too(self):
+        self.set_profile()
+        self.write_settings(self.cwd / ".claude" / "settings.json",
+                            {"sandbox": {"enabled": False}})
+        self.write_settings(self.managed, {"sandbox": {"excludedCommands": ["x"]}})
+        undoing = " ".join(self.facts()["undoing"])
+        self.assertIn(str(self.cwd / ".claude" / "settings.json"), undoing)
+        self.assertIn("sandbox.enabled", undoing)
+        self.assertIn(str(self.managed), undoing)
+
+    def test_allow_unsandboxed_false_is_reported(self):
+        self.set_profile()
+        self.write_settings(doctor.global_settings_path(),
+                            {"sandbox": {"allowUnsandboxedCommands": False}})
+        facts = self.facts()
+        self.assertIn("sandbox.allowUnsandboxedCommands", facts["undoing"][0])
+        self.assertEqual(facts["state"], "off")
+
+    def test_a_pin_inside_the_write_scope_is_exposed(self):
+        scope = tmphome.mkdtemp(prefix="pplscope-")
+        pin = os.path.join(scope, "bin", "gh")
+        self.write_facts(write_scope=[scope], pins={"gh": {"path": pin, "realpath": pin}})
+        facts = self.facts(env={"SANDBOX_RUNTIME": "1", "PATH": "/usr/bin"})
+        self.assertIn(pin, facts["exposed"])
+        self.assertNotIn("/usr/bin", facts["exposed"])
+        facts = self.facts(env={"SANDBOX_RUNTIME": "1", "PATH": scope + os.pathsep + "/usr/bin"})
+        self.assertIn(scope, facts["exposed"])
+
+    def test_the_proxy_url_is_never_in_the_report(self):
+        self.set_profile()
+        env = {"SANDBOX_RUNTIME": "1", "PATH": "/usr/bin",
+               "HTTPS_PROXY": "http://user:secret@localhost:1"}
+        result = doctor.report(cwd=str(self.cwd), env=env, probe=lambda: "unknown")
+        self.assertNotIn("secret", json.dumps(result))
+        self.assertNotIn("localhost:1", json.dumps(result))
+
+    def test_the_default_probe_reads_the_status_line_through_the_proxy(self):
+        import socket
+        import threading
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        seen = []
+
+        def serve(status):
+            conn, _ = server.accept()
+            seen.append(conn.recv(4096).decode("latin-1"))
+            conn.sendall(status)
+            conn.close()
+
+        port = server.getsockname()[1]
+        env = {"HTTPS_PROXY": "http://user:secret@127.0.0.1:%d" % port}
+        thread = threading.Thread(target=serve, args=(b"HTTP/1.1 403 Forbidden\r\n\r\n",),
+                                  daemon=True)
+        thread.start()
+        self.assertEqual(doctor.probe_github(env), "denied")
+        thread.join()
+        server.close()
+        self.assertIn("CONNECT api.github.com:443 HTTP/1.1", seen[0])
+        self.assertIn("Proxy-Authorization: Basic ", seen[0])
+        self.assertEqual(doctor.probe_github({}), "unknown")
+        self.assertEqual(doctor.probe_github({"HTTPS_PROXY": "http://127.0.0.1:1"}), "unknown")
+
+    def test_gh_checks_are_skipped_inside_the_sandbox(self):
+        fixtures.install_routing()
+        fixtures.install_harness("example-maven")
+        config.ensure()
+        config.set_active_harness("example-maven")
+        with mock.patch.object(doctor, "_gh_kinds", lambda doc: (True, True)):
+            skipped = doctor.inspect_setup(env={"SANDBOX_RUNTIME": "1"})
+        detail = "skipped inside the OS sandbox, run ppl doctor --forge outside it"
+        self.assertEqual(skipped["forge"]["ok"], None)
+        self.assertEqual(skipped["forge"]["detail"], detail)
+        self.assertEqual(skipped["tracker"]["ok"], None)
+        self.assertEqual(skipped["tracker"]["detail"], detail)
+
+    def test_doctor_checks_run_the_pinned_gh(self):
+        from ppl.forges import github as github_forge
+        pin = "/opt/pinned/gh"
+        self.write_facts(pins={"gh": {"path": pin, "realpath": pin}})
+        argv = []
+
+        def runner(cmd, **kwargs):
+            argv.append(cmd[0])
+            return subprocess.CompletedProcess(cmd, 0, stdout="gh version 2\n", stderr="")
+
+        github_forge.doctor_check({}, None, None, runner=runner)
+        github_issues.doctor_check({"repo": "o/r", "task_prefix": "GH"}, runner=runner)
+        self.assertTrue(argv)
+        self.assertEqual(set(argv), {pin})
+        (self.home / "os_sandbox.json").unlink()
+        del argv[:]
+        github_forge.doctor_check({}, None, None, runner=runner)
+        self.assertEqual(set(argv), {"gh"})

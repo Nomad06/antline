@@ -1074,9 +1074,11 @@ def doctor_check(table, runner=None):
     if errors:
         return {"ok": False, "detail": errors[0]}
     repo = table["repo"]
+    from .. import os_sandbox
+    gh = os_sandbox.gh_path()
     for argv in (["auth", "status"], ["issue", "list", "-R", repo, "-L", "1"]):
         try:
-            done = runner(["gh"] + argv, capture_output=True, text=True, encoding="utf-8",
+            done = runner([gh] + argv, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=GH_TIMEOUT)
         except FileNotFoundError:
             return {"ok": False, "detail": "gh is not installed or not on PATH"}

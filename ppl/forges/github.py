@@ -4,6 +4,7 @@ as the official GitHub MCP server's tool names."""
 import re
 import subprocess
 
+from .. import os_sandbox
 from . import read_fragment
 
 KIND = "github"
@@ -92,11 +93,12 @@ def fragment(name):
 
 
 def doctor_check(settings, claude_json_path, workspace, runner=subprocess.run):
+    gh = os_sandbox.gh_path()
     try:
-        version = runner(["gh", "--version"], capture_output=True, text=True, timeout=20)
+        version = runner([gh, "--version"], capture_output=True, text=True, timeout=20)
         if version.returncode != 0:
             return {"ok": False, "detail": "gh --version failed: %s" % (version.stderr or "").strip()}
-        auth = runner(["gh", "auth", "status"], capture_output=True, text=True, timeout=20)
+        auth = runner([gh, "auth", "status"], capture_output=True, text=True, timeout=20)
     except FileNotFoundError:
         return {"ok": False, "detail": "gh is not installed or not on PATH"}
     except OSError as exc:

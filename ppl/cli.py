@@ -177,6 +177,9 @@ def cmd_init(args):
 
 
 def cmd_doctor(args):
+    if getattr(args, "forge", False):
+        print(json.dumps(doctor.forge_report(), sort_keys=True))
+        return 0
     result = doctor.report(getattr(args, "task", None))
     print(json.dumps(result, sort_keys=True))
     if result["mismatch"]:
@@ -1355,6 +1358,7 @@ def build_parser():
 
     p = sub.add_parser("doctor")
     p.add_argument("--task")
+    p.add_argument("--forge", action="store_true")
 
     p = sub.add_parser("metrics")
     p.add_argument("--text", action="store_true")
