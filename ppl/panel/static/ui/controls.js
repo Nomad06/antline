@@ -20,9 +20,14 @@ function short(count) {
 }
 
 export function Measured({ stat }) {
-  if (!stat || !stat.runs) return null;
-  const usd = stat.usd_mean === null || stat.usd_mean === undefined ? "" : ", $" + stat.usd_mean.toFixed(2);
-  return html`<span class="help"><br />${"last " + stat.runs + " runs: " + short(stat.tokens_mean) + " tokens" + usd + " per task"}</span>`;
+  const line = (text) => html`<span class="help"><br />${text}</span>`;
+  if (!stat || !stat.runs) return line("no measured runs yet");
+  const head = "last " + (stat.runs === 1 ? "1 run" : stat.runs + " runs") + ": " + short(Math.round(stat.tokens_mean)) + " tokens";
+  if (stat.usd_mean === null || stat.usd_mean === undefined) {
+    const why = (stat.unpriced && stat.unpriced.length) ? "no price for " + stat.unpriced.join(", ") : (stat.usd_reason || "no reason recorded");
+    return line(head + ", cost undefined: " + why);
+  }
+  return line(head + ", " + (stat.usd_mean < 0.005 ? "<$0.01" : "$" + stat.usd_mean.toFixed(2)) + " per task");
 }
 
 export function Badge({ kind, children }) {

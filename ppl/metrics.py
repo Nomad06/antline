@@ -373,32 +373,55 @@ def _usage_metrics(run_records, producer_key):
 
 
 def preset_costs(limit=10):
-    """{preset: {"runs", "tokens_mean", "usd_mean"}} over the `limit` newest done runs
-    with recorded usage per routing preset, newest `init` first, priced with the live
-    config.toml prices. usd_mean is None when any of those runs has an unpriced model.
-    A run without a stamp counts for no preset."""
+    """{preset: {"runs", "tokens_mean", "usd_mean", "unpriced", "usd_reason"}} for every
+    routing preset, over the `limit` newest done runs with recorded usage, newest `init`
+    first, priced with the live config.toml prices. A preset with no such run has runs 0
+    and nulls. usd_mean is None when a model is unpriced (unpriced names them) or the
+    price table is invalid (usd_reason carries the message). A run that cannot be read
+    is skipped and a run without a stamp counts for no preset."""
+    from . import presets
     found = {}
     for task_id, directory in _accepted_runs(_run_records(), None):
-        state = store.read_json(directory / "state.json")
-        preset = state.get("routing_preset") if isinstance(state, dict) else None
-        if not isinstance(preset, str) or not usage.run_usage(directory):
+        try:
+            state = store.read_json(directory / "state.json")
+            preset = state.get("routing_preset") if isinstance(state, dict) else None
+            roles = usage.run_usage(directory)
+            started = _event(store.read_log_at(directory), "init")
+        except (PplError, OSError, ValueError, AttributeError, TypeError):
             continue
-        started = _event(store.read_log_at(directory), "init")
-        found.setdefault(preset, []).append(((started or {}).get("at") or "", task_id, directory))
-    table = usage.prices()
+        if isinstance(preset, str) and roles:
+            found.setdefault(preset, []).append(
+                (((started or {}).get("at") or ""), task_id, roles))
+    try:
+        table, table_error = usage.prices(), None
+    except (PplError, OSError) as exc:
+        table, table_error = None, getattr(exc, "message", None) or str(exc)
     out = {}
-    for preset, runs in found.items():
-        runs.sort(reverse=True)
-        tokens = []
-        costs = []
-        for _, _, directory in runs[:limit]:
+    for preset in list(presets.PRESETS) + sorted(set(found) - set(presets.PRESETS)):
+        runs = sorted(found.get(preset, []), key=lambda r: r[:2], reverse=True)[:limit]
+        entry = {"runs": len(runs), "tokens_mean": None, "usd_mean": None,
+                 "unpriced": [], "usd_reason": None}
+        out[preset] = entry
+        if not runs:
+            continue
+        tokens, costs, unpriced = [], [], set()
+        for _, _, roles in runs:
             models = {}
-            for role_models in usage.run_usage(directory).values():
+            for role_models in roles.values():
                 models = usage.add(models, role_models)
             tokens.append(usage.total(_counts_of(models)))
-            costs.append(usage.dollars(models, table)[0])
-        out[preset] = {"runs": len(tokens), "tokens_mean": sum(tokens) / len(tokens),
-                       "usd_mean": None if None in costs else sum(costs) / len(costs)}
+            if table is not None:
+                usd, missing = usage.dollars(models, table)
+                costs.append(usd)
+                unpriced.update(missing)
+        entry["tokens_mean"] = sum(tokens) / len(tokens)
+        entry["unpriced"] = sorted(unpriced)
+        if table is None:
+            entry["usd_reason"] = table_error
+        elif unpriced:
+            entry["usd_reason"] = "no price for %s" % ", ".join(sorted(unpriced))
+        else:
+            entry["usd_mean"] = sum(costs) / len(costs)
     return out
 
 

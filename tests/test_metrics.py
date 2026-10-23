@@ -540,7 +540,7 @@ class TestPresetCosts(IsolatedFleet):
         self.assertEqual(costs["balanced"]["runs"], 10)
         self.assertAlmostEqual(costs["balanced"]["tokens_mean"], 7.5)
         self.assertAlmostEqual(costs["balanced"]["usd_mean"], 7.5)
-        self.assertNotIn("economy", costs)
+        self.assertEqual(costs["economy"]["runs"], 0)
 
     def test_preset_costs_leave_usd_undefined_when_a_model_is_unpriced(self):
         done_preset_run("economy", 1, input=10)
@@ -565,7 +565,34 @@ class TestPresetCosts(IsolatedFleet):
         state["routing_preset"] = "max"
         run.save(state)
         costs = metrics.preset_costs()
-        self.assertEqual(sorted(costs), ["custom"])
+        self.assertEqual(costs["custom"]["runs"], 1)
+        self.assertEqual(costs["max"]["runs"], 0)
+        self.assertIsNone(costs["max"]["tokens_mean"])
+
+    def test_preset_costs_name_the_unpriced_models(self):
+        done_preset_run("economy", 1, input=10)
+        entry = metrics.preset_costs()["economy"]
+        self.assertEqual(entry["unpriced"], ["m"])
+        self.assertIn("no price for m", entry["usd_reason"])
+
+    def test_preset_costs_skip_a_run_that_cannot_be_read(self):
+        write_prices(PRICED)
+        done_preset_run("balanced", 1, input=4)
+        bad_state = done_preset_run("balanced", 2, input=100)
+        bad_log = done_preset_run("balanced", 3, input=100)
+        (paths.run_dir(bad_state) / "state.json").write_text("{not json", encoding="utf-8")
+        (paths.run_dir(bad_log) / "log.jsonl").write_text("{not json\n", encoding="utf-8")
+        entry = metrics.preset_costs()["balanced"]
+        self.assertEqual(entry["runs"], 1)
+        self.assertEqual(entry["tokens_mean"], 4)
+
+    def test_preset_costs_keep_tokens_when_the_prices_table_is_invalid(self):
+        done_preset_run("balanced", 1, input=8)
+        write_prices('[prices."m"]\ninput = "x"\n')
+        entry = metrics.preset_costs()["balanced"]
+        self.assertEqual(entry["tokens_mean"], 8)
+        self.assertIsNone(entry["usd_mean"])
+        self.assertIn("prices.m", entry["usd_reason"])
 
 
 if __name__ == "__main__":
