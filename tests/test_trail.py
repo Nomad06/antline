@@ -88,6 +88,15 @@ def write_issue(task, home):
     store.write_text(folder / "issue.md", github_issues.render_issue(doc))
 
 
+def rewrite_issue(task, change):
+    """issue.json changed by `change(doc)`, and issue.md rendered again from it."""
+    folder = paths.run_dir(task) / "tracker"
+    doc = store.read_json(folder / "issue.json")
+    change(doc)
+    store.write_json(folder / "issue.json", doc)
+    store.write_text(folder / "issue.md", github_issues.render_issue(doc))
+
+
 def build_run(home, logs):
     """A finished run written by the real writers: two candidates (REWORK, then PASS),
     receipts with a build log under /tmp, two review threads, a finding, a denial and
@@ -370,16 +379,87 @@ class TestTrailExport(unittest.TestCase):
         self.assertFalse(os.path.lexists(self.out))
         self.assertEqual(list(self.parent.iterdir()), [])
 
-    def test_a_kept_url_keeps_the_owner_login(self):
+    def own_repository(self):
+        """The run's tracker and MR live in octocat's own repository."""
+        state = run.load(self.task)
+        state["tracker_url"] = "https://github.com/octocat/shop/issues/1"
+        run.save(state)
         review.set_mr(self.task, 3, "https://github.com/octocat/shop/pull/3", author="octocat")
-        self.export()
+
+    def test_a_kept_url_keeps_the_owner_login(self):
+        self.own_repository()
+        manifest = self.export()
         state = json.loads((self.out / "docs" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["tracker_url"], "https://github.com/octocat/shop/issues/1")
         self.assertEqual(state["mr"]["url"], "https://github.com/octocat/shop/pull/3")
-        self.assertEqual(state["mr"]["author"], "@person-1")
+        self.assertEqual(state["mr"]["author"], "octocat")
         issue = (self.out / "docs" / "tracker" / "issue.md").read_text(encoding="utf-8")
-        self.assertIn("- Author: @person-1", issue)
+        self.assertIn("- Author: octocat", issue)
+        self.assertIn("### @person-1,", issue)
         log = (self.out / "docs" / "log.jsonl").read_text(encoding="utf-8")
         self.assertIn('"url": "https://github.com/octocat/shop/pull/3"', log)
+        self.assertEqual(manifest["redactions"]["people"], 1)
+        for rel, text in texts(self.out).items():
+            self.assertNotIn("monalisa", text, rel)
+
+    def test_the_owner_login_is_a_person_when_urls_are_redacted(self):
+        self.own_repository()
+        self.export(redact=("paths", "people", "urls"))
+        for rel, text in texts(self.out).items():
+            self.assertNotIn("octocat", text, rel)
+        state = json.loads((self.out / "docs" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["mr"]["author"], "@person-1")
+
+    def test_a_login_glued_to_a_kept_url_is_aliased(self):
+        record = findings.add(self.task, "minor",
+                              "see https://github.com/a/b/pull/3,monalisa and @monalisa",
+                              self.rework, "shop/cart.py")
+        self.export()
+        for rel, text in texts(self.out).items():
+            self.assertNotIn("monalisa", text, rel)
+        finding = json.loads((self.out / "docs" / "findings" / ("%s.json" % record["finding_id"]))
+                             .read_text(encoding="utf-8"))
+        self.assertEqual(finding["evidence"],
+                         "see https://github.com/a/b/pull/3,@person-2 and @person-2")
+
+    def test_another_persons_profile_url_is_aliased(self):
+        def parent(doc):
+            doc["links"]["parent"] = {
+                "number": 1, "title": "Checkout epic",
+                "url": "https://github.com/acme/shop/issues/1",
+                "user": {"login": "hubot", "html_url": "https://github.com/hubot"}}
+
+        rewrite_issue(self.task, parent)
+        self.export()
+        for rel, text in texts(self.out).items():
+            self.assertNotIn("hubot", text, rel)
+        issue = json.loads((self.out / "docs" / "tracker" / "issue.json")
+                           .read_text(encoding="utf-8"))
+        user = issue["links"]["parent"]["user"]
+        self.assertRegex(user["html_url"], r"^https://github\.com/@person-[0-9]+$")
+        self.assertEqual(user["html_url"], "https://github.com/" + user["login"])
+
+    def test_a_value_ending_in_a_bare_root_component_is_kept(self):
+        def body(doc):
+            doc["issue"]["body"] = 'Navigate to the "/var" page, or open https://example.com/home'
+
+        rewrite_issue(self.task, body)
+        for target in ("cd /var", "ls /Users", "open https://example.com/home"):
+            store.append_log(self.task, {"event": "deny", "role": "ppl-code-worker",
+                                         "tool": "Bash", "code": "BOUNDARY_VIOLATION",
+                                         "target": target})
+        self.export()
+        log = (self.out / "docs" / "log.jsonl").read_text(encoding="utf-8")
+        for target in ("cd /var", "ls /Users", "open https://example.com/home"):
+            self.assertIn('"target": "%s"' % target, log)
+        issue = (self.out / "docs" / "tracker" / "issue.md").read_text(encoding="utf-8")
+        self.assertIn('Navigate to the "/var" page, or open https://example.com/home', issue)
+
+    def test_a_placeholder_used_only_in_the_measures_is_listed(self):
+        paths.config_file().write_text("[prices\n", encoding="utf-8")
+        manifest = self.export()
+        self.assertIn("<ppl-home>/config.toml", manifest["measures"]["reasons"]["usd"])
+        self.assertIn("<ppl-home>", manifest["redactions"]["paths"])
 
     def test_an_out_created_during_the_export_is_refused(self):
         real = trail.measures
@@ -454,7 +534,8 @@ class TestRedactor(unittest.TestCase):
     def test_a_value_cut_inside_the_home_becomes_its_placeholder(self):
         self.assertEqual(self.redactor.text("cat /Users/alexander.sm"), "cat <home>...")
         self.assertEqual(self.redactor.text("cat /Users/alexander.smith/.pp"), "cat <ppl-home>...")
-        self.assertEqual(self.redactor.text("ls /Use"), "ls <home>...")
+        self.assertEqual(self.redactor.text("ls /Users/a"), "ls <home>...")
+        self.assertEqual(self.redactor.text("ls /Use"), "ls /Use")
         self.assertEqual(self.redactor.text("ls /Us"), "ls /Us")
 
     def test_a_cut_path_or_token_left_in_a_file_is_a_leak(self):
@@ -463,6 +544,24 @@ class TestRedactor(unittest.TestCase):
         self.assertTrue(trail.leaks("echo %s" % TOKEN[:8], self.redactor))
         self.assertEqual(trail.leaks('{"target": "cat <home>..."}\n', self.redactor), [])
         self.assertEqual(trail.leaks('{"target": "echo ghp_Ab1"}\n', self.redactor), [])
+
+    def test_a_bare_root_component_is_not_cut(self):
+        linux = trail.Redactor({}, home="/home/alexander", ppl_home="/home/alexander/.ppl",
+                               temp_roots=("/tmp", "/var/folders"), people=False, urls=False)
+        for value in ("https://example.com/home", "cd /var", "ls /home", "ls /home/"):
+            self.assertEqual(linux.text(value), value)
+        self.assertEqual(linux.text("ls /home/al"), "ls <home>...")
+        self.assertEqual(trail.leaks('Navigate to the "/home" page\n', linux), [])
+        self.assertEqual(trail.leaks('{"target": "cd /var"}\n', linux), [])
+        self.assertTrue(trail.leaks('{"target": "ls /home/al"}\n', linux))
+
+    def test_a_very_long_home_path_does_not_crash(self):
+        home = "/home/" + "a" * 1000
+        long = trail.Redactor({}, home=home, ppl_home="/srv/ppl", temp_roots=(), people=False,
+                              urls=False)
+        self.assertEqual(long.text("cat " + home[:600]), "cat <home>...")
+        self.assertTrue(trail.leaks('{"target": "cat %s"}\n' % home[:600], long))
+        self.assertEqual(trail.leaks('{"target": "cat <home>..."}\n', long), [])
 
 
 if __name__ == "__main__":

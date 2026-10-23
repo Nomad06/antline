@@ -1730,7 +1730,8 @@ deadline.
   roots, each as given and resolved, longest first, become `<repo>`, `<ppl-home>`, `<home>` and
   `<tmp>`. A `--redact` list without `paths` is `SCHEMA_INVALID`.
   The guard logs the first 200 characters of a blocked call's target, so a value can end
-  inside a path: an end of at least 4 characters that starts one of these paths becomes its
+  inside a path: an end that starts the repo path, `PPL_HOME` or the home directory and reaches
+  past its first component (`/Users/a`, not `/Users`, `/home` or `/var`) becomes its
   placeholder followed by `...`. A relative `repo` in state.json is `SCHEMA_INVALID`, since
   there is no absolute path to redact.
 - **People are redacted by default.** Every string under the keys `author`, `assignee`,
@@ -1738,20 +1739,24 @@ deadline.
   or `displayName` of a dict there) becomes `@person-<n>` in the order of a sorted walk, in
   every file, markdown included. The mapping is written nowhere, and the order makes two
   exports of the same run identical.
-- **URLs are kept unless `urls` is asked for**, then each becomes `<url-<n>>`. A kept URL is
-  kept whole, a login inside it included, so a link to the owner's own pull request still
-  works. Paths inside it are redacted all the same.
+- **URLs are kept unless `urls` is asked for**, then each becomes `<url-<n>>`. While URLs are
+  kept, the login that owns the run's repository (the first path segment of the run's
+  `tracker_url` and `mr.url` on github.com, gitlab.com or the host the two share) is not
+  treated as a person, so links to the owner's own issues and pull requests still work. Every
+  other person is aliased inside URLs too, and with `urls` redacted the owner is a person like
+  any other.
 
 After redaction every written file is checked, and `ppl trail export` refuses with
 `SCHEMA_INVALID`, naming the file, while one still holds the repo path, the home directory,
-`PPL_HOME`, a redacted person outside a kept URL or one of the trail's own token patterns, or
-a value that ends in the start of one of those paths or of a token [R-TRAIL-REDACTED]. The
+`PPL_HOME`, a redacted person or one of the trail's own token patterns, or a value that ends
+in the start of one of those paths or of a token [R-TRAIL-REDACTED]. The
 trail is built in a temporary directory beside `--out` and renamed onto it once that check
 passes, so a refusal leaves nothing behind. An existing `--out`, or one that appears while the
 trail is written, is `SCHEMA_INVALID`. A name in free text under no known key, a secret in a
 format the patterns do not list, Claude Code's dash-encoded project directory form of a path, a
 URL-encoded path and a checkout outside the home directory and the temp roots pass both the
-redaction and the check, so the owner reads a trail before publishing it.
+redaction and the check, and so does the repository owner's login while URLs are kept, so the
+owner reads a trail before publishing it.
 
 `MANIFEST.json` holds the task id, the base and head SHA, the antline version, the redactions
 applied, the skipped files, every other file with its sha256, and the run's measures:

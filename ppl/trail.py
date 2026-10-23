@@ -20,6 +20,7 @@ import tempfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import __version__, metrics, paths, store, usage
 from .errors import PplError
@@ -65,7 +66,7 @@ _TOKENS = tuple((pattern, re.compile(pattern)) for pattern in TOKEN_PATTERNS)
 _TOKEN_CUT_RE = re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}"
                            r"|glpat-[A-Za-z0-9_-]{4,}|AKIA[0-9A-Z]{4,}|sk-ant-[A-Za-z0-9_-]{4,}"
                            r"|xox[abpr]-[A-Za-z0-9-]{4,})(?=\"|\Z)")
-# The shortest piece of a path that a value cut short is still redacted for.
+# The shortest end of a value that is still taken for a path cut short.
 _CUT_MIN = 4
 
 REDACTIONS = ("paths", "people", "urls")
@@ -77,6 +78,7 @@ _PERSON_FIELDS = ("login", "name", "displayName")
 _NOT_PEOPLE = ("cli", "panel")
 
 _URL_RE = re.compile(r"https?://[^\s<>\"'`(){}\[\]]*[^\s<>\"'`(){}\[\].,;:!?]")
+_FORGE_HOSTS = ("github.com", "gitlab.com")
 
 RENDERED = ("brief.md", "verdicts.md", "threads.md")
 
@@ -146,27 +148,54 @@ def _forms(value):
     return forms
 
 
-def _cut_pattern(form):
-    """A proper prefix of `form`, at least _CUT_MIN characters, ending a value: before
-    the closing quote in serialized JSON or at the end of the text."""
-    if len(form) <= _CUT_MIN:
+def _cut_minimum(form):
+    """The shortest end of a value taken for `form` cut short: one character past its
+    first component, so `/Users/a` is and `/Users`, `/home` or `/var` is not. None
+    when no proper prefix of `form` is that long."""
+    second = form.find("/", 1)
+    if second == -1:
         return None
-    nested = ""
-    for char in reversed(form[_CUT_MIN:-1]):
-        nested = "(?:%s%s)?" % (re.escape(char), nested)
-    return re.compile(re.escape(form[:_CUT_MIN]) + nested + r'(?="|\Z)')
+    minimum = max(_CUT_MIN, second + 2)
+    return minimum if minimum < len(form) else None
 
 
-def _outside_urls(text, change):
-    """`text` with `change` applied to everything but its URLs."""
-    parts = []
-    last = 0
-    for match in _URL_RE.finditer(text):
-        parts.append(change(text[last:match.start()]))
-        parts.append(match.group(0))
-        last = match.end()
-    parts.append(change(text[last:]))
-    return "".join(parts)
+def _ends_in_cut(text, form, minimum):
+    """True when a proper prefix of `form`, at least `minimum` characters long, ends a
+    value in `text`: right before a quote, where a JSON string closes, or at the end."""
+    head = form[:minimum]
+    start = text.find(head)
+    while start != -1:
+        reach = minimum
+        limit = min(len(form) - 1, len(text) - start)
+        while reach < limit and text[start + reach] == form[reach]:
+            reach += 1
+        for length in range(minimum, reach + 1):
+            end = start + length
+            if end == len(text) or text[end] == '"':
+                return True
+        start = text.find(head, start + 1)
+    return False
+
+
+def _owner_logins(state):
+    """The first path segment of the run's tracker and MR URLs on a forge host
+    (github.com, gitlab.com, or the host the two URLs share): the login or group
+    that owns the repository the run worked in."""
+    mr = state.get("mr") if isinstance(state.get("mr"), dict) else {}
+    found = []
+    for url in (state.get("tracker_url"), mr.get("url")):
+        if not isinstance(url, str):
+            continue
+        try:
+            parts = urlsplit(url)
+            host = (parts.hostname or "").lower()
+        except ValueError:
+            continue
+        found.append((host, parts.path.strip("/").split("/")[0]))
+    hosts = set(_FORGE_HOSTS)
+    if len(found) == 2 and found[0][0] and found[0][0] == found[1][0]:
+        hosts.add(found[0][0])
+    return {segment.casefold() for host, segment in found if host in hosts and segment}
 
 
 def _person_pattern(names):
@@ -177,10 +206,12 @@ def _person_pattern(names):
 class Redactor:
     """Paths always, people and URLs when asked. Paths are matched longest first,
     so a repo under the home under a temp root reads `<repo>`, and a value cut
-    short inside a path ends in that path's placeholder and `...`. People are
-    found by `find_people` before anything is applied and become `@person-<n>`
-    in the order of a sorted walk, except inside a URL that is kept. URLs become
-    `<url-<n>>` in the order they are met."""
+    short inside the repo path, PPL_HOME or the home ends in that path's
+    placeholder and `...`. People are found by `find_people` before anything is
+    applied and become `@person-<n>` everywhere, URLs included, in the order of a
+    sorted walk. While URLs are kept, the login that owns the run's repository is
+    not a person, so links to it still work. URLs become `<url-<n>>` in the order
+    they are met."""
 
     def __init__(self, state, home, ppl_home, temp_roots, people, urls):
         state = state if isinstance(state, dict) else {}
@@ -200,12 +231,12 @@ class Redactor:
         forms = "|".join(re.escape(form)
                          for form in sorted(self._placeholder, key=len, reverse=True))
         self._paths_re = re.compile(r"(?<![\w.-])(?:%s)" % forms) if forms else None
-        self._longest = max((len(form) for form in self._placeholder), default=0)
-        self._cut_needles = [(pattern, reason) for pattern, reason in
-                             ((_cut_pattern(form), reason) for form, reason in self._needles)
-                             if pattern is not None]
+        self._cuts = [(form, _cut_minimum(form), reason) for form, reason in self._needles
+                      if _cut_minimum(form) is not None]
+        self._longest = max((len(form) for form, _, _ in self._cuts), default=0)
         self.people = bool(people)
         self.urls = bool(urls)
+        self._owners = _owner_logins(state) if not self.urls else set()
         self._aliases = {}
         self._spellings = []
         self._people_re = None
@@ -233,7 +264,7 @@ class Redactor:
                 self._walk_people(item)
 
     def _add_person(self, name):
-        if not name.strip() or name.lower() in _NOT_PEOPLE:
+        if not name.strip() or name.lower() in _NOT_PEOPLE or name.casefold() in self._owners:
             return
         if name not in self._spellings:
             self._spellings.append(name)
@@ -270,8 +301,8 @@ class Redactor:
             tail = value[start:]
             if tail in self._placeholder:
                 return value
-            owners = [form for form in self._placeholder
-                      if len(tail) < len(form) and form.startswith(tail)]
+            owners = [form for form, minimum, _ in self._cuts
+                      if minimum <= len(tail) < len(form) and form.startswith(tail)]
             if owners:
                 placeholder = self._placeholder[min(owners, key=len)]
                 self._used_paths.add(placeholder)
@@ -279,17 +310,13 @@ class Redactor:
             start = value.find("/", start + 1)
         return value
 
-    def _people(self, value):
-        return self._people_re.sub(self._person, value)
-
     def text(self, value):
         if self._paths_re is not None:
             value = self._paths_re.sub(self._path, self._cut(value))
         if self.urls:
             value = _URL_RE.sub(self._url, value)
         if self._people_re is not None:
-            # a kept URL stays whole, the owner's own login in it included
-            value = self._people(value) if self.urls else _outside_urls(value, self._people)
+            value = self._people_re.sub(self._person, value)
         return value
 
     def apply(self, value):
@@ -331,14 +358,12 @@ def leaks(text, redactor):
     for needle, reason in redactor._needles:
         if needle in text and reason not in reasons:
             reasons.append(reason)
-    for pattern, reason in redactor._cut_needles:
+    for form, minimum, reason in redactor._cuts:
         cut = "the start of %s at the end of a value" % reason
-        if cut not in reasons and pattern.search(text):
+        if cut not in reasons and _ends_in_cut(text, form, minimum):
             reasons.append(cut)
-    if redactor._people_re is not None:
-        searched = text if redactor.urls else _URL_RE.sub(" ", text)
-        if redactor._people_re.search(searched):
-            reasons.append("a redacted person")
+    if redactor._people_re is not None and redactor._people_re.search(text):
+        reasons.append("a redacted person")
     for pattern, compiled in _TOKENS:
         if compiled.search(text):
             reasons.append("a token matching %s" % pattern)
@@ -517,14 +542,17 @@ def export(task_id, out, redact=("paths", "people")):
         files = [{"path": rel,
                   "sha256": hashlib.sha256(Path(building, rel).read_bytes()).hexdigest()}
                  for rel in sorted(texts)]
+        listed_skipped = redactor.apply(skipped)
+        run_measures = redactor.apply(measures(directory))
         manifest = {
             "task_id": task_id,
             "base_sha": state.get("base_sha"),
             "head_sha": state.get("candidate_sha"),
             "antline_version": __version__,
+            # after the two above, so a placeholder used only there is listed
             "redactions": redactor.applied(),
-            "skipped": redactor.apply(skipped),
-            "measures": redactor.apply(measures(directory)),
+            "skipped": listed_skipped,
+            "measures": run_measures,
             "files": files,
         }
         _write(building, "MANIFEST.json",

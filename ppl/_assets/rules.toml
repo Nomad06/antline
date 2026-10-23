@@ -2219,7 +2219,7 @@ residual = "the thresholds are starting points, recalibrate them after the first
 
 [[rule]]
 id = "R-TRAIL-REDACTED"
-statement = "ppl trail export refuses to write a trail in which, after redaction, any file still holds the run's repo path, the home directory, PPL_HOME, a redacted person outside a kept URL or a token pattern, or a value that ends in the start of one of those paths or of a token (a target the guard cut at 200 characters)."
+statement = "ppl trail export refuses to write a trail in which, after redaction, any file still holds the run's repo path, the home directory, PPL_HOME, a redacted person or a token pattern, or a value that ends in the start of one of those paths or of a token (a target the guard cut at 200 characters)."
 scope = "ppl CLI"
 event = "ppl trail export"
 enforcement = "blocking"
@@ -2227,4 +2227,4 @@ hook_or_check = "ppl/trail.py:export, ppl/trail.py:leaks"
 deny_test = "tests/test_trail.py::TestTrailExport::test_a_leak_refuses_and_leaves_no_output, tests/test_trail.py::TestTrailExport::test_a_path_redaction_misses_refuses, tests/test_trail.py::TestTrailExport::test_a_deny_target_cut_inside_a_token_refuses"
 allow_test = "tests/test_trail.py::TestTrailExport::test_the_repo_home_and_tmp_paths_are_redacted, tests/test_trail.py::TestTrailExport::test_people_become_stable_aliases"
 owner = "ppl"
-residual = "free-text names under no known key and secrets in formats outside TOKEN_PATTERNS pass, and so do Claude Code's dash-encoded project directory form of a path, URL-encoded paths and a checkout outside the home directory and the temp roots: they pass both the redaction and the check, so the owner reads a trail before publishing it"
+residual = "free-text names under no known key and secrets in formats outside TOKEN_PATTERNS pass, and so do Claude Code's dash-encoded project directory form of a path, URL-encoded paths and a checkout outside the home directory and the temp roots: they pass both the redaction and the check. While URLs are kept, the login that owns the run's tracker and MR repositories (the first path segment of those URLs on a forge host) is published as is, by design. So the owner reads a trail before publishing it"
