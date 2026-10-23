@@ -920,5 +920,28 @@ class TestMetricsText(IsolatedFleet):
             "WARNING VERIFIER_NEVER_REWORKS claude-code-subagent:opus: "), line)
 
 
+class TestOsSandboxOffWarning(IsolatedFleet):
+    def github_run(self, task, os_sandboxed):
+        run.init(task, "u", "/tmp/repo", os_sandboxed=os_sandboxed)
+        store.write_json(paths.run_dir(task) / "harness.json", {"os_sandbox": {"needed": True}})
+
+    def test_os_sandbox_off_warning_names_the_run(self):
+        self.github_run("GH-1", True)
+        self.github_run("GH-2", False)
+        got = found(metrics.compute(), "OS_SANDBOX_OFF")
+        self.assertEqual(len(got), 1)
+        self.assertIn("GH-2", got[0]["message"])
+        self.assertNotIn("GH-1", got[0]["message"])
+        self.assertEqual(got[0]["evidence"], {"n": 2, "value": 1, "threshold": 1.0})
+
+    def test_a_run_that_needs_no_os_sandbox_never_warns(self):
+        run.init("DEMO-77", "u", "/tmp/repo")
+        self.assertEqual(found(metrics.compute(), "OS_SANDBOX_OFF"), [])
+
+    def test_a_sandboxed_github_run_never_warns(self):
+        self.github_run("GH-3", True)
+        self.assertEqual(found(metrics.compute(), "OS_SANDBOX_OFF"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

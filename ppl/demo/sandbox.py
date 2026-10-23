@@ -125,7 +125,7 @@ class Sandbox:
                    "--answer", "workspace=%s" % self.workspace, "--answer", "hooks=local",
                    "--answer", "harness_from=%s" % source, "--answer", "harness_name=demo")
         self._step("init", TASK, "--tracker-url", "https://github.com/demo/shop/issues/1",
-                   "--repo", str(self.repo), "--harness", "demo", "--skip-model-check")
+                   "--repo", str(self.repo), "--harness", "demo", "--skip-model-check", "--no-os-sandbox")
 
     def remove(self):
         shutil.rmtree(self.root, ignore_errors=True)

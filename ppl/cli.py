@@ -6,7 +6,7 @@ import stat
 import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
-               harness, metrics, models, paths, recover, refusals, review, routing, run, schema,
+               harness, metrics, models, os_sandbox, paths, recover, refusals, review, routing, run, schema,
                setup, status, store, trackers, trail, usage, verdict, watchdog)
 from .errors import PplError, role_output
 
@@ -119,6 +119,33 @@ def parse_json_arg(text, what):
         raise PplError("SCHEMA_INVALID", "%s is not valid JSON: %s" % (what, exc))
 
 
+def os_sandbox_problem(inspected):
+    """None when this session's OS sandbox denies GitHub and the guard is registered in the
+    workspace's local settings, else a message naming the first failing fact."""
+    facts = doctor.os_sandbox_facts()
+    if facts["state"] != "on":
+        return ("this harness reaches GitHub and the OS sandbox is %s for this session (%s): "
+                "start Claude Code in the workspace after `ppl harness apply`, or pass "
+                "--no-os-sandbox to record a run without it" % (facts["state"], _why_off(facts)))
+    if inspected["registration"] != "local":
+        return ("the guard hook is registered %s, not in the workspace's settings.local.json: "
+                "`ppl setup claude` registers it there, or pass --no-os-sandbox to record a run "
+                "without the OS sandbox" % inspected["registration"])
+    return None
+
+
+def _why_off(facts):
+    if facts["state"] == "unavailable":
+        return "native Windows has no OS sandbox"
+    if not facts["env_marker"]:
+        return "this session is not running inside it"
+    if not facts["profile"]:
+        return "ppl's profile is missing from the workspace settings.local.json"
+    if facts["undoing"]:
+        return "a setting undoes it"
+    return "GitHub is reachable from here"
+
+
 def cmd_init(args):
     # isolated=true asserts a fact about how the guard hook is registered that
     # ppl cannot otherwise verify. The configurations that make that assertion
@@ -157,6 +184,12 @@ def cmd_init(args):
         model_check = "verified"
     doc = harness.load(args.harness)
     harness.require_applied(doc)
+    os_sandboxed = False
+    if os_sandbox.needed(doc) and args.os_sandbox:
+        problem = os_sandbox_problem(inspected)
+        if problem:
+            raise PplError("SCHEMA_INVALID", problem)
+        os_sandboxed = True
     pattern = doc["task"]["key_pattern"]
     if not re.match(pattern, args.task_id):
         raise PplError("SCHEMA_INVALID",
@@ -165,7 +198,8 @@ def cmd_init(args):
                       "format": harness.FORMAT}
     snapshot = harness.snapshot(doc)
     state = run.init(args.task_id, args.tracker_url, args.repo, isolated=args.isolated,
-                     risk=args.risk, model_check=model_check, harness=harness_record)
+                     risk=args.risk, model_check=model_check, harness=harness_record,
+                     os_sandboxed=os_sandboxed)
     store.write_json(paths.run_dir(args.task_id) / "harness.json", snapshot)
     # after the run exists, so a refusal's stderr stays the one JSON line it is
     for warning in (doctor.dispatch_warning(), doctor.usage_warning(),
@@ -1126,6 +1160,9 @@ def build_parser():
     # registered somewhere broader (e.g. global settings), so scoping falls back
     # to cwd instead of reaching their other projects.
     p.add_argument("--isolated", action=argparse.BooleanOptionalAction, default=True)
+    # A harness that reaches GitHub needs the OS sandbox that denies it. --no-os-sandbox is the
+    # operator's per-run opt-out, and the run records it.
+    p.add_argument("--os-sandbox", action=argparse.BooleanOptionalAction, default=True)
     # The risk tier routes the code worker to a stronger model on high-risk
     # tasks (routing.toml by_risk) - see routing.resolve.
     p.add_argument("--risk", choices=list(run.RISK_TIERS), default="normal")

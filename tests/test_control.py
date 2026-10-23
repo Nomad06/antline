@@ -224,6 +224,16 @@ class TestStatus(unittest.TestCase):
         self.assertIn("Needs you:", text)
         self.assertIn("Next:", text)
 
+    def test_the_card_shows_the_os_sandbox_line(self):
+        for task, on in (("GH-4211", True), ("GH-4221", False)):
+            run.init(task, "u", "/tmp/repo", os_sandboxed=on)
+            store.write_json(paths.run_dir(task) / "harness.json",
+                             {"os_sandbox": {"needed": True}})
+        self.assertIn("OS sandbox: on\n", status.card("GH-4211"))
+        self.assertIn("OS sandbox: off\n", status.card("GH-4221"))
+        run.init("DEMO-4299", "u", "/tmp/repo")
+        self.assertNotIn("OS sandbox", status.card("DEMO-4299"))
+
     def test_card_reports_paused_state(self):
         run.init("DEMO-421", "u", "/tmp/repo")
         control.set_command("DEMO-421", "pause")

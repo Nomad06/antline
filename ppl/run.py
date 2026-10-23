@@ -64,7 +64,8 @@ RISK_TIERS = ("low", "normal", "high")
 
 
 def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check="verified",
-               harness=None, usd_max=0.0, prices=None, routing_preset=None):
+               harness=None, usd_max=0.0, prices=None, routing_preset=None,
+               os_sandboxed=False):
     pid = os.getpid()
     budgets = dict(DEFAULT_BUDGETS)
     budgets["usd_max"] = usd_max
@@ -80,6 +81,7 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "routing_preset": routing_preset,
         "repo": repo,
         "isolated": isolated,
+        "os_sandboxed": os_sandboxed,
         "branch": None,
         "base_sha": None,
         "candidate_sha": None,
@@ -108,7 +110,7 @@ def _routing_preset(presets, routing):
 
 
 def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="verified",
-         harness=None):
+         harness=None, os_sandboxed=False):
     paths.check_task_id(task_id)
     if risk not in RISK_TIERS:
         raise PplError("SCHEMA_INVALID", "risk must be one of %s" % ", ".join(RISK_TIERS))
@@ -122,7 +124,8 @@ def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="
     # editable mid-run.
     state = _new_state(task_id, tracker_url, repo, isolated, risk, model_check, harness,
                        usd_max=config.budgets_usd_max(), prices=usage.prices(),
-                       routing_preset=_routing_preset(presets, routing))
+                       routing_preset=_routing_preset(presets, routing),
+                       os_sandboxed=os_sandboxed)
     save(state)
     set_active(task_id)
     store.append_log(task_id, {"event": "init", "tracker_url": tracker_url, "repo": repo,

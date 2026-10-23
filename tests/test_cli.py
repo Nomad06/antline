@@ -3192,7 +3192,7 @@ class TestInitRequiresSetup(unittest.TestCase):
         config.set_active_harness("example-generic")
         with mock.patch("ppl.forges.github.doctor_check",
                         return_value={"ok": True, "detail": ""}) as forge_check:
-            code, out, err = self.init("DEMO-813", "--harness", "example-generic")
+            code, out, err = self.init("DEMO-813", "--harness", "example-generic", "--no-os-sandbox")
         self.assertEqual(code, 0, err)
         forge_check.assert_not_called()
         state = json.loads((paths.run_dir("DEMO-813") / "state.json").read_text(encoding="utf-8"))
@@ -4028,6 +4028,74 @@ class TestVersion(unittest.TestCase):
         code, out, _ = call("--version")
         self.assertEqual(code, 0)
         self.assertEqual(out, "antline %s\n" % ppl.__version__)
+
+
+class TestInitRequiresTheOsSandbox(unittest.TestCase):
+    """A run on a GitHub harness starts only inside the OS sandbox that denies GitHub, with the
+    guard registered in the workspace's local settings, unless the operator opts out."""
+
+    COUNTER = iter(range(8100, 8200))
+
+    def setUp(self):
+        fixtures.install_variant("example-generic", "gh-issues", **fixtures.GITHUB_ISSUES)
+        config.set_active_harness("gh-issues")
+        self.addCleanup(config.set_active_harness, "example-maven")
+
+    def start(self, state, registration, *flags, harness="gh-issues", task=None):
+        facts = {"state": state, "env_marker": state == "on", "profile": state == "on",
+                 "live": "denied" if state == "on" else "reachable", "undoing": [],
+                 "exposed": []}
+        inspected = dict(doctor.inspect(), registration=registration)
+        task = task or "GH-%d" % next(self.COUNTER)
+        with mock.patch.object(doctor, "os_sandbox_facts", return_value=facts), \
+                mock.patch.object(doctor, "inspect", return_value=inspected):
+            code, out, err = call("init", task, "--tracker-url", "u", "--repo", "/tmp/repo",
+                                  "--harness", harness, *flags)
+        return task, code, out, err
+
+    def test_init_refuses_a_github_run_outside_the_os_sandbox(self):
+        # rule: R-OS-SANDBOX-INIT-REQUIRED
+        task, code, _, err = self.start("off", "local")
+        self.assertEqual(code, 2)
+        doc = json.loads(err)
+        self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
+        self.assertIn("--no-os-sandbox", doc["message"])
+        self.assertFalse(paths.run_dir(task).exists())
+
+    def test_init_refuses_when_the_guard_is_only_global(self):
+        _, code, _, err = self.start("on", "global")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+
+    def test_init_refuses_when_the_guard_is_absent(self):
+        _, code, _, err = self.start("on", "none")
+        self.assertEqual(code, 2)
+        doc = json.loads(err)
+        self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
+        self.assertIn("settings.local.json", doc["message"])
+
+    def test_init_records_os_sandboxed_true_when_on(self):
+        task, code, out, err = self.start("on", "local")
+        self.assertEqual(code, 0, err)
+        _, shown, _ = call("show", "--task", task, "--json")
+        self.assertIs(json.loads(shown)["os_sandboxed"], True)
+        self.assertIn("OS sandbox: on", out)
+
+    def test_no_os_sandbox_records_false_and_starts(self):
+        task, code, out, err = self.start("off", "none", "--no-os-sandbox")
+        self.assertEqual(code, 0, err)
+        _, shown, _ = call("show", "--task", task, "--json")
+        self.assertIs(json.loads(shown)["os_sandboxed"], False)
+        self.assertIn("OS sandbox: off", out)
+
+    def test_a_gitlab_harness_needs_no_os_sandbox(self):
+        config.set_active_harness("example-maven")
+        task, code, out, err = self.start("off", "none", harness="example-maven",
+                                          task="DEMO-%d" % next(self.COUNTER))
+        self.assertEqual(code, 0, err)
+        _, shown, _ = call("show", "--task", task, "--json")
+        self.assertIs(json.loads(shown)["os_sandboxed"], False)
+        self.assertNotIn("OS sandbox:", out)
 
 
 if __name__ == "__main__":

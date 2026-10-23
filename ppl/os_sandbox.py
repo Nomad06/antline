@@ -28,6 +28,21 @@ def needed(doc):
             or _table(doc).get("enabled") is True)
 
 
+def run_needs(task_id):
+    return dir_needs(paths.run_dir(task_id))
+
+
+def dir_needs(directory):
+    """True when the harness snapshot in a run directory says it needs the profile. A missing
+    or unreadable snapshot is False."""
+    from . import store
+    try:
+        doc = store.read_json(Path(directory) / "harness.json")
+    except (PplError, OSError):
+        return False
+    return isinstance(doc, dict) and (doc.get("os_sandbox") or {}).get("needed") is True
+
+
 def scratch_root():
     return paths.home() / "scratch"
 

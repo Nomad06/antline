@@ -567,6 +567,15 @@ for it without this flag. `--no-isolated` restores the plain cwd check instead, 
 operator who registered the hook more broadly (e.g. in global settings) and knows scoping by
 "run active" would reach their other projects.
 
+**The `os_sandboxed` flag.** On a harness that reaches GitHub, `ppl init` also requires
+that this session runs inside Claude Code's OS sandbox with GitHub denied
+(`doctor.os_sandbox_facts()` reports `"on"`) and that the guard is registered in the
+workspace's local settings, and refuses with `SCHEMA_INVALID` naming the first failing fact
+otherwise [R-OS-SANDBOX-INIT-REQUIRED]. `--no-os-sandbox` skips the check. The run records
+`os_sandboxed` true or false (false for a harness that does not need the profile), the card
+shows `OS sandbox: on|off` for a run whose frozen harness needs it, the panel row carries the
+field, and `ppl metrics` warns `OS_SANDBOX_OFF` for a GitHub run that started without it.
+
 **Checked, not just trusted.** `ppl` cannot see how the guard hook is registered
 from inside `decide()` - that lives in a `.claude/settings*.json` file, not in run state -
 but it can be checked separately, on disk, before a run even starts
@@ -718,7 +727,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 180 rows: 133 `blocking`, 20 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 181 rows: 134 `blocking`, 20 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
