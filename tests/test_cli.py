@@ -2243,7 +2243,7 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def write(self, guard_changes, dispatch=True):
+    def write(self, guard_changes, dispatch=True, usage=True):
         entries = setup.hook_entries(fixtures.SOURCE)
         guard = entries["PreToolUse"]
         guard["hooks"][0].update(guard_changes)
@@ -2251,6 +2251,8 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         doc = {"hooks": {"PreToolUse": [guard]}}
         if dispatch:
             doc["hooks"]["SubagentStart"] = [entries["SubagentStart"]]
+        if usage:
+            doc["hooks"]["SubagentStop"] = [entries["SubagentStop"]]
         path = Path(self.local_dir) / ".claude" / "settings.local.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(doc), encoding="utf-8")
@@ -2304,7 +2306,26 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         self.assertIn("warning: ", err)
         self.assertIn("ppl_dispatch.py", err)
 
-    def test_init_is_quiet_when_both_entries_are_the_ones_setup_writes(self):
+    def test_init_warns_when_the_usage_hook_is_missing(self):
+        self.write({}, usage=False)
+        code, _, err = self.init("DEMO-9926")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: ", err)
+        self.assertIn("ppl_usage.py", err)
+        self.assertIn("tokens are not recorded", err)
+
+    def test_init_warns_when_a_hook_runs_from_outside_this_install(self):
+        old = Path(tmphome.mkdtemp(prefix="pplold-")) / "hooks" / "ppl_guard.py"
+        old.parent.mkdir(parents=True)
+        old.write_text("", encoding="utf-8")
+        self.write({"command": "%s %s" % (shlex.quote(sys.executable), shlex.quote(str(old)))})
+        code, _, err = self.init("DEMO-9927")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: ", err)
+        self.assertIn(str(old), err)
+        self.assertIn("ppl setup claude", err)
+
+    def test_init_is_quiet_when_the_entries_are_the_ones_setup_writes(self):
         self.write({})
         code, _, err = self.init("DEMO-9923")
         self.assertEqual((code, err), (0, ""))

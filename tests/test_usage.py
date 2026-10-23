@@ -285,6 +285,18 @@ class TestUsage(unittest.TestCase):
         models, _, _ = usage.read_increment(self.path, 0, "2026-10-22T00:00:00Z", [])
         self.assertEqual(models[OPUS]["output"], 7)
 
+    def test_a_huge_integer_count_does_not_crash_the_read(self):
+        # math.isfinite raises OverflowError on an int too large for a float
+        self.path.write_text(
+            '{"type":"assistant","isSidechain":false,"timestamp":"2026-10-22T12:00:00Z",'
+            '"message":{"id":"m1","model":"%s","usage":{"input_tokens":1%s,'
+            '"output_tokens":7}}}\n' % (OPUS, "0" * 400), encoding="utf-8")
+        got = usage.sum_transcript(self.path)
+        self.assertEqual(got[OPUS]["input"], 10 ** 400)
+        self.assertEqual(got[OPUS]["output"], 7)
+        models, _, _ = usage.read_increment(self.path, 0, "2026-10-22T00:00:00Z", [])
+        self.assertEqual(models[OPUS]["output"], 7)
+
     def test_run_dollars_sum_every_role(self):
         self.write_config('[prices."m"]\ninput = 0\ncache_write = 0\n'
                           'cache_read = 0\noutput = 10\n')

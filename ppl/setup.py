@@ -23,12 +23,13 @@ TIER_PREFIX = "tier."
 HOOK_MODES = ("local", "global", "manual")
 EXAMPLE_HARNESSES = ("example-generic", "example-maven")
 DISPATCH_MARKER = doctor.DISPATCH_MARKER
+USAGE_MARKER = doctor.USAGE_MARKER
 _HOOK_TIMEOUT_SECONDS = 5
 _YES, _NO = ("yes", "y"), ("no", "n")
 _SKIP, _QUIT = "s", "q"
 STEP_INTROS = {
     "paths": "Creates the data root and copies the example config.toml and routing.toml into it.",
-    "claude": "Names the Claude Code binary and an isolated workspace, and registers the two hooks.",
+    "claude": "Names the Claude Code binary and an isolated workspace, and registers the three hooks.",
     "models": "Picks a model per tier and proves each one answers with a cheap probe.",
     "harness": "Installs the project harness: build gates, guard shapes, task key and tracker.",
     "forge": "Chooses the git forge and the issue tracker and checks that ppl can reach both.",
@@ -107,11 +108,11 @@ class Prompter:
 
 
 def hook_entries(code_root):
-    """The PreToolUse guard entry and the SubagentStart dispatch entry, both
-    on absolute paths into the assets directory of the installed package or
-    the clone, run by the interpreter running this setup. Bare python3 is
-    whatever the PATH Claude Code spawns hooks with finds first, and one older
-    than 3.11 cannot run the hooks."""
+    """The PreToolUse guard entry, the SubagentStart dispatch entry and the
+    SubagentStop usage entry, each on an absolute path into the assets
+    directory of the installed package or the clone, run by the interpreter
+    running this setup. Bare python3 is whatever the PATH Claude Code spawns
+    hooks with finds first, and one older than 3.11 cannot run the hooks."""
     hooks_dir = Path(os.path.abspath(code_root)) / "hooks"
 
     def entry(matcher, script):
@@ -119,10 +120,12 @@ def hook_entries(code_root):
         return {"matcher": matcher,
                 "hooks": [{"type": "command", "command": command, "timeout": _HOOK_TIMEOUT_SECONDS}]}
     return {"PreToolUse": entry(doctor.RECOMMENDED_MATCHER, doctor.GUARD_MARKER),
-            "SubagentStart": entry("", DISPATCH_MARKER)}
+            "SubagentStart": entry("", DISPATCH_MARKER),
+            "SubagentStop": entry("", USAGE_MARKER)}
 
 
-_MARKERS = {"PreToolUse": doctor.GUARD_MARKER, "SubagentStart": DISPATCH_MARKER}
+_MARKERS = {"PreToolUse": doctor.GUARD_MARKER, "SubagentStart": DISPATCH_MARKER,
+            "SubagentStop": USAGE_MARKER}
 
 
 def _is_ours(hook, marker):
@@ -135,9 +138,9 @@ def _bad_settings(path, why):
 
 
 def write_local_settings(workspace, code_root):
-    """Merge the two hook entries into <workspace>/.claude/settings.local.json.
-    A guard or dispatch hook already there, matched by its script name, is
-    replaced rather than duplicated. Every other key, entry and hook stays."""
+    """Merge the three hook entries into <workspace>/.claude/settings.local.json.
+    A guard, dispatch or usage hook already there, matched by its script name,
+    is replaced rather than duplicated. Every other key, entry and hook stays."""
     path = Path(workspace) / ".claude" / "settings.local.json"
     doc = {}
     if path.is_file():

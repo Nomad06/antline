@@ -3219,7 +3219,7 @@ HOOKS = Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"
 
 
 class TestPythonFloor(unittest.TestCase):
-    """Both hooks need Python 3.11, and under an older one they died on import,
+    """Every hook needs Python 3.11, and under an older one they died on import,
     which Claude Code reads as a non-blocking error: every call allowed. The
     floor runs before any ppl import and fails closed for a role
     [R-GUARD-PYTHON-FLOOR]."""
@@ -3294,7 +3294,8 @@ class TestPythonFloor(unittest.TestCase):
             self.skipTest("no python3 older than 3.11 at %s" % fixtures.SYSTEM_PYTHON)
         interpreter, version = found
         env = fixtures.isolated_env()
-        for hook, event in (("ppl_guard.py", "PreToolUse"), ("ppl_dispatch.py", "SubagentStart")):
+        for hook, event in (("ppl_guard.py", "PreToolUse"), ("ppl_dispatch.py", "SubagentStart"),
+                            ("ppl_usage.py", "SubagentStop")):
             with self.subTest(hook=hook):
                 result = subprocess.run(
                     [interpreter, str(HOOKS / hook)],
@@ -3317,6 +3318,7 @@ class TestPythonFloor(unittest.TestCase):
         env = fixtures.isolated_env(PYTHONSAFEPATH="1")
         cases = (("ppl_guard.py", payload(None, "Read", {"file_path": "/dev/null"}, cwd="/tmp"), None),
                  ("ppl_dispatch.py", payload("ppl-code-worker", "Task", {}, cwd="/tmp"), None),
+                 ("ppl_usage.py", payload("ppl-code-worker", "Task", {}, cwd="/tmp"), None),
                  ("ppl_guard.py", payload("ppl-code-worker", "Bash", {"command": "git add -A"},
                                           cwd="/tmp"), "BOUNDARY_VIOLATION"))
         for hook, hook_payload, refusal in cases:
@@ -3355,6 +3357,8 @@ class TestHookBootstrap(unittest.TestCase):
                   "tool_input": {"command": "git push --force origin main"}, "cwd": "/tmp"}
     ROLE_START = {"hook_event_name": "SubagentStart", "agent_type": "ppl-code-worker",
                   "cwd": "/tmp"}
+    ROLE_STOP = {"hook_event_name": "SubagentStop", "agent_type": "ppl-code-worker",
+                 "agent_id": "a1", "cwd": "/tmp"}
 
     def site_with_ppl(self):
         site = Path(tmphome.mkdtemp(prefix="pplsite-"))
@@ -3362,13 +3366,14 @@ class TestHookBootstrap(unittest.TestCase):
                         ignore=shutil.ignore_patterns("__pycache__"))
         return site
 
-    def assert_both_hooks_work(self, site, **extra):
+    def assert_every_hook_works(self, site, **extra):
         env = fixtures.isolated_env()
         env.pop("PYTHONPATH", None)
         env.pop("PPL_ROOT", None)
         env.update(extra)
         cases = (("ppl_guard.py", self.FORCE_PUSH, "BOUNDARY_VIOLATION"),
-                 ("ppl_dispatch.py", self.ROLE_START, None))
+                 ("ppl_dispatch.py", self.ROLE_START, None),
+                 ("ppl_usage.py", self.ROLE_STOP, None))
         for hook, hook_payload, refusal in cases:
             with self.subTest(hook=hook):
                 result = subprocess.run(
@@ -3394,13 +3399,13 @@ class TestHookBootstrap(unittest.TestCase):
         site = self.site_with_ppl()
         for name in sys.stdlib_module_names:
             (site / (name + ".py")).write_text('raise ImportError("shadowed stdlib")\n')
-        self.assert_both_hooks_work(site)
+        self.assert_every_hook_works(site)
 
     def test_the_ppl_beside_the_hook_wins_over_another_one_on_the_path(self):
         other = Path(tmphome.mkdtemp(prefix="pplother-"))
         (other / "ppl").mkdir()
         (other / "ppl" / "__init__.py").write_text('raise ImportError("the other ppl")\n')
-        self.assert_both_hooks_work(self.site_with_ppl(), PYTHONPATH=str(other))
+        self.assert_every_hook_works(self.site_with_ppl(), PYTHONPATH=str(other))
 
 if __name__ == "__main__":
     unittest.main()

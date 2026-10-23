@@ -1,4 +1,4 @@
-"""The interpreter floor both hooks check before anything from ppl is imported.
+"""The interpreter floor every hook checks before anything from ppl is imported.
 
 The hooks and ppl need Python 3.11 (tomllib, possessive and atomic regex
 syntax). Under an older interpreter a hook used to die on import, and Claude

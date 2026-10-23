@@ -15,7 +15,7 @@ import stat
 import time
 from datetime import datetime
 
-from ppl import config, store
+from ppl import config, paths, store
 from ppl.errors import PplError
 
 COUNTS = ("input", "cache_write", "cache_read", "output")
@@ -37,8 +37,12 @@ class TranscriptError(Exception):
 
 
 def _is_count(value):
-    return (not isinstance(value, bool) and isinstance(value, (int, float))
-            and math.isfinite(value))
+    if isinstance(value, bool):
+        return False
+    # an int too large for a float makes math.isfinite raise OverflowError
+    if isinstance(value, int):
+        return True
+    return isinstance(value, float) and math.isfinite(value)
 
 
 def _number(value):
@@ -181,6 +185,82 @@ def read_increment(path, offset, since, seen_ids, deadline=None,
             bucket[name] += value
         seen.append(key)
     return models, position, seen[-50:]
+
+
+def _usage_file(task_id):
+    return paths.run_dir(task_id) / "usage.json"
+
+
+def _orchestrator_entries(doc):
+    entries = doc.get("orchestrator") if isinstance(doc, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def note_orchestrator(task_id, transcript_path, session_id):
+    """Adds the orchestrator's main transcript to runs/<task>/usage.json the
+    first time it is seen. A path that is not a regular file is not noted."""
+    if not transcript_path or not isinstance(transcript_path, str) \
+            or not session_id or not isinstance(session_id, str):
+        return
+    try:
+        _check_file(transcript_path)
+    except TranscriptError:
+        return
+    target = _usage_file(task_id)
+    doc = store.read_json(target, default={})
+    if not isinstance(doc, dict):
+        doc = {}
+    entries = _orchestrator_entries(doc)
+    if transcript_path in entries:
+        return
+    entries[transcript_path] = {"session": session_id, "offset": 0, "seen": [], "models": {}}
+    doc["orchestrator"] = entries
+    store.write_json(target, doc)
+
+
+def _run_began(task_id):
+    for event in store.read_log(task_id):
+        if isinstance(event, dict) and event.get("event") == "init" \
+                and isinstance(event.get("at"), str):
+            return event["at"]
+    return None
+
+
+def refresh_orchestrator(task_id, deadline=None):
+    """Reads the increment of every noted orchestrator transcript, counting the
+    lines written since the run's init, saves the offsets and logs the
+    cumulative usage of each transcript whose totals changed. A transcript that
+    can no longer be read is left as it was."""
+    target = _usage_file(task_id)
+    doc = store.read_json(target, default={})
+    entries = _orchestrator_entries(doc)
+    since = _run_began(task_id)
+    if not entries or since is None:
+        return
+    dirty = False
+    for path, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        offset = entry.get("offset")
+        offset = offset if isinstance(offset, int) and not isinstance(offset, bool) else 0
+        seen = entry.get("seen") if isinstance(entry.get("seen"), list) else []
+        before = entry.get("models") if isinstance(entry.get("models"), dict) else {}
+        try:
+            models, new_offset, new_seen = read_increment(path, offset, since, seen,
+                                                          deadline=deadline)
+        except TranscriptError:
+            continue
+        after = add(before, models)
+        if new_offset == offset and after == before:
+            continue
+        entry.update(offset=new_offset, seen=new_seen, models=after)
+        dirty = True
+        if after != before:
+            store.append_log(task_id, {"event": "usage", "role": "orchestrator",
+                                       "agent_id": "orchestrator:%s" % entry.get("session"),
+                                       "models": after})
+    if dirty:
+        store.write_json(target, doc)
 
 
 def add(a, b):

@@ -299,15 +299,15 @@ residual = "the unroled orchestrator session keeps the quadratic tail of the lex
 
 [[rule]]
 id = "R-GUARD-PYTHON-FLOOR"
-statement = "Under a Python older than 3.11 both hooks read the payload before importing anything from ppl, deny a call whose agent_type starts with ppl- (a superset of boundary.ROLE_RULES, so the cage fails closed), write one stderr line naming the version found and the 3.11 floor, and exit 0; an unroled session is allowed."
+statement = "Under a Python older than 3.11 every hook reads the payload before importing anything from ppl, deny a call whose agent_type starts with ppl- (a superset of boundary.ROLE_RULES, so the cage fails closed), write one stderr line naming the version found and the 3.11 floor, and exit 0; an unroled session is allowed."
 scope = "every hook call, under an interpreter older than 3.11"
-event = "PreToolUse and SubagentStart, before the ppl imports"
+event = "PreToolUse, SubagentStart and SubagentStop, before the ppl imports"
 enforcement = "blocking"
-hook_or_check = "ppl/_assets/hooks/ppl_python_floor.py:refuse_old_python, ppl/_assets/hooks/ppl_guard.py, ppl/_assets/hooks/ppl_dispatch.py"
+hook_or_check = "ppl/_assets/hooks/ppl_python_floor.py:refuse_old_python, ppl/_assets/hooks/ppl_guard.py, ppl/_assets/hooks/ppl_dispatch.py, ppl/_assets/hooks/ppl_usage.py"
 deny_test = "tests/test_guard.py::TestPythonFloor::test_an_old_python_denies_a_role_and_names_the_version, tests/test_guard.py::TestPythonFloor::test_every_generated_role_and_any_other_ppl_name_is_denied, tests/test_guard.py::TestPythonFloor::test_the_hooks_deny_a_role_under_the_system_python, tests/test_guard.py::TestPythonFloor::test_the_hooks_start_with_their_own_directory_off_sys_path"
 allow_test = "tests/test_guard.py::TestPythonFloor::test_a_supported_python_passes_through_untouched, tests/test_guard.py::TestPythonFloor::test_an_old_python_lets_an_unroled_session_through_with_the_message, tests/test_guard.py::TestPythonFloor::test_an_unroled_session_under_the_system_python_is_allowed"
 owner = "guard-hook"
-residual = "the floor runs only if the file parses and the floor module imports: each hook appends its own directory to sys.path, so PYTHONSAFEPATH, -P and -I do not hide it, and both hooks and ppl/_assets/hooks/ppl_python_floor.py are kept to Python 3.9 syntax, and the subprocess test proves that on a machine with an older python3 at /usr/bin/python3 and skips elsewhere, and CI's python-floor job runs both hooks and bin/ppl under Python 3.9 on every push. SubagentStart cannot block (R-DISPATCH-HOOK-CANNOT-BLOCK), so the dispatch hook's deny is informational. ppl setup claude pins the interpreter that ran it, so the floor fires for a hand-written or stale entry; ppl doctor's hook_runs runs each registered guard command once and reports false when it does not exit 0 cleanly"
+residual = "the floor runs only if the file parses and the floor module imports: each hook appends its own directory to sys.path, so PYTHONSAFEPATH, -P and -I do not hide it, and every hook and ppl/_assets/hooks/ppl_python_floor.py are kept to Python 3.9 syntax, and the subprocess test proves that on a machine with an older python3 at /usr/bin/python3 and skips elsewhere, and CI's python-floor job runs every hook and bin/ppl under Python 3.9 on every push. SubagentStart cannot block (R-DISPATCH-HOOK-CANNOT-BLOCK), so the dispatch hook's deny is informational, and the usage hook's deny is no SubagentStop decision either (R-USAGE-HOOK-CANNOT-BLOCK). ppl setup claude pins the interpreter that ran it, so the floor fires for a hand-written or stale entry; ppl doctor's hook_runs runs each registered guard command once and reports false when it does not exit 0 cleanly"
 
 [[rule]]
 id = "R-RUNS-WRITE-PROTECTION"
@@ -1192,6 +1192,18 @@ deny_test = ""
 allow_test = "tests/test_dispatch_hook.py::TestDispatchHook::test_start_increments_the_dispatch_counter, tests/test_dispatch_hook.py::TestDispatchHook::test_start_denies_past_the_hard_cap, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_dispatched_from_beside_the_worktree_is_counted"
 owner = "harness"
 residual = "the deny document the hook returns past the cap is never acted on by the harness; R-BUDGET-DISPATCH-CAP is the only real enforcement of that budget"
+
+[[rule]]
+id = "R-USAGE-HOOK-CANNOT-BLOCK"
+statement = "SubagentStop is informational: the usage hook records token usage and never refuses or delays a dispatch."
+scope = "global"
+event = "SubagentStop"
+enforcement = "soft"
+hook_or_check = "ppl/_assets/hooks/ppl_usage.py:on_stop"
+deny_test = ""
+allow_test = "tests/test_usage_hook.py::TestUsageHook::test_a_role_stop_logs_its_cumulative_usage, tests/test_usage_hook.py::TestUsageHook::test_a_non_role_agent_is_ignored, tests/test_usage_hook.py::TestUsageHook::test_no_active_run_is_ignored, tests/test_usage_hook.py::TestUsageHook::test_a_missing_transcript_logs_an_error_event_and_prints_nothing, tests/test_usage_hook.py::TestUsageHook::test_an_oversized_transcript_logs_transcript_too_large, tests/test_usage_hook.py::TestUsageHook::test_the_orchestrator_counts_only_lines_since_the_run_began, tests/test_usage_hook.py::TestUsageHook::test_a_second_stop_adds_only_new_orchestrator_lines, tests/test_usage_hook.py::TestUsageHook::test_the_same_agent_stopping_twice_is_counted_at_its_newest_totals, tests/test_usage_hook.py::TestUsageHook::test_the_hook_never_prints_a_decision, tests/test_usage_hook.py::TestUsageHook::test_the_floor_names_subagentstop"
+owner = "harness"
+residual = "the transcript is Claude Code's own format, not a contract: a drift in it is a schema_unknown error event and that role's tokens go unrecorded. Orchestrator turns after the last refresh are not counted, so whatever the orchestrator does after the last role stops (the merge watch) is missing. The hook records only when it is registered: ppl doctor reports usage_hook per settings file and ppl init warns when a guard is registered without it. A role read past the 2 s budget is a deadline error event, and two roles stopping at once may both log the same orchestrator totals, which aggregation counts once since it keeps the newest event per agent_id"
 
 [[rule]]
 id = "R-EGRESS-SOURCE-UPLOAD"
@@ -2123,13 +2135,13 @@ residual = "a cap bounds one rendered file, not the skill as a whole: a harness 
 
 [[rule]]
 id = "R-DOCTOR-HOOK-SHAPE"
-statement = "ppl doctor reports per settings file dispatch_hook (registered or missing) and hook_shape (ok or the problems of the guard and dispatch entries, read from the file and never run: type not command, no timeout, an interpreter that is not an absolute path to an executable file, a hook script that is not an absolute path to a file). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook is not, or has such a problem. The interpreter version is asked only where ppl doctor already runs the guard (hook_runs), which reports one older than Python 3.11."
+statement = "ppl doctor reports per settings file dispatch_hook and usage_hook (registered or missing) and hook_shape (ok or the problems of the guard, dispatch and usage entries, read from the file and never run: type not command, no timeout, an interpreter that is not an absolute path to an executable file, a hook script that is not an absolute path to a file). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook or the SubagentStop usage hook is not, or has such a problem, and when a registered hook script is not under this install's assets hooks directory. The interpreter version is asked only where ppl doctor already runs the guard (hook_runs), which reports one older than Python 3.11."
 scope = "hook registration"
 event = "ppl doctor, ppl init"
 enforcement = "blocking"
-hook_or_check = "ppl/doctor.py:_shape_problems, ppl/doctor.py:_command_problems, ppl/doctor.py:guard_shape_problem, ppl/doctor.py:dispatch_warning, ppl/doctor.py:hook_runs, ppl/cli.py:cmd_init"
+hook_or_check = "ppl/doctor.py:_shape_problems, ppl/doctor.py:_command_problems, ppl/doctor.py:guard_shape_problem, ppl/doctor.py:dispatch_warning, ppl/doctor.py:usage_warning, ppl/doctor.py:hook_location_warning, ppl/doctor.py:hook_runs, ppl/cli.py:cmd_init"
 deny_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_entry_that_is_not_a_command, tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_entry_without_a_timeout, tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_whose_interpreter_is_not_an_absolute_path, tests/test_doctor.py::TestHookRuns::test_a_guard_under_an_interpreter_older_than_the_floor_reports_false"
-allow_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_is_quiet_when_both_entries_are_the_ones_setup_writes, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_the_dispatch_hook_is_missing, tests/test_cli.py::TestInitChecksTheHookShape::test_init_never_runs_the_interpreter_it_judges, tests/test_doctor.py::TestHookShape::test_the_entries_setup_writes_are_well_shaped_and_register_the_dispatch_hook, tests/test_doctor.py::TestHookShape::test_inspecting_the_settings_never_runs_the_interpreter_they_name, tests/test_doctor.py::TestHookRuns::test_a_guard_run_through_env_asks_the_interpreter_env_names"
+allow_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_is_quiet_when_the_entries_are_the_ones_setup_writes, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_the_dispatch_hook_is_missing, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_the_usage_hook_is_missing, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_a_hook_runs_from_outside_this_install, tests/test_doctor.py::TestHookShape::test_usage_warning_when_the_guard_is_registered_without_it, tests/test_doctor.py::TestHookShape::test_a_hook_outside_the_assets_hooks_directory_is_warned, tests/test_cli.py::TestInitChecksTheHookShape::test_init_never_runs_the_interpreter_it_judges, tests/test_doctor.py::TestHookShape::test_the_entries_setup_writes_are_well_shaped_and_register_the_dispatch_hook, tests/test_doctor.py::TestHookShape::test_inspecting_the_settings_never_runs_the_interpreter_they_name, tests/test_doctor.py::TestHookRuns::test_a_guard_run_through_env_asks_the_interpreter_env_names"
 owner = "ppl"
 residual = "judged on the two settings files ppl reads, at doctor and init time. ppl init never runs the interpreter, so an absolute interpreter older than 3.11 passes init (the guard then denies every role call, R-GUARD-PYTHON-FLOOR) and only ppl doctor reports it, for the guard and not the dispatch hook. A missing dispatch hook is only a warning: SubagentStart cannot block anyway (R-DISPATCH-HOOK-CANNOT-BLOCK)"
 

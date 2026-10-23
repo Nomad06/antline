@@ -120,7 +120,7 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `ppl/_assets/rules.toml` holds 174 rules, 130 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 175 rules, 130 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
   refusal. The suite has 2369 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
@@ -276,13 +276,19 @@ another tab or a terminal since the page loaded it is refused [R-STUDIO-CHANGED-
   "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command",
     "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_guard.py", "timeout": 5}]}],
   "SubagentStart": [{"matcher": "", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_dispatch.py", "timeout": 5}]}]}}
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_dispatch.py", "timeout": 5}]}],
+  "SubagentStop": [{"matcher": "", "hooks": [{"type": "command",
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_usage.py", "timeout": 5}]}]}}
 ```
 
 The paths are the ones `ppl setup claude` finds for your install, so use what it writes or
 prints rather than this example: under pipx the scripts sit in its venv, at
 `.../site-packages/ppl/_assets/hooks/ppl_guard.py`, and in a clone under the checkout's
 `ppl/_assets/hooks/`.
+
+The guard is the cage, the dispatch hook counts role dispatches, and the usage hook
+records each role's and the orchestrator's tokens in the run's `log.jsonl` when a role
+stops, never refusing or delaying a dispatch [R-USAGE-HOOK-CANNOT-BLOCK].
 
 The interpreter in those commands has to be Python 3.11 or newer, and `ppl setup
 claude` writes the one that ran it, so the hooks do not depend on which `python3`
@@ -299,12 +305,13 @@ guard is in `~/.claude/settings.json` [R-INIT-ISOLATION-CHECK], so if you answer
 `global` in `ppl setup claude`, start runs with `ppl init --no-isolated`. Until the
 hooks are registered, nothing in the cage is enforced [R-GUARD-NOT-ARMED n/a].
 
-`ppl doctor` reports per settings file `dispatch_hook` (registered or missing) and
-`hook_shape` (`ok` or what is wrong with the guard and dispatch entries: a `type`
+`ppl doctor` reports per settings file `dispatch_hook` and `usage_hook` (registered or
+missing) and `hook_shape` (`ok` or what is wrong with the hook entries: a `type`
 other than `"command"`, no `timeout`, an interpreter or hook script that is not an
 absolute path to a file). `ppl init` refuses a run while the guard entry has such a
-problem, and warns when the dispatch hook is missing or malformed
-[R-DOCTOR-HOOK-SHAPE]. Neither runs anything to judge the shape: the interpreter's
+problem, and warns when the dispatch or the usage hook is missing or malformed, or when
+a hook script is not the one under this install's `_assets/hooks` (a clone or an older
+install left behind) [R-DOCTOR-HOOK-SHAPE]. Neither runs anything to judge the shape: the interpreter's
 version is asked by `ppl doctor` when it runs the guard (`hook_runs`).
 
 ## Harness
