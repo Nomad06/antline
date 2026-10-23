@@ -106,7 +106,6 @@ def sum_transcript(path, deadline=None):
     if _expired(deadline):
         raise TranscriptError("deadline")
     last = {}
-    seen_usage = False
     with open(path, "rb") as handle:
         for number, raw in enumerate(handle):
             if number % _CHECK_EVERY == 0 and _expired(deadline):
@@ -114,14 +113,15 @@ def sum_transcript(path, deadline=None):
             found = _assistant_usage(_parse(raw))
             if found is None:
                 continue
-            seen_usage = True
             msg_id, model, use = found
             if (not isinstance(model, str) or model.startswith("<")
                     or not isinstance(msg_id, str)):
                 continue
             last[msg_id] = (model, _counts_of(use))
-    if not seen_usage:
-        raise TranscriptError("schema_unknown", "no assistant line carries a usage dict")
+    # synthetic lines alone (an API error before any response) are no usage either
+    if not last:
+        raise TranscriptError("schema_unknown",
+                              "no assistant line of a real model carries a usage dict")
     models = {}
     for model, got in last.values():
         bucket = _bucket(models, model)
@@ -287,7 +287,9 @@ def run_usage(directory):
     for event in store.read_log_at(directory):
         if not isinstance(event, dict) or event.get("event") != "usage":
             continue
-        if "error" in event or not isinstance(event.get("models"), dict):
+        # an empty models dict was logged before a synthetic-only transcript was an error
+        if "error" in event or not isinstance(event.get("models"), dict) \
+                or not event["models"]:
             continue
         key = event.get("agent_id")
         if not isinstance(key, str):

@@ -329,6 +329,14 @@ def _counts_of(models):
     return out
 
 
+def _run_models(roles):
+    """Every role's models of one run summed, empty when the run recorded no usage."""
+    models = {}
+    for role_models in roles.values():
+        models = usage.add(models, role_models)
+    return models
+
+
 def _usage_metrics(run_records, producer_key):
     """cost, tokens per task and tokens by role over the accepted runs that
     have recorded usage. Undefined is never zero: each reason says what is
@@ -339,7 +347,8 @@ def _usage_metrics(run_records, producer_key):
         if producer_key is not None and _accepted_runs(run_records, None):
             why = "no done task was accepted by producer %s yet" % producer_key
         return tuple(_metric(None, why) for _ in range(3))
-    usages = [u for u in (usage.run_usage(directory) for _, directory in accepted) if u]
+    usages = [u for u in (usage.run_usage(directory) for _, directory in accepted)
+              if _run_models(u)]
     if not usages:
         why = ("%d accepted task(s) but no usage recorded - install the usage hook "
                "with `ppl setup claude`" % len(accepted))
@@ -397,7 +406,7 @@ def preset_costs(limit=10):
             started = _event(store.read_log_at(directory), "init")
         except (PplError, OSError, ValueError, AttributeError, TypeError):
             continue
-        if isinstance(preset, str) and roles:
+        if isinstance(preset, str) and _run_models(roles):
             found.setdefault(preset, []).append(
                 (((started or {}).get("at") or ""), task_id, roles))
     try:
@@ -414,9 +423,7 @@ def preset_costs(limit=10):
             continue
         tokens, costs, unpriced = [], [], set()
         for _, _, roles in runs:
-            models = {}
-            for role_models in roles.values():
-                models = usage.add(models, role_models)
+            models = _run_models(roles)
             tokens.append(usage.total(_counts_of(models)))
             if table is not None:
                 usd, missing = usage.dollars(models, table)

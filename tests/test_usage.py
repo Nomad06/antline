@@ -80,6 +80,14 @@ class TestUsage(unittest.TestCase):
         write_transcript(self.path, [line("m1", OPUS, body)])
         self.assertEqual(usage.sum_transcript(self.path)[OPUS]["output"], 10)
 
+    def test_a_synthetic_only_transcript_is_schema_unknown(self):
+        # an API error before any real response leaves only synthetic usage lines
+        write_transcript(self.path, [line("m1", "<synthetic>", counts(0)),
+                                     line(None, OPUS, counts(5))])
+        with self.assertRaises(usage.TranscriptError) as ctx:
+            usage.sum_transcript(self.path)
+        self.assertEqual(ctx.exception.code, "schema_unknown")
+
     def test_a_transcript_without_usage_is_schema_unknown(self):
         write_transcript(self.path, [line("m1", usage_=None), {"type": "user"}])
         with self.assertRaises(usage.TranscriptError) as ctx:

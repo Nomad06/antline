@@ -1,9 +1,11 @@
+import io
 import itertools
 import json
 import os
 import re
 import sys
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,7 +16,7 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import metrics, paths, run, store
+from ppl import cli, metrics, paths, run, status, store, trail
 from ppl.errors import PplError
 
 PRODUCER_A = {"provider": "claude-code-subagent", "model": "opus", "params_hash": "h1"}
@@ -369,6 +371,36 @@ class TestCostPerAcceptedTask(IsolatedFleet):
         for key in ("cost_per_accepted_task", "tokens_per_accepted_task", "tokens_by_role"):
             self.assertIsNone(report[key]["value"], key)
             self.assertFalse(report[key]["defined"], key)
+
+    def test_an_empty_models_event_is_ignored(self):
+        # rule: R-METRIC-SAMPLE-DEPENDENT-UNDEFINED
+        write_prices(PRICED)
+        real = done_run("a1")
+        log_usage(real, "ppl-code-worker", "w", "m", input=3)
+        empty = done_run("b1")
+        store.append_log(empty, {"event": "usage", "role": "ppl-code-worker", "agent_id": "w",
+                                 "effort": "high", "models": {}})
+        for task in (real, empty):
+            state = run.load(task)
+            state["routing_preset"] = "balanced"
+            run.save(state)
+        self.assertEqual(status.tokens_line(empty), "none recorded")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["metrics", "--text"]), 0)
+        self.assertIn("cost_per_accepted_task: 3.0", out.getvalue().splitlines())
+        overall = metrics.compute()["overall"]
+        self.assertEqual(overall["tokens_per_accepted_task"]["value"]["input"], 3.0)
+        self.assertEqual(overall["tokens_by_role"]["value"],
+                         {"ppl-code-worker": {"input": 3, "cache_write": 0, "cache_read": 0,
+                                              "output": 0}})
+        balanced = metrics.preset_costs()["balanced"]
+        self.assertEqual((balanced["runs"], balanced["tokens_mean"], balanced["usd_mean"]),
+                         (1, 3, 3.0))
+        measures = trail.measures(paths.run_dir(empty))
+        self.assertIsNone(measures["tokens_by_role"])
+        self.assertIsNone(measures["usd"])
+        self.assertIn("no usage recorded", measures["reasons"]["usd"])
 
 
 class TestStructurallyUndefinedMetrics(IsolatedFleet):
