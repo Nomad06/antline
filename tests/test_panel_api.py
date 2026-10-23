@@ -76,6 +76,20 @@ class TestPanelApi(unittest.TestCase):
         for field in ("stage", "status", "needs_you", "budgets", "mr"):
             self.assertIn(field, row)
 
+    def test_a_run_row_carries_its_tokens_line(self):
+        row = [r for r in server.list_runs() if r["task_id"] == self.task][0]
+        self.assertEqual(row["tokens"], "none recorded")
+        store.append_log(self.task, {"event": "usage", "role": "ppl-verifier", "agent_id": "a1",
+                                     "models": {"m": {"input": 5, "cache_write": 0,
+                                                      "cache_read": 0, "output": 2}}})
+        row = [r for r in server.list_runs() if r["task_id"] == self.task][0]
+        self.assertEqual(row["tokens"], "verifier 7 (out 2)")
+        self.assertEqual(row["usd"], "usd 0.0 (no cap) + unpriced m, not in config.toml [prices]")
+
+    def test_an_error_row_has_empty_tokens_and_usd(self):
+        row = server._error_row("X-1", ValueError("bad"))
+        self.assertEqual((row["tokens"], row["usd"]), ("", ""))
+
     def test_list_runs_carries_the_tracker_url(self):
         row = [r for r in server.list_runs() if r["task_id"] == self.task][0]
         self.assertEqual(row["tracker_url"], "https://j/x")

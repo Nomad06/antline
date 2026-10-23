@@ -24,6 +24,6 @@ export function HomePage() {
     <ol>
       ${setup.steps.map((step) => html`<li><strong>${step.name}</strong> ${step.intro} <${Badge} kind=${step.state}>${step.state}<//></li>`)}
     </ol>
-    <p class="muted">Data root <code>${setup.data_root}</code>, code root <code>${setup.code_root || "unknown"}</code>.</p>
+    <p class="muted">Data root <code>${setup.data_root}</code>, assets directory <code>${setup.code_root || "unknown"}</code>.</p>
   </section>`;
 }

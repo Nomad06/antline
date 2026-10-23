@@ -42,7 +42,9 @@ from .errors import PplError
 
 GUARD_MARKER = "ppl_guard.py"
 DISPATCH_MARKER = "ppl_dispatch.py"
-HOOK_EVENTS = (("PreToolUse", GUARD_MARKER), ("SubagentStart", DISPATCH_MARKER))
+USAGE_MARKER = "ppl_usage.py"
+HOOK_EVENTS = (("PreToolUse", GUARD_MARKER), ("SubagentStart", DISPATCH_MARKER),
+               ("SubagentStop", USAGE_MARKER))
 _VERSION_PROBE = "import sys; print('%d.%d.%d' % sys.version_info[:3])"
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -274,7 +276,7 @@ def _interpreter_problem(command):
         return "has a command that does not split into words"
     first = _past_env(words) if words and os.path.basename(words[0]) == "env" else \
         (words[0] if words else "")
-    if first.endswith((GUARD_MARKER, DISPATCH_MARKER)):
+    if first.endswith(tuple(marker for _, marker in HOOK_EVENTS)):
         return ("runs the script itself, so its shebang picks the interpreter: name a Python "
                 "%s or newer first" % shown)
     version, why = _python_version(first)
@@ -286,9 +288,9 @@ def _interpreter_problem(command):
 
 
 def _shape_problems(doc, path):
-    """(marker, problem) for every guard and dispatch hook in a parsed settings
-    document that Claude Code would not run as a bounded command: read from
-    the document only, never run."""
+    """(marker, problem) for every guard, dispatch and usage hook in a parsed
+    settings document that Claude Code would not run as a bounded command:
+    read from the document only, never run."""
     problems = []
     for event, marker in HOOK_EVENTS:
         for hook in _hooks_of(doc, event, marker):
@@ -356,22 +358,78 @@ def guard_shape_problem(cwd=None):
             "3.11." % "; ".join(problems))
 
 
-def dispatch_warning(cwd=None):
-    """None unless a guard is registered while the SubagentStart dispatch hook
-    is in no settings file, or is there in the wrong shape: the dispatch cap
-    then counts only the dispatches recorded by hand. `ppl init` warns."""
+def _hook_warning(cwd, event, marker, name, consequence):
+    """None unless a guard is registered while the `event` hook (`marker`) is
+    in no settings file, or is there in the wrong shape, else the problems,
+    `consequence` and the fix."""
     settings = _readable_settings(cwd)
     if not any(_hooks_of(doc, "PreToolUse", GUARD_MARKER) for _, doc in settings):
         return None
     problems = [text for path, doc in settings
-                for marker, text in _shape_problems(doc, path) if marker == DISPATCH_MARKER]
-    if not any(_hooks_of(doc, "SubagentStart", DISPATCH_MARKER) for _, doc in settings):
-        problems.append("the SubagentStart dispatch hook (%s) is registered in neither %s nor %s"
-                        % (DISPATCH_MARKER, local_settings_path(cwd), global_settings_path()))
+                for found, text in _shape_problems(doc, path) if found == marker]
+    if not any(_hooks_of(doc, event, marker) for _, doc in settings):
+        problems.append("the %s %s hook (%s) is registered in neither %s nor %s"
+                        % (event, name, marker, local_settings_path(cwd), global_settings_path()))
     if not problems:
         return None
-    return ("%s. The dispatch cap counts only the dispatches recorded by hand until it fires: run "
-            "`ppl setup claude` to write the hook entries again." % "; ".join(problems))
+    return ("%s. %s: run `ppl setup claude` to write the hook entries again."
+            % ("; ".join(problems), consequence))
+
+
+def dispatch_warning(cwd=None):
+    """None unless a guard is registered while the SubagentStart dispatch hook
+    is in no settings file, or is there in the wrong shape: the dispatch cap
+    then counts only the dispatches recorded by hand. `ppl init` warns."""
+    return _hook_warning(cwd, "SubagentStart", DISPATCH_MARKER, "dispatch",
+                         "The dispatch cap counts only the dispatches recorded by hand until "
+                         "it fires")
+
+
+def usage_warning(cwd=None):
+    """None unless a guard is registered while the SubagentStop usage hook is
+    in no settings file, or is there in the wrong shape: no tokens are then
+    recorded and every cost number stays undefined. `ppl init` warns."""
+    return _hook_warning(cwd, "SubagentStop", USAGE_MARKER, "usage",
+                         "The tokens are not recorded, so the cost metrics stay undefined")
+
+
+def _hook_scripts(command, marker):
+    """The absolute script paths named `marker` among a hook command's words."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return []
+    return [word for word in words[1:]
+            if os.path.basename(word) == marker and os.path.isabs(word)]
+
+
+def hook_location_warning(cwd=None):
+    """None unless a registered guard, dispatch or usage command runs a script
+    outside the hooks directory of this install (`paths.root()/hooks`): a
+    clone or an older install left behind keeps running its own copy of the
+    hook. `ppl init` and `ppl doctor` warn. It never raises: `ppl init` prints
+    it after the run exists. A path that does not resolve (a symlink loop
+    raises RuntimeError on Python 3.11 and 3.12) is skipped."""
+    from . import paths
+    try:
+        hooks_dir = (paths.root() / "hooks").resolve()
+    except (PplError, OSError, RuntimeError):
+        return None
+    found = []
+    for path, doc in _readable_settings(cwd):
+        for event, marker in HOOK_EVENTS:
+            for hook in _hooks_of(doc, event, marker):
+                for script in _hook_scripts(str(hook.get("command", "")), marker):
+                    try:
+                        inside = Path(script).resolve().is_relative_to(hooks_dir)
+                    except (OSError, RuntimeError):
+                        continue
+                    if not inside:
+                        found.append("%s: the %s hook runs %s" % (path, marker, script))
+    if not found:
+        return None
+    return ("%s, not the hook of this install under %s. Run `ppl setup claude` to point the "
+            "entries at this install's hooks." % ("; ".join(found), hooks_dir))
 
 
 def matcher_covers(matcher, tool_name):
@@ -438,17 +496,20 @@ def _location(path):
     never pass to the hook - empty for a complete registration, None whenever
     the state is not a confirmed yes, since there is no matcher to judge.
 
-    "dispatch_hook" is "registered" or "missing" for the SubagentStart
-    dispatch hook, and "hook_shape" is "ok" or the problems of the guard and
-    dispatch entries (`_shape_problems`), None when the file holds neither.
-    Both are None for a file that could not be read.
+    "dispatch_hook" and "usage_hook" are "registered" or "missing" for the
+    SubagentStart dispatch hook and the SubagentStop usage hook, and
+    "hook_shape" is "ok" or the problems of the guard, dispatch and usage
+    entries (`_shape_problems`), None when the file holds none of them. All
+    three are None for a file that could not be read.
     """
-    def result(state, detail=None, uncovered=None, dispatch_hook=None, hook_shape=None):
+    def result(state, detail=None, uncovered=None, dispatch_hook=None, usage_hook=None,
+               hook_shape=None):
         return {"state": state, "detail": detail, "uncovered": uncovered,
-                "dispatch_hook": dispatch_hook, "hook_shape": hook_shape}
+                "dispatch_hook": dispatch_hook, "usage_hook": usage_hook,
+                "hook_shape": hook_shape}
 
     if not path.exists():
-        return result("no", dispatch_hook="missing")
+        return result("no", dispatch_hook="missing", usage_hook="missing")
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -459,9 +520,11 @@ def _location(path):
         return result("unknown", "%s is not valid JSON: %s" % (path, exc))
     if not isinstance(doc, dict):
         return result("unknown", "%s does not contain a JSON object" % path)
-    hooks = {"dispatch_hook": "missing", "hook_shape": None}
+    hooks = {"dispatch_hook": "missing", "usage_hook": "missing", "hook_shape": None}
     if _hooks_of(doc, "SubagentStart", DISPATCH_MARKER):
         hooks["dispatch_hook"] = "registered"
+    if _hooks_of(doc, "SubagentStop", USAGE_MARKER):
+        hooks["usage_hook"] = "registered"
     if any(_hooks_of(doc, event, marker) for event, marker in HOOK_EVENTS):
         hooks["hook_shape"] = "; ".join(text for _, text in _shape_problems(doc, path)) or "ok"
     matchers = _guard_matchers(doc)

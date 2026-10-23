@@ -7,7 +7,7 @@ import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
                harness, metrics, models, paths, recover, refusals, review, routing, run, schema,
-               setup, status, store, trackers, verdict, watchdog)
+               setup, status, store, trackers, trail, usage, verdict, watchdog)
 from .errors import PplError, role_output
 
 
@@ -168,7 +168,8 @@ def cmd_init(args):
                      risk=args.risk, model_check=model_check, harness=harness_record)
     store.write_json(paths.run_dir(args.task_id) / "harness.json", snapshot)
     # after the run exists, so a refusal's stderr stays the one JSON line it is
-    for warning in (doctor.dispatch_warning(), doctor.matcher_warning()):
+    for warning in (doctor.dispatch_warning(), doctor.usage_warning(),
+                    doctor.hook_location_warning(), doctor.matcher_warning()):
         if warning:
             sys.stderr.write("warning: %s\n" % warning)
     print(status.card(state["task_id"]))
@@ -183,7 +184,8 @@ def cmd_doctor(args):
     problem = doctor.matcher_problem(result)
     if problem:
         print(problem)
-    for line in (doctor.guard_shape_problem(), doctor.dispatch_warning()):
+    for line in (doctor.guard_shape_problem(), doctor.dispatch_warning(), doctor.usage_warning(),
+                 doctor.hook_location_warning()):
         if line:
             print(line)
     warning = doctor.matcher_warning()
@@ -220,10 +222,62 @@ def check_dispatch_budget(task_id):
                        % (budgets["dispatch_used"], budgets["dispatch_hard"]))
 
 
+def check_usd_budget(task_id):
+    """The dollar cap is checked after the fact, like the dispatch cap.
+
+    What a dispatch cost is known only once its role stops and the usage hook
+    logs it, so the dispatch that crosses usd_max has already run and this
+    refusal at stage boundaries and lifecycle transitions is the whole of the
+    enforcement [R-BUDGET-USD-CAP]. Spent is usd_used, the manual `ppl budget
+    spend usd`, plus the usage priced with the table ppl init froze into the
+    run, so a price edited in config.toml mid-run moves nothing. A usd_used that
+    is not a finite number >= 0 counts as spent. A recorded model without a
+    frozen price leaves the cap uncomputable, and a cap that cannot be computed
+    is refused, never read as zero [R-BUDGET-USD-UNPRICED]. A zero cap is no cap,
+    and ppl park stays available.
+    """
+    budgets = run.load(task_id)["budgets"]
+    cap = budgets["usd_max"]
+    if not cap > 0:
+        return
+    if not usage.valid_usd_used(budgets.get("usd_used")):
+        raise PplError("BUDGET_EXHAUSTED",
+                       "usd_used is %r, not a finite number >= 0, so the dollar budget counts as "
+                       "spent. Park the task with a handoff (ppl park) instead of continuing."
+                       % (budgets.get("usd_used"),))
+    spent, unpriced = usage.spent_usd(task_id)
+    if unpriced:
+        raise PplError("OWNER_DECISION",
+                       "the dollar cap (usd_max %s) cannot be checked: the prices this run took "
+                       "from config.toml at ppl init have none for the recorded model%s %s. Add "
+                       "%s with input, cache_write, cache_read and output in USD per million "
+                       "tokens to %s and start a new run, or park this one (ppl park)."
+                       % (cap, "s" if len(unpriced) > 1 else "", ", ".join(unpriced),
+                          ", ".join('[prices."%s"]' % model for model in unpriced),
+                          paths.config_file()))
+    if spent >= cap:
+        raise PplError("BUDGET_EXHAUSTED",
+                       "dollar budget is spent: %s of %s USD (usd_used plus the priced usage). "
+                       "Park the task with a handoff (ppl park) instead of continuing."
+                       % (round(spent, 4), cap))
+
+
+def refresh_orchestrator_usage(task_id):
+    """Counts the orchestrator's turns since the last role stopped. A refresh never
+    changes the command's outcome: a failure is a warning."""
+    try:
+        usage.refresh_orchestrator(task_id)
+    except Exception as exc:
+        sys.stderr.write("warning: orchestrator usage not refreshed: %s\n" % exc)
+
+
 def cmd_stage(args):
     task_id = resolve_task(args)
     control.enforce(task_id)
+    # before the cap check, so the orchestrator's turns up to this call count
+    refresh_orchestrator_usage(task_id)
     check_dispatch_budget(task_id)
+    check_usd_budget(task_id)
     state = run.stage_enter(task_id, args.stage)
     print("stage: %s" % state["stage"])
     # The value to capture and pass back as --generation on every write below
@@ -561,7 +615,10 @@ def _closure_hint(stage):
 def cmd_transition(args):
     task_id = resolve_task(args)
     control.enforce(task_id)
+    # before the cap check, so the orchestrator's turns up to this call count
+    refresh_orchestrator_usage(task_id)
     check_dispatch_budget(task_id)
+    check_usd_budget(task_id)
     state = run.load(task_id)
     # Checked BEFORE the done gate below (N4, cycle 2 wave B): a lifecycle
     # transition that is illegal on its face - still "planned", say - used
@@ -600,6 +657,7 @@ def cmd_transition(args):
 
 def cmd_park(args):
     task_id = resolve_task(args)
+    refresh_orchestrator_usage(task_id)
     run.park(task_id, args.blocker, args.safe_next, args.unsafe_to_repeat or [])
     print(status.card(task_id))
     return 0
@@ -958,7 +1016,20 @@ def cmd_destroy(args):
 
 
 def cmd_metrics(args):
-    print(json.dumps(metrics.compute(), indent=2, sort_keys=True))
+    report = metrics.compute()
+    if args.text:
+        print(metrics.text(report))
+    else:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_trail(args):
+    # A reference run is normally archived by the time it is published, so the
+    # task is named explicitly and nothing here touches the run.
+    redact = tuple(part.strip() for part in args.redact.split(",") if part.strip())
+    manifest = trail.export(args.task, args.out, redact=redact)
+    print("trail written to %s: %d files" % (args.out, len(manifest["files"]) + 1))
     return 0
 
 
@@ -1006,7 +1077,7 @@ COMMANDS = {
     "apply-patch": cmd_apply_patch, "destroy": cmd_destroy,
     "mr": cmd_mr, "merge": cmd_merge, "review": cmd_review, "doctor": cmd_doctor,
     "watchdog": cmd_watchdog, "metrics": cmd_metrics, "label": cmd_label,
-    "setup": cmd_setup, "tracker": cmd_tracker,
+    "setup": cmd_setup, "tracker": cmd_tracker, "trail": cmd_trail,
 }
 
 
@@ -1286,6 +1357,14 @@ def build_parser():
     p.add_argument("--task")
 
     p = sub.add_parser("metrics")
+    p.add_argument("--text", action="store_true")
+
+    p = sub.add_parser("trail")
+    p.add_argument("action", choices=["export"])
+    p.add_argument("--task", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--redact", default="paths,people",
+                   help="comma list of %s, paths always included" % ", ".join(trail.REDACTIONS))
 
     p = sub.add_parser("label")
     p.add_argument("--sha", required=True)

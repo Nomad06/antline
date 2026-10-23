@@ -796,12 +796,13 @@ class TestHookShape(unittest.TestCase):
                 p.unlink()
         self.addCleanup(lambda: self.global_path.exists() and self.global_path.unlink())
 
-    def write(self, guard=None, dispatch=None, path=None):
-        """Settings with setup's own entries, each hook dict updated by `guard`
-        and `dispatch` (None drops that entry, a None value drops that key)."""
+    def write(self, guard=None, dispatch=None, path=None, usage=None):
+        """Settings with setup's own entries, each hook dict updated by `guard`,
+        `dispatch` and `usage` (None drops that entry, a None value drops that key)."""
         entries = setup.hook_entries(fixtures.SOURCE)
         doc = {"hooks": {}}
-        for event, change in (("PreToolUse", guard), ("SubagentStart", dispatch)):
+        for event, change in (("PreToolUse", guard), ("SubagentStart", dispatch),
+                              ("SubagentStop", usage)):
             if change is None:
                 continue
             entry = json.loads(json.dumps(entries[event]))
@@ -822,11 +823,14 @@ class TestHookShape(unittest.TestCase):
         return str(script)
 
     def test_the_entries_setup_writes_are_well_shaped_and_register_the_dispatch_hook(self):
-        self.write(guard={}, dispatch={})
+        self.write(guard={}, dispatch={}, usage={})
         local = self.local()
-        self.assertEqual((local["hook_shape"], local["dispatch_hook"]), ("ok", "registered"))
+        self.assertEqual((local["hook_shape"], local["dispatch_hook"], local["usage_hook"]),
+                         ("ok", "registered", "registered"))
         self.assertIsNone(doctor.guard_shape_problem(cwd=self.local_dir))
         self.assertIsNone(doctor.dispatch_warning(cwd=self.local_dir))
+        self.assertIsNone(doctor.usage_warning(cwd=self.local_dir))
+        self.assertIsNone(doctor.hook_location_warning(cwd=self.local_dir))
 
     def test_a_guard_entry_without_type_command_is_reported(self):
         self.write(guard={"type": "prompt"}, dispatch={})
@@ -921,7 +925,78 @@ class TestHookShape(unittest.TestCase):
         self.local_path.write_text("not json", encoding="utf-8")
         local = self.local()
         self.assertIsNone(local["dispatch_hook"])
+        self.assertIsNone(local["usage_hook"])
         self.assertIsNone(local["hook_shape"])
+
+    def test_the_report_says_whether_the_usage_hook_is_registered(self):
+        self.write(guard={}, dispatch={})
+        self.write(guard={}, dispatch={}, usage={}, path=self.global_path)
+        with mock.patch.object(doctor, "hook_runs", return_value={"ok": True, "problem": None}):
+            result = doctor.report(cwd=self.local_dir)
+        self.assertEqual(result["local"]["usage_hook"], "missing")
+        self.assertEqual(result["global"]["usage_hook"], "registered")
+        self.global_path.unlink()
+        self.assertEqual(self.local()["usage_hook"], "missing")
+        self.assertEqual(doctor.inspect(cwd=self.local_dir)["global"]["usage_hook"], "missing")
+
+    def test_usage_warning_when_the_guard_is_registered_without_it(self):
+        self.write(guard={}, dispatch={})
+        warning = doctor.usage_warning(cwd=self.local_dir)
+        self.assertIn("ppl_usage.py", warning)
+        self.assertIn("SubagentStop", warning)
+        self.assertIn("tokens are not recorded", warning)
+        self.assertIn("ppl setup claude", warning)
+        self.write(guard={}, dispatch={}, usage={"type": "prompt"})
+        self.assertIn("type 'prompt'", doctor.usage_warning(cwd=self.local_dir))
+        self.assertIn("ppl_usage.py", self.local()["hook_shape"])
+        self.assertIsNone(doctor.guard_shape_problem(cwd=self.local_dir))
+        self.write(guard={}, dispatch={}, usage={})
+        self.assertIsNone(doctor.usage_warning(cwd=self.local_dir))
+        # no guard registered at all: nothing to warn about
+        self.write(dispatch={})
+        self.assertIsNone(doctor.usage_warning(cwd=self.local_dir))
+
+    def test_a_hook_outside_the_assets_hooks_directory_is_warned(self):
+        elsewhere = Path(tmphome.mkdtemp(prefix="pplold-")) / "elsewhere" / "ppl_guard.py"
+        elsewhere.parent.mkdir(parents=True)
+        elsewhere.write_text("", encoding="utf-8")
+        self.write(guard={"command": "%s %s" % (shlex.quote(sys.executable),
+                                                shlex.quote(str(elsewhere)))},
+                   dispatch={}, usage={})
+        self.assertEqual(self.local()["hook_shape"], "ok")
+        warning = doctor.hook_location_warning(cwd=self.local_dir)
+        self.assertIn(str(elsewhere), warning)
+        # the warning names the resolved directory, a symlinked checkout included
+        self.assertIn(str((paths.root() / "hooks").resolve()), warning)
+        self.assertIn("ppl setup claude", warning)
+        self.assertNotIn("ppl_dispatch.py", warning)
+
+    def test_a_symlink_loop_in_a_hook_path_does_not_crash_the_warning(self):
+        # ppl init prints this warning after the run exists, so it must not raise
+        loop = Path(tmphome.mkdtemp(prefix="pplloop-")) / "loop"
+        os.symlink(str(loop), str(loop))
+        script = loop / "ppl_guard.py"
+        self.write(guard={"command": "%s %s" % (shlex.quote(sys.executable),
+                                                shlex.quote(str(script)))},
+                   dispatch={}, usage={})
+        real = Path.resolve
+        # Python 3.11 and 3.12 raise RuntimeError on a loop, a strict resolve OSError
+        for error in (RuntimeError("Symlink loop from %r" % str(loop)),
+                      OSError(62, "Too many levels of symbolic links")):
+            def resolve(path, *args, **kwargs):
+                if str(path).startswith(str(loop)):
+                    raise error
+                return real(path, *args, **kwargs)
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(Path, "resolve", resolve):
+                self.assertIsNone(doctor.hook_location_warning(cwd=self.local_dir))
+
+    def test_hooks_from_this_install_raise_no_location_warning(self):
+        self.assertEqual(fixtures.SOURCE.resolve(), paths.root().resolve())
+        self.write(guard={}, dispatch={}, usage={})
+        self.assertIsNone(doctor.hook_location_warning(cwd=self.local_dir))
+        self.write(guard={}, dispatch={}, usage={}, path=self.global_path)
+        self.assertIsNone(doctor.hook_location_warning(cwd=self.local_dir))
 
     def test_the_report_carries_both_per_settings_file(self):
         self.write(guard={"timeout": None})

@@ -20,7 +20,7 @@ jobs:
           PPL_REQUIRE_PACKAGING: "1"
       - run: python tools/cage_check.py
   python-floor:
-    # The interpreter floor under Python 3.9: both hooks deny a role and exit 0,
+    # The interpreter floor under Python 3.9: every hook denies a role and exits 0,
     # bin/ppl names the version it found. The suite itself needs 3.11 and does
     # not run here.
     runs-on: ubuntu-latest
@@ -29,13 +29,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.9"
-      - name: both hooks deny a role and exit 0
+      - name: every hook denies a role and exits 0
         shell: bash
         run: |
           export PPL_HOME="$RUNNER_TEMP/ppl-home"
           python3 --version
           payload='{"hook_event_name": "PreToolUse", "agent_type": "ppl-code-worker", "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": "/tmp"}'
-          for hook in ppl_guard ppl_dispatch; do
+          for hook in ppl_guard ppl_dispatch ppl_usage; do
             status=0
             out=$(printf '%s' "$payload" | python3 "ppl/_assets/hooks/$hook.py" 2> stderr.txt) || status=$?
             echo "$hook exit=$status stdout=$out"

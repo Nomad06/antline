@@ -2,9 +2,9 @@
 
 `ppl metrics` reads every run's `log.jsonl` and `verdicts/` (the latest verdict per
 SHA, and for the incomplete check rate every recorded one) and computes
-seven numbers, sliced by `producer`: defect escape rate, outcompeted rate,
-false FAIL rate, incomplete check rate, cost per accepted task, time to
-acceptance, human minutes.
+nine numbers, sliced by `producer`: defect escape rate, outcompeted rate,
+false FAIL rate, incomplete check rate, cost per accepted task, tokens per
+accepted task, tokens by role, time to acceptance, human minutes.
 
 The one rule this module exists to hold: **a metric with no data prints that
 it is undefined, and never prints zero.** Zero is a claim ("we shipped no
@@ -13,8 +13,7 @@ it did. Every metric below returns an envelope - `{"value": ..., "defined":
 bool, "reason": ...}` - and `ppl metrics` prints that whole envelope as JSON,
 so `value` is `null` and `reason` explains why whenever `defined` is false,
 never a bare 0. This is deliberately the same shape whether the absence is
-temporary (no labels filed yet) or structural (this pipeline has no data
-source for it at all):
+temporary (no labels filed yet) or a gap (nothing records it at all):
 
 - **defect escape rate**, **outcompeted rate** and **false FAIL rate** need a
   human label (`ppl label`) on top of a verdict - undefined until at least one exists
@@ -22,14 +21,16 @@ source for it at all):
 - **incomplete check rate** and **time to acceptance** need at least one
   verdict, respectively one completed (`done`) task - undefined on an empty
   fleet or a fleet with nothing accepted yet [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED].
-- **cost per accepted task** is undefined always, for a structural reason
-  that will not change until routing does: v1 routing is entirely
-  subscription-billed Claude subagents (DESIGN 10.2), so `usd_used` is a
-  manual budget cap that nothing in the dispatch path spends automatically
-  and there is no dollar meter anywhere to read from - there is nothing to
-  build here yet, not merely nothing built [R-METRIC-STRUCTURALLY-UNDEFINED].
-- **human minutes** is undefined always too, but for the other reason: unlike
-  cost, this one IS buildable (a `--minutes` flag on `ppl label`, or a
+- **cost per accepted task** is the mean dollars over the accepted (`done`)
+  runs that have recorded usage, priced with the live `[prices]` table of
+  `config.toml`. It is undefined while any model in those runs has no price,
+  and the reason names the model [R-METRIC-COST-NEEDS-PRICES].
+- **tokens per accepted task** and **tokens by role** are the mean of the four
+  token counts per accepted run, and the counts summed per role over those
+  runs. They need no prices but do need the usage hook (`ppl setup claude`),
+  so they are undefined until an accepted run has recorded usage
+  [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED].
+- **human minutes** is undefined always: it IS buildable (a `--minutes` flag on `ppl label`, or a
   dedicated command) and simply has not been - no event or field anywhere in
   this pipeline records a human's working minutes today (a human's *wait*
   time is inferable from timestamps - effort minutes are a different claim
@@ -57,10 +58,12 @@ could act on. Labels are therefore kept at `PPL_HOME/labels/<task_id>/<sha>.json
 untouched by `ppl destroy`, and every scan below walks both `runs/*` and
 `runs/_archive/*` rather than only the former.
 """
+import json
+import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-from . import paths, schema, store
+from . import boundary, config, paths, schema, store, usage
 from .errors import PplError
 
 # "outcompeted": the accepted candidate was correct but a parallel
@@ -316,15 +319,125 @@ def _incomplete_check_rate(records):
     return _metric(incomplete / len(records))
 
 
-def _cost_per_accepted_task():
-    """Always undefined: v1 has no billed adapter, so no task carries a real
-    dollar figure to average [R-METRIC-STRUCTURALLY-UNDEFINED]. See DESIGN
-    10.3 - cost tracking becomes meaningful only once an API-billed provider
-    exists."""
-    return _metric(None, "v1 routing is entirely subscription-billed (DESIGN 10.2) - "
-                         "usd_used is a manual budget cap nothing in the dispatch path "
-                         "spends automatically, so no accepted task carries a real "
-                         "dollar figure to average")
+def _counts_of(models):
+    out = dict.fromkeys(usage.COUNTS, 0)
+    for counts in models.values():
+        for name in usage.COUNTS:
+            value = counts.get(name, 0)
+            if usage.is_count(value):
+                out[name] += value
+    return out
+
+
+def _run_models(roles):
+    """Every role's models of one run summed, empty when the run recorded no usage."""
+    models = {}
+    for role_models in roles.values():
+        models = usage.add(models, role_models)
+    return models
+
+
+def _usage_metrics(run_records, producer_key):
+    """cost, tokens per task and tokens by role over the accepted runs that
+    have recorded usage. Undefined is never zero: each reason says what is
+    missing [R-METRIC-COST-NEEDS-PRICES] [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED]."""
+    accepted = _accepted_runs(run_records, producer_key)
+    if not accepted:
+        why = "no task in scope has reached done yet"
+        if producer_key is not None and _accepted_runs(run_records, None):
+            why = "no done task was accepted by producer %s yet" % producer_key
+        return tuple(_metric(None, why) for _ in range(3))
+    usages = [u for u in (usage.run_usage(directory) for _, directory in accepted)
+              if _run_models(u)]
+    if not usages:
+        why = ("%d accepted task(s) but no usage recorded - install the usage hook "
+               "with `ppl setup claude`" % len(accepted))
+        return tuple(_metric(None, why) for _ in range(3))
+    try:
+        table, table_error = usage.prices(), None
+    except PplError as exc:
+        table, table_error = None, exc.message
+    by_role = {}
+    per_task = []
+    costs = []
+    unpriced = set()
+    for roles in usages:
+        task_total = dict.fromkeys(usage.COUNTS, 0)
+        models = {}
+        for role, role_models in roles.items():
+            counts = _counts_of(role_models)
+            bucket = by_role.setdefault(role, dict.fromkeys(usage.COUNTS, 0))
+            for name in usage.COUNTS:
+                bucket[name] += counts[name]
+                task_total[name] += counts[name]
+            models = usage.add(models, role_models)
+        per_task.append(task_total)
+        if table is not None:
+            usd, missing = usage.dollars(models, table)
+            unpriced.update(missing)
+            costs.append(usd)
+    tokens = _metric({name: sum(t[name] for t in per_task) / len(per_task)
+                      for name in usage.COUNTS})
+    roles_metric = _metric(by_role)
+    if table is None:
+        cost = _metric(None, table_error)
+    elif unpriced:
+        cost = _metric(None, "no price for model(s) %s - add a [prices.\"<model>\"] table "
+                             "to config.toml" % ", ".join(sorted(unpriced)))
+    else:
+        cost = _metric(sum(costs) / len(costs))
+    return cost, tokens, roles_metric
+
+
+def preset_costs(limit=10):
+    """{preset: {"runs", "tokens_mean", "usd_mean", "unpriced", "usd_reason"}} for every
+    routing preset, over the `limit` newest done runs with recorded usage, newest `init`
+    first, priced with the live config.toml prices. A preset with no such run has runs 0
+    and nulls. usd_mean is None when a model is unpriced (unpriced names them) or the
+    price table is invalid (usd_reason carries the message). A run that cannot be read
+    is skipped and a run without a stamp counts for no preset."""
+    from . import presets
+    found = {}
+    for task_id, directory in _accepted_runs(_run_records(), None):
+        try:
+            state = store.read_json(directory / "state.json")
+            preset = state.get("routing_preset") if isinstance(state, dict) else None
+            roles = usage.run_usage(directory)
+            started = _event(store.read_log_at(directory), "init")
+        except (PplError, OSError, ValueError, AttributeError, TypeError):
+            continue
+        if isinstance(preset, str) and _run_models(roles):
+            found.setdefault(preset, []).append(
+                (((started or {}).get("at") or ""), task_id, roles))
+    try:
+        table, table_error = usage.prices(), None
+    except (PplError, OSError) as exc:
+        table, table_error = None, getattr(exc, "message", None) or str(exc)
+    out = {}
+    for preset in list(presets.PRESETS) + sorted(set(found) - set(presets.PRESETS)):
+        runs = sorted(found.get(preset, []), key=lambda r: r[:2], reverse=True)[:limit]
+        entry = {"runs": len(runs), "tokens_mean": None, "usd_mean": None,
+                 "unpriced": [], "usd_reason": None}
+        out[preset] = entry
+        if not runs:
+            continue
+        tokens, costs, unpriced = [], [], set()
+        for _, _, roles in runs:
+            models = _run_models(roles)
+            tokens.append(usage.total(_counts_of(models)))
+            if table is not None:
+                usd, missing = usage.dollars(models, table)
+                costs.append(usd)
+                unpriced.update(missing)
+        entry["tokens_mean"] = sum(tokens) / len(tokens)
+        entry["unpriced"] = sorted(unpriced)
+        if table is None:
+            entry["usd_reason"] = table_error
+        elif unpriced:
+            entry["usd_reason"] = "no price for %s" % ", ".join(sorted(unpriced))
+        else:
+            entry["usd_mean"] = sum(costs) / len(costs)
+    return out
 
 
 def _human_minutes():
@@ -343,11 +456,32 @@ def _parse(ts):
 
 def _event(events, name, **match):
     for ev in events:
-        if ev.get("event") != name:
+        # a log line can be valid JSON and still no object
+        if not isinstance(ev, dict) or ev.get("event") != name:
             continue
         if all(ev.get(key) == value for key, value in match.items()):
             return ev
     return None
+
+
+def _accepted_runs(run_records, producer_key):
+    """(task_id, directory) of every run that reached `done`, narrowed to
+    those whose accepted PASS verdict (the one at the run's `candidate_sha`)
+    has `producer_key`, or all of them when it is None. Reads state.json
+    directly so an archived run counts too [R-METRIC-SCANS-ARCHIVE]."""
+    accepted = []
+    for task_id, directory in run_records:
+        events = store.read_log_at(directory)
+        if not _event(events, "init") or not _event(events, "lifecycle", to="done"):
+            continue
+        if producer_key is not None:
+            state = store.read_json(directory / "state.json")
+            sha = (state or {}).get("candidate_sha")
+            doc = store.read_json(directory / "verdicts" / ("%s.json" % sha)) if sha else None
+            if _producer_key((doc or {}).get("producer")) != producer_key:
+                continue
+        accepted.append((task_id, directory))
+    return accepted
 
 
 def _time_to_acceptance(run_records, producer_key):
@@ -369,21 +503,16 @@ def _time_to_acceptance(run_records, producer_key):
       for a producer slice, and says how many tasks did finish, so the
       reader is not left thinking the fleet is idle when it is not.
     """
+    done = _accepted_runs(run_records, None)
+    accepted_here = _accepted_runs(run_records, producer_key)
     all_durations = []
     matching_durations = []
-    for task_id, directory in run_records:
+    for task_id, directory in done:
         events = store.read_log_at(directory)
-        init_ev = _event(events, "init")
-        done_ev = _event(events, "lifecycle", to="done")
-        if not init_ev or not done_ev:
-            continue
-        state = store.read_json(directory / "state.json")
-        sha = (state or {}).get("candidate_sha")
-        doc = store.read_json(directory / "verdicts" / ("%s.json" % sha)) if sha else None
-        accepted_producer = _producer_key((doc or {}).get("producer"))
-        duration = (_parse(done_ev["at"]) - _parse(init_ev["at"])).total_seconds()
+        duration = (_parse(_event(events, "lifecycle", to="done")["at"])
+                    - _parse(_event(events, "init")["at"])).total_seconds()
         all_durations.append(duration)
-        if producer_key is None or accepted_producer == producer_key:
+        if producer_key is None or (task_id, directory) in accepted_here:
             matching_durations.append(duration)
     if not all_durations:
         return _metric(None, "no task in scope has reached done yet")
@@ -395,25 +524,211 @@ def _time_to_acceptance(run_records, producer_key):
 
 
 def _entry(records, run_records, producer_key, history=None):
+    cost, tokens, by_role = _usage_metrics(run_records, producer_key)
     return {
         "defect_escape_rate": _defect_escape_rate(records),
         "outcompeted_rate": _outcompeted_rate(records),
         "false_fail_rate": _false_fail_rate(records),
         "incomplete_check_rate": _incomplete_check_rate(records if history is None else history),
-        "cost_per_accepted_task": _cost_per_accepted_task(),
+        "cost_per_accepted_task": cost,
+        "tokens_per_accepted_task": tokens,
+        "tokens_by_role": by_role,
         "time_to_acceptance_seconds": _time_to_acceptance(run_records, producer_key),
         "human_minutes": _human_minutes(),
     }
 
 
-def compute():
+WARNINGS = {
+    "VERIFIER_NEVER_REWORKS": (1.0, 10),
+    "HIGH_INCOMPLETE_CHECKS": (0.25, 8),
+    "RETRY_BUDGET_OFTEN_SPENT": (0.30, 6),
+    "PARKS_ONE_CAUSE": (0.50, 6),
+    "LABELS_MISSING": (0.50, 6),
+    "FORMAT_REFUSALS": (2.0, 5),
+    "CAGE_HITS_HIGH": (5.0, 5),
+}
+LABEL_AGE_DAYS = 14
+
+
+def thresholds():
+    """WARNINGS with the `[metrics]` table of config.toml laid over it: the keys
+    `<code in lower case>_threshold` and `<code in lower case>_min_sample`. An unknown
+    key, a non-number or a negative number is SCHEMA_INVALID naming the known keys."""
+    known = {}
+    for code in WARNINGS:
+        known[code.lower() + "_threshold"] = (code, 0)
+        known[code.lower() + "_min_sample"] = (code, 1)
+    table = config.section("metrics")
+    unknown = sorted(key for key in table if key not in known)
+    if unknown:
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: [metrics] has the unknown key %s, the known keys are %s"
+                       % (paths.config_file(), ", ".join(unknown), ", ".join(sorted(known))))
+    out = {code: list(pair) for code, pair in WARNINGS.items()}
+    for key, value in table.items():
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise PplError("SCHEMA_INVALID",
+                           "config.toml at %s: metrics.%s must be a number >= 0"
+                           % (paths.config_file(), key))
+        code, slot = known[key]
+        out[code][slot] = value
+    return {code: tuple(pair) for code, pair in out.items()}
+
+
+def _warning(limits, code, producer, n, value, message):
+    """The warning when `n` reaches the minimum sample and `value` the threshold, else None."""
+    threshold, min_sample = limits[code]
+    if n < min_sample or value < threshold:
+        return None
+    return {"code": code, "producer": producer, "message": message,
+            "evidence": {"n": n, "value": value, "threshold": threshold}}
+
+
+def _pass_dates(run_records):
+    """{(task_id, sha): newest `verdict` log event time with verdict PASS}. A PASS with
+    no such event has no date and counts for no age."""
+    dates = {}
+    for task_id, directory in run_records:
+        try:
+            events = store.read_log_at(directory)
+        except OSError:
+            continue
+        for ev in events:
+            if not isinstance(ev, dict) or ev.get("event") != "verdict" \
+                    or ev.get("verdict") != "PASS":
+                continue
+            try:
+                at = _parse(ev["at"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            key = (task_id, ev.get("sha"))
+            if key not in dates or at > dates[key]:
+                dates[key] = at
+    return dates
+
+
+def _verdict_warnings(limits, producer, records, history, dates, now):
+    out = []
+    if history:
+        n = len(history)
+        passed = sum(1 for r in history if r["verdict"] == "PASS") / n
+        incomplete = sum(1 for r in history if r["verdict"] in schema.INCOMPLETE_OUTCOMES) / n
+        out.append(_warning(
+            limits, "VERIFIER_NEVER_REWORKS", producer, n, passed,
+            "%d of %d verdicts are PASS, a verifier that passes everything may be "
+            "rubber-stamping" % (round(passed * n), n)))
+        out.append(_warning(
+            limits, "HIGH_INCOMPLETE_CHECKS", producer, n, incomplete,
+            "%d of %d verdicts did not finish (%s), verification is failing to finish, "
+            "not judging" % (round(incomplete * n), n, "/".join(schema.INCOMPLETE_OUTCOMES))))
+    cutoff = now - timedelta(days=LABEL_AGE_DAYS)
+    old = [r for r in records if r["verdict"] == "PASS"
+           and (r["task_id"], r["sha"]) in dates and dates[(r["task_id"], r["sha"])] <= cutoff]
+    if old:
+        missing = sum(1 for r in old if not r["actual"]) / len(old)
+        out.append(_warning(
+            limits, "LABELS_MISSING", producer, len(old), missing,
+            "%d of %d PASS verdicts older than %d days have no label, defect escape stays "
+            "undefined until someone runs `ppl label`"
+            % (round(missing * len(old)), len(old), LABEL_AGE_DAYS)))
+    return out
+
+
+def _top(counter):
+    return sorted(counter.items(), key=lambda item: (-item[1], item[0]))[0]
+
+
+def _run_warnings(limits, run_records):
+    """The four run-based warnings, over the whole fleet. A run whose files cannot be
+    read, or whose state.json carries no usable budgets, is skipped for what needs them."""
+    runs = budgeted = spent = 0
+    parks, refusals, denials = {}, {}, {}
+    for _, directory in run_records:
+        try:
+            events = store.read_log_at(directory)
+            state = store.read_json(directory / "state.json")
+        except (PplError, OSError):
+            continue
+        runs += 1
+        budgets = state.get("budgets") if isinstance(state, dict) else None
+        used = budgets.get("retry_used") if isinstance(budgets, dict) else None
+        cap = budgets.get("retry_max") if isinstance(budgets, dict) else None
+        if usage.is_count(used) and usage.is_count(cap):
+            budgeted += 1
+            spent += 1 if used >= cap else 0
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            kind = ev.get("event")
+            if kind == "park" and isinstance(ev.get("blocker"), str):
+                parks[ev["blocker"]] = parks.get(ev["blocker"], 0) + 1
+            elif kind == "refusal" and ev.get("counted") is True:
+                role = ev.get("role") if isinstance(ev.get("role"), str) else "no role"
+                refusals[role] = refusals.get(role, 0) + 1
+            elif kind == "deny" and ev.get("role") in boundary.ROLE_RULES:
+                denials[ev["role"]] = denials.get(ev["role"], 0) + 1
+    out = []
+    if budgeted:
+        share = spent / budgeted
+        out.append(_warning(
+            limits, "RETRY_BUDGET_OFTEN_SPENT", None, budgeted, share,
+            "%d of %d runs used their whole retry budget, rework is not converging, "
+            "check the brief and the gates" % (spent, budgeted)))
+    if parks:
+        total = sum(parks.values())
+        blocker, count = _top(parks)
+        out.append(_warning(
+            limits, "PARKS_ONE_CAUSE", None, total, count / total,
+            "%d of %d parks are %s, a recurring setup problem" % (count, total, blocker)))
+    if runs:
+        total = sum(refusals.values())
+        if refusals:
+            role = _top(refusals)[0]
+            out.append(_warning(
+                limits, "FORMAT_REFUSALS", None, runs, total / runs,
+                "%d counted refusals over %d runs, most from %s, see the refusal log"
+                % (total, runs, role)))
+        for role in sorted(denials):
+            out.append(_warning(
+                limits, "CAGE_HITS_HIGH", None, runs, denials[role] / runs,
+                "%s was denied %d times over %d runs, its prompt or notes may contradict "
+                "its boundary" % (role, denials[role], runs)))
+    return out
+
+
+def compute(now=None):
+    limits = thresholds()
+    now = now or datetime.now(timezone.utc)
     run_records = _run_records()
     records = _gather(run_records)
     history = _gather(run_records, history=True)
+    dates = _pass_dates(run_records)
     producers = sorted(set(r["producer"] for r in history))
     result = {"overall": _entry(records, run_records, None, history), "producers": {}}
+    warnings = _verdict_warnings(limits, None, records, history, dates, now)
     for key in producers:
         sliced = [r for r in records if r["producer"] == key]
         sliced_history = [r for r in history if r["producer"] == key]
         result["producers"][key] = _entry(sliced, run_records, key, sliced_history)
+        warnings.extend(_verdict_warnings(limits, key, sliced, sliced_history, dates, now))
+    warnings.extend(_run_warnings(limits, run_records))
+    result["warnings"] = sorted((w for w in warnings if w),
+                                key=lambda w: (w["code"], w["producer"] or ""))
     return result
+
+
+def text(report):
+    """One line per overall metric, then one line per warning."""
+    lines = []
+    for name, entry in report["overall"].items():
+        if entry["defined"]:
+            lines.append("%s: %s" % (name, json.dumps(entry["value"], sort_keys=True)))
+        else:
+            lines.append("%s: undefined (%s)" % (name, entry["reason"]))
+    for warning in report["warnings"]:
+        who = " %s" % warning["producer"] if warning["producer"] else ""
+        lines.append("WARNING %s%s: %s" % (warning["code"], who, warning["message"]))
+    return "\n".join(lines)

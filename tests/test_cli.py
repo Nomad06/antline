@@ -1286,6 +1286,248 @@ class TestDispatchHardCap(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
 
+class TestUsdCap(unittest.TestCase):
+    """The dollar cap is checked after the fact, like the dispatch cap: once
+    usd_used plus the priced usage the run recorded reaches usd_max, ppl stage
+    enter and ppl transition refuse and ppl park stays available. Model "m"
+    costs 1 USD per million output tokens."""
+
+    def start(self, task_id, usd_max):
+        target = paths.config_file()
+        before = target.read_text(encoding="utf-8")
+        self.addCleanup(target.write_text, before, encoding="utf-8")
+        config.update("budgets", {"usd_max": usd_max})
+        config.update("prices", {"m": {"input": 0, "cache_write": 0, "cache_read": 0,
+                                       "output": 1.0}})
+        code, _, err = call("init", task_id, "--tracker-url", "u", "--repo", make_repo(),
+                            "--harness", "example-maven")
+        self.assertEqual(code, 0, err)
+
+    def record_usage(self, task_id, output, model="m"):
+        from ppl import store
+        store.append_log(task_id, {"event": "usage", "role": "ppl-code-worker",
+                                   "agent_id": "agent-%s" % model, "models": {model: {
+                                       "input": 0, "cache_write": 0, "cache_read": 0,
+                                       "output": output, "thinking": 0}}})
+
+    def set_usd_used(self, task_id, amount):
+        from ppl import run
+        state = run.load(task_id)
+        state["budgets"]["usd_used"] = amount
+        run.save(state)
+
+    def orchestrator_events(self, task_id):
+        from ppl import store
+        return [e for e in store.read_log(task_id)
+                if e.get("event") == "usage" and e.get("role") == "orchestrator"]
+
+    def noted_transcript(self, task_id, output=7):
+        """A main session transcript noted in usage.json, then one new line in it."""
+        from ppl import usage
+        transcript = Path(tmphome.mkdtemp(prefix="pplmain-")) / "session.jsonl"
+        transcript.write_text("", encoding="utf-8")
+        usage.note_orchestrator(task_id, str(transcript), "s1")
+        line = {"type": "assistant", "isSidechain": False, "timestamp": "2099-01-01T00:00:00Z",
+                "message": {"id": "o1", "model": "m",
+                            "usage": {"input_tokens": 1, "output_tokens": output}}}
+        with open(transcript, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(line) + "\n")
+
+    def test_stage_enter_is_refused_once_priced_usage_reaches_the_cap(self):
+        # rule: R-BUDGET-USD-CAP
+        self.start("DEMO-680", 1.0)
+        self.record_usage("DEMO-680", 1200000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-680")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "BUDGET_EXHAUSTED")
+        self.assertIn("ppl park", error["message"])
+
+    def test_transition_is_refused_once_priced_usage_reaches_the_cap(self):
+        # rule: R-BUDGET-USD-CAP
+        self.start("DEMO-681", 1.0)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-681")
+        self.assertEqual(code, 0, err)
+        self.record_usage("DEMO-681", 1000000)
+        code, _, err = call("transition", "done", "--task", "DEMO-681")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "BUDGET_EXHAUSTED")
+
+    def test_manual_usd_used_counts_toward_the_cap(self):
+        # rule: R-BUDGET-USD-CAP
+        self.start("DEMO-682", 1.0)
+        self.set_usd_used("DEMO-682", 0.6)
+        self.record_usage("DEMO-682", 500000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-682")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "BUDGET_EXHAUSTED")
+
+    def test_stage_enter_still_works_below_the_cap(self):
+        self.start("DEMO-683", 1.0)
+        self.set_usd_used("DEMO-683", 0.3)
+        self.record_usage("DEMO-683", 600000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-683")
+        self.assertEqual(code, 0, err)
+
+    def test_park_still_works_past_the_cap(self):
+        from ppl import run
+        self.start("DEMO-684", 1.0)
+        self.record_usage("DEMO-684", 5000000)
+        code, _, err = call("park", "--blocker", "BUDGET_EXHAUSTED", "--safe-next",
+                            "raise usd_max in a new run", "--task", "DEMO-684")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-684")["stage"], "parking")
+
+    def test_a_zero_cap_never_refuses(self):
+        self.start("DEMO-685", 0)
+        self.record_usage("DEMO-685", 1000000000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-685")
+        self.assertEqual(code, 0, err)
+
+    def test_an_unpriced_model_with_a_cap_refuses_owner_decision_naming_it(self):
+        # rule: R-BUDGET-USD-UNPRICED
+        self.start("DEMO-686", 1.0)
+        self.record_usage("DEMO-686", 10, model="claude-unpriced-9")
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-686")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        for part in ('[prices."claude-unpriced-9"]', "config.toml", "new run", "ppl park"):
+            self.assertIn(part, error["message"])
+        # a price added to config.toml mid-run prices the next run, not this one
+        config.update("prices", {"claude-unpriced-9": {"input": 0, "cache_write": 0,
+                                                       "cache_read": 0, "output": 0}})
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-686")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "OWNER_DECISION")
+
+    def test_a_capped_run_without_a_price_snapshot_fails_closed(self):
+        # rule: R-BUDGET-USD-UNPRICED
+        from ppl import run
+        self.start("DEMO-679", 1.0)
+        state = run.load("DEMO-679")
+        # a run from before ppl init froze prices: config.toml prices m, the run does not
+        del state["budgets"]["prices"]
+        run.save(state)
+        self.record_usage("DEMO-679", 10)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-679")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        self.assertIn('[prices."m"]', error["message"])
+
+    def test_a_price_lowered_after_init_does_not_lower_the_spend(self):
+        # rule: R-BUDGET-USD-CAP
+        self.start("DEMO-691", 1.0)
+        self.record_usage("DEMO-691", 1200000)
+        config.update("prices", {"m": {"input": 0, "cache_write": 0, "cache_read": 0,
+                                       "output": 0}})
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-691")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "BUDGET_EXHAUSTED")
+
+    def test_a_corrupt_usd_used_counts_as_exhausted(self):
+        # rule: R-BUDGET-USD-CAP
+        for number, bad in enumerate((float("nan"), -1.0, "x")):
+            with self.subTest(usd_used=bad):
+                task_id = "DEMO-%d" % (692 + number)
+                self.start(task_id, 1.0)
+                self.set_usd_used(task_id, bad)
+                code, _, err = call("stage", "enter", "baseline", "--task", task_id)
+                self.assertEqual(code, 2, err)
+                error = json.loads(err)
+                self.assertEqual(error["error_code"], "BUDGET_EXHAUSTED")
+                self.assertIn("usd_used is %r" % bad, error["message"])
+
+    def test_stage_enter_refreshes_the_orchestrator_usage(self):
+        self.start("DEMO-695", 0)
+        self.noted_transcript("DEMO-695")
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-695")
+        self.assertEqual(code, 0, err)
+        events = self.orchestrator_events("DEMO-695")
+        self.assertEqual(len(events), 1, events)
+        self.assertEqual(events[0]["models"]["m"]["output"], 7)
+
+    def test_stage_enter_counts_orchestrator_usage_refreshed_in_the_same_call(self):
+        # rule: R-BUDGET-USD-CAP
+        # no role usage: only the orchestrator line this call refreshes reaches the cap
+        self.start("DEMO-696", 1.0)
+        self.noted_transcript("DEMO-696", output=1000000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-696")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "BUDGET_EXHAUSTED")
+        self.assertEqual(len(self.orchestrator_events("DEMO-696")), 1)
+
+    def test_transition_counts_orchestrator_usage_refreshed_in_the_same_call(self):
+        # rule: R-BUDGET-USD-CAP
+        self.start("DEMO-697", 1.0)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-697")
+        self.assertEqual(code, 0, err)
+        self.noted_transcript("DEMO-697", output=1000000)
+        code, _, err = call("transition", "done", "--task", "DEMO-697")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "BUDGET_EXHAUSTED")
+        self.assertEqual(len(self.orchestrator_events("DEMO-697")), 1)
+
+    def test_transition_refuses_owner_decision_for_an_unpriced_model_with_a_cap(self):
+        # rule: R-BUDGET-USD-UNPRICED
+        self.start("DEMO-698", 1.0)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-698")
+        self.assertEqual(code, 0, err)
+        self.record_usage("DEMO-698", 10, model="claude-unpriced-9")
+        code, _, err = call("transition", "done", "--task", "DEMO-698")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        self.assertIn('[prices."claude-unpriced-9"]', error["message"])
+
+    def test_a_halted_run_records_no_orchestrator_usage_before_its_refusal(self):
+        from ppl import control
+        self.start("DEMO-699", 0)
+        self.noted_transcript("DEMO-699")
+        control.set_command("DEMO-699", "pause")
+        for command in (("stage", "enter", "baseline"), ("transition", "done")):
+            with self.subTest(command=command):
+                code, _, err = call(*command, "--task", "DEMO-699")
+                self.assertEqual(code, 2, err)
+                self.assertEqual(self.orchestrator_events("DEMO-699"), [])
+
+    def test_an_unpriced_model_without_a_cap_does_not_refuse(self):
+        self.start("DEMO-687", 0)
+        self.record_usage("DEMO-687", 10, model="claude-unpriced-9")
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-687")
+        self.assertEqual(code, 0, err)
+
+    def test_transition_refreshes_the_orchestrator_usage(self):
+        self.start("DEMO-688", 0)
+        self.noted_transcript("DEMO-688")
+        self.assertEqual(self.orchestrator_events("DEMO-688"), [])
+        call("transition", "done", "--task", "DEMO-688")
+        events = self.orchestrator_events("DEMO-688")
+        self.assertEqual(len(events), 1, events)
+        self.assertEqual(events[0]["agent_id"], "orchestrator:s1")
+        self.assertEqual(events[0]["models"]["m"]["output"], 7)
+
+    def test_park_refreshes_the_orchestrator_usage(self):
+        self.start("DEMO-689", 0)
+        self.noted_transcript("DEMO-689")
+        code, _, err = call("park", "--blocker", "OWNER_DECISION", "--safe-next", "ask",
+                            "--task", "DEMO-689")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.orchestrator_events("DEMO-689")), 1)
+
+    def test_a_failing_refresh_is_a_warning_and_park_still_parks(self):
+        from ppl import run, usage
+        self.start("DEMO-690", 0)
+        with mock.patch.object(usage, "refresh_orchestrator", side_effect=RuntimeError("boom")):
+            code, _, err = call("park", "--blocker", "OWNER_DECISION", "--safe-next", "ask",
+                                "--task", "DEMO-690")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning:", err)
+        self.assertIn("boom", err)
+        self.assertEqual(run.load("DEMO-690")["stage"], "parking")
+
+
 class TestEvidenceShaDefault(unittest.TestCase):
     def test_sha_defaults_to_git_head_when_not_given(self):
         repo = make_repo()
@@ -2243,7 +2485,7 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def write(self, guard_changes, dispatch=True):
+    def write(self, guard_changes, dispatch=True, usage=True):
         entries = setup.hook_entries(fixtures.SOURCE)
         guard = entries["PreToolUse"]
         guard["hooks"][0].update(guard_changes)
@@ -2251,6 +2493,8 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         doc = {"hooks": {"PreToolUse": [guard]}}
         if dispatch:
             doc["hooks"]["SubagentStart"] = [entries["SubagentStart"]]
+        if usage:
+            doc["hooks"]["SubagentStop"] = [entries["SubagentStop"]]
         path = Path(self.local_dir) / ".claude" / "settings.local.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(doc), encoding="utf-8")
@@ -2304,7 +2548,26 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         self.assertIn("warning: ", err)
         self.assertIn("ppl_dispatch.py", err)
 
-    def test_init_is_quiet_when_both_entries_are_the_ones_setup_writes(self):
+    def test_init_warns_when_the_usage_hook_is_missing(self):
+        self.write({}, usage=False)
+        code, _, err = self.init("DEMO-9926")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: ", err)
+        self.assertIn("ppl_usage.py", err)
+        self.assertIn("tokens are not recorded", err)
+
+    def test_init_warns_when_a_hook_runs_from_outside_this_install(self):
+        old = Path(tmphome.mkdtemp(prefix="pplold-")) / "hooks" / "ppl_guard.py"
+        old.parent.mkdir(parents=True)
+        old.write_text("", encoding="utf-8")
+        self.write({"command": "%s %s" % (shlex.quote(sys.executable), shlex.quote(str(old)))})
+        code, _, err = self.init("DEMO-9927")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: ", err)
+        self.assertIn(str(old), err)
+        self.assertIn("ppl setup claude", err)
+
+    def test_init_is_quiet_when_the_entries_are_the_ones_setup_writes(self):
         self.write({})
         code, _, err = self.init("DEMO-9923")
         self.assertEqual((code, err), (0, ""))
@@ -2541,6 +2804,44 @@ class TestMetricsCommandPrintsUndefinedNotZero(unittest.TestCase):
                 self.assertFalse(entry["defined"], "%s reported defined on no data" % metric)
                 self.assertIsNone(entry["value"], "%s printed a value instead of null" % metric)
                 self.assertTrue(entry["reason"])
+
+
+class TestMetricsWarnings(unittest.TestCase):
+    def setUp(self):
+        self._real_ppl_home = os.environ["PPL_HOME"]
+        os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+        paths.config_file().write_text(
+            "[metrics]\nverifier_never_reworks_min_sample = 1\n", encoding="utf-8")
+        from ppl import run as run_module, store
+        run_module.init("WARN-1", "u", "/tmp/repo")
+        store.write_json(paths.run_dir("WARN-1") / "verdicts" / "a1.json", {
+            "task_id": "WARN-1", "candidate_sha": "a1", "verdict": "PASS",
+            "producer": {"provider": "p", "model": "m"}})
+
+    def tearDown(self):
+        os.environ["PPL_HOME"] = self._real_ppl_home
+
+    def test_a_warning_never_changes_the_exit_code(self):
+        # rule: R-METRIC-WARNINGS-NEVER-REFUSE
+        for args in (("metrics",), ("metrics", "--text")):
+            with self.subTest(args=args):
+                code, out, err = call(*args)
+                self.assertEqual(code, 0, err)
+                self.assertIn("VERIFIER_NEVER_REWORKS", out)
+
+    def test_json_carries_the_warnings_at_the_top_level(self):
+        code, out, err = call("metrics")
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)
+        self.assertEqual([w["code"] for w in report["warnings"]],
+                         ["VERIFIER_NEVER_REWORKS", "VERIFIER_NEVER_REWORKS"])
+
+    def test_text_output_prints_undefined_with_its_reason_and_the_warning_line(self):
+        code, out, err = call("metrics", "--text")
+        self.assertEqual(code, 0, err)
+        self.assertRaises(ValueError, json.loads, out)
+        self.assertRegex(out, r"(?m)^cost_per_accepted_task: undefined \(.+\)$")
+        self.assertRegex(out, r"(?m)^WARNING VERIFIER_NEVER_REWORKS: .+$")
 
 
 class TestLabelAndMetricsSurviveDestroyThroughTheRealCli(unittest.TestCase):
@@ -3687,6 +3988,30 @@ class TestRefusalRetryCap(unittest.TestCase):
                                           "--from", "ppl-briefer")
         self.assertEqual(code, 0, err)
         self.assertEqual(err.strip(), "warning: refusal count not updated: disk full")
+
+
+class TestTrailExport(unittest.TestCase):
+    def test_trail_export_writes_the_trail_and_prints_its_size(self):
+        from ppl import run as run_module
+        run_module.init("DEMO-9801", "https://example.test/issues/9801", make_repo())
+        out = Path(tmphome.mkdtemp(prefix="ppltrail-")) / "trail"
+        code, stdout, err = call("trail", "export", "--task", "DEMO-9801", "--out", str(out))
+        self.assertEqual(code, 0, err)
+        written = [p for p in out.rglob("*") if p.is_file()]
+        self.assertEqual(stdout, "trail written to %s: %d files\n" % (out, len(written)))
+        manifest = json.loads((out / "MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(manifest["files"]), len(written) - 1)
+        self.assertIs(manifest["redactions"]["urls"], False)
+
+    def test_trail_export_without_paths_redaction_is_refused(self):
+        from ppl import run as run_module
+        run_module.init("DEMO-9802", "https://example.test/issues/9802", make_repo())
+        out = Path(tmphome.mkdtemp(prefix="ppltrail-")) / "trail"
+        code, _, err = call("trail", "export", "--task", "DEMO-9802", "--out", str(out),
+                            "--redact", "people,urls")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err.strip().splitlines()[-1])["error_code"], "SCHEMA_INVALID")
+        self.assertFalse(out.exists())
 
 
 class TestVersion(unittest.TestCase):

@@ -299,15 +299,15 @@ residual = "the unroled orchestrator session keeps the quadratic tail of the lex
 
 [[rule]]
 id = "R-GUARD-PYTHON-FLOOR"
-statement = "Under a Python older than 3.11 both hooks read the payload before importing anything from ppl, deny a call whose agent_type starts with ppl- (a superset of boundary.ROLE_RULES, so the cage fails closed), write one stderr line naming the version found and the 3.11 floor, and exit 0; an unroled session is allowed."
+statement = "Under a Python older than 3.11 every hook reads the payload before importing anything from ppl, deny a call whose agent_type starts with ppl- (a superset of boundary.ROLE_RULES, so the cage fails closed), write one stderr line naming the version found and the 3.11 floor, and exit 0; an unroled session is allowed."
 scope = "every hook call, under an interpreter older than 3.11"
-event = "PreToolUse and SubagentStart, before the ppl imports"
+event = "PreToolUse, SubagentStart and SubagentStop, before the ppl imports"
 enforcement = "blocking"
-hook_or_check = "ppl/_assets/hooks/ppl_python_floor.py:refuse_old_python, ppl/_assets/hooks/ppl_guard.py, ppl/_assets/hooks/ppl_dispatch.py"
+hook_or_check = "ppl/_assets/hooks/ppl_python_floor.py:refuse_old_python, ppl/_assets/hooks/ppl_guard.py, ppl/_assets/hooks/ppl_dispatch.py, ppl/_assets/hooks/ppl_usage.py"
 deny_test = "tests/test_guard.py::TestPythonFloor::test_an_old_python_denies_a_role_and_names_the_version, tests/test_guard.py::TestPythonFloor::test_every_generated_role_and_any_other_ppl_name_is_denied, tests/test_guard.py::TestPythonFloor::test_the_hooks_deny_a_role_under_the_system_python, tests/test_guard.py::TestPythonFloor::test_the_hooks_start_with_their_own_directory_off_sys_path"
 allow_test = "tests/test_guard.py::TestPythonFloor::test_a_supported_python_passes_through_untouched, tests/test_guard.py::TestPythonFloor::test_an_old_python_lets_an_unroled_session_through_with_the_message, tests/test_guard.py::TestPythonFloor::test_an_unroled_session_under_the_system_python_is_allowed"
 owner = "guard-hook"
-residual = "the floor runs only if the file parses and the floor module imports: each hook appends its own directory to sys.path, so PYTHONSAFEPATH, -P and -I do not hide it, and both hooks and ppl/_assets/hooks/ppl_python_floor.py are kept to Python 3.9 syntax, and the subprocess test proves that on a machine with an older python3 at /usr/bin/python3 and skips elsewhere, and CI's python-floor job runs both hooks and bin/ppl under Python 3.9 on every push. SubagentStart cannot block (R-DISPATCH-HOOK-CANNOT-BLOCK), so the dispatch hook's deny is informational. ppl setup claude pins the interpreter that ran it, so the floor fires for a hand-written or stale entry; ppl doctor's hook_runs runs each registered guard command once and reports false when it does not exit 0 cleanly"
+residual = "the floor runs only if the file parses and the floor module imports: each hook appends its own directory to sys.path, so PYTHONSAFEPATH, -P and -I do not hide it, and every hook and ppl/_assets/hooks/ppl_python_floor.py are kept to Python 3.9 syntax, and the subprocess test proves that on a machine with an older python3 at /usr/bin/python3 and skips elsewhere, and CI's python-floor job runs every hook and bin/ppl under Python 3.9 on every push. SubagentStart cannot block (R-DISPATCH-HOOK-CANNOT-BLOCK), so the dispatch hook's deny is informational, and the usage hook's deny is no SubagentStop decision either (R-USAGE-HOOK-CANNOT-BLOCK). ppl setup claude pins the interpreter that ran it, so the floor fires for a hand-written or stale entry; ppl doctor's hook_runs runs each registered guard command once and reports false when it does not exit 0 cleanly"
 
 [[rule]]
 id = "R-RUNS-WRITE-PROTECTION"
@@ -1143,12 +1143,12 @@ residual = "same counter provenance as R-BUDGET-DISPATCH-CAP: nothing increments
 
 [[rule]]
 id = "R-BUDGET-USD"
-statement = "Spending past usd_max is refused, and a zero cap means unlimited only because subscription providers have no dollar meter."
+statement = "Spending past usd_max is refused, and a zero cap means unlimited. A spend of any budget whose amount is not a finite number above zero is refused SCHEMA_INVALID, so a NaN cannot poison a counter and a negative amount cannot rewind one."
 scope = "ppl CLI"
-event = "ppl budget spend usd"
+event = "ppl budget spend usd, ppl budget spend dispatch, ppl budget spend retry"
 enforcement = "blocking"
 hook_or_check = "ppl/budget.py:spend, ppl/budget.py:KINDS"
-deny_test = "tests/test_verdict.py::TestBudget::test_usd_cap_enforced_when_set"
+deny_test = "tests/test_verdict.py::TestBudget::test_usd_cap_enforced_when_set, tests/test_verdict.py::TestBudget::test_spend_refuses_a_non_finite_or_non_positive_amount"
 allow_test = "tests/test_verdict.py::TestBudget::test_usd_unlimited_when_max_is_zero"
 owner = "ppl"
 residual = ""
@@ -1163,7 +1163,31 @@ hook_or_check = "none"
 deny_test = ""
 allow_test = ""
 owner = "orchestrator"
-residual = "GAP: routing.dispatch never calls budget.spend, so the ordering is a convention the caller has to keep; with the only v1 provider being a subagent there is no dollar meter to spend against yet"
+residual = "GAP: before a dispatch, the cost of that dispatch is unknown, so the cap is checked after it at the next stage boundary (R-BUDGET-USD-CAP)"
+
+[[rule]]
+id = "R-BUDGET-USD-CAP"
+statement = "With usd_max above zero, ppl stage enter and ppl transition refuse with BUDGET_EXHAUSTED once usd_used plus the usage the run recorded, priced with the prices in force at ppl init, reaches usd_max, and a usd_used that is not a finite number >= 0 counts as spent. ppl park stays available. ppl init copies usd_max from config.toml [budgets], refusing an unknown key there, and the [prices] table into the run, and zero means no cap."
+scope = "ppl CLI"
+event = "ppl init, ppl stage enter, ppl transition"
+enforcement = "blocking"
+hook_or_check = "ppl/cli.py:check_usd_budget, ppl/usage.py:spent_usd, ppl/config.py:budgets_usd_max"
+deny_test = "tests/test_cli.py::TestUsdCap::test_stage_enter_is_refused_once_priced_usage_reaches_the_cap, tests/test_cli.py::TestUsdCap::test_transition_is_refused_once_priced_usage_reaches_the_cap, tests/test_cli.py::TestUsdCap::test_manual_usd_used_counts_toward_the_cap, tests/test_cli.py::TestUsdCap::test_a_price_lowered_after_init_does_not_lower_the_spend, tests/test_cli.py::TestUsdCap::test_a_corrupt_usd_used_counts_as_exhausted, tests/test_run.py::TestUsdMaxFromConfig::test_an_unknown_budgets_key_is_refused_naming_usd_max, tests/test_cli.py::TestUsdCap::test_stage_enter_counts_orchestrator_usage_refreshed_in_the_same_call, tests/test_cli.py::TestUsdCap::test_transition_counts_orchestrator_usage_refreshed_in_the_same_call"
+allow_test = "tests/test_cli.py::TestUsdCap::test_stage_enter_still_works_below_the_cap, tests/test_cli.py::TestUsdCap::test_park_still_works_past_the_cap, tests/test_cli.py::TestUsdCap::test_a_zero_cap_never_refuses, tests/test_run.py::TestUsdMaxFromConfig::test_init_copies_usd_max_from_config, tests/test_run.py::TestUsdMaxFromConfig::test_init_snapshots_the_price_table"
+owner = "ppl"
+residual = "after the fact: what a dispatch cost is known only once its role stops, so the dispatch that crosses usd_max has already run and the refusal comes at the next stage enter or transition. Only recorded usage counts: with the usage hook not registered, after a transcript error event, and for orchestrator turns since the last refresh (ppl stage enter and ppl transition refresh after the control check and before their budget checks, ppl park before parking, best effort) the spend is under-counted, see R-USAGE-HOOK-CANNOT-BLOCK. A price changed in config.toml applies from the next run, and the frozen prices are as safe as state.json, see R-RUNS-WRITE-PROTECTION"
+
+[[rule]]
+id = "R-BUDGET-USD-UNPRICED"
+statement = "With usd_max above zero, ppl stage enter and ppl transition refuse with OWNER_DECISION while a model the run recorded usage for has no price in the [prices] table ppl init copied into the run, naming the model and its [prices.\"<id>\"] table to add to config.toml before a new run: a cap that cannot be computed is not a cap. ppl park stays available."
+scope = "ppl CLI"
+event = "ppl stage enter, ppl transition"
+enforcement = "blocking"
+hook_or_check = "ppl/cli.py:check_usd_budget"
+deny_test = "tests/test_cli.py::TestUsdCap::test_an_unpriced_model_with_a_cap_refuses_owner_decision_naming_it, tests/test_cli.py::TestUsdCap::test_transition_refuses_owner_decision_for_an_unpriced_model_with_a_cap, tests/test_cli.py::TestUsdCap::test_a_capped_run_without_a_price_snapshot_fails_closed"
+allow_test = "tests/test_cli.py::TestUsdCap::test_an_unpriced_model_without_a_cap_does_not_refuse"
+owner = "ppl"
+residual = "model ids match exactly: a price for claude-x does not price claude-x[1m], which stays named as unpriced until it has its own table. A price added to config.toml mid-run prices the next run only"
 
 [[rule]]
 id = "R-REFUSAL-RETRY-CAP"
@@ -1192,6 +1216,18 @@ deny_test = ""
 allow_test = "tests/test_dispatch_hook.py::TestDispatchHook::test_start_increments_the_dispatch_counter, tests/test_dispatch_hook.py::TestDispatchHook::test_start_denies_past_the_hard_cap, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_dispatched_from_beside_the_worktree_is_counted"
 owner = "harness"
 residual = "the deny document the hook returns past the cap is never acted on by the harness; R-BUDGET-DISPATCH-CAP is the only real enforcement of that budget"
+
+[[rule]]
+id = "R-USAGE-HOOK-CANNOT-BLOCK"
+statement = "SubagentStop is informational: the usage hook records token usage and never refuses or delays a dispatch."
+scope = "global"
+event = "SubagentStop"
+enforcement = "soft"
+hook_or_check = "ppl/_assets/hooks/ppl_usage.py:on_stop"
+deny_test = ""
+allow_test = "tests/test_usage_hook.py::TestUsageHook::test_a_role_stop_logs_its_cumulative_usage, tests/test_usage_hook.py::TestUsageHook::test_a_non_role_agent_is_ignored, tests/test_usage_hook.py::TestUsageHook::test_no_active_run_is_ignored, tests/test_usage_hook.py::TestUsageHook::test_a_missing_transcript_logs_an_error_event_and_prints_nothing, tests/test_usage_hook.py::TestUsageHook::test_an_oversized_transcript_logs_transcript_too_large, tests/test_usage_hook.py::TestUsageHook::test_the_orchestrator_counts_only_lines_since_the_run_began, tests/test_usage_hook.py::TestUsageHook::test_a_second_stop_adds_only_new_orchestrator_lines, tests/test_usage_hook.py::TestUsageHook::test_the_same_agent_stopping_twice_is_counted_at_its_newest_totals, tests/test_usage_hook.py::TestUsageHook::test_the_hook_never_prints_a_decision, tests/test_usage_hook.py::TestUsageHook::test_the_floor_names_subagentstop, tests/test_usage_hook.py::TestUsageHook::test_a_fifo_log_is_skipped_without_blocking, tests/test_usage_hook.py::TestUsageHook::test_a_role_read_past_the_deadline_logs_deadline_and_keeps_the_orchestrator_offset"
+owner = "harness"
+residual = "the transcript is Claude Code's own format, not a contract: a drift in it is a schema_unknown error event and that role's tokens go unrecorded. Orchestrator turns after the last refresh are not counted, so whatever the orchestrator does after the last role stops (the merge watch) is missing. The hook records only when it is registered: ppl doctor reports usage_hook per settings file and ppl init warns when a guard is registered without it. A role read past the 2 s budget is a deadline error event while the orchestrator's offset stays where its read stopped, a log.jsonl or usage.json there but not a regular file (a FIFO) records nothing rather than block, an orchestrator transcript that vanished is named on stderr and never logged, and two roles stopping at once may both log the same orchestrator totals, which aggregation counts once since it keeps the newest event per agent_id"
 
 [[rule]]
 id = "R-EGRESS-SOURCE-UPLOAD"
@@ -1766,16 +1802,16 @@ owner = "ppl"
 residual = "incomplete check rate has one cause only, not two - the records passed in are already producer-scoped by compute(), so an empty list unambiguously means nothing of this producer's has a verdict yet. Corrected here: an earlier version of this residual claimed time to acceptance only sees undestroyed runs, which stopped being true once R-METRIC-SCANS-ARCHIVE landed"
 
 [[rule]]
-id = "R-METRIC-STRUCTURALLY-UNDEFINED"
-statement = "ppl metrics reports cost per accepted task as undefined always, never as zero: v1 has no billed adapter, so the metric has nothing to compute even in principle."
+id = "R-METRIC-COST-NEEDS-PRICES"
+statement = "ppl metrics reports cost per accepted task as undefined, never as zero, while any model in the accepted runs has no price in config.toml, and names the model."
 scope = "ppl CLI"
 event = "ppl metrics"
 enforcement = "blocking"
-hook_or_check = "ppl/metrics.py:_cost_per_accepted_task"
-deny_test = "tests/test_metrics.py::TestStructurallyUndefinedMetrics::test_cost_per_accepted_task_is_always_undefined"
-allow_test = ""
+hook_or_check = "ppl/metrics.py:_usage_metrics"
+deny_test = "tests/test_metrics.py::TestCostPerAcceptedTask::test_cost_is_undefined_naming_an_unpriced_model, tests/test_metrics.py::TestCostPerAcceptedTask::test_cost_is_never_zero_for_no_data"
+allow_test = "tests/test_metrics.py::TestCostPerAcceptedTask::test_cost_is_the_mean_dollars_of_accepted_runs_with_usage"
 owner = "ppl"
-residual = "a PROPERTY, not a GAP: becomes computable the day an API-billed adapter exists (DESIGN 10.3), but until then there is no dollar meter anywhere for this to read, not merely one nobody wrote"
+residual = "prices are the user's own and match a model id exactly: a model id with a suffix the user did not price is listed as unpriced, so the cost stays undefined until the exact id is added. Reporting reads the live config.toml prices, only the dollar cap reads the run's frozen snapshot"
 
 [[rule]]
 id = "R-METRIC-HUMAN-MINUTES-UNDEFINED"
@@ -1787,7 +1823,7 @@ hook_or_check = "ppl/metrics.py:_human_minutes"
 deny_test = "tests/test_metrics.py::TestStructurallyUndefinedMetrics::test_human_minutes_is_always_undefined"
 allow_test = ""
 owner = "ppl"
-residual = "unlike R-METRIC-STRUCTURALLY-UNDEFINED this is a real GAP, not a property: a data source (a --minutes flag on ppl label, or a dedicated command) is buildable today and simply has not been built"
+residual = "this is a real GAP: a data source (a --minutes flag on ppl label, or a dedicated command) is buildable today and simply has not been built"
 
 [[rule]]
 id = "R-LABEL-NO-LIVENESS-REFRESH"
@@ -2123,15 +2159,15 @@ residual = "a cap bounds one rendered file, not the skill as a whole: a harness 
 
 [[rule]]
 id = "R-DOCTOR-HOOK-SHAPE"
-statement = "ppl doctor reports per settings file dispatch_hook (registered or missing) and hook_shape (ok or the problems of the guard and dispatch entries, read from the file and never run: type not command, no timeout, an interpreter that is not an absolute path to an executable file, a hook script that is not an absolute path to a file). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook is not, or has such a problem. The interpreter version is asked only where ppl doctor already runs the guard (hook_runs), which reports one older than Python 3.11."
+statement = "ppl doctor reports per settings file dispatch_hook and usage_hook (registered or missing) and hook_shape (ok or the problems of the guard, dispatch and usage entries, read from the file and never run: type not command, no timeout, an interpreter that is not an absolute path to an executable file, a hook script that is not an absolute path to a file). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook or the SubagentStop usage hook is not, or has such a problem, and when a registered hook script is not under this install's assets hooks directory. The interpreter version is asked only where ppl doctor already runs the guard (hook_runs), which reports one older than Python 3.11."
 scope = "hook registration"
 event = "ppl doctor, ppl init"
 enforcement = "blocking"
-hook_or_check = "ppl/doctor.py:_shape_problems, ppl/doctor.py:_command_problems, ppl/doctor.py:guard_shape_problem, ppl/doctor.py:dispatch_warning, ppl/doctor.py:hook_runs, ppl/cli.py:cmd_init"
+hook_or_check = "ppl/doctor.py:_shape_problems, ppl/doctor.py:_command_problems, ppl/doctor.py:guard_shape_problem, ppl/doctor.py:dispatch_warning, ppl/doctor.py:usage_warning, ppl/doctor.py:hook_location_warning, ppl/doctor.py:hook_runs, ppl/cli.py:cmd_init"
 deny_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_entry_that_is_not_a_command, tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_entry_without_a_timeout, tests/test_cli.py::TestInitChecksTheHookShape::test_init_refuses_a_guard_whose_interpreter_is_not_an_absolute_path, tests/test_doctor.py::TestHookRuns::test_a_guard_under_an_interpreter_older_than_the_floor_reports_false"
-allow_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_is_quiet_when_both_entries_are_the_ones_setup_writes, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_the_dispatch_hook_is_missing, tests/test_cli.py::TestInitChecksTheHookShape::test_init_never_runs_the_interpreter_it_judges, tests/test_doctor.py::TestHookShape::test_the_entries_setup_writes_are_well_shaped_and_register_the_dispatch_hook, tests/test_doctor.py::TestHookShape::test_inspecting_the_settings_never_runs_the_interpreter_they_name, tests/test_doctor.py::TestHookRuns::test_a_guard_run_through_env_asks_the_interpreter_env_names"
+allow_test = "tests/test_cli.py::TestInitChecksTheHookShape::test_init_is_quiet_when_the_entries_are_the_ones_setup_writes, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_the_dispatch_hook_is_missing, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_the_usage_hook_is_missing, tests/test_cli.py::TestInitChecksTheHookShape::test_init_warns_when_a_hook_runs_from_outside_this_install, tests/test_doctor.py::TestHookShape::test_usage_warning_when_the_guard_is_registered_without_it, tests/test_doctor.py::TestHookShape::test_a_hook_outside_the_assets_hooks_directory_is_warned, tests/test_cli.py::TestInitChecksTheHookShape::test_init_never_runs_the_interpreter_it_judges, tests/test_doctor.py::TestHookShape::test_the_entries_setup_writes_are_well_shaped_and_register_the_dispatch_hook, tests/test_doctor.py::TestHookShape::test_inspecting_the_settings_never_runs_the_interpreter_they_name, tests/test_doctor.py::TestHookRuns::test_a_guard_run_through_env_asks_the_interpreter_env_names"
 owner = "ppl"
-residual = "judged on the two settings files ppl reads, at doctor and init time. ppl init never runs the interpreter, so an absolute interpreter older than 3.11 passes init (the guard then denies every role call, R-GUARD-PYTHON-FLOOR) and only ppl doctor reports it, for the guard and not the dispatch hook. A missing dispatch hook is only a warning: SubagentStart cannot block anyway (R-DISPATCH-HOOK-CANNOT-BLOCK)"
+residual = "judged on the two settings files ppl reads, at doctor and init time. ppl init never runs the interpreter, so an absolute interpreter older than 3.11 passes init (the guard then denies every role call, R-GUARD-PYTHON-FLOOR) and only ppl doctor reports it, for the guard and not the dispatch or the usage hook. A missing or malformed dispatch or usage hook is only a warning: the SubagentStart hook cannot block anyway and the SubagentStop hook decides nothing (R-DISPATCH-HOOK-CANNOT-BLOCK, R-USAGE-HOOK-CANNOT-BLOCK). The location warning skips a script path that does not resolve (a symlink loop)"
 
 [[rule]]
 id = "R-SKILL-GENERATED"
@@ -2168,3 +2204,27 @@ deny_test = ""
 allow_test = "tests/test_guard_denial_log.py::TestGuardDenialLog::test_a_denied_code_worker_edit_logs_one_deny_event, tests/test_guard_denial_log.py::TestGuardDenialLog::test_an_allowed_call_writes_nothing, tests/test_guard_denial_log.py::TestGuardDenialLogFromMain::test_main_writes_and_flushes_the_decision_before_it_logs_the_deny, tests/test_guard_denial_log.py::TestGuardDenialLogFromMain::test_the_internal_error_branch_logs_the_role_deny_it_returns, tests/test_guard_denial_log.py::TestGuardDenialLogFromMain::test_a_log_that_is_not_a_regular_file_is_skipped_not_opened, tests/test_guard_denial_log.py::TestGuardDenialLogFromMain::test_the_doctor_probe_is_denied_under_a_paused_run_but_not_logged_against_it, tests/test_guard_denial_log.py::TestGuardDenialLogFromMain::test_only_the_whole_probe_shape_skips_the_log"
 owner = "ppl"
 residual = "PROPERTY: an append that fails is lost, the decision stands. A deny with no active run is not logged, and the guard is antline's own code, not a role, so this write does not weaken R-RUNS-BASH-WRITE"
+
+[[rule]]
+id = "R-METRIC-WARNINGS-NEVER-REFUSE"
+statement = "ppl metrics reports warnings and never refuses or changes its exit code over them."
+scope = "ppl CLI"
+event = "ppl metrics"
+enforcement = "soft"
+hook_or_check = "ppl/metrics.py:compute"
+deny_test = ""
+allow_test = "tests/test_cli.py::TestMetricsWarnings::test_a_warning_never_changes_the_exit_code"
+owner = "ppl"
+residual = "the thresholds are starting points, recalibrate them after the first 20 real runs. A warning needs its minimum sample, so a small fleet prints none. A malformed [metrics] table in config.toml (an unknown key, a non-number or a negative number) refuses the whole command with SCHEMA_INVALID, numbers included, since the thresholds are read before anything is computed"
+
+[[rule]]
+id = "R-TRAIL-REDACTED"
+statement = "ppl trail export refuses to write a trail in which, after redaction, any file still holds the run's repo path, the home directory, PPL_HOME, a redacted person or a token pattern, or a value that ends in the start of one of those paths or of a token (a target the guard cut at 200 characters)."
+scope = "ppl CLI"
+event = "ppl trail export"
+enforcement = "blocking"
+hook_or_check = "ppl/trail.py:export, ppl/trail.py:leaks"
+deny_test = "tests/test_trail.py::TestTrailExport::test_a_leak_refuses_and_leaves_no_output, tests/test_trail.py::TestTrailExport::test_a_path_redaction_misses_refuses, tests/test_trail.py::TestTrailExport::test_a_deny_target_cut_inside_a_token_refuses, tests/test_trail.py::TestTrailExport::test_a_deny_target_cut_inside_the_home_path_is_redacted, tests/test_trail.py::TestTrailExport::test_the_owner_login_is_a_person_when_urls_are_redacted, tests/test_trail.py::TestTrailExport::test_a_login_glued_to_a_kept_url_is_aliased, tests/test_trail.py::TestTrailExport::test_another_persons_profile_url_is_aliased, tests/test_trail.py::TestTrailExport::test_a_login_after_a_percent_escape_is_aliased, tests/test_trail.py::TestTrailExport::test_a_person_object_is_reduced_to_its_alias, tests/test_trail.py::TestRedactor::test_a_cut_inside_a_user_specific_first_component_is_redacted, tests/test_trail.py::TestRedactor::test_a_single_component_repo_is_cut_checked"
+allow_test = "tests/test_trail.py::TestTrailExport::test_the_repo_home_and_tmp_paths_are_redacted, tests/test_trail.py::TestTrailExport::test_people_become_stable_aliases, tests/test_trail.py::TestTrailExport::test_a_kept_url_keeps_the_owner_login, tests/test_trail.py::TestTrailExport::test_a_value_ending_in_a_bare_root_component_is_kept, tests/test_trail.py::TestRedactor::test_a_bare_root_component_is_not_cut"
+owner = "ppl"
+residual = "free-text names under no known key and secrets in formats outside TOKEN_PATTERNS pass, and so do Claude Code's dash-encoded project directory form of a path, URL-encoded paths and a checkout outside the home directory and the temp roots, and a login URL-encoded beyond a single %XX escape (double-encoded, or escaped inside the login): they pass both the redaction and the check. While URLs are kept, the login that owns the run's tracker and MR repositories (the first path segment of those URLs on a forge host) is published as is, by design. So the owner reads a trail before publishing it"

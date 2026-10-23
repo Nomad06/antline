@@ -1,6 +1,6 @@
 import { html, useEffect, useState } from "../vendor/htm-preact.mjs";
 import { get, post } from "../api.js";
-import { Badge, Button, Field, Log, Notice } from "../ui/controls.js";
+import { Badge, Button, Field, Log, Measured, Notice } from "../ui/controls.js";
 import { useStepRunner } from "../ui/step.js";
 import { HarnessStep } from "./setup-harness.js";
 import { AntMark } from "../ui/ant.js";
@@ -15,7 +15,7 @@ function Outcome({ step }) {
 function PathsStep({ state, done }) {
   const step = useStepRunner("paths", done);
   return html`<div>
-    <p>antline keeps its settings, verified models and harnesses in <code>${state.data_root}</code>. The code is in <code>${state.code_root || "unknown"}</code>.</p>
+    <p>antline keeps its settings, verified models and harnesses in <code>${state.data_root}</code>. The assets directory is <code>${state.code_root || "unknown"}</code>.</p>
     <${Button} primary busy=${step.busy} onClick=${() => step.run({})}>Create the data root<//>
     <${Outcome} step=${step} />
   </div>`;
@@ -88,6 +88,7 @@ function ModelsStep({ mode, done }) {
       <button class=${"card" + (info.current === preset.name ? " on" : "")} onClick=${() => choose(preset.name)}>
         <strong>${preset.label}</strong> <${Badge}>${preset.cost} cost<//>
         <ul>${preset.roles.map((role) => html`<li>${role.role.replace("ppl-", "")}: ${role.tier}, ${role.effort}</li>`)}</ul>
+        <${Measured} stat=${(info.measured || {})[preset.name]} />
       </button>`)}</div>
     ${error ? html`<${Notice} kind="error">${error}<//>` : null}
     ${mode === "expert" ? html`<div class="grid">${Object.keys(tiers).sort().map((tier) => html`

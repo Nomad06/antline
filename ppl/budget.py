@@ -1,3 +1,5 @@
+import math
+
 from . import run, store
 from .errors import PplError
 
@@ -9,6 +11,12 @@ KINDS = {"dispatch": ("dispatch_used", "dispatch_hard"),
 def spend(task_id, kind, amount=1):
     if kind not in KINDS:
         raise PplError("SCHEMA_INVALID", "unknown budget %r" % kind)
+    # a NaN would poison the counter (NaN > cap is never true) and a negative or
+    # zero amount would rewind it or log a spend that is none
+    if (isinstance(amount, bool) or not isinstance(amount, (int, float))
+            or not math.isfinite(amount) or amount <= 0):
+        raise PplError("SCHEMA_INVALID",
+                       "a %s spend must be a finite number above zero, got %r" % (kind, amount))
     used_key, cap_key = KINDS[kind]
     state = run.load(task_id)
     budgets = state["budgets"]

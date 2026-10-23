@@ -64,8 +64,11 @@ RISK_TIERS = ("low", "normal", "high")
 
 
 def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check="verified",
-               harness=None):
+               harness=None, usd_max=0.0, prices=None, routing_preset=None):
     pid = os.getpid()
+    budgets = dict(DEFAULT_BUDGETS)
+    budgets["usd_max"] = usd_max
+    budgets["prices"] = prices or {}
     return {
         "task_id": task_id,
         "tracker_url": tracker_url,
@@ -74,6 +77,7 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "risk": risk,
         "model_check": model_check,
         "harness": harness,
+        "routing_preset": routing_preset,
         "repo": repo,
         "isolated": isolated,
         "branch": None,
@@ -85,7 +89,7 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "lease_generation": 1,
         "deadline": store.deadline_in(INACTIVITY_TIMEOUT_SECONDS),
         "last_activity_at": store.now(),
-        "budgets": dict(DEFAULT_BUDGETS),
+        "budgets": budgets,
         "orchestrator": {"pid": pid, "started_at": process_started_at(pid)},
         "mr": {"iid": None, "url": None, "approved_sha": None,
                "merged_sha": None, "merged_url": None},
@@ -93,6 +97,14 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "next_safe_action": "complete admission checklist",
         "unsafe_to_repeat": [],
     }
+
+
+def _routing_preset(presets, routing):
+    """The preset routing.toml equals, "custom" when none does, None when it cannot be read."""
+    try:
+        return presets.matching(routing.load()) or "custom"
+    except (PplError, OSError):
+        return None
 
 
 def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="verified",
@@ -103,7 +115,14 @@ def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="
     if state_path(task_id).exists():
         raise PplError("ILLEGAL_TRANSITION",
                        "run %s already exists. Use ppl show, or destroy it first." % task_id)
-    state = _new_state(task_id, tracker_url, repo, isolated, risk, model_check, harness)
+    # imported here so the hooks, which import this module on every call, never load tomllib
+    from . import config, presets, routing, usage
+    # The cap and the prices it is computed with are frozen into state.json, which
+    # the guard write-protects (R-RUNS-WRITE-PROTECTION), since config.toml stays
+    # editable mid-run.
+    state = _new_state(task_id, tracker_url, repo, isolated, risk, model_check, harness,
+                       usd_max=config.budgets_usd_max(), prices=usage.prices(),
+                       routing_preset=_routing_preset(presets, routing))
     save(state)
     set_active(task_id)
     store.append_log(task_id, {"event": "init", "tracker_url": tracker_url, "repo": repo,

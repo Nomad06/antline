@@ -1,6 +1,6 @@
 import { html, useEffect, useState } from "../vendor/htm-preact.mjs";
 import { get, post, put, runJob } from "../api.js";
-import { Badge, Button, Field, Log, Notice } from "../ui/controls.js";
+import { Badge, Button, Field, Log, Measured, Notice } from "../ui/controls.js";
 import { History } from "../ui/history.js";
 
 function clone(value) {
@@ -190,7 +190,8 @@ export function AgentsPage({ mode }) {
     <p class="muted">Each role runs as its own Claude Code subagent. Changes reach the agent files when you apply, and a run already started keeps the files it started with.</p>
     ${data.harness_error ? html`<${Notice} kind="warn">The active harness does not load, so Apply is off. Fix it on the Harness page. The routing can still be edited here.<br />${data.harness_error}<//>` : null}
     <div class="cards">${data.presets.map((p) => html`<button class=${"card" + (data.preset === p.name ? " on" : "")} disabled=${dirty || Boolean(busy)} onClick=${() => preset(p.name)}>
-      <strong>${p.label}</strong> <${Badge}>${p.cost} cost<//></button>`)}</div>
+      <strong>${p.label}</strong> <${Badge}>${p.cost} cost<//>
+      <${Measured} stat=${(data.measured || {})[p.name]} /></button>`)}</div>
     <p class="help">${dirty ? "Save or reload the routing first: a preset replaces the saved routing.toml, not the edits on this page."
       : "A preset sets the tier and the effort of every role and writes routing.toml at once. Comments in it are dropped, and its history keeps the old file."}</p>
     ${data.roles.map((row) => {

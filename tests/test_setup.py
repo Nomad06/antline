@@ -85,6 +85,8 @@ class TestNonInteractive(SetupTestCase):
         self.assertTrue(any("ppl_guard.py" in c for c in commands))
         self.assertTrue(any("ppl_dispatch.py" in c for h in settings["hooks"]["SubagentStart"]
                             for c in [x["command"] for x in h["hooks"]]))
+        self.assertTrue(any("ppl_usage.py" in c for h in settings["hooks"]["SubagentStop"]
+                            for c in [x["command"] for x in h["hooks"]]))
         self.assertTrue((self.workspace / ".claude" / "skills" / "pipeline" / "SKILL.md").is_file())
         self.assertTrue((self.workspace / ".claude" / "agents" / "ppl-code-worker.md").is_file())
         from ppl import harness
@@ -115,6 +117,9 @@ class TestNonInteractive(SetupTestCase):
         dispatch_entries = [e for e in settings["hooks"]["SubagentStart"]
                             if any("ppl_dispatch.py" in h["command"] for h in e["hooks"])]
         self.assertEqual(len(dispatch_entries), 1)
+        usage_entries = [e for e in settings["hooks"]["SubagentStop"]
+                         if any("ppl_usage.py" in h["command"] for h in e["hooks"])]
+        self.assertEqual(len(usage_entries), 1)
         self.assertEqual(len(config.load()["setup"]["done"]), len(setup.STEPS))
         self.assertEqual(config.load()["harness"]["active"], "mine")
 
@@ -711,11 +716,28 @@ class TestLocalSettings(SetupTestCase):
         self.assertEqual(entries["SubagentStart"]["hooks"][0]["command"],
                          "%s %s" % (shlex.quote(interpreter),
                                     shlex.quote(str(hooks_dir / "ppl_dispatch.py"))))
+        self.assertEqual(entries["SubagentStop"]["hooks"][0]["command"],
+                         "%s %s" % (shlex.quote(interpreter),
+                                    shlex.quote(str(hooks_dir / "ppl_usage.py"))))
+        self.assertEqual(sorted(entries), ["PreToolUse", "SubagentStart", "SubagentStop"])
         setup.write_local_settings(self.workspace, SOURCE)
         commands = [h["command"] for e in self.settings()["hooks"]["PreToolUse"]
                     for h in e["hooks"]]
         self.assertTrue(all(c.startswith(shlex.quote(sys.executable) + " ") for c in commands),
                         commands)
+
+    def test_setup_registers_the_usage_hook_on_subagentstop(self):
+        entry = setup.hook_entries(SOURCE)["SubagentStop"]
+        self.assertEqual(entry["matcher"], "")
+        self.assertEqual(len(entry["hooks"]), 1)
+        self.assertTrue(entry["hooks"][0]["command"].endswith("ppl_usage.py"),
+                        entry["hooks"][0]["command"])
+        self.assertEqual(entry["hooks"][0]["type"], "command")
+        setup.write_local_settings(self.workspace, SOURCE)
+        setup.write_local_settings(self.workspace, SOURCE)
+        commands = [h["command"] for e in self.settings()["hooks"]["SubagentStop"]
+                    for h in e["hooks"]]
+        self.assertEqual(sum("ppl_usage.py" in c for c in commands), 1, commands)
 
     def test_a_settings_file_of_the_wrong_shape_is_setup_incomplete(self):
         path = self.workspace / ".claude" / "settings.local.json"

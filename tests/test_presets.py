@@ -239,6 +239,22 @@ class TestPresetRoutes(panel_client.StudioTestCase):
         self.assertEqual(list(data["effort_levels"]), list(routing.EFFORT_LEVELS))
         self.assertEqual(len(data["roles"]), len(routing.REQUIRED_ROLES))
 
+    def test_presets_view_carries_measured_costs(self):
+        _, data, _ = panel_client.call("GET", "/api/routing/presets")
+        self.assertEqual(sorted(data["measured"]), sorted(presets.PRESETS))
+        self.assertEqual(data["measured"]["max"]["runs"], 0)
+        from unittest import mock
+        measured = {"balanced": {"runs": 3, "tokens_mean": 12345.0, "usd_mean": None}}
+        with mock.patch("ppl.metrics.preset_costs", return_value=measured):
+            _, data, _ = panel_client.call("GET", "/api/routing/presets")
+        self.assertEqual(data["measured"], measured)
+
+    def test_the_presets_route_answers_when_the_prices_table_is_invalid(self):
+        paths.config_file().write_text('[prices."m"]\ninput = "x"\n', encoding="utf-8")
+        status, data, _ = panel_client.call("GET", "/api/routing/presets")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["presets"]), len(presets.PRESETS))
+
     def choose(self, name, hash_value):
         return panel_client.call("POST", "/api/routing/preset",
                                  body={"name": name, "hash": hash_value})

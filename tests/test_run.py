@@ -329,6 +329,117 @@ class TestRun(unittest.TestCase):
         self.assertEqual(event["tracker_url"], "https://j/DEMO-110")
 
 
+class TestUsdMaxFromConfig(unittest.TestCase):
+    """ppl init copies config.toml [budgets] usd_max into the run's budgets.
+    state.json is guarded, so this copy is the one way to set the cap."""
+
+    def setUp(self):
+        self._home = os.environ["PPL_HOME"]
+        os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+
+    def tearDown(self):
+        os.environ["PPL_HOME"] = self._home
+
+    def write_config(self, text):
+        from ppl import paths
+        paths.config_file().parent.mkdir(parents=True, exist_ok=True)
+        paths.config_file().write_text(text, encoding="utf-8")
+
+    def test_init_copies_usd_max_from_config(self):
+        self.write_config("[budgets]\nusd_max = 2.5\n")
+        state = run.init("DEMO-120", "https://j/DEMO-120", "/tmp/repo")
+        self.assertEqual(state["budgets"]["usd_max"], 2.5)
+        self.assertEqual(run.load("DEMO-120")["budgets"]["usd_max"], 2.5)
+        self.assertEqual(state["budgets"]["dispatch_hard"], run.DEFAULT_BUDGETS["dispatch_hard"])
+
+    def test_init_without_a_budgets_table_keeps_no_cap(self):
+        state = run.init("DEMO-121", "https://j/DEMO-121", "/tmp/repo")
+        self.assertEqual(state["budgets"]["usd_max"], 0.0)
+        self.write_config("[harness]\nactive = \"\"\n")
+        state = run.init("DEMO-122", "https://j/DEMO-122", "/tmp/repo")
+        self.assertEqual(state["budgets"]["usd_max"], 0.0)
+
+    def test_a_negative_usd_max_is_refused_at_init(self):
+        for number, value in enumerate(("-1", "-0.01", "\"2\"", "true", "nan", "inf")):
+            with self.subTest(value=value):
+                task_id = "DEMO-%d" % (130 + number)
+                self.write_config("[budgets]\nusd_max = %s\n" % value)
+                with self.assertRaises(PplError) as ctx:
+                    run.init(task_id, "https://j/%s" % task_id, "/tmp/repo")
+                self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+                self.assertIn("budgets.usd_max", ctx.exception.message)
+                self.assertFalse(run.state_path(task_id).exists())
+
+    def test_an_unknown_budgets_key_is_refused_naming_usd_max(self):
+        # rule: R-BUDGET-USD-CAP
+        self.write_config("[budgets]\nusd_mx = 2\n")
+        with self.assertRaises(PplError) as ctx:
+            run.init("DEMO-140", "https://j/DEMO-140", "/tmp/repo")
+        self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+        self.assertIn("usd_mx", ctx.exception.message)
+        self.assertIn("usd_max", ctx.exception.message)
+        self.assertFalse(run.state_path("DEMO-140").exists())
+
+    def test_init_snapshots_the_price_table(self):
+        state = run.init("DEMO-141", "https://j/DEMO-141", "/tmp/repo")
+        self.assertEqual(state["budgets"]["prices"], {})
+        self.write_config('[budgets]\nusd_max = 1\n\n[prices."m"]\ninput = 3\ncache_write = 3.75\n'
+                          'cache_read = 0.3\noutput = 15\n')
+        state = run.init("DEMO-142", "https://j/DEMO-142", "/tmp/repo")
+        table = {"m": {"input": 3.0, "cache_write": 3.75, "cache_read": 0.3, "output": 15.0}}
+        self.assertEqual(state["budgets"]["prices"], table)
+        self.write_config('[prices."m"]\ninput = 0\ncache_write = 0\ncache_read = 0\noutput = 0\n')
+        self.assertEqual(run.load("DEMO-142")["budgets"]["prices"], table)
+
+    def test_an_invalid_price_table_is_refused_at_init(self):
+        self.write_config('[prices."m"]\ninput = 3\ncache_write = 3\noutput = 15\n')
+        with self.assertRaises(PplError) as ctx:
+            run.init("DEMO-143", "https://j/DEMO-143", "/tmp/repo")
+        self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+        self.assertIn("cache_read", ctx.exception.message)
+        self.assertFalse(run.state_path("DEMO-143").exists())
+
+
+class TestRoutingPresetStamp(unittest.TestCase):
+    """ppl init stamps the routing preset in force, the join key for the cost per preset."""
+
+    def setUp(self):
+        self._home = os.environ["PPL_HOME"]
+        os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+
+    def tearDown(self):
+        os.environ["PPL_HOME"] = self._home
+
+    def write_routing(self, document):
+        from ppl import paths, tomlout
+        paths.routing_file().parent.mkdir(parents=True, exist_ok=True)
+        paths.routing_file().write_text(tomlout.dumps(document), encoding="utf-8")
+
+    def test_init_stamps_the_matching_routing_preset(self):
+        from ppl import config, routing
+        config.ensure()
+        self.write_routing(routing.preset_document("balanced"))
+        self.assertEqual(run.init("DEMO-130", "u", "/tmp/repo")["routing_preset"], "balanced")
+        self.assertEqual(run.load("DEMO-130")["routing_preset"], "balanced")
+
+    def test_init_stamps_custom_for_an_edited_routing(self):
+        from ppl import config, routing
+        config.ensure()
+        document = routing.preset_document("balanced")
+        role = sorted(document["roles"])[0]
+        document["roles"][role]["params"]["effort"] = "low"
+        self.write_routing(document)
+        self.assertEqual(run.init("DEMO-131", "u", "/tmp/repo")["routing_preset"], "custom")
+
+    def test_init_stamps_null_when_routing_cannot_be_read(self):
+        self.assertIsNone(run.init("DEMO-132", "u", "/tmp/repo")["routing_preset"])
+        from ppl import paths
+        self.assertIn("routing_preset", run.load("DEMO-132"))
+        paths.routing_file().write_text("not [valid toml", encoding="utf-8")
+        self.assertIsNone(run.init("DEMO-133", "u", "/tmp/repo")["routing_preset"])
+        self.assertIn("routing_preset", run.load("DEMO-133"))
+
+
 class TestNextActionText(unittest.TestCase):
     def test_the_merge_watch_next_action_names_no_tracker_product(self):
         self.assertNotIn("Jira", run.STAGE_NEXT_ACTION["merge_watch"])
