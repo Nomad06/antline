@@ -1289,6 +1289,30 @@ class TestApplyOsSandbox(HarnessTestCase):
         self.apply("example-maven")
         self.assertEqual(config.active_harness(), "example-maven")
 
+    def test_a_corrupt_facts_file_is_removed_when_the_harness_does_not_need_it(self):
+        config.update("claude", {"workspace": ""})
+        fixtures.install_harness("example-maven")
+        for garbage in ("{oops", "[1]", ""):
+            self.facts_path.write_text(garbage, encoding="utf-8")
+            self.apply("example-maven")
+            self.assertFalse(self.facts_path.exists(), garbage)
+
+    def test_a_corrupt_facts_file_is_rewritten_for_a_github_harness(self):
+        fixtures.install_harness("example-generic")
+        self.facts_path.write_text("{oops", encoding="utf-8")
+        self.apply()
+        facts = json.loads(self.facts_path.read_text(encoding="utf-8"))
+        self.assertEqual(facts["written_sandbox"], self.settings()["sandbox"])
+
+    def test_a_corrupt_facts_file_makes_an_existing_sandbox_block_foreign(self):
+        fixtures.install_harness("example-generic")
+        self.apply()
+        self.facts_path.write_text("{oops", encoding="utf-8")
+        with self.assertRaises(PplError) as caught:
+            self.apply()
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertIn("sandbox", caught.exception.message)
+
     def test_apply_creates_the_scratch_root(self):
         fixtures.install_harness("example-generic")
         self.apply()

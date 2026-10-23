@@ -719,7 +719,12 @@ def apply(name, agents_dir=None, skills_dir=None):
     skill_files = render_skill(doc)
     _size_warnings(skill_files, {role: routing.render(role, doc) for role in routing.REQUIRED_ROLES})
     workspace = config.section("claude").get("workspace") or ""
-    previous = os_sandbox.load_facts() or {}
+    try:
+        previous = os_sandbox.load_facts()
+    except PplError:
+        previous = None
+    if not isinstance(previous, dict):
+        previous = {}
     sandbox_facts = prof = None
     if os_sandbox.needed(doc):
         if not workspace:
