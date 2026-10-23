@@ -60,6 +60,13 @@ TOKEN_PATTERNS = (
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
 )
 _TOKENS = tuple((pattern, re.compile(pattern)) for pattern in TOKEN_PATTERNS)
+# A value the guard cut at its length cap can end inside a token, too short for
+# TOKEN_PATTERNS: a token's prefix and 4 more token characters at a value's end.
+_TOKEN_CUT_RE = re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}"
+                           r"|glpat-[A-Za-z0-9_-]{4,}|AKIA[0-9A-Z]{4,}|sk-ant-[A-Za-z0-9_-]{4,}"
+                           r"|xox[abpr]-[A-Za-z0-9-]{4,})(?=\"|\Z)")
+# The shortest piece of a path that a value cut short is still redacted for.
+_CUT_MIN = 4
 
 REDACTIONS = ("paths", "people", "urls")
 
@@ -139,6 +146,29 @@ def _forms(value):
     return forms
 
 
+def _cut_pattern(form):
+    """A proper prefix of `form`, at least _CUT_MIN characters, ending a value: before
+    the closing quote in serialized JSON or at the end of the text."""
+    if len(form) <= _CUT_MIN:
+        return None
+    nested = ""
+    for char in reversed(form[_CUT_MIN:-1]):
+        nested = "(?:%s%s)?" % (re.escape(char), nested)
+    return re.compile(re.escape(form[:_CUT_MIN]) + nested + r'(?="|\Z)')
+
+
+def _outside_urls(text, change):
+    """`text` with `change` applied to everything but its URLs."""
+    parts = []
+    last = 0
+    for match in _URL_RE.finditer(text):
+        parts.append(change(text[last:match.start()]))
+        parts.append(match.group(0))
+        last = match.end()
+    parts.append(change(text[last:]))
+    return "".join(parts)
+
+
 def _person_pattern(names):
     alternatives = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))
     return re.compile(r"@?(?<![\w-])(?P<name>%s)(?![\w-])" % alternatives, re.IGNORECASE)
@@ -146,9 +176,11 @@ def _person_pattern(names):
 
 class Redactor:
     """Paths always, people and URLs when asked. Paths are matched longest first,
-    so a repo under the home under a temp root reads `<repo>`. People are found
-    by `find_people` before anything is applied and become `@person-<n>` in the
-    order of a sorted walk. URLs become `<url-<n>>` in the order they are met."""
+    so a repo under the home under a temp root reads `<repo>`, and a value cut
+    short inside a path ends in that path's placeholder and `...`. People are
+    found by `find_people` before anything is applied and become `@person-<n>`
+    in the order of a sorted walk, except inside a URL that is kept. URLs become
+    `<url-<n>>` in the order they are met."""
 
     def __init__(self, state, home, ppl_home, temp_roots, people, urls):
         state = state if isinstance(state, dict) else {}
@@ -168,6 +200,10 @@ class Redactor:
         forms = "|".join(re.escape(form)
                          for form in sorted(self._placeholder, key=len, reverse=True))
         self._paths_re = re.compile(r"(?<![\w.-])(?:%s)" % forms) if forms else None
+        self._longest = max((len(form) for form in self._placeholder), default=0)
+        self._cut_needles = [(pattern, reason) for pattern, reason in
+                             ((_cut_pattern(form), reason) for form, reason in self._needles)
+                             if pattern is not None]
         self.people = bool(people)
         self.urls = bool(urls)
         self._aliases = {}
@@ -225,13 +261,35 @@ class Redactor:
             alias = self._aliases[spelling.casefold()]
         return alias
 
+    def _cut(self, value):
+        """The guard logs the first 200 characters of a blocked call's target, so a
+        value can end inside a path. That end becomes the placeholder of the
+        shortest path it starts, followed by `...`."""
+        start = value.find("/", max(0, len(value) - self._longest))
+        while start != -1 and len(value) - start >= _CUT_MIN:
+            tail = value[start:]
+            if tail in self._placeholder:
+                return value
+            owners = [form for form in self._placeholder
+                      if len(tail) < len(form) and form.startswith(tail)]
+            if owners:
+                placeholder = self._placeholder[min(owners, key=len)]
+                self._used_paths.add(placeholder)
+                return value[:start] + placeholder + "..."
+            start = value.find("/", start + 1)
+        return value
+
+    def _people(self, value):
+        return self._people_re.sub(self._person, value)
+
     def text(self, value):
         if self._paths_re is not None:
-            value = self._paths_re.sub(self._path, value)
+            value = self._paths_re.sub(self._path, self._cut(value))
         if self.urls:
             value = _URL_RE.sub(self._url, value)
         if self._people_re is not None:
-            value = self._people_re.sub(self._person, value)
+            # a kept URL stays whole, the owner's own login in it included
+            value = self._people(value) if self.urls else _outside_urls(value, self._people)
         return value
 
     def apply(self, value):
@@ -273,11 +331,19 @@ def leaks(text, redactor):
     for needle, reason in redactor._needles:
         if needle in text and reason not in reasons:
             reasons.append(reason)
-    if redactor._people_re is not None and redactor._people_re.search(text):
-        reasons.append("a redacted person")
+    for pattern, reason in redactor._cut_needles:
+        cut = "the start of %s at the end of a value" % reason
+        if cut not in reasons and pattern.search(text):
+            reasons.append(cut)
+    if redactor._people_re is not None:
+        searched = text if redactor.urls else _URL_RE.sub(" ", text)
+        if redactor._people_re.search(searched):
+            reasons.append("a redacted person")
     for pattern, compiled in _TOKENS:
         if compiled.search(text):
             reasons.append("a token matching %s" % pattern)
+    if _TOKEN_CUT_RE.search(text):
+        reasons.append("the start of a token at the end of a value")
     return reasons
 
 
@@ -302,6 +368,15 @@ def _wall_clock(events):
         return None
 
 
+def _frozen_prices(directory):
+    """The prices `ppl init` froze into the run, or None when it froze none: then the
+    live config.toml prices the run, the same as `ppl metrics`."""
+    state = store.read_json(Path(directory) / "state.json")
+    budgets = state.get("budgets") if isinstance(state, dict) else None
+    table = budgets.get("prices") if isinstance(budgets, dict) else None
+    return table if isinstance(table, dict) and table else None
+
+
 def measures(directory):
     """The run's numbers for the manifest. A number with no data is null and
     `reasons` says why, never 0."""
@@ -315,9 +390,13 @@ def measures(directory):
     if tokens is None:
         reasons["tokens_by_role"] = ("no usage recorded - the usage hook (ppl setup claude) "
                                      "records it")
+    frozen = _frozen_prices(directory)
     try:
-        usd, unpriced = usage.run_dollars(directory)
-        if unpriced:
+        usd, unpriced = usage.run_dollars(directory, price_table=frozen)
+        if unpriced and frozen:
+            reasons["usd"] = ("no price for model(s) %s in the prices frozen into the run at "
+                              "ppl init" % ", ".join(unpriced))
+        elif unpriced:
             reasons["usd"] = ("no price for model(s) %s - add a [prices.\"<model>\"] table to "
                               "config.toml" % ", ".join(unpriced))
         elif usd is None:
@@ -325,6 +404,10 @@ def measures(directory):
     except PplError as exc:
         usd = None
         reasons["usd"] = exc.message
+    except (AttributeError, KeyError, TypeError):
+        usd = None
+        reasons["usd"] = ("the prices frozen into the run's state.json are not a table of "
+                          "the four counts per model")
     verdicts = Counter(e.get("verdict") for e in events
                        if e.get("event") == "verdict" and isinstance(e.get("verdict"), str))
     return {
@@ -410,6 +493,12 @@ def export(task_id, out, redact=("paths", "people")):
     docs, skipped = collect(directory)
     state = docs.get("state.json")
     state = state if isinstance(state, dict) else {}
+    repo = state.get("repo")
+    if isinstance(repo, str) and repo and not repo.startswith("/"):
+        raise PplError("SCHEMA_INVALID",
+                       "the run's repo %r is a relative path, and the trail redacts the repo "
+                       "by its absolute path, so the export is refused rather than written "
+                       "with the repo left in it" % repo)
     redactor = Redactor(state, home=str(Path.home()), ppl_home=str(paths.home()),
                         temp_roots=temp_roots(), people="people" in redact,
                         urls="urls" in redact)
@@ -434,8 +523,8 @@ def export(task_id, out, redact=("paths", "people")):
             "head_sha": state.get("candidate_sha"),
             "antline_version": __version__,
             "redactions": redactor.applied(),
-            "skipped": skipped,
-            "measures": measures(directory),
+            "skipped": redactor.apply(skipped),
+            "measures": redactor.apply(measures(directory)),
             "files": files,
         }
         _write(building, "MANIFEST.json",
@@ -450,7 +539,16 @@ def export(task_id, out, redact=("paths", "people")):
                            "trail for %s refused, nothing was written: %s. Remove the value "
                            "from the run's documents and export again"
                            % (task_id, "; ".join(found)))
-        os.rename(building, out)
+        # os.rename replaces an empty directory, so one created meanwhile is checked
+        if os.path.lexists(out):
+            raise PplError("SCHEMA_INVALID", "%s appeared while the trail was being written: "
+                                             "the trail is written to a new directory, never "
+                                             "over one" % out)
+        try:
+            os.rename(building, out)
+        except OSError as exc:
+            raise PplError("SCHEMA_INVALID", "the trail could not be moved onto %s: %s"
+                           % (out, exc))
     except BaseException:
         shutil.rmtree(building, ignore_errors=True)
         raise

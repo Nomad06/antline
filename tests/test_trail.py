@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # tests/ is not a package, so the helper next to this file is imported
 # by path. It must be imported before PPL_HOME is chosen below.
@@ -29,6 +30,23 @@ PRODUCER = {"provider": "claude-code-subagent", "model": "claude-test", "params_
 BUILD_LOG = "collected 7 items, the build log body that must stay out of a trail\n"
 MODELS = {"claude-test": {"input": 100, "cache_write": 10, "cache_read": 1000, "output": 50,
                           "thinking": 5}}
+PRICES = '[prices."claude-test"]\ninput = %s\ncache_write = %s\ncache_read = %s\noutput = %s\n'
+TOKEN = "ghp_" + "Ab1" * 12
+# the guard keeps this many characters of a denied call's target
+TARGET_CAP = 200
+
+
+def cut_target(head, tail_kept):
+    """A denied command's target as the guard logs it: cut at TARGET_CAP characters,
+    ending with `tail_kept`."""
+    pad = TARGET_CAP - len(head) - 1 - len(tail_kept)
+    target = (head + "a" * pad + " " + tail_kept + "rest-of-the-command")[:TARGET_CAP]
+    assert target.endswith(tail_kept)
+    return target
+
+
+def priced(prices):
+    return sum(MODELS["claude-test"][name] * prices[name] for name in usage.COUNTS) / 1000000
 
 
 def git(repo, *args):
@@ -167,7 +185,8 @@ class TestTrailExport(unittest.TestCase):
         self.export()
         found = texts(self.out)
         forbidden = {self.repo, os.path.realpath(self.repo), self.home,
-                     os.path.realpath(self.home), os.environ["PPL_HOME"], "/tmp/"}
+                     os.path.realpath(self.home), os.environ["PPL_HOME"],
+                     os.path.realpath(os.environ["PPL_HOME"]), "/tmp/"}
         for rel, text in found.items():
             for needle in forbidden:
                 self.assertNotIn(needle, text, rel)
@@ -314,6 +333,104 @@ class TestTrailExport(unittest.TestCase):
         self.assertIn("usd", measures["reasons"])
         self.assertIn("tokens_by_role", measures["reasons"])
 
+    def test_a_deny_target_cut_inside_the_home_path_is_redacted(self):
+        target = cut_target("cat ", self.home[:-3])
+        store.append_log(self.task, {"event": "deny", "role": "ppl-code-worker", "tool": "Bash",
+                                     "code": "BOUNDARY_VIOLATION", "target": target})
+        self.export()
+        log = (self.out / "docs" / "log.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"target": "%s<home>..."' % target[:-len(self.home[:-3])], log)
+        fragment = os.path.basename(self.home)[:-3]
+        for rel, text in texts(self.out).items():
+            self.assertNotIn(self.home[:-3], text, rel)
+            self.assertNotIn(fragment, text, rel)
+
+    def test_a_deny_target_cut_inside_a_token_refuses(self):
+        # rule: R-TRAIL-REDACTED
+        target = cut_target("echo ", TOKEN[:29])
+        store.append_log(self.task, {"event": "deny", "role": "ppl-code-worker", "tool": "Bash",
+                                     "code": "BOUNDARY_VIOLATION", "target": target})
+        with self.assertRaises(PplError) as caught:
+            self.export()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("docs/log.jsonl", caught.exception.message)
+        self.assertNotIn(TOKEN[:29], caught.exception.message)
+        self.assertFalse(os.path.lexists(self.out))
+        self.assertEqual(list(self.parent.iterdir()), [])
+
+    def test_a_path_redaction_misses_refuses(self):
+        # rule: R-TRAIL-REDACTED
+        record = findings.add(self.task, "minor", "copied to x%s/notes/cart.txt" % self.home,
+                              self.rework, "shop/cart.py")
+        with self.assertRaises(PplError) as caught:
+            self.export()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("docs/findings/%s.json still holds the home directory"
+                      % record["finding_id"], caught.exception.message)
+        self.assertFalse(os.path.lexists(self.out))
+        self.assertEqual(list(self.parent.iterdir()), [])
+
+    def test_a_kept_url_keeps_the_owner_login(self):
+        review.set_mr(self.task, 3, "https://github.com/octocat/shop/pull/3", author="octocat")
+        self.export()
+        state = json.loads((self.out / "docs" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["mr"]["url"], "https://github.com/octocat/shop/pull/3")
+        self.assertEqual(state["mr"]["author"], "@person-1")
+        issue = (self.out / "docs" / "tracker" / "issue.md").read_text(encoding="utf-8")
+        self.assertIn("- Author: @person-1", issue)
+        log = (self.out / "docs" / "log.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"url": "https://github.com/octocat/shop/pull/3"', log)
+
+    def test_an_out_created_during_the_export_is_refused(self):
+        real = trail.measures
+
+        def racing(directory):
+            self.out.mkdir()
+            return real(directory)
+
+        with mock.patch.object(trail, "measures", racing):
+            with self.assertRaises(PplError) as caught:
+                self.export()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertEqual(list(self.out.iterdir()), [])
+        self.assertEqual([p.name for p in self.parent.iterdir()], ["trail"])
+
+    def test_a_failed_rename_is_refused_and_leaves_nothing(self):
+        with mock.patch("ppl.trail.os.rename", side_effect=OSError("cross-device link")):
+            with self.assertRaises(PplError) as caught:
+                self.export()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("cross-device link", caught.exception.message)
+        self.assertEqual(list(self.parent.iterdir()), [])
+
+    def test_a_config_error_in_the_measures_is_redacted(self):
+        paths.config_file().write_text("[prices\n", encoding="utf-8")
+        manifest = self.export()
+        self.assertIsNone(manifest["measures"]["usd"])
+        self.assertIn("<ppl-home>/config.toml", manifest["measures"]["reasons"]["usd"])
+
+    def test_usd_uses_the_prices_frozen_at_init(self):
+        frozen = {"input": 3, "cache_write": 3.75, "cache_read": 0.3, "output": 15}
+        paths.config_file().write_text(PRICES % tuple(frozen[n] for n in usage.COUNTS),
+                                       encoding="utf-8")
+        run.init("GH-600", "https://github.com/acme/shop/issues/600", self.repo)
+        store.append_log("GH-600", {"event": "usage", "role": "ppl-code-worker",
+                                    "agent_id": "agent-1", "models": MODELS})
+        paths.config_file().write_text(PRICES % (30, 37.5, 3, 150), encoding="utf-8")
+        measures = trail.measures(trail.find_run("GH-600"))
+        self.assertAlmostEqual(measures["usd"], priced(frozen))
+
+    def test_a_relative_repo_is_refused(self):
+        state = run.load(self.task)
+        state["repo"] = "work/shop"
+        run.save(state)
+        with self.assertRaises(PplError) as caught:
+            self.export()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("work/shop", caught.exception.message)
+        self.assertFalse(os.path.lexists(self.out))
+        self.assertEqual(list(self.parent.iterdir()), [])
+
     def test_the_page_links_only_relative_docs(self):
         self.export(redact=("paths", "people"))
         page = (self.out / "index.html").read_text(encoding="utf-8")
@@ -324,6 +441,28 @@ class TestTrailExport(unittest.TestCase):
         for link in links:
             self.assertTrue(link.startswith("docs/"), link)
             self.assertTrue((self.out / link).is_file(), link)
+
+
+class TestRedactor(unittest.TestCase):
+    """The redactor alone, on a home that is not under a temp root."""
+
+    def setUp(self):
+        self.redactor = trail.Redactor({}, home="/Users/alexander.smith",
+                                       ppl_home="/Users/alexander.smith/.ppl", temp_roots=(),
+                                       people=False, urls=False)
+
+    def test_a_value_cut_inside_the_home_becomes_its_placeholder(self):
+        self.assertEqual(self.redactor.text("cat /Users/alexander.sm"), "cat <home>...")
+        self.assertEqual(self.redactor.text("cat /Users/alexander.smith/.pp"), "cat <ppl-home>...")
+        self.assertEqual(self.redactor.text("ls /Use"), "ls <home>...")
+        self.assertEqual(self.redactor.text("ls /Us"), "ls /Us")
+
+    def test_a_cut_path_or_token_left_in_a_file_is_a_leak(self):
+        self.assertTrue(trail.leaks('{"target": "cat /Users/alexander.sm"}\n', self.redactor))
+        self.assertTrue(trail.leaks('{"target": "echo %s"}\n' % TOKEN[:29], self.redactor))
+        self.assertTrue(trail.leaks("echo %s" % TOKEN[:8], self.redactor))
+        self.assertEqual(trail.leaks('{"target": "cat <home>..."}\n', self.redactor), [])
+        self.assertEqual(trail.leaks('{"target": "echo ghp_Ab1"}\n', self.redactor), [])
 
 
 if __name__ == "__main__":

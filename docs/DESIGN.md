@@ -1729,26 +1729,37 @@ deadline.
 - **Paths are always redacted.** The run's repo, `PPL_HOME`, the home directory and the temp
   roots, each as given and resolved, longest first, become `<repo>`, `<ppl-home>`, `<home>` and
   `<tmp>`. A `--redact` list without `paths` is `SCHEMA_INVALID`.
+  The guard logs the first 200 characters of a blocked call's target, so a value can end
+  inside a path: an end of at least 4 characters that starts one of these paths becomes its
+  placeholder followed by `...`. A relative `repo` in state.json is `SCHEMA_INVALID`, since
+  there is no absolute path to redact.
 - **People are redacted by default.** Every string under the keys `author`, `assignee`,
   `assignees`, `reporter`, `creator`, `by`, `login` and `displayName` (or the `login`, `name`
   or `displayName` of a dict there) becomes `@person-<n>` in the order of a sorted walk, in
   every file, markdown included. The mapping is written nowhere, and the order makes two
   exports of the same run identical.
-- **URLs are kept unless `urls` is asked for**, then each becomes `<url-<n>>`.
+- **URLs are kept unless `urls` is asked for**, then each becomes `<url-<n>>`. A kept URL is
+  kept whole, a login inside it included, so a link to the owner's own pull request still
+  works. Paths inside it are redacted all the same.
 
 After redaction every written file is checked, and `ppl trail export` refuses with
 `SCHEMA_INVALID`, naming the file, while one still holds the repo path, the home directory,
-`PPL_HOME`, a redacted person or one of the trail's own token patterns [R-TRAIL-REDACTED]. The
+`PPL_HOME`, a redacted person outside a kept URL or one of the trail's own token patterns, or
+a value that ends in the start of one of those paths or of a token [R-TRAIL-REDACTED]. The
 trail is built in a temporary directory beside `--out` and renamed onto it once that check
-passes, so a refusal leaves nothing behind. An existing `--out` is `SCHEMA_INVALID`. A name in
-free text under no known key, or a secret in a format the patterns do not list, passes the
-check, so the owner reads a trail before publishing it.
+passes, so a refusal leaves nothing behind. An existing `--out`, or one that appears while the
+trail is written, is `SCHEMA_INVALID`. A name in free text under no known key, a secret in a
+format the patterns do not list, Claude Code's dash-encoded project directory form of a path, a
+URL-encoded path and a checkout outside the home directory and the temp roots pass both the
+redaction and the check, so the owner reads a trail before publishing it.
 
 `MANIFEST.json` holds the task id, the base and head SHA, the antline version, the redactions
 applied, the skipped files, every other file with its sha256, and the run's measures:
-`wall_clock_seconds` (init to `done`, else to the last event), `tokens_by_role`, `usd` (priced
-with the live `[prices]`), `denials`, `rework_rounds` and `verdicts` (a count per outcome). A
-measure with no data is null, not 0, and `reasons` says why.
+`wall_clock_seconds` (init to `done`, else to the last event), `tokens_by_role`, `usd`,
+`denials`, `rework_rounds` and `verdicts` (a count per outcome). `usd` is priced with the prices
+`ppl init` froze into the run, so a later export quotes the same number, and with the live
+`[prices]` only for a run that froze none. A measure with no data is null, not 0, and `reasons`
+says why. The skipped names and the measures go through the same redaction as the documents.
 
 ## 7. Stage flow: task link to MR
 
