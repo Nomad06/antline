@@ -4,6 +4,8 @@ Everything here renders documents `ppl.trail` has already redacted, so a value r
 the page exactly as it reached the JSON files, and the leak check that runs over every
 written file covers these too."""
 import html
+import json
+import re
 from collections import Counter
 
 COUNTS = ("input", "cache_write", "cache_read", "output")
@@ -60,14 +62,15 @@ def _short(sha):
     return _s(sha)[:7] if isinstance(sha, str) else _s(sha)
 
 
+def _count(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _total(models):
-    total = 0
-    for counts in models.values() if isinstance(models, dict) else ():
-        for name in COUNTS:
-            value = counts.get(name) if isinstance(counts, dict) else None
-            if isinstance(value, int) and not isinstance(value, bool):
-                total += value
-    return total
+    """The sum of the counts, None when there is no count to sum."""
+    found = [counts.get(name) for counts in (models.values() if isinstance(models, dict) else ())
+             if isinstance(counts, dict) for name in COUNTS if _count(counts.get(name))]
+    return sum(found) if found else None
 
 
 def timeline(log_events):
@@ -87,8 +90,10 @@ def timeline(log_events):
                 text = "%s dispatched, usage not recorded (%s)" % (
                     _s(event.get("role")), _s(event.get("error"), "no models"))
             else:
-                text = "%s dispatched, %s tokens" % (_s(event.get("role")),
-                                                     format(_total(event["models"]), ","))
+                total = _total(event["models"])
+                text = "%s dispatched, %s" % (
+                    _s(event.get("role")), "undefined tokens (the event holds no counts)"
+                    if total is None else "%s tokens" % format(total, ","))
         elif kind == "evidence":
             text = "%s %s on %s" % (_s(event.get("check")), _s(event.get("result")), _short(sha))
             link = "docs/evidence/%s/%s.json" % (sha, event.get("check"))
@@ -129,8 +134,8 @@ def _e(value):
     return html.escape(_s(value), quote=False)
 
 
-def _num(value):
-    return format(value, ",") if isinstance(value, int) and not isinstance(value, bool) else "?"
+def _num(value, reason="no count recorded"):
+    return format(value, ",") if _count(value) else "undefined: %s" % reason
 
 
 def _undefined(measures, key):
@@ -145,8 +150,9 @@ def _measure_rows(measures):
     usd = measures.get("usd")
     rows.append(("dollars", ("$%.4f" % usd) if isinstance(usd, (int, float))
                  else _undefined(measures, "usd")))
-    rows.append(("denials", _num(measures.get("denials"))))
-    rows.append(("rework rounds", _num(measures.get("rework_rounds"))))
+    rows.append(("denials", _num(measures.get("denials"), "no denial count recorded")))
+    rows.append(("rework rounds", _num(measures.get("rework_rounds"),
+                                       "no rework count recorded")))
     outcomes = measures.get("verdicts") or {}
     rows.append(("verdicts", ", ".join("%s %s" % (k, _num(v)) for k, v in outcomes.items())
                  or "none recorded"))
@@ -162,10 +168,10 @@ def _tokens_table(measures):
     body = []
     for role, counts in roles.items():
         counts = counts if isinstance(counts, dict) else {}
-        cells = "".join('<td class="n">%s</td>' % _num(counts.get(name)) for name in COUNTS)
+        cells = "".join('<td class="n">%s</td>' % _num(counts.get(name), "no count")
+                        for name in COUNTS)
         body.append('<tr><th>%s</th>%s<td class="n">%s</td></tr>'
-                    % (_e(role), cells, _num(sum(counts.get(n) for n in COUNTS
-                                                 if isinstance(counts.get(n), int)))))
+                    % (_e(role), cells, _num(_total({"all": counts}), "no counts recorded")))
     return ("<table>\n<tr><th>role</th>%s<th>total</th></tr>\n%s\n</table>"
             % (head, "\n".join(body)))
 
@@ -207,36 +213,43 @@ def page(task_id, entries, measures, manifest_head):
     return text.encode("ascii", "xmlcharrefreplace").decode("ascii")
 
 
-def _line(value):
-    return html.escape(_s(value), quote=False)
+def _fence(value):
+    """A value inside a fenced code block, so no viewer reads it as a link, an image or
+    markup. The fence is one backtick longer than the longest run in the value."""
+    text = "none" if value is None or value == "" else str(value)
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    mark = "`" * max(3, longest + 1)
+    return "%s\n%s\n%s" % (mark, text.replace("\r", ""), mark)
 
 
-def _block(value):
-    return html.escape(str(value), quote=False) if value else "none"
+def _item_text(item):
+    if isinstance(item, dict):
+        return (item.get("question") or item.get("name") or item.get("shape")
+                or json.dumps(item, sort_keys=True))
+    return item
 
 
-def _bullets(values):
-    items = values if isinstance(values, list) else []
-    return "\n".join("- %s" % _line(v if not isinstance(v, dict) else
-                                    v.get("question") or v.get("name") or v.get("shape") or v)
-                     for v in items) or "none"
+def _list(values):
+    items = values if isinstance(values, list) and values else None
+    return "\n\n".join(_fence(_item_text(v)) for v in items) if items else "none"
 
 
 def brief_md(brief, challenge):
     brief = brief if isinstance(brief, dict) else {}
-    out = ["# brief", "", "## Purpose", "", _block(brief.get("purpose")), "",
-           "## Success outcome", "", _block(brief.get("success_outcome")), "",
-           "## Acceptance", "", _bullets(brief.get("acceptance")), "",
-           "## Governing requirements", "", _bullets(brief.get("governing_requirements")), "",
-           "## May write", "", _bullets(brief.get("allowed_write_paths")), "",
-           "## May not touch", "", _bullets(brief.get("forbidden_paths")), "",
-           "## Verification", "", _bullets(brief.get("verification")), "",
-           "## Open decisions", "", _bullets(brief.get("open_decisions")), ""]
+    out = ["# brief", "", "## Purpose", "", _fence(brief.get("purpose")), "",
+           "## Success outcome", "", _fence(brief.get("success_outcome")), "",
+           "## Acceptance", "", _list(brief.get("acceptance")), "",
+           "## Governing requirements", "", _list(brief.get("governing_requirements")), "",
+           "## May write", "", _list(brief.get("allowed_write_paths")), "",
+           "## May not touch", "", _list(brief.get("forbidden_paths")), "",
+           "## Verification", "", _list(brief.get("verification")), "",
+           "## Open decisions", "", _list(brief.get("open_decisions")), "",
+           "## Challenge", ""]
     if isinstance(challenge, dict):
-        out += ["## Challenge", "", "Verdict: %s" % _line(challenge.get("verdict")), "",
-                "Open decisions:", "", _bullets(challenge.get("open_decisions")), ""]
+        out += ["Verdict:", "", _fence(challenge.get("verdict")), "", "Open decisions:", "",
+                _list(challenge.get("open_decisions")), ""]
     else:
-        out += ["## Challenge", "", "none recorded", ""]
+        out += ["none recorded", ""]
     return "\n".join(out)
 
 
@@ -254,14 +267,11 @@ def verdicts_md(history):
         doc = doc if isinstance(doc, dict) else {}
         producer = doc.get("producer") if isinstance(doc.get("producer"), dict) else {}
         found = doc.get("findings") if isinstance(doc.get("findings"), list) else []
-        out += ["## %d. %s on %s" % (number, _line(doc.get("verdict")),
-                                      _line(doc.get("candidate_sha"))), "",
-                "- SHA: %s" % _line(doc.get("candidate_sha")),
-                "- Outcome: %s" % _line(doc.get("verdict")),
-                "- Producer: %s %s" % (_line(producer.get("provider")),
-                                       _line(producer.get("model"))),
-                "- Findings: %s" % (", ".join(_line(_findings_line(f)) for f in found)
-                                    or "none recorded"), ""]
+        out += ["## Verdict %d" % number, "", "SHA and outcome:", "",
+                _fence("%s %s" % (_s(doc.get("candidate_sha")), _s(doc.get("verdict")))), "",
+                "Producer:", "",
+                _fence("%s %s" % (_s(producer.get("provider")), _s(producer.get("model")))), "",
+                "Findings:", "", _list([_findings_line(f) for f in found]), ""]
     if not history:
         out += ["none recorded", ""]
     return "\n".join(out)
@@ -274,7 +284,6 @@ def threads_md(threads):
     for thread, by_sha in sorted((threads if isinstance(threads, dict) else {}).items()):
         for sha, reply in sorted((by_sha if isinstance(by_sha, dict) else {}).items()):
             reply = reply if isinstance(reply, dict) else {}
-            rows.append("- %s on %s: %s at %s" % (
-                _line(thread), _line(sha), _line(reply.get("classification")),
-                _line(reply.get("at"))))
-    return "\n".join(out + (rows or ["none recorded"]) + [""])
+            rows.append(_fence("%s on %s: %s at %s" % (
+                _s(thread), _s(sha), _s(reply.get("classification")), _s(reply.get("at")))))
+    return "\n".join(out + ["\n\n".join(rows) if rows else "none recorded"] + [""])

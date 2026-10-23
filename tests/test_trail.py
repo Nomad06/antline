@@ -575,7 +575,8 @@ class TestTrailExport(unittest.TestCase):
         links = re.findall(r'href="([^"]*)"', page)
         self.assertTrue(links)
         for link in links:
-            self.assertTrue(link.startswith("docs/") or link == "MANIFEST.json", link)
+            self.assertTrue(re.fullmatch(r"docs/[A-Za-z0-9._/-]+", link) and ".." not in link
+                            or link == "MANIFEST.json", link)
             self.assertTrue((self.out / link).is_file(), link)
 
 
@@ -622,9 +623,8 @@ class TestTrailPage(unittest.TestCase):
         hostile = "<script>alert(1)</script>"
         out = self.exported(brief={"task_id": self.task, "purpose": hostile,
                                    "success_outcome": "ok", "acceptance": ["AC1"]})
-        for rel in ("index.html", "docs/brief.md"):
-            self.assertNotIn(hostile, out[rel])
-        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", out["docs/brief.md"])
+        self.assertNotIn(hostile, out["index.html"])
+        self.assertIn("```\n%s\n```" % hostile, out["docs/brief.md"])
 
     def test_the_verdicts_markdown_shows_rework_then_pass(self):
         text = self.exported()["docs/verdicts.md"]
@@ -655,6 +655,57 @@ class TestTrailPage(unittest.TestCase):
         self.assertNotIn("<img", text)
         self.assertEqual(re.findall(r'href="([^"]*)"', text)[-1], "docs/a&quot;b.json")
         text.encode("ascii")
+
+    def test_a_usage_event_without_counts_renders_undefined_not_zero(self):
+        events = [{"event": "usage", "role": "r1", "models": {}, "at": "t"},
+                  {"event": "usage", "role": "r2", "models": {"m": {"input": "x"}}, "at": "t"}]
+        for entry in trail_render.timeline(events):
+            self.assertIn("undefined", entry["text"])
+            self.assertNotRegex(entry["text"], r"\b0\b")
+        measures = {"tokens_by_role": {"r1": {}, "r2": {"input": None}}, "reasons": {}}
+        text = trail_render.page("T", [], measures, None)
+        rows = re.findall(r"<tr><th>r\d</th>.*?</tr>", text)
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertIn("undefined", row)
+            self.assertNotRegex(row, r">0<")
+
+    def test_absent_denials_and_rework_rounds_are_undefined_with_a_reason(self):
+        text = trail_render.page("T", [], {"reasons": {}}, None)
+        for label in ("denials", "rework rounds"):
+            row = re.search(r"<tr><th>%s</th><td>(.*?)</td></tr>" % label, text).group(1)
+            self.assertTrue(row.startswith("undefined: "), row)
+        self.assertNotIn("?", text.split("<main>")[1])
+
+    def test_a_stage_entry_reads_without_a_doubled_stage_word(self):
+        entry = trail_render.timeline([{"event": "stage_enter", "from": "a", "to": "b"}])[0]
+        self.assertEqual(entry["text"], "a to b")
+
+    def test_markdown_never_renders_free_text_as_a_link_or_image(self):
+        evil = ("![x](https://tracker.example/p.png) [click](https://evil.example) "
+                "<img src=x> ````")
+        brief = {"purpose": evil, "success_outcome": evil, "acceptance": [evil]}
+        history = [{"candidate_sha": "aa", "verdict": "PASS", "producer": {"model": evil},
+                    "findings": [{"severity": "important", "status": "open",
+                                  "evidence": evil}]}]
+        docs = {"brief": trail_render.brief_md(brief, {"verdict": evil}),
+                "verdicts": trail_render.verdicts_md(history),
+                "threads": trail_render.threads_md({evil: {"aa": {"classification": "X",
+                                                                  "at": evil}}})}
+        for name, text in docs.items():
+            self.assertIn(evil, text, name)
+            fence = None
+            for line in text.split("\n"):
+                marks = re.match(r"^(`{3,})$", line)
+                if fence is None and marks:
+                    fence = marks.group(1)
+                elif fence is not None and line == fence:
+                    fence = None
+                elif fence is None:
+                    self.assertNotIn("](", line, name)
+                    self.assertNotIn("<img", line, name)
+            self.assertIsNone(fence, name)
+            self.assertIn("`````\n", text, name)
 
     def test_a_verdict_is_numbered_per_sha_in_log_order(self):
         events = [{"event": "verdict", "sha": "aa", "verdict": "REWORK", "at": "t1"},
