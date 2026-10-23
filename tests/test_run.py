@@ -329,6 +329,48 @@ class TestRun(unittest.TestCase):
         self.assertEqual(event["tracker_url"], "https://j/DEMO-110")
 
 
+class TestUsdMaxFromConfig(unittest.TestCase):
+    """ppl init copies config.toml [budgets] usd_max into the run's budgets.
+    state.json is guarded, so this copy is the one way to set the cap."""
+
+    def setUp(self):
+        self._home = os.environ["PPL_HOME"]
+        os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+
+    def tearDown(self):
+        os.environ["PPL_HOME"] = self._home
+
+    def write_config(self, text):
+        from ppl import paths
+        paths.config_file().parent.mkdir(parents=True, exist_ok=True)
+        paths.config_file().write_text(text, encoding="utf-8")
+
+    def test_init_copies_usd_max_from_config(self):
+        self.write_config("[budgets]\nusd_max = 2.5\n")
+        state = run.init("DEMO-120", "https://j/DEMO-120", "/tmp/repo")
+        self.assertEqual(state["budgets"]["usd_max"], 2.5)
+        self.assertEqual(run.load("DEMO-120")["budgets"]["usd_max"], 2.5)
+        self.assertEqual(state["budgets"]["dispatch_hard"], run.DEFAULT_BUDGETS["dispatch_hard"])
+
+    def test_init_without_a_budgets_table_keeps_no_cap(self):
+        state = run.init("DEMO-121", "https://j/DEMO-121", "/tmp/repo")
+        self.assertEqual(state["budgets"]["usd_max"], 0.0)
+        self.write_config("[harness]\nactive = \"\"\n")
+        state = run.init("DEMO-122", "https://j/DEMO-122", "/tmp/repo")
+        self.assertEqual(state["budgets"]["usd_max"], 0.0)
+
+    def test_a_negative_usd_max_is_refused_at_init(self):
+        for number, value in enumerate(("-1", "-0.01", "\"2\"", "true", "nan", "inf")):
+            with self.subTest(value=value):
+                task_id = "DEMO-%d" % (130 + number)
+                self.write_config("[budgets]\nusd_max = %s\n" % value)
+                with self.assertRaises(PplError) as ctx:
+                    run.init(task_id, "https://j/%s" % task_id, "/tmp/repo")
+                self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+                self.assertIn("budgets.usd_max", ctx.exception.message)
+                self.assertFalse(run.state_path(task_id).exists())
+
+
 class TestNextActionText(unittest.TestCase):
     def test_the_merge_watch_next_action_names_no_tracker_product(self):
         self.assertNotIn("Jira", run.STAGE_NEXT_ACTION["merge_watch"])

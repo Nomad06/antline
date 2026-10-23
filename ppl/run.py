@@ -64,8 +64,10 @@ RISK_TIERS = ("low", "normal", "high")
 
 
 def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check="verified",
-               harness=None):
+               harness=None, usd_max=0.0):
     pid = os.getpid()
+    budgets = dict(DEFAULT_BUDGETS)
+    budgets["usd_max"] = usd_max
     return {
         "task_id": task_id,
         "tracker_url": tracker_url,
@@ -85,7 +87,7 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "lease_generation": 1,
         "deadline": store.deadline_in(INACTIVITY_TIMEOUT_SECONDS),
         "last_activity_at": store.now(),
-        "budgets": dict(DEFAULT_BUDGETS),
+        "budgets": budgets,
         "orchestrator": {"pid": pid, "started_at": process_started_at(pid)},
         "mr": {"iid": None, "url": None, "approved_sha": None,
                "merged_sha": None, "merged_url": None},
@@ -103,7 +105,10 @@ def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="
     if state_path(task_id).exists():
         raise PplError("ILLEGAL_TRANSITION",
                        "run %s already exists. Use ppl show, or destroy it first." % task_id)
-    state = _new_state(task_id, tracker_url, repo, isolated, risk, model_check, harness)
+    # imported here so the hooks, which import this module on every call, never load tomllib
+    from . import config
+    state = _new_state(task_id, tracker_url, repo, isolated, risk, model_check, harness,
+                       usd_max=config.budgets_usd_max())
     save(state)
     set_active(task_id)
     store.append_log(task_id, {"event": "init", "tracker_url": tracker_url, "repo": repo,

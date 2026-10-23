@@ -18,6 +18,14 @@ verify_ttl_days = 30
 [harness]
 active = ""
 
+# The dollar cap per run, a number >= 0, copied into the run at ppl init, so a
+# change applies to the next run. 0 is no cap. With a cap, ppl stage enter and
+# ppl transition stop once the manual usd_used plus the priced usage reaches it,
+# and a recorded model with no price below stops them too, since the cap cannot
+# be computed. ppl park stays available.
+[budgets]
+usd_max = 0
+
 # Dollar figures need prices. antline ships no built-in prices: it never states
 # a cost it cannot source. A model with no price here is listed as unpriced.
 # Use the exact model id and USD per million tokens, all four keys, numbers >= 0.

@@ -7,7 +7,7 @@ import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
                harness, metrics, models, paths, recover, refusals, review, routing, run, schema,
-               setup, status, store, trackers, verdict, watchdog)
+               setup, status, store, trackers, usage, verdict, watchdog)
 from .errors import PplError, role_output
 
 
@@ -222,10 +222,51 @@ def check_dispatch_budget(task_id):
                        % (budgets["dispatch_used"], budgets["dispatch_hard"]))
 
 
+def check_usd_budget(task_id):
+    """The dollar cap is checked after the fact, like the dispatch cap.
+
+    What a dispatch cost is known only once its role stops and the usage hook
+    logs it, so the dispatch that crosses usd_max has already run and this
+    refusal at stage boundaries and lifecycle transitions is the whole of the
+    enforcement [R-BUDGET-USD-CAP]. Spent is usd_used, the manual `ppl budget
+    spend usd`, plus the priced usage. A recorded model without a price leaves
+    the cap uncomputable, and a cap that cannot be computed is refused, never
+    read as zero [R-BUDGET-USD-UNPRICED]. A zero cap is no cap, and ppl park
+    stays available.
+    """
+    cap = run.load(task_id)["budgets"]["usd_max"]
+    if not cap > 0:
+        return
+    spent, unpriced = usage.spent_usd(task_id)
+    if unpriced:
+        raise PplError("OWNER_DECISION",
+                       "the dollar cap (usd_max %s) cannot be checked: no price for the recorded "
+                       "model%s %s. Add %s with input, cache_write, cache_read and output in USD "
+                       "per million tokens to %s, or park the task (ppl park)."
+                       % (cap, "s" if len(unpriced) > 1 else "", ", ".join(unpriced),
+                          ", ".join('[prices."%s"]' % model for model in unpriced),
+                          paths.config_file()))
+    if spent >= cap:
+        raise PplError("BUDGET_EXHAUSTED",
+                       "dollar budget is spent: %s of %s USD (usd_used plus the priced usage). "
+                       "Park the task with a handoff (ppl park) instead of continuing."
+                       % (round(spent, 4), cap))
+
+
+def refresh_orchestrator_usage(task_id):
+    """Counts the orchestrator's turns since the last role stopped. A refresh never
+    changes the command's outcome: a failure is a warning."""
+    try:
+        usage.refresh_orchestrator(task_id)
+    except Exception as exc:
+        sys.stderr.write("warning: orchestrator usage not refreshed: %s\n" % exc)
+
+
 def cmd_stage(args):
     task_id = resolve_task(args)
     control.enforce(task_id)
     check_dispatch_budget(task_id)
+    check_usd_budget(task_id)
     state = run.stage_enter(task_id, args.stage)
     print("stage: %s" % state["stage"])
     # The value to capture and pass back as --generation on every write below
@@ -562,8 +603,10 @@ def _closure_hint(stage):
 
 def cmd_transition(args):
     task_id = resolve_task(args)
+    refresh_orchestrator_usage(task_id)
     control.enforce(task_id)
     check_dispatch_budget(task_id)
+    check_usd_budget(task_id)
     state = run.load(task_id)
     # Checked BEFORE the done gate below (N4, cycle 2 wave B): a lifecycle
     # transition that is illegal on its face - still "planned", say - used
@@ -602,6 +645,7 @@ def cmd_transition(args):
 
 def cmd_park(args):
     task_id = resolve_task(args)
+    refresh_orchestrator_usage(task_id)
     run.park(task_id, args.blocker, args.safe_next, args.unsafe_to_repeat or [])
     print(status.card(task_id))
     return 0

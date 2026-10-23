@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime
 
-from ppl import config, paths, store
+from ppl import config, paths, run, store
 from ppl.errors import PplError
 
 COUNTS = ("input", "cache_write", "cache_read", "output")
@@ -344,3 +344,14 @@ def run_dollars(directory):
     for role_models in run_usage(directory).values():
         models = add(models, role_models)
     return dollars(models, prices())
+
+
+def spent_usd(task_id):
+    """(usd, unpriced): the manual usd_used plus the run's priced usage. usd is
+    None only when a recorded model has no price (unpriced names them). A run
+    with no usage recorded has spent its usd_used alone."""
+    used = run.load(task_id)["budgets"]["usd_used"]
+    priced, unpriced = run_dollars(paths.run_dir(task_id))
+    if unpriced:
+        return None, unpriced
+    return used + (priced or 0.0), []

@@ -718,7 +718,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 175 rows: 130 `blocking`, 18 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 177 rows: 132 `blocking`, 18 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -2286,14 +2286,22 @@ Only the exit-code rule has code behind it, the rest are recipes rendered into t
   the *only* enforcement of this budget that exists [R-BUDGET-DISPATCH-CAP].
 - retry budget: 3 full rework cycles per task, then escalate. Three failed convergences is
   not bad luck.
-- cost budget: `usd_max` per task, and optionally per role, for any provider billed by API
-  rather than by subscription window. Enforced by `ppl budget spend usd` [R-BUDGET-USD], which the
-  orchestrator calls before a dispatch rather than after - an ordering no code checks
-  [R-BUDGET-USD-BEFORE-DISPATCH n/a]. Zero means unlimited only for subscription providers, which have no dollar
-  meter. The third hook, `ppl_usage.py` on `SubagentStop`, logs each role's cumulative tokens per
+- cost budget: `usd_max` per task, a number `>= 0` in `config.toml` `[budgets]` that `ppl init`
+  copies into the run's budgets, so a changed cap applies from the next run. Zero means no cap.
+  The third hook, `ppl_usage.py` on `SubagentStop`, logs each role's cumulative tokens per
   model from its transcript and the orchestrator's, counted since `ppl init`, from the main
   session transcript, as `usage` events, and never refuses or delays a dispatch
-  [R-USAGE-HOOK-CANNOT-BLOCK].
+  [R-USAGE-HOOK-CANNOT-BLOCK]. `ppl transition` and `ppl park` first refresh the orchestrator's
+  count from the transcript path the hook stored, and a refresh that fails is a warning. Dollars
+  spent are `usd_used`, which `ppl budget spend usd` adds to by hand and refuses past the cap
+  [R-BUDGET-USD], plus the recorded usage priced from `config.toml` `[prices."<model id>"]`. With a
+  cap set, `ppl stage enter` and `ppl transition` refuse with `BUDGET_EXHAUSTED` once dollars spent
+  reach `usd_max` [R-BUDGET-USD-CAP], and with `OWNER_DECISION`, naming the model and its
+  `[prices."<model id>"]` table, while a recorded model has no price, since a cap that cannot be
+  computed is not a cap [R-BUDGET-USD-UNPRICED]. `ppl park` stays available. Like the dispatch cap
+  the check comes after the fact: what a dispatch costs is known only once its role stops, so the
+  dispatch that crosses the cap has already run when the next stage boundary refuses
+  [R-BUDGET-USD-CAP] [R-BUDGET-USD-BEFORE-DISPATCH n/a].
 - format violations: a role's output refused `SCHEMA_INVALID` goes back to the role once
   with the refusal quoted, and the second refusal of that output in a row for the same
   command in one lease generation parks the run with `FORMAT_RETRY_EXHAUSTED` - a third

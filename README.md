@@ -120,7 +120,7 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `ppl/_assets/rules.toml` holds 175 rules, 130 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 177 rules, 132 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
   refusal. The suite has 2369 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
@@ -289,6 +289,13 @@ prints rather than this example: under pipx the scripts sit in its venv, at
 The guard is the cage, the dispatch hook counts role dispatches, and the usage hook
 records each role's and the orchestrator's tokens in the run's `log.jsonl` when a role
 stops, never refusing or delaying a dispatch [R-USAGE-HOOK-CANNOT-BLOCK].
+
+A dollar cap is opt-in: set `usd_max` under `[budgets]` in `~/.ppl/config.toml` and a price
+for each model under `[prices."<model id>"]`. `ppl init` copies the cap into the run, and
+`ppl stage enter` and `ppl transition` refuse with `BUDGET_EXHAUSTED` once the manual
+`usd_used` plus the run's priced usage reaches it [R-BUDGET-USD-CAP], or with
+`OWNER_DECISION` while a model it used has no price [R-BUDGET-USD-UNPRICED]. `ppl park`
+stays available.
 
 The interpreter in those commands has to be Python 3.11 or newer, and `ppl setup
 claude` writes the one that ran it, so the hooks do not depend on which `python3`

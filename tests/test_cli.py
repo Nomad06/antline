@@ -1286,6 +1286,150 @@ class TestDispatchHardCap(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
 
+class TestUsdCap(unittest.TestCase):
+    """The dollar cap is checked after the fact, like the dispatch cap: once
+    usd_used plus the priced usage the run recorded reaches usd_max, ppl stage
+    enter and ppl transition refuse and ppl park stays available. Model "m"
+    costs 1 USD per million output tokens."""
+
+    def start(self, task_id, usd_max):
+        target = paths.config_file()
+        before = target.read_text(encoding="utf-8")
+        self.addCleanup(target.write_text, before, encoding="utf-8")
+        config.update("budgets", {"usd_max": usd_max})
+        config.update("prices", {"m": {"input": 0, "cache_write": 0, "cache_read": 0,
+                                       "output": 1.0}})
+        code, _, err = call("init", task_id, "--tracker-url", "u", "--repo", make_repo(),
+                            "--harness", "example-maven")
+        self.assertEqual(code, 0, err)
+
+    def record_usage(self, task_id, output, model="m"):
+        from ppl import store
+        store.append_log(task_id, {"event": "usage", "role": "ppl-code-worker",
+                                   "agent_id": "agent-%s" % model, "models": {model: {
+                                       "input": 0, "cache_write": 0, "cache_read": 0,
+                                       "output": output, "thinking": 0}}})
+
+    def set_usd_used(self, task_id, amount):
+        from ppl import run
+        state = run.load(task_id)
+        state["budgets"]["usd_used"] = amount
+        run.save(state)
+
+    def orchestrator_events(self, task_id):
+        from ppl import store
+        return [e for e in store.read_log(task_id)
+                if e.get("event") == "usage" and e.get("role") == "orchestrator"]
+
+    def noted_transcript(self, task_id):
+        """A main session transcript noted in usage.json, then one new line in it."""
+        from ppl import usage
+        transcript = Path(tmphome.mkdtemp(prefix="pplmain-")) / "session.jsonl"
+        transcript.write_text("", encoding="utf-8")
+        usage.note_orchestrator(task_id, str(transcript), "s1")
+        line = {"type": "assistant", "isSidechain": False, "timestamp": "2099-01-01T00:00:00Z",
+                "message": {"id": "o1", "model": "m",
+                            "usage": {"input_tokens": 1, "output_tokens": 7}}}
+        with open(transcript, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(line) + "\n")
+
+    def test_stage_enter_is_refused_once_priced_usage_reaches_the_cap(self):
+        # rule: R-BUDGET-USD-CAP
+        self.start("DEMO-680", 1.0)
+        self.record_usage("DEMO-680", 1200000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-680")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "BUDGET_EXHAUSTED")
+        self.assertIn("ppl park", error["message"])
+
+    def test_transition_is_refused_once_priced_usage_reaches_the_cap(self):
+        # rule: R-BUDGET-USD-CAP
+        self.start("DEMO-681", 1.0)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-681")
+        self.assertEqual(code, 0, err)
+        self.record_usage("DEMO-681", 1000000)
+        code, _, err = call("transition", "done", "--task", "DEMO-681")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "BUDGET_EXHAUSTED")
+
+    def test_manual_usd_used_counts_toward_the_cap(self):
+        # rule: R-BUDGET-USD-CAP
+        self.start("DEMO-682", 1.0)
+        self.set_usd_used("DEMO-682", 0.6)
+        self.record_usage("DEMO-682", 500000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-682")
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(err)["error_code"], "BUDGET_EXHAUSTED")
+
+    def test_stage_enter_still_works_below_the_cap(self):
+        self.start("DEMO-683", 1.0)
+        self.set_usd_used("DEMO-683", 0.3)
+        self.record_usage("DEMO-683", 600000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-683")
+        self.assertEqual(code, 0, err)
+
+    def test_park_still_works_past_the_cap(self):
+        from ppl import run
+        self.start("DEMO-684", 1.0)
+        self.record_usage("DEMO-684", 5000000)
+        code, _, err = call("park", "--blocker", "BUDGET_EXHAUSTED", "--safe-next",
+                            "raise usd_max in a new run", "--task", "DEMO-684")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-684")["stage"], "parking")
+
+    def test_a_zero_cap_never_refuses(self):
+        self.start("DEMO-685", 0)
+        self.record_usage("DEMO-685", 1000000000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-685")
+        self.assertEqual(code, 0, err)
+
+    def test_an_unpriced_model_with_a_cap_refuses_owner_decision_naming_it(self):
+        # rule: R-BUDGET-USD-UNPRICED
+        self.start("DEMO-686", 1.0)
+        self.record_usage("DEMO-686", 10, model="claude-unpriced-9")
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-686")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        self.assertIn('[prices."claude-unpriced-9"]', error["message"])
+
+    def test_an_unpriced_model_without_a_cap_does_not_refuse(self):
+        self.start("DEMO-687", 0)
+        self.record_usage("DEMO-687", 10, model="claude-unpriced-9")
+        code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-687")
+        self.assertEqual(code, 0, err)
+
+    def test_transition_refreshes_the_orchestrator_usage(self):
+        self.start("DEMO-688", 0)
+        self.noted_transcript("DEMO-688")
+        self.assertEqual(self.orchestrator_events("DEMO-688"), [])
+        call("transition", "done", "--task", "DEMO-688")
+        events = self.orchestrator_events("DEMO-688")
+        self.assertEqual(len(events), 1, events)
+        self.assertEqual(events[0]["agent_id"], "orchestrator:s1")
+        self.assertEqual(events[0]["models"]["m"]["output"], 7)
+
+    def test_park_refreshes_the_orchestrator_usage(self):
+        self.start("DEMO-689", 0)
+        self.noted_transcript("DEMO-689")
+        code, _, err = call("park", "--blocker", "OWNER_DECISION", "--safe-next", "ask",
+                            "--task", "DEMO-689")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.orchestrator_events("DEMO-689")), 1)
+
+    def test_a_failing_refresh_is_a_warning_and_park_still_parks(self):
+        from ppl import run, usage
+        self.start("DEMO-690", 0)
+        with mock.patch.object(usage, "refresh_orchestrator", side_effect=RuntimeError("boom")):
+            code, _, err = call("park", "--blocker", "OWNER_DECISION", "--safe-next", "ask",
+                                "--task", "DEMO-690")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning:", err)
+        self.assertIn("boom", err)
+        self.assertEqual(run.load("DEMO-690")["stage"], "parking")
+
+
 class TestEvidenceShaDefault(unittest.TestCase):
     def test_sha_defaults_to_git_head_when_not_given(self):
         repo = make_repo()

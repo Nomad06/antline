@@ -1,6 +1,7 @@
 """config.toml: per-machine settings in the data root. It records the active
 harness, where the generated agents and skill go, and the `ppl setup`
 bookkeeping in [setup]."""
+import math
 import os
 import shutil
 import tomllib
@@ -55,6 +56,18 @@ def active_harness():
         raise PplError("SCHEMA_INVALID",
                        "config.toml at %s: harness.active must be a string" % paths.config_file())
     return active or None
+
+
+def budgets_usd_max():
+    """[budgets] usd_max, the run's dollar cap that ppl init copies. 0.0, no cap,
+    when absent."""
+    value = _section(load(), "budgets").get("usd_max", 0.0)
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0):
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: budgets.usd_max must be a number >= 0"
+                       % paths.config_file())
+    return float(value)
 
 
 def _dir_setting(key, env_var, fallback):
