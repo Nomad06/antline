@@ -13,6 +13,18 @@ export function Field({ label, help, error, children }) {
   </label>`;
 }
 
+function short(count) {
+  if (count < 1000) return String(Math.round(count));
+  if (count < 1e6) return count < 1e4 ? (count / 1000).toFixed(1) + "k" : Math.round(count / 1000) + "k";
+  return count < 1e7 ? (count / 1e6).toFixed(1) + "M" : Math.round(count / 1e6) + "M";
+}
+
+export function Measured({ stat }) {
+  if (!stat || !stat.runs) return null;
+  const usd = stat.usd_mean === null || stat.usd_mean === undefined ? "" : ", $" + stat.usd_mean.toFixed(2);
+  return html`<span class="help"><br />${"last " + stat.runs + " runs: " + short(stat.tokens_mean) + " tokens" + usd + " per task"}</span>`;
+}
+
 export function Badge({ kind, children }) {
   return html`<span class=${"badge " + (kind || "")}>${children}</span>`;
 }

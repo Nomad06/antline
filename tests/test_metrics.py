@@ -1,4 +1,5 @@
 import itertools
+import json
 import os
 import re
 import sys
@@ -498,6 +499,73 @@ class TestMetricsDocumentation(unittest.TestCase):
                               for name in re.findall(r"\*\*([A-Za-z ]+)\*\*", line))
         returned = set(key.removesuffix("_seconds") for key in metrics._entry([], [], None))
         self.assertEqual(listed, returned)
+
+
+
+PRESET_COUNTER = itertools.count(5000)
+
+
+def done_preset_run(preset, minute, **counts):
+    task = "DEMO-%d" % next(PRESET_COUNTER)
+    run.init(task, "u", "/tmp/repo")
+    write_verdict(task, "c%d" % next(PRESET_COUNTER), "PASS", PRODUCER_A)
+    mark_done(task, "c%d" % next(PRESET_COUNTER))
+    log_usage(task, "ppl-code-worker", "w", "m", **counts)
+    state = run.load(task)
+    state["routing_preset"] = preset
+    run.save(state)
+    directory = paths.run_dir(task)
+    events = store.read_log_at(directory)
+    for event in events:
+        if event["event"] == "init":
+            event["at"] = "2026-10-01T10:%02d:00Z" % minute
+    (directory / "log.jsonl").write_text(
+        "".join(json.dumps(event, sort_keys=True) + "\n" for event in events), encoding="utf-8")
+    return task
+
+
+class TestPresetCosts(IsolatedFleet):
+    def setUp(self):
+        self._home = os.environ["PPL_HOME"]
+        super().setUp()
+
+    def tearDown(self):
+        os.environ["PPL_HOME"] = self._home
+
+    def test_preset_costs_average_the_newest_ten_done_runs(self):
+        write_prices(PRICED)
+        for minute in range(12):
+            done_preset_run("balanced", minute, input=minute + 1)
+        costs = metrics.preset_costs()
+        self.assertEqual(costs["balanced"]["runs"], 10)
+        self.assertAlmostEqual(costs["balanced"]["tokens_mean"], 7.5)
+        self.assertAlmostEqual(costs["balanced"]["usd_mean"], 7.5)
+        self.assertNotIn("economy", costs)
+
+    def test_preset_costs_leave_usd_undefined_when_a_model_is_unpriced(self):
+        done_preset_run("economy", 1, input=10)
+        costs = metrics.preset_costs()
+        self.assertEqual(costs["economy"]["tokens_mean"], 10)
+        self.assertIsNone(costs["economy"]["usd_mean"])
+
+    def test_preset_costs_skip_runs_without_a_preset_or_usage_or_done(self):
+        write_prices(PRICED)
+        done_preset_run(None, 1, input=1)
+        done_preset_run("custom", 2, input=1)
+        task = "DEMO-%d" % next(PRESET_COUNTER)
+        run.init(task, "u", "/tmp/repo")
+        state = run.load(task)
+        state["routing_preset"] = "max"
+        run.save(state)
+        log_usage(task, "ppl-code-worker", "w", "m", input=5)
+        quiet = "DEMO-%d" % next(PRESET_COUNTER)
+        run.init(quiet, "u", "/tmp/repo")
+        mark_done(quiet, "q1")
+        state = run.load(quiet)
+        state["routing_preset"] = "max"
+        run.save(state)
+        costs = metrics.preset_costs()
+        self.assertEqual(sorted(costs), ["custom"])
 
 
 if __name__ == "__main__":

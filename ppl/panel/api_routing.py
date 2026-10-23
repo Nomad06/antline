@@ -1,5 +1,5 @@
 """Model presets for the wizard's Models screen and the Agents page."""
-from .. import presets, routing, tomlout
+from .. import metrics, presets, routing, tomlout
 from ..studio import files
 
 
@@ -8,7 +8,8 @@ def _view():
     config = routing.loads(current["text"])
     return {"presets": presets.listing(), "current": presets.matching(config),
             "tiers": routing.tiers(config), "roles": routing.summary(config),
-            "effort_levels": list(routing.EFFORT_LEVELS), "routing_hash": current["hash"]}
+            "effort_levels": list(routing.EFFORT_LEVELS), "routing_hash": current["hash"],
+            "measured": metrics.preset_costs()}
 
 
 def _choose(params, body, query):

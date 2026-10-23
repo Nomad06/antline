@@ -3,7 +3,7 @@ the agent file apply would write, and the blocking rules that hold for it."""
 import shutil
 import tempfile
 
-from .. import config, harness, models, paths, presets, routing, tomlout
+from .. import config, harness, metrics, models, paths, presets, routing, tomlout
 from ..errors import PplError
 from ..studio import drafts, enforced, files
 
@@ -54,7 +54,7 @@ def overview(params, body, query):
     return {"roles": roles, "routing": doc, "routing_hash": current["hash"],
             "tiers": routing.tiers(doc), "effort_levels": list(routing.EFFORT_LEVELS),
             "presets": presets.listing(), "preset": presets.matching(doc), "harness": name,
-            "harness_error": harness_error}
+            "harness_error": harness_error, "measured": metrics.preset_costs()}
 
 
 def detail(params, body, query):

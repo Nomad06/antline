@@ -400,6 +400,46 @@ class TestUsdMaxFromConfig(unittest.TestCase):
         self.assertFalse(run.state_path("DEMO-143").exists())
 
 
+class TestRoutingPresetStamp(unittest.TestCase):
+    """ppl init stamps the routing preset in force, the join key for the cost per preset."""
+
+    def setUp(self):
+        self._home = os.environ["PPL_HOME"]
+        os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+
+    def tearDown(self):
+        os.environ["PPL_HOME"] = self._home
+
+    def write_routing(self, document):
+        from ppl import paths, tomlout
+        paths.routing_file().parent.mkdir(parents=True, exist_ok=True)
+        paths.routing_file().write_text(tomlout.dumps(document), encoding="utf-8")
+
+    def test_init_stamps_the_matching_routing_preset(self):
+        from ppl import config, routing
+        config.ensure()
+        self.write_routing(routing.preset_document("balanced"))
+        self.assertEqual(run.init("DEMO-130", "u", "/tmp/repo")["routing_preset"], "balanced")
+        self.assertEqual(run.load("DEMO-130")["routing_preset"], "balanced")
+
+    def test_init_stamps_custom_for_an_edited_routing(self):
+        from ppl import config, routing
+        config.ensure()
+        document = routing.preset_document("balanced")
+        role = sorted(document["roles"])[0]
+        document["roles"][role]["params"]["effort"] = "low"
+        self.write_routing(document)
+        self.assertEqual(run.init("DEMO-131", "u", "/tmp/repo")["routing_preset"], "custom")
+
+    def test_init_stamps_null_when_routing_cannot_be_read(self):
+        self.assertIsNone(run.init("DEMO-132", "u", "/tmp/repo")["routing_preset"])
+        from ppl import paths
+        self.assertIn("routing_preset", run.load("DEMO-132"))
+        paths.routing_file().write_text("not [valid toml", encoding="utf-8")
+        self.assertIsNone(run.init("DEMO-133", "u", "/tmp/repo")["routing_preset"])
+        self.assertIn("routing_preset", run.load("DEMO-133"))
+
+
 class TestNextActionText(unittest.TestCase):
     def test_the_merge_watch_next_action_names_no_tracker_product(self):
         self.assertNotIn("Jira", run.STAGE_NEXT_ACTION["merge_watch"])

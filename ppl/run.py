@@ -64,7 +64,7 @@ RISK_TIERS = ("low", "normal", "high")
 
 
 def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check="verified",
-               harness=None, usd_max=0.0, prices=None):
+               harness=None, usd_max=0.0, prices=None, routing_preset=None):
     pid = os.getpid()
     budgets = dict(DEFAULT_BUDGETS)
     budgets["usd_max"] = usd_max
@@ -77,6 +77,7 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "risk": risk,
         "model_check": model_check,
         "harness": harness,
+        "routing_preset": routing_preset,
         "repo": repo,
         "isolated": isolated,
         "branch": None,
@@ -98,6 +99,14 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
     }
 
 
+def _routing_preset(presets, routing):
+    """The preset routing.toml equals, "custom" when none does, None when it cannot be read."""
+    try:
+        return presets.matching(routing.load()) or "custom"
+    except (PplError, OSError):
+        return None
+
+
 def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="verified",
          harness=None):
     paths.check_task_id(task_id)
@@ -107,12 +116,13 @@ def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="
         raise PplError("ILLEGAL_TRANSITION",
                        "run %s already exists. Use ppl show, or destroy it first." % task_id)
     # imported here so the hooks, which import this module on every call, never load tomllib
-    from . import config, usage
+    from . import config, presets, routing, usage
     # The cap and the prices it is computed with are frozen into state.json, which
     # the guard write-protects (R-RUNS-WRITE-PROTECTION), since config.toml stays
     # editable mid-run.
     state = _new_state(task_id, tracker_url, repo, isolated, risk, model_check, harness,
-                       usd_max=config.budgets_usd_max(), prices=usage.prices())
+                       usd_max=config.budgets_usd_max(), prices=usage.prices(),
+                       routing_preset=_routing_preset(presets, routing))
     save(state)
     set_active(task_id)
     store.append_log(task_id, {"event": "init", "tracker_url": tracker_url, "repo": repo,

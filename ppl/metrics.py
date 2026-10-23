@@ -372,6 +372,36 @@ def _usage_metrics(run_records, producer_key):
     return cost, tokens, roles_metric
 
 
+def preset_costs(limit=10):
+    """{preset: {"runs", "tokens_mean", "usd_mean"}} over the `limit` newest done runs
+    with recorded usage per routing preset, newest `init` first, priced with the live
+    config.toml prices. usd_mean is None when any of those runs has an unpriced model.
+    A run without a stamp counts for no preset."""
+    found = {}
+    for task_id, directory in _accepted_runs(_run_records(), None):
+        state = store.read_json(directory / "state.json")
+        preset = state.get("routing_preset") if isinstance(state, dict) else None
+        if not isinstance(preset, str) or not usage.run_usage(directory):
+            continue
+        started = _event(store.read_log_at(directory), "init")
+        found.setdefault(preset, []).append(((started or {}).get("at") or "", task_id, directory))
+    table = usage.prices()
+    out = {}
+    for preset, runs in found.items():
+        runs.sort(reverse=True)
+        tokens = []
+        costs = []
+        for _, _, directory in runs[:limit]:
+            models = {}
+            for role_models in usage.run_usage(directory).values():
+                models = usage.add(models, role_models)
+            tokens.append(usage.total(_counts_of(models)))
+            costs.append(usage.dollars(models, table)[0])
+        out[preset] = {"runs": len(tokens), "tokens_mean": sum(tokens) / len(tokens),
+                       "usd_mean": None if None in costs else sum(costs) / len(costs)}
+    return out
+
+
 def _human_minutes():
     """Always undefined today, but unlike cost this is a real gap, not a
     property of the architecture: nothing anywhere records a human's working
