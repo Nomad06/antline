@@ -39,7 +39,7 @@ if not _PPL_FILE or not Path(_PPL_FILE).resolve().is_relative_to(_PACKAGE_PARENT
     sys.stderr.write("ppl_guard: imported ppl from %s, not the one beside this hook in %s\n"
                      % (_PPL_FILE, _PACKAGE_PARENT))
 
-from ppl import boundary, control, gitfacts, paths, run, store, trackers
+from ppl import boundary, control, escape, gitfacts, paths, run, store, trackers
 from ppl import forges as _forges
 from ppl.errors import PplError
 from ppl.trackers import jira as _jira
@@ -2253,6 +2253,14 @@ def _decide(payload):
     if not isinstance(tool_input, dict):
         tool_input = {}
     agent = payload.get("agent_type")
+    # R-OS-SANDBOX-ROLE-NO-ESCAPE, R-OS-SANDBOX-ORCHESTRATOR-SHAPE: a call that asks to run
+    # outside the OS sandbox is decided first, before any file read, so a ppl-* role is
+    # refused from the call alone. One the escape check lets through still meets every
+    # check below, the tracker gate and the forge denials included.
+    if escape.flagged(payload):
+        refusal = escape.decide(payload, paths.home(), active_state)
+        if refusal:
+            return deny(*refusal)
     active = _active_task_id()
 
     denied = denied_tools(active)
@@ -2556,15 +2564,22 @@ def main():
     except Exception as err:
         # Claude Code reads exit 0 with no output as allow. A ppl-* role is
         # refused instead, an unroled session keeps the allow so a hook defect
-        # cannot lock the operator out of unrelated sessions
-        # [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. The deny goes out before the
+        # cannot lock the operator out of unrelated sessions, unless the call
+        # asks to leave the OS sandbox [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. The deny goes out before the
         # diagnostic, and a broken stderr is swallowed, since a nonzero exit
         # would not block the call either.
         agent = payload.get("agent_type") if isinstance(payload, dict) else None
-        if isinstance(agent, str) and agent in boundary.ROLE_RULES:
+        # A call that asks to leave the OS sandbox is refused whatever its agent
+        # [R-OS-SANDBOX-FAIL-CLOSED]. A check that fails reads as flagged.
+        try:
+            unsandboxed = escape.flagged(payload)
+        except Exception:
+            unsandboxed = True
+        if unsandboxed or (isinstance(agent, str) and agent in boundary.ROLE_RULES):
             refusal = deny(
                 "BOUNDARY_VIOLATION",
-                "guard internal error, role call refused: %s" % type(err).__name__)
+                "guard internal error, %s call refused: %s"
+                % ("unsandboxed" if unsandboxed else "role", type(err).__name__))
             sys.stdout.write(json.dumps(refusal))
             sys.stdout.flush()
             log_denial(payload, refusal)

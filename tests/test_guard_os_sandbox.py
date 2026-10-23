@@ -1,0 +1,678 @@
+import contextlib
+import io
+import json
+import os
+import shutil
+import sys
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+# tests/ is not a package, so the helper next to this file is imported
+# by path. It must be imported before PPL_HOME is chosen below.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tmphome
+
+os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
+
+import fixtures
+from ppl import escape, harness, os_sandbox, paths, run, store
+import ppl_guard
+
+TASK = "GH-7"
+REPO = "/tmp/ghrepo"
+WS = "/tmp/ws"
+OTHER = "/tmp/other"
+BRANCH = "gh-7-cart-total"
+GH = "/opt/pin/gh"
+GIT = "/opt/pin/git"
+PPL = "/opt/pin/ppl"
+
+
+def real(path):
+    return os.path.realpath(str(path))
+
+
+def scratch_file(name):
+    return str(paths.home() / "scratch" / TASK / name)
+
+
+def facts_doc(**overrides):
+    """What harness.apply writes for a GitHub harness whose checkout is the run's repo."""
+    home = paths.home()
+    doc = {"version": 1,
+           "workspace": real(WS),
+           "checkout": real(REPO),
+           "worktrees": real(REPO + "/.worktrees"),
+           "default_branch": "main",
+           "forge_repo": "o/r",
+           "tracker_repo": "o/r",
+           "scratch": real(home / "scratch"),
+           "write_scope": [real(home / "runs"), real(home / "labels"), real(home / "scratch"),
+                           real(REPO), real(REPO + "/.worktrees")],
+           "pins": {"gh": {"path": GH, "realpath": real(GH)},
+                    "git": {"path": GIT, "realpath": real(GIT)},
+                    "ppl": {"path": PPL, "realpath": real(PPL)}},
+           "written_sandbox": {"enabled": True},
+           "written_allow": []}
+    doc.update(overrides)
+    return doc
+
+
+def facts_path():
+    return paths.home() / os_sandbox.FACTS_FILE
+
+
+def setUpModule():
+    if not run.state_path(TASK).exists():
+        run.init(TASK, "https://github.com/o/r/issues/7", REPO)
+    state = run.load(TASK)
+    state["branch"] = BRANCH
+    run.save(state)
+    store.write_json(paths.run_dir(TASK) / "boundary.json", {"write": ["src/**"], "forbid": []})
+    fixtures.install_variant("example-generic", "gh-issues", **fixtures.GITHUB_ISSUES)
+    store.write_json(paths.run_dir(TASK) / "harness.json",
+                     harness.snapshot(harness.load("gh-issues")))
+    store.write_json(facts_path(), facts_doc())
+    (paths.home() / "scratch" / TASK).mkdir(parents=True, exist_ok=True)
+    for name in ("pr-body.md", "note.md", "reply.md"):
+        Path(scratch_file(name)).write_text("text\n", encoding="utf-8")
+
+
+def tearDownModule():
+    """The data root is shared under discover, so the facts and the scratch files go."""
+    facts_path().unlink(missing_ok=True)
+    shutil.rmtree(str(paths.home() / "scratch" / TASK), ignore_errors=True)
+
+
+def payload(agent, tool, tool_input, cwd=WS):
+    return {"hook_event_name": "PreToolUse", "agent_type": agent,
+            "tool_name": tool, "tool_input": tool_input, "cwd": cwd}
+
+
+def flagged(agent, command, cwd=WS):
+    return payload(agent, "Bash", {"command": command, "dangerouslyDisableSandbox": True}, cwd)
+
+
+def pr_create():
+    """Built per call: under discover every module points PPL_HOME elsewhere at import."""
+    return ("%s pr create -R o/r --head %s --base main --title 'GH-7 add the cart total' "
+            "--body-file %s" % (GH, BRANCH, scratch_file("pr-body.md")))
+
+
+class OsSandboxCase(unittest.TestCase):
+    def setUp(self):
+        run.set_active(TASK)
+        store.write_json(facts_path(), facts_doc())
+
+    def deny_reason(self, result):
+        self.assertIsNotNone(result, "the call was allowed")
+        return result["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def decide(self, command, agent=None, cwd=WS):
+        return ppl_guard.decide(flagged(agent, command, cwd))
+
+    @contextlib.contextmanager
+    def facts_text(self, text):
+        """os_sandbox.json replaced by `text`, or removed when `text` is None."""
+        if text is None:
+            facts_path().unlink()
+        else:
+            facts_path().write_text(text, encoding="utf-8")
+        try:
+            yield
+        finally:
+            store.write_json(facts_path(), facts_doc())
+
+    @contextlib.contextmanager
+    def no_active_run(self):
+        paths.active_file().unlink()
+        try:
+            yield
+        finally:
+            run.set_active(TASK)
+
+    @contextlib.contextmanager
+    def run_state(self, **changes):
+        state = run.load(TASK)
+        saved = dict(state)
+        state.update(changes)
+        run.save(state)
+        try:
+            yield
+        finally:
+            run.save(saved)
+
+
+class TestRoleEscape(OsSandboxCase):
+    def test_a_ppl_role_cannot_leave_the_sandbox(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        result = self.decide("ls", agent="ppl-code-worker")
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+        self.assertIn("outside the OS sandbox", self.deny_reason(result))
+
+    def test_a_role_is_denied_even_without_a_run_or_facts(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        with self.facts_text(None), self.no_active_run():
+            for agent in ("ppl-verifier", "ppl-review-responder"):
+                with self.subTest(agent=agent):
+                    result = self.decide(pr_create(), agent=agent, cwd=OTHER)
+                    self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_role_is_denied_before_any_file_is_read(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        with mock.patch.object(ppl_guard, "active_state", side_effect=AssertionError), \
+                mock.patch.object(ppl_guard, "_active_task_id", side_effect=AssertionError), \
+                mock.patch.object(escape, "load_facts", side_effect=AssertionError):
+            result = self.decide("ls", agent="ppl-test-worker")
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_general_purpose_subagent_in_the_workspace_is_denied(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        for cwd in (WS, REPO):
+            with self.subTest(cwd=cwd):
+                result = self.decide("ls", agent="general-purpose", cwd=cwd)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_subagent_cannot_ride_the_orchestrator_shape(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        result = self.decide(pr_create(), agent="general-purpose")
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_subagent_elsewhere_is_left_alone(self):
+        with self.facts_text(None), self.no_active_run():
+            self.assertIsNone(self.decide("ls", agent="general-purpose", cwd=OTHER))
+            self.assertIsNone(self.decide("ls", cwd=OTHER))
+        # with the facts and the run in place, a cwd outside both is not pipeline-scoped
+        self.assertIsNone(self.decide("ls", agent="general-purpose", cwd=OTHER))
+        self.assertIsNone(self.decide("ls", cwd=OTHER))
+
+    def test_an_unflagged_role_call_is_not_touched_by_escape(self):
+        for flag in (None, False):
+            tool_input = {"command": "ls"}
+            if flag is not None:
+                tool_input["dangerouslyDisableSandbox"] = flag
+            with self.subTest(flag=flag), \
+                    mock.patch.object(escape, "decide", side_effect=AssertionError) as checked:
+                self.assertIsNone(ppl_guard.decide(payload("ppl-code-worker", "Bash", tool_input)))
+                checked.assert_not_called()
+
+    def test_a_truthy_flag_that_is_not_true_still_counts(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        for value in ("true", 1, "yes"):
+            with self.subTest(value=value):
+                result = ppl_guard.decide(payload(
+                    "ppl-code-worker", "Bash", {"command": "ls", "dangerouslyDisableSandbox": value}))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+
+class TestFailClosed(OsSandboxCase):
+    def test_a_non_string_agent_type_with_the_flag_is_denied(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        for agent in (["x"], 7, {"name": "ppl-code-worker"}, ""):
+            with self.subTest(agent=agent):
+                result = self.decide("ls", agent=agent, cwd=OTHER)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_an_exception_on_a_flagged_call_denies(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        def broken(_payload):
+            raise RuntimeError("boom")
+
+        for agent in (None, "general-purpose", ["x"]):
+            stdout = io.StringIO()
+            stdin = io.StringIO(json.dumps(flagged(agent, pr_create())))
+            with self.subTest(agent=agent), mock.patch.object(ppl_guard, "_decide", broken), \
+                    mock.patch.object(sys, "stdin", stdin), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(ppl_guard.main(), 0)
+                reason = self.deny_reason(json.loads(stdout.getvalue()))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn("RuntimeError", reason)
+
+    def test_an_unflagged_unroled_call_keeps_the_internal_error_allow(self):
+        def broken(_payload):
+            raise RuntimeError("boom")
+
+        stdout = io.StringIO()
+        stdin = io.StringIO(json.dumps(payload(None, "Bash", {"command": "ls"})))
+        with mock.patch.object(ppl_guard, "_decide", broken), \
+                mock.patch.object(sys, "stdin", stdin), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ppl_guard.main(), 0)
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_missing_facts_deny_the_orchestrator_naming_apply(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        with self.facts_text(None):
+            for agent, cwd in ((None, WS), (None, REPO), (None, OTHER), ("general-purpose", WS)):
+                with self.subTest(agent=agent, cwd=cwd):
+                    result = self.decide(pr_create(), agent=agent, cwd=cwd)
+                    self.assertIn("OWNER_DECISION", self.deny_reason(result))
+                    self.assertIn("ppl harness apply", self.deny_reason(result))
+
+    def test_corrupt_facts_deny(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        broken = dict(facts_doc())
+        del broken["pins"]
+        for text in ("{not json", "[]", json.dumps(dict(facts_doc(), version=2)),
+                     json.dumps(broken), json.dumps(facts_doc(write_scope="/tmp")),
+                     json.dumps(facts_doc(workspace="relative/ws"))):
+            with self.subTest(text=text[:40]), self.facts_text(text):
+                result = self.decide(pr_create())
+                self.assertIn("OWNER_DECISION", self.deny_reason(result))
+                self.assertIn("ppl harness apply", self.deny_reason(result))
+        # with no run active too: the guard cannot tell what is pipeline-scoped
+        with self.facts_text("{not json"), self.no_active_run():
+            self.assertIn("ppl harness apply", self.deny_reason(self.decide("ls", cwd=OTHER)))
+
+    def test_unreadable_run_state_denies_a_flagged_call(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        state_file = run.state_path(TASK)
+        saved = state_file.read_text(encoding="utf-8")
+        state_file.write_text("{half", encoding="utf-8")
+        try:
+            result = self.decide(pr_create(), cwd=OTHER)
+        finally:
+            state_file.write_text(saved, encoding="utf-8")
+        self.assertIn("OWNER_DECISION", self.deny_reason(result))
+        self.assertIn("state", self.deny_reason(result))
+
+    def test_a_snapshot_that_is_a_fifo_denies_without_blocking(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        # runs/ is sandbox-writable, and a hook that blocks past its timeout denies nothing
+        snapshot = paths.run_dir(TASK) / "harness.json"
+        saved = snapshot.read_text(encoding="utf-8")
+        snapshot.unlink()
+        os.mkfifo(str(snapshot))
+        try:
+            with self.facts_text(None):
+                started = time.monotonic()
+                result = self.decide(pr_create())
+                self.assertLess(time.monotonic() - started, 5)
+        finally:
+            snapshot.unlink()
+            snapshot.write_text(saved, encoding="utf-8")
+        self.assertIn("OWNER_DECISION", self.deny_reason(result))
+        self.assertIn("ppl harness apply", self.deny_reason(result))
+
+    def test_extra_keys_in_the_facts_are_accepted(self):
+        with self.facts_text(json.dumps(facts_doc(future_key={"a": 1}))):
+            self.assertIsNone(self.decide(pr_create()))
+
+
+class TestOrchestratorShape(OsSandboxCase):
+    def test_a_bare_gh_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        result = self.decide("gh pr view 12 -R o/r")
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+        self.assertIn(GH, self.deny_reason(result))
+
+    def test_a_pin_spelled_another_way_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for spelling in ("/opt/pin/./gh", "/opt//pin/gh", "/opt/pin/gh/", "'/opt/pin/gh'x"):
+            with self.subTest(spelling=spelling):
+                result = self.decide(spelling + " auth status")
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_pin_whose_target_moved_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        pins = dict(facts_doc()["pins"], gh={"path": GH, "realpath": "/opt/cellar/gh-2.1/gh"})
+        with self.facts_text(json.dumps(facts_doc(pins=pins))):
+            result = self.decide(GH + " auth status")
+        self.assertIn("ppl harness apply", self.deny_reason(result))
+
+    def test_a_compound_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for joiner in (" ; ", " && ", " || ", " | ", " & ", "\n"):
+            with self.subTest(joiner=joiner):
+                result = self.decide(GH + " auth status" + joiner + "id")
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_redirect_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for tail in (" > /tmp/x", " 2>/dev/null", " < /etc/passwd", " <<EOF"):
+            with self.subTest(tail=tail):
+                result = self.decide(GH + " auth status" + tail)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_leading_assignment_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for command in ("GH_HOST=evil.example " + GH + " auth status",
+                        "GH_REPO=x/y " + GH + " pr view 12 -R o/r"):
+            with self.subTest(command=command):
+                result = self.decide(command)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                self.assertIn("assignment", self.deny_reason(result))
+
+    def test_globs_groups_and_subshells_are_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for command in (GH + " pr view 1* -R o/r", GH + " pr view 1? -R o/r",
+                        GH + " pr view [1] -R o/r", GH + " pr view {1,2} -R o/r",
+                        "(" + GH + " auth status)", GH + " auth status `id`"):
+            with self.subTest(command=command):
+                result = self.decide(command)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_dollar_inside_single_quotes_is_literal(self):
+        command = pr_create().replace("'GH-7 add the cart total'", "'Fix $HOME'")
+        self.assertIsNone(self.decide(command))
+        self.assertIsNone(self.decide(GH + " api user --jq '.login'"))
+
+    def test_a_dollar_inside_double_quotes_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for title in ('"Fix $HOME"', "Fix$HOME", '"it\'s $HOME"', "\\$HOME", '"$(id)"'):
+            with self.subTest(title=title):
+                command = pr_create().replace("'GH-7 add the cart total'", title)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_a_quote_inside_the_other_quote_does_not_hide_a_separator(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # each title ends a quoted word, runs `id`, and starts another
+        for title in ("\"'\";id;\"'\"", "\\';id;\\'", "\"\\\"'\";id;\"'\\\"\""):
+            with self.subTest(title=title):
+                command = pr_create().replace("'GH-7 add the cart total'", title)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_a_comment_and_a_control_character_are_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for command in (pr_create() + " #--draft", GH + " auth status\r", GH + " auth\x0bstatus",
+                        GH + " auth status 'unclosed"):
+            with self.subTest(command=command):
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_zsh_expansions_outside_quotes_are_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # under zsh's EXTENDED_GLOB, ^ ~ # glob, a word-start = names a command path, a
+        # leading ~ is the home directory, and ! is history or negation
+        for title in ("fix^x", "a~b", "~root", "fix#", "!x", "=ls"):
+            with self.subTest(title=title):
+                command = pr_create().replace("'GH-7 add the cart total'", title)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+        quoted = pr_create().replace("'GH-7 add the cart total'", "'fix ^x ~y #z !w =v'")
+        self.assertIsNone(self.decide(quoted))
+        quoted = pr_create().replace("'GH-7 add the cart total'", '"fix ^x ~y #z !w =v"')
+        self.assertIsNone(self.decide(quoted))
+
+    def test_adjacent_single_quoted_strings_are_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # zsh's RC_QUOTES reads '' inside single quotes as a quote: 'a''b' is a'b there and
+        # ab here, so the guard would check one body file while gh reads another
+        body = scratch_file("pr-body.md")
+        split = body[:-3] + "''" + body[-3:]
+        command = pr_create().replace(body, "'" + split + "'")
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_ppl_from_a_cwd_inside_the_write_scope_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # ppl's own gh and git calls inherit the cwd, so a role-writable repo there is
+        # loaded outside the sandbox
+        for command in (PPL + " tracker fetch --task GH-7", PPL + " doctor --forge"):
+            with self.subTest(command=command):
+                result = self.decide(command, cwd=REPO)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                self.assertIn("write", self.deny_reason(result))
+
+    def test_pr_create_with_head_base_and_body_file_is_allowed(self):
+        self.assertIsNone(self.decide(pr_create()))
+        self.assertIsNone(self.decide(pr_create() + " --draft"))
+        spaced = pr_create().replace("--head " + BRANCH, "--head=" + BRANCH).replace(
+            "-R o/r", "-R=o/r")
+        self.assertIsNone(self.decide(spaced))
+
+    def test_pr_create_from_a_cwd_inside_the_write_scope_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for cwd in (REPO, REPO + "/src"):
+            with self.subTest(cwd=cwd):
+                result = self.decide(pr_create(), cwd=cwd)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                self.assertIn("write", self.deny_reason(result))
+        # an [os_sandbox] allow_write entry that holds the workspace
+        scope = facts_doc()["write_scope"] + [real("/tmp")]
+        with self.facts_text(json.dumps(facts_doc(write_scope=scope))):
+            self.assertIn("write", self.deny_reason(self.decide(pr_create(), cwd=WS)))
+
+    def test_a_gh_call_with_no_cwd_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        call = flagged(None, pr_create())
+        del call["cwd"]
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(ppl_guard.decide(call)))
+
+    def test_pr_create_against_another_repo_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for repo in ("evil/r", "O/R", "github.com/o/r", "https://github.com/o/r"):
+            with self.subTest(repo=repo):
+                result = self.decide(pr_create().replace("-R o/r", "-R " + repo))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_repeated_flag_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # gh takes the last value, so a second -R would name another repo
+        for extra in (" -R evil/r", " --head other", " --base other"):
+            with self.subTest(extra=extra):
+                result = self.decide(pr_create() + extra)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_pr_create_without_head_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for gone in ("--head " + BRANCH, "--base main", "-R o/r", "--title 'GH-7 add the cart total'",
+                     "--body-file " + scratch_file("pr-body.md")):
+            with self.subTest(gone=gone):
+                result = self.decide(pr_create().replace(gone, ""))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_pr_create_with_another_head_or_base_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for old, new in (("--head " + BRANCH, "--head main"), ("--head " + BRANCH, "--head o:x"),
+                         ("--base main", "--base release")):
+            with self.subTest(new=new):
+                result = self.decide(pr_create().replace(old, new))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+        with self.run_state(branch=None):
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(pr_create())))
+        with self.run_state(branch="main"):
+            command = pr_create().replace("--head " + BRANCH, "--head main")
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_issue_comment_needs_a_body_file_under_the_scratch_dir(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        with self.run_state(stage="merge_watch", mr={"merged_sha": "f" * 40}):
+            good = GH + " issue comment 7 -R o/r --body-file " + scratch_file("note.md")
+            self.assertIsNone(self.decide(good))
+            outside = (str(paths.home() / "scratch" / "GH-8" / "note.md"), "/tmp/note.md",
+                       "note.md", scratch_file("../../os_sandbox.json"),
+                       scratch_file("missing.md"), scratch_file(""), "-")
+            for path in outside:
+                with self.subTest(path=path):
+                    command = GH + " issue comment 7 -R o/r --body-file " + path
+                    self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+            command = GH + " issue comment 7 -R o/r"
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+            command = GH + " issue comment 7 -R o/r --body 'x'"
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_a_body_file_that_links_out_of_the_scratch_dir_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # a role can write the scratch directory, so a link there can point gh at a secret
+        secret = paths.home() / "secret.txt"
+        secret.write_text("token\n", encoding="utf-8")
+        links = {"soft.md": lambda path: os.symlink(str(secret), path),
+                 "hard.md": lambda path: os.link(str(secret), path)}
+        try:
+            for name, make in links.items():
+                make(scratch_file(name))
+                with self.subTest(name=name):
+                    command = pr_create().replace(scratch_file("pr-body.md"), scratch_file(name))
+                    self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+        finally:
+            for name in links:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(scratch_file(name))
+            secret.unlink()
+
+    def test_a_run_scratch_dir_that_is_a_link_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        run_dir = paths.home() / "scratch" / TASK
+        kept = paths.home() / "scratch" / "kept"
+        elsewhere = paths.home() / "elsewhere"
+        elsewhere.mkdir(exist_ok=True)
+        (elsewhere / "pr-body.md").write_text("secret\n", encoding="utf-8")
+        run_dir.rename(kept)
+        os.symlink(str(elsewhere), str(run_dir))
+        try:
+            result = self.decide(pr_create())
+        finally:
+            os.unlink(str(run_dir))
+            kept.rename(run_dir)
+            shutil.rmtree(str(elsewhere))
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_an_unknown_gh_verb_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for tail in ("co 12", "pr new -R o/r", "pr merge 12 -R o/r", "pr diff 12 -R o/r",
+                     "issue close 7 -R o/r", "repo delete o/r", "extension install x/y",
+                     "alias set co 'pr checkout'", "pr view 12 -R o/r --web",
+                     "pr view 12 -R o/r --repo evil/r", "auth status --show-token",
+                     "auth token", "pr close 12 -R o/r --comment bye",
+                     "pr close 12 -R o/r --delete-branch", "pr view -R o/r", "pr view 12 13 -R o/r",
+                     "pr view 012 -R o/r", "pr checks 12 -R o/r -- x", "issue view 7 -Ro/r"):
+            with self.subTest(tail=tail):
+                result = self.decide(GH + " " + tail)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_the_read_verbs_of_the_table_are_allowed(self):
+        for tail in ("issue view 7 -R o/r", "issue view 7 -R o/r --comments --json=title,body",
+                     "issue view 7 --json title -R o/r", "pr view 12 -R o/r --json=reviews,headRefOid",
+                     "pr checks 12 -R o/r", "pr close 12 -R o/r", "auth status",
+                     "api user", "api user --jq .login", "api user --jq=.login"):
+            with self.subTest(tail=tail):
+                self.assertIsNone(self.decide(GH + " " + tail))
+
+    def test_the_tracker_repo_and_the_forge_repo_are_told_apart(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        with self.facts_text(json.dumps(facts_doc(tracker_repo="o/issues", forge_repo="o/code"))):
+            self.assertIsNone(self.decide(GH + " issue view 7 -R o/issues"))
+            self.assertIsNone(self.decide(GH + " pr view 12 -R o/code"))
+            self.assertIn("BOUNDARY_VIOLATION",
+                          self.deny_reason(self.decide(GH + " issue view 7 -R o/code")))
+            self.assertIn("BOUNDARY_VIOLATION",
+                          self.deny_reason(self.decide(GH + " pr view 12 -R o/issues")))
+        with self.facts_text(json.dumps(facts_doc(tracker_repo=None))):
+            self.assertIn("BOUNDARY_VIOLATION",
+                          self.deny_reason(self.decide(GH + " issue view 7 -R o/r")))
+
+    def test_api_graphql_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        command = GH + " api graphql -f query='query { viewer { login } }'"
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_the_reply_route_with_a_body_file_is_allowed(self):
+        route = "repos/o/r/pulls/12/comments/345/replies"
+        self.assertIsNone(self.decide(
+            "%s api %s -F body=@%s" % (GH, route, scratch_file("reply.md"))))
+
+    def test_the_reply_route_takes_nothing_but_its_body_file(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        route = "repos/o/r/pulls/12/comments/345/replies"
+        body = "-F body=@" + scratch_file("reply.md")
+        for tail in ("%s" % route, "%s -f body=hi" % route, "%s %s -X DELETE" % (route, body),
+                     "%s -F body=@/tmp/reply.md" % route, "%s -F title=@%s" % (route, scratch_file("reply.md")),
+                     "repos/evil/r/pulls/12/comments/345/replies " + body,
+                     "/repos/o/r/pulls/12/comments/345/replies " + body,
+                     "repos/o/r/pulls/12/comments/345/replies/x " + body,
+                     "%s %s --jq .id" % (route, body), "%s %s %s" % (route, body, body)):
+            with self.subTest(tail=tail):
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(GH + " api " + tail)))
+
+    def test_api_post_to_an_issues_route_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        body = scratch_file("note.md")
+        for tail in ("repos/o/r/issues/7/comments -F body=@" + body,
+                     "repos/o/r/issues/7 -X PATCH -f state=closed",
+                     "user -X PATCH -f bio=x", "user --jq env", "user --jq '$ENV'"):
+            with self.subTest(tail=tail):
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(GH + " api " + tail)))
+
+    def test_ppl_tracker_fetch_for_the_active_task_is_allowed(self):
+        for command in (PPL + " tracker fetch --task GH-7", PPL + " tracker fetch --task=GH-7",
+                        PPL + " review fetch --pr 12", PPL + " review fetch --pr=12",
+                        PPL + " doctor --forge"):
+            with self.subTest(command=command):
+                self.assertIsNone(self.decide(command))
+
+    def test_ppl_tracker_fetch_for_another_task_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for command in (PPL + " tracker fetch --task GH-8", PPL + " tracker fetch --tas GH-7",
+                        PPL + " tracker fetch --task GH-7 --task GH-8",
+                        PPL + " review fetch --pr x", PPL + " doctor --forge --fix",
+                        "ppl tracker fetch --task GH-7"):
+            with self.subTest(command=command):
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+        with self.no_active_run():
+            result = self.decide(PPL + " tracker fetch --task GH-7")
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_ppl_init_unsandboxed_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for tail in ("init GH-8 https://github.com/o/r/issues/8 /tmp/ghrepo", "harness apply x",
+                     "stage enter briefing", "doctor"):
+            with self.subTest(tail=tail):
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(PPL + " " + tail)))
+
+    def test_git_has_no_unsandboxed_shape_yet(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        command = GIT + " -c core.hooksPath=/dev/null -C %s fetch origin main" % real(REPO)
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_any_other_binary_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        for command in ("ls", "curl https://api.github.com", "env " + GH + " auth status",
+                        "command " + GH + " auth status", "/usr/bin/git fetch"):
+            with self.subTest(command=command):
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_decide_takes_a_run_state_value_as_well_as_the_reader(self):
+        call = flagged(None, pr_create())
+        self.assertIsNone(escape.decide(call, paths.home(), run.load(TASK)))
+        self.assertIsNone(escape.decide(call, paths.home(), ppl_guard.active_state))
+        # with no run, the run's branch and scratch directory are unknown
+        self.assertIsNotNone(escape.decide(call, paths.home(), None))
+
+    def test_tracker_gate_still_applies_to_an_allowed_issue_comment_before_merge(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        command = GH + " issue comment 7 -R o/r --body-file " + scratch_file("note.md")
+        self.assertIsNone(escape.decide(flagged(None, command), paths.home(),
+                                        ppl_guard.active_state))
+        result = self.decide(command)
+        self.assertIn("OWNER_DECISION", self.deny_reason(result))
+        self.assertIn("merge", self.deny_reason(result))
+
+
+class TestPlainArgv(unittest.TestCase):
+    def test_a_plain_command_splits_like_the_shell(self):
+        self.assertEqual(escape.plain_argv("/opt/pin/gh pr view 12 --title 'a $b `c`' \"c d\""),
+                         ["/opt/pin/gh", "pr", "view", "12", "--title", "a $b `c`", "c d"])
+        self.assertEqual(escape.plain_argv("a \"it's\" b\\ c 'x'\"y\" d=e"),
+                         ["a", "it's", "b c", "xy", "d=e"])
+
+    def test_anything_the_shell_would_expand_is_not_plain(self):
+        for command in ("", "   ", "a;b", "a $b", "a \"$b\"", "a `b`", "a > b", "a\nb", "X=1 a",
+                        "a *", "a {b,c}", "a 'b", "a # b", "a\\;b", "a b#", "a ~", "a ^b",
+                        "a !b", "a =b", "a 'b''c'"):
+            with self.subTest(command=command):
+                self.assertIsNone(escape.plain_argv(command))
+
+
+class TestEscapeFacts(unittest.TestCase):
+    def test_escape_facts_file_matches_os_sandbox(self):
+        self.assertEqual(escape.FACTS_FILE, os_sandbox.FACTS_FILE)
+
+    def test_load_facts_reads_what_apply_writes(self):
+        self.assertIsNone(escape.load_facts(paths.home() / "no-such-dir"))
+        self.assertEqual(escape.load_facts(paths.home())["pins"]["gh"]["path"], GH)
+
+
+if __name__ == "__main__":
+    unittest.main()

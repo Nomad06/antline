@@ -184,6 +184,7 @@ def main():
         run_cases(cages[-1])
         cages.append(Cage(layout="python"))
         run_python_cases(cages[-1])
+        run_os_sandbox_cases(cages[-1])
         return report([result for cage in cages for result in cage.results])
     finally:
         # This harness used to leave three directories per invocation behind in
@@ -1030,6 +1031,52 @@ def run_cases(cage):
         "a ppl-test-worker dispatch of acceptance criteria only is allowed",
         dispatch("AC-1: 10 percent off 1000 gives 900.\nAC-2: never below zero."),
         "allow")
+
+
+def run_os_sandbox_cases(cage):
+    """Who may leave the OS sandbox, on the python cage's GitHub Issues run: the guard facts
+    `ppl harness apply` writes, pins that need not exist, and the unrelated directory as the
+    workspace, which no sandboxed command can write [R-OS-SANDBOX-ROLE-NO-ESCAPE]
+    [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]."""
+    real = os.path.realpath
+    home = cage.ppl_home
+    workspace = str(cage.unrelated)
+    pins = {name: {"path": "/opt/pin/" + name, "realpath": real("/opt/pin/" + name)}
+            for name in ("gh", "git", "ppl")}
+    facts = {"version": 1, "workspace": real(workspace), "checkout": real(str(cage.worktree)),
+             "worktrees": real(str(cage.worktree) + "/.worktrees"), "default_branch": "main",
+             "forge_repo": "o/r", "tracker_repo": "o/r", "scratch": real(str(home / "scratch")),
+             "write_scope": [real(str(home / part)) for part in ("runs", "labels", "scratch")]
+             + [real(str(cage.worktree))],
+             "pins": pins}
+    cage._store.write_json(home / "os_sandbox.json", facts)
+    state = cage._run.load(cage.task_id)
+    state["branch"] = "cage-branch"
+    cage._run.save(state)
+    body = home / "scratch" / cage.task_id / "pr-body.md"
+    body.parent.mkdir(parents=True, exist_ok=True)
+    body.write_text("body\n", encoding="utf-8")
+    gh = pins["gh"]["path"]
+
+    def flagged(agent, command, cwd):
+        return cage.payload(agent, "Bash",
+                            {"command": command, "dangerouslyDisableSandbox": True}, cwd)
+
+    cage.check(
+        "os-sandbox role escape denied",
+        flagged("ppl-code-worker", "ls", str(cage.worktree)),
+        "BOUNDARY_VIOLATION", reason="outside the OS sandbox")
+
+    cage.check(
+        "os-sandbox orchestrator plain pr create allowed",
+        flagged(None, "%s pr create -R o/r --head cage-branch --base main --title 'Fix $HOME' "
+                "--body-file %s" % (gh, body), workspace),
+        "allow")
+
+    cage.check(
+        "os-sandbox orchestrator compound denied",
+        flagged(None, gh + " auth status; id", workspace),
+        "BOUNDARY_VIOLATION", reason="one plain command")
 
 
 if __name__ == "__main__":

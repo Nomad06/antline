@@ -576,6 +576,30 @@ otherwise [R-OS-SANDBOX-INIT-REQUIRED]. `--no-os-sandbox` skips the check. The r
 shows `OS sandbox: on|off` for a run whose frozen harness needs it, the panel row carries the
 field, and `ppl metrics` warns `OS_SANDBOX_OFF` for a GitHub run that started without it.
 
+**Leaving the OS sandbox.** A pipeline command reaches GitHub only outside Claude Code's OS
+sandbox, which takes `dangerouslyDisableSandbox: true` on the Bash call, so the guard decides
+who may set it (`ppl/escape.py`), first and before any other check
+[R-OS-SANDBOX-ROLE-NO-ESCAPE]. A ppl-* role is denied from the call and its `agent_type`
+alone, before any file is read, run or no run [R-OS-SANDBOX-ROLE-NO-ESCAPE]. Any other
+subagent is denied when its `cwd` is inside the workspace or the active run's repo, and left
+alone elsewhere [R-OS-SANDBOX-ROLE-NO-ESCAPE]. The unroled orchestrator leaves the sandbox
+only for one plain command, with no separator, redirect, subshell, group, glob, expansion,
+comment, newline or leading assignment outside single quotes and nothing zsh reads otherwise
+than a POSIX shell, whose `argv0` is spelled exactly as a binary `ppl harness apply` pinned in
+`PPL_HOME/os_sandbox.json`, in a shape from the guard's table [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For gh that table holds `issue view` and
+`issue comment`, `pr create`, `pr view`, `pr checks` and `pr close`, `api user`, a review reply
+and `auth status`, each naming the harness's own repository, with any body file a plain file
+directly in the run's scratch directory [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For ppl it holds
+`tracker fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`, and
+git has no shape yet [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. Both gh and ppl run only from a
+`cwd` outside every path a sandboxed command can write, so neither loads a repo a role wrote
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A command the check lets through still meets the tracker
+gate and the forge denials below it [R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-TRACKER-CLI-GATE].
+Where the guard cannot decide a flagged call it denies it: an internal error, a non-string
+`agent_type`, an unreadable `os_sandbox.json` or run state, or a missing `os_sandbox.json`
+while a GitHub run is active, the facts cases naming `ppl harness apply`
+[R-OS-SANDBOX-FAIL-CLOSED].
+
 **Checked, not just trusted.** `ppl` cannot see how the guard hook is registered
 from inside `decide()` - that lives in a `.claude/settings*.json` file, not in run state -
 but it can be checked separately, on disk, before a run even starts
@@ -727,7 +751,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 181 rows: 134 `blocking`, 20 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 184 rows: 137 `blocking`, 20 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -887,7 +911,9 @@ is denied [R-REVIEW-RESPONDER-BASH-SHAPES].
 The hook's own failure modes are decided the same way. When `decide()` raises, the call is
 denied for any role in `boundary.ROLE_RULES` (all six generated roles) and allowed for an
 unroled session, so a hook defect cannot lock
-the operator out of unrelated work [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A role's Bash command
+the operator out of unrelated work [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A call that asks to
+run outside the OS sandbox is the exception: it is denied whoever makes it
+[R-OS-SANDBOX-FAIL-CLOSED]. A role's Bash command
 longer than 4096 characters is denied before any pattern runs, so a padded command cannot
 outlast the hook's timeout [R-GUARD-ROLE-COMMAND-LENGTH]. While a run is active, every deny the guard returns is
 also appended to the run's `log.jsonl` as a `deny` event with the role, the tool, the code and
