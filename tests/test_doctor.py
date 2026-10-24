@@ -187,7 +187,7 @@ class TestMatcher(unittest.TestCase):
 
     def test_the_guarded_names_are_the_cage_surface(self):
         names = doctor.guarded_tool_names()
-        for name in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash",
+        for name in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "WebFetch",
                      "mcp__GitLab-MCP__merge_merge_request",
                      "mcp__atlassian__addCommentToJiraIssue",
                      "mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue",
@@ -241,7 +241,7 @@ class TestMatcher(unittest.TestCase):
                     if name.startswith("mcp__claude_ai_Atlassian_Rovo")
                     or name.startswith("mcp__atlassian_2__")
                     or name.startswith("mcp__github__")
-                    or name in ("Read", "Grep", "Glob", "Agent", "Task")]
+                    or name in ("Read", "Grep", "Glob", "Agent", "Task", "WebFetch")]
         self.assertGreater(len(expected), 3)
         self.assertEqual(result["local"]["uncovered"], expected)
         for name in ("Read", "Grep", "Glob"):
@@ -280,7 +280,8 @@ class TestMatcher(unittest.TestCase):
         # the editing tools): the hook fires when any one of them matches, so
         # together they cover.
         write_settings(self.local_path,
-                       matchers=(EDITING_TOOLS_ONLY, "Bash|Read|Grep|Glob|Agent|Task|mcp__.*"))
+                       matchers=(EDITING_TOOLS_ONLY,
+                                 "Bash|Read|Grep|Glob|Agent|Task|WebFetch|mcp__.*"))
         result = self.inspect()
         self.assertEqual(result["matcher"], "ok")
         self.assertEqual(result["local"]["uncovered"], [])
@@ -1007,5 +1008,427 @@ class TestHookShape(unittest.TestCase):
         self.assertEqual(result["global"]["dispatch_hook"], "missing")
 
 
+class TestMcpServersWarning(unittest.TestCase):
+    TOKEN = "ghp_FAKETOKEN0123456789"
+
+    def setUp(self):
+        self.home = Path(tmphome.mkdtemp(prefix="pplhome-"))
+        self.claude = Path(tmphome.mkdtemp(prefix="pplclaude-"))
+        self.cwd = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplcwd-")))
+        self.user_json = self.home / "dot-claude.json"
+        patcher = mock.patch.dict(os.environ, {"PPL_HOME": str(self.home),
+                                               "PPL_CLAUDE_HOME": str(self.claude)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, path, doc):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+    def facts(self):
+        self.write(self.home / "os_sandbox.json", {"version": 1})
+
+    def warning(self):
+        return doctor.mcp_servers_warning(cwd=str(self.cwd), claude_json=self.user_json)
+
+    def test_mcp_warning_lists_workspace_and_user_servers_by_name_only(self):
+        self.facts()
+        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {
+            "command": "uvx", "args": ["serena", "--token", self.TOKEN]}}})
+        self.write(self.user_json, {"projects": {str(self.cwd): {"mcpServers": {
+            "jetbrains": {"command": "npx", "env": {"TOKEN": self.TOKEN}}}}},
+            "mcpServers": {"globalone": {"command": "node"}}})
+        self.write(self.claude / "settings.json", {"mcpServers": {"fromuser": {"command": "x"}}})
+        self.write(self.cwd / ".claude" / "settings.local.json",
+                   {"mcpServers": {"fromlocal": {"command": "x"}}})
+        warning = self.warning()
+        for name in ("serena", "jetbrains", "globalone", "fromuser", "fromlocal"):
+            self.assertIn(name, warning)
+        self.assertIn("outside the OS sandbox", warning)
+        # what the names cannot show: a plugin's servers and the claude.ai connectors
+        self.assertIn("plugin MCP servers", warning)
+        self.assertIn("claude.ai connectors", warning)
+        for secret in (self.TOKEN, "uvx", "npx", "--token", "node"):
+            self.assertNotIn(secret, warning)
+        self.assertNotIn("\n", warning)
+
+    def test_no_mcp_warning_without_facts(self):
+        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {"command": "uvx"}}})
+        self.assertIsNone(self.warning())
+
+    def test_no_mcp_warning_without_servers(self):
+        self.facts()
+        self.write(self.cwd / ".mcp.json", {"mcpServers": {}})
+        self.write(self.user_json, {"projects": {"/elsewhere": {"mcpServers": {"x": {}}}}})
+        self.assertIsNone(self.warning())
+
+    def test_the_scan_follows_the_configured_workspace_not_the_process_cwd(self):
+        self.facts()
+        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {"command": "uvx"}}})
+        elsewhere = Path(tmphome.mkdtemp(prefix="pplelsewhere-"))
+        env = {key: value for key, value in os.environ.items()
+               if key != "PPL_LOCAL_SETTINGS_DIR"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(doctor, "workspace", lambda: str(self.cwd)), \
+                mock.patch("os.getcwd", lambda: str(elsewhere)):
+            self.assertIn("serena", doctor.mcp_servers_warning(claude_json=self.user_json))
+
+    def test_doctor_report_carries_mcp_server_names(self):
+        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {"args": [self.TOKEN]}}})
+        result = doctor.report(cwd=str(self.cwd), env={"PATH": "/usr/bin"},
+                               probe=lambda: "unknown")
+        self.assertEqual(result["mcp_servers"], ["serena"])
+        self.assertNotIn(self.TOKEN, json.dumps(result))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestForeignBashHooks(unittest.TestCase):
+    """Another PreToolUse hook that sees Bash may rewrite a call with updatedInput, and
+    whether that keeps or drops dangerouslyDisableSandbox is unverified, so doctor names
+    every such hook, by its first word or script name only."""
+
+    def setUp(self):
+        self.home = Path(tmphome.mkdtemp(prefix="pplhome-"))
+        self.claude = Path(tmphome.mkdtemp(prefix="pplclaude-"))
+        self.cwd = Path(tmphome.mkdtemp(prefix="pplcwd-"))
+        self.managed = self.home / "managed-settings.json"
+        for patcher in (mock.patch.dict(os.environ, {"PPL_HOME": str(self.home),
+                                                     "PPL_CLAUDE_HOME": str(self.claude)}),
+                        mock.patch.object(doctor, "managed_settings_path",
+                                          lambda: self.managed)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def write(self, path, doc):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+    def pre_tool_use(self, *entries):
+        return {"hooks": {"PreToolUse": [{"matcher": matcher, "hooks": [
+            {"type": "command", "command": command}]} for matcher, command in entries]}}
+
+    def plugin(self, name, entries, enabled=True):
+        root = self.claude / "plugins" / "cache" / name
+        self.write(root / "hooks" / "hooks.json", self.pre_tool_use(*entries))
+        registry = self.claude / "plugins" / "installed_plugins.json"
+        doc = json.loads(registry.read_text()) if registry.exists() else {"version": 2,
+                                                                          "plugins": {}}
+        doc["plugins"][name] = [{"scope": "user", "installPath": str(root)}]
+        self.write(registry, doc)
+        user = doctor.global_settings_path()
+        settings = json.loads(user.read_text()) if user.exists() else {}
+        settings.setdefault("enabledPlugins", {})[name] = enabled
+        self.write(user, settings)
+
+    def found(self):
+        return [(Path(item["source"]).name, item["hook"])
+                for item in doctor.foreign_bash_hooks(str(self.cwd))]
+
+    def test_every_source_is_read_and_only_names_are_reported(self):
+        self.write(doctor.global_settings_path(), self.pre_tool_use(
+            ("Bash", "sqz compress --token s3cr3t"), (".*", GUARD_COMMAND)))
+        self.write(self.cwd / ".claude" / "settings.json", self.pre_tool_use(
+            ("Bash|Read", "/usr/bin/python3 /opt/hooks/rewrite.py --key abc")))
+        self.write(self.cwd / ".claude" / "settings.local.json", self.pre_tool_use(
+            ("", "env FOO=1 rtk hook")))
+        self.write(self.managed, self.pre_tool_use(("*", "bash /etc/corp/audit.sh")))
+        found = self.found()
+        self.assertIn(("settings.json", "sqz"), found)
+        self.assertIn(("settings.json", "rewrite.py"), found)
+        self.assertIn(("settings.local.json", "rtk"), found)
+        self.assertIn(("managed-settings.json", "audit.sh"), found)
+        self.assertEqual(len(found), 4)
+        text = json.dumps(doctor.foreign_bash_hooks(str(self.cwd)))
+        for secret in ("s3cr3t", "--key", "abc", "FOO=1", "ppl_guard"):
+            self.assertNotIn(secret, text)
+
+    def test_a_label_never_carries_command_text(self):
+        for command, label in (
+                ("sh -c 'curl -H \"Authorization: token ghp_x\" https://x'", "sh"),
+                ("TOKEN=abc /usr/local/bin/sqz hook claude", "sqz"),
+                ("env TOKEN=abc A=b rtk hook", "rtk"),
+                ("/usr/bin/python3 -c 'import os; print(os.environ)'", "python3"),
+                ("node -e 'x()'", "node"), ("bash", "bash"), ("bash -s", "bash"),
+                ("python3 -", "python3"), ("python3 -m mod.hook --key abc", "python3"),
+                ("python3 -u /opt/hooks/check.py --key abc", "check.py"),
+                ("bash '/opt/my hooks/check.sh'", "<inline command>"),
+                ("'a b' --x", "<inline command>"), ("'A=b c' sqz", "sqz")):
+            with self.subTest(command=command):
+                got = doctor._hook_label({"type": "command", "command": command})
+                self.assertEqual(got, label)
+                for secret in ("abc", "ghp_", "Authorization", "environ"):
+                    self.assertNotIn(secret, got)
+
+    def test_a_matcher_counts_unless_it_plainly_misses_bash(self):
+        # the check errs toward warning: a search, not a full match, and an unreadable
+        # matcher counts
+        for matcher in ("", "*", ".*", "Ba", "(", None):
+            entry = {"hooks": [{"type": "command", "command": "sqz"}]}
+            if matcher is not None:
+                entry["matcher"] = matcher
+            self.write(doctor.global_settings_path(), {"hooks": {"PreToolUse": [entry]}})
+            with self.subTest(matcher=matcher):
+                self.assertEqual(self.found(), [("settings.json", "sqz")])
+        self.write(doctor.global_settings_path(), self.pre_tool_use(("Edit|Write", "sqz")))
+        self.assertEqual(self.found(), [])
+
+    def test_a_hook_whose_matcher_misses_bash_is_not_reported(self):
+        self.write(doctor.global_settings_path(), self.pre_tool_use(
+            ("Edit|Write", "fmt-hook"), ("mcp__.*", "mcp-audit"), ("Bash", "sqz")))
+        self.assertEqual(self.found(), [("settings.json", "sqz")])
+
+    def test_an_enabled_plugins_hooks_are_reported(self):
+        self.plugin("lint@market", [("Bash", "${CLAUDE_PLUGIN_ROOT}/hooks/check.sh x")])
+        self.plugin("off@market", [("Bash", "offhook")], enabled=False)
+        self.assertEqual(self.found(), [("hooks.json", "check.sh")])
+
+    def test_the_report_and_the_warning_name_them(self):
+        self.write(doctor.global_settings_path(), self.pre_tool_use(("Bash", "sqz compress")))
+        result = doctor.report(cwd=str(self.cwd), env={"PATH": "/usr/bin"},
+                               probe=lambda: "unknown")
+        self.assertEqual([item["hook"] for item in result["foreign_bash_hooks"]], ["sqz"])
+        warning = doctor.foreign_bash_hooks_warning(str(self.cwd))
+        self.assertIn("sqz", warning)
+        self.assertIn("remove or disable", warning)
+        self.assertIn("before a GitHub run", warning)
+
+
+class TestOsSandboxFacts(unittest.TestCase):
+    BLOCK = {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": True}
+
+    def setUp(self):
+        self.home = Path(tmphome.mkdtemp(prefix="pplhome-"))
+        self.claude = Path(tmphome.mkdtemp(prefix="pplclaude-"))
+        self.cwd = Path(tmphome.mkdtemp(prefix="pplcwd-"))
+        self.managed = self.home / "managed-settings.json"
+        for patcher in (mock.patch.dict(os.environ, {"PPL_HOME": str(self.home),
+                                                     "PPL_CLAUDE_HOME": str(self.claude)}),
+                        mock.patch.object(doctor, "managed_settings_path",
+                                          lambda: self.managed)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def write_facts(self, **extra):
+        facts = {"version": 1, "write_scope": [], "written_sandbox": self.BLOCK,
+                 "pins": {"gh": {"path": "/opt/gh/bin/gh", "realpath": "/opt/gh/bin/gh"}}}
+        facts.update(extra)
+        (self.home / "os_sandbox.json").write_text(json.dumps(facts), encoding="utf-8")
+
+    def write_settings(self, path, doc):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+    def set_profile(self):
+        self.write_facts()
+        self.write_settings(self.cwd / ".claude" / "settings.local.json", {"sandbox": self.BLOCK})
+
+    def facts(self, probe="denied", env=None):
+        env = {"SANDBOX_RUNTIME": "1", "PATH": "/usr/bin"} if env is None else env
+        return doctor.os_sandbox_facts(cwd=str(self.cwd), env=env, probe=lambda: probe)
+
+    def test_on_needs_marker_profile_and_a_denied_probe(self):
+        self.set_profile()
+        facts = self.facts()
+        self.assertEqual(facts["state"], "on", facts)
+        self.assertEqual((facts["env_marker"], facts["profile"], facts["live"]),
+                         (True, True, "denied"))
+        self.assertEqual(facts["undoing"], [])
+        for missing in ({"SANDBOX_RUNTIME": "0"}, {}):
+            self.assertEqual(self.facts(env=missing)["state"], "off")
+        (self.cwd / ".claude" / "settings.local.json").write_text(
+            json.dumps({"sandbox": dict(self.BLOCK, enabled=False)}), encoding="utf-8")
+        self.assertFalse(self.facts()["profile"])
+        self.assertEqual(self.facts()["state"], "off")
+
+    def test_an_open_probe_is_off(self):
+        self.set_profile()
+        facts = self.facts(probe="open")
+        self.assertEqual((facts["live"], facts["state"]), ("open", "off"))
+
+    def test_native_windows_is_unavailable(self):
+        self.set_profile()
+        with mock.patch.object(doctor, "_native_windows", lambda: True):
+            self.assertEqual(self.facts()["state"], "unavailable")
+
+    def test_excluded_commands_in_user_settings_undo_the_boundary(self):
+        self.set_profile()
+        path = doctor.global_settings_path()
+        self.write_settings(path, {"sandbox": {"excludedCommands": ["docker *"]}})
+        facts = self.facts()
+        self.assertEqual(facts["state"], "off")
+        self.assertEqual(len(facts["undoing"]), 1)
+        self.assertIn(str(path), facts["undoing"][0])
+        self.assertIn("sandbox.excludedCommands", facts["undoing"][0])
+
+    def test_project_local_and_managed_settings_are_scanned_too(self):
+        self.set_profile()
+        self.write_settings(self.cwd / ".claude" / "settings.json",
+                            {"sandbox": {"enabled": False}})
+        self.write_settings(self.managed, {"sandbox": {"excludedCommands": ["x"]}})
+        undoing = " ".join(self.facts()["undoing"])
+        self.assertIn(str(self.cwd / ".claude" / "settings.json"), undoing)
+        self.assertIn("sandbox.enabled", undoing)
+        self.assertIn(str(self.managed), undoing)
+
+    def test_allow_unsandboxed_false_is_reported(self):
+        self.set_profile()
+        self.write_settings(doctor.global_settings_path(),
+                            {"sandbox": {"allowUnsandboxedCommands": False}})
+        facts = self.facts()
+        self.assertIn("sandbox.allowUnsandboxedCommands", facts["undoing"][0])
+        self.assertEqual(facts["state"], "off")
+
+    def test_another_sources_write_grant_over_a_protected_path_is_undoing(self):
+        self.set_profile()
+        self.write_settings(doctor.global_settings_path(),
+                            {"sandbox": {"filesystem": {"allowWrite": [str(self.claude),
+                                                                       "/var/cache/x"]}}})
+        self.write_settings(self.cwd / ".claude" / "settings.json",
+                            {"permissions": {"additionalDirectories": [str(self.home)]}})
+        facts = self.facts()
+        undoing = " ".join(facts["undoing"])
+        self.assertEqual(facts["state"], "off")
+        self.assertIn("sandbox.filesystem.allowWrite %s" % self.claude, undoing)
+        self.assertIn("permissions.additionalDirectories %s" % self.home, undoing)
+        self.assertNotIn("/var/cache/x", undoing)
+        self.assertEqual(len(facts["undoing"]), 2)
+
+    def test_a_write_grant_under_a_protected_path_is_undoing(self):
+        self.set_profile()
+        self.write_settings(self.managed, {"sandbox": {"filesystem": {
+            "allowWrite": [str(self.home / "harnesses" / "mine")]}}})
+        self.assertIn("allowWrite", " ".join(self.facts()["undoing"]))
+
+    def test_unix_socket_allowances_are_undoing(self):
+        self.set_profile()
+        self.write_settings(doctor.global_settings_path(), {"sandbox": {"network": {
+            "allowUnixSockets": ["/var/run/docker.sock"]}}})
+        self.write_settings(self.managed, {"sandbox": {"network": {"allowAllUnixSockets": True}}})
+        undoing = " ".join(self.facts()["undoing"])
+        self.assertIn("sandbox.network.allowUnixSockets", undoing)
+        self.assertIn("sandbox.network.allowAllUnixSockets", undoing)
+
+    def test_ppls_own_block_is_not_undoing(self):
+        block = dict(self.BLOCK, filesystem={"allowWrite": [str(self.home / "runs")],
+                                             "denyWrite": [str(self.cwd)]})
+        self.write_facts(written_sandbox=block)
+        self.write_settings(self.cwd / ".claude" / "settings.local.json", {"sandbox": block})
+        self.assertEqual(self.facts()["undoing"], [])
+
+    def test_a_github_token_in_the_environment_is_named_never_its_value(self):
+        env = {"GH_TOKEN": "gho_secretvalue1", "GITHUB_TOKEN": "ghp_secretvalue2",
+               "GH_ENTERPRISE_TOKEN": "", "OTHER": "x"}
+        self.assertEqual(doctor.github_token_names(env), ["GH_TOKEN", "GITHUB_TOKEN"])
+        warning = doctor.github_token_warning(env)
+        self.assertIn("GH_TOKEN, GITHUB_TOKEN", warning)
+        self.assertNotIn("secretvalue", warning)
+        self.assertIsNone(doctor.github_token_warning({"PATH": "/usr/bin"}))
+        result = doctor.report(cwd=str(self.cwd), env=dict(env, PATH="/usr/bin"),
+                               probe=lambda: "unknown")
+        self.assertEqual(result["github_token_env"], ["GH_TOKEN", "GITHUB_TOKEN"])
+        self.assertNotIn("secretvalue", json.dumps(result))
+
+    def test_a_variable_holding_a_github_token_is_named_whatever_its_name(self):
+        value = "github_pat_11ABCDEFG0secretvalue"
+        env = {"FOO": value, "BAR": "ordinary", "GITHUB_ENTERPRISE_TOKEN": "x",
+               "BAZ": "ghs_secretvalue3", "QUX": "prefix ghp_notatstart", "PATH": "/usr/bin"}
+        self.assertEqual(doctor.github_token_names(env),
+                         ["GITHUB_ENTERPRISE_TOKEN", "BAZ", "FOO"])
+        warning = doctor.github_token_warning(env)
+        self.assertIn("FOO", warning)
+        self.assertNotIn("BAR", warning)
+        self.assertNotIn("QUX", warning)
+        for prefix in ("ghp_", "ghs_", "github_pat_", "secretvalue"):
+            self.assertNotIn(prefix, warning)
+        result = doctor.report(cwd=str(self.cwd), env=env, probe=lambda: "unknown")
+        self.assertIn("FOO", result["github_token_env"])
+        self.assertNotIn("secretvalue", json.dumps(result))
+        for prefix in ("ghu_", "gho_", "ghr_", "ghp_"):
+            self.assertEqual(doctor.github_token_names({"V": prefix + "abc"}), ["V"])
+
+    def test_a_pin_inside_the_write_scope_is_exposed(self):
+        scope = tmphome.mkdtemp(prefix="pplscope-")
+        pin = os.path.join(scope, "bin", "gh")
+        self.write_facts(write_scope=[scope], pins={"gh": {"path": pin, "realpath": pin}})
+        facts = self.facts(env={"SANDBOX_RUNTIME": "1", "PATH": "/usr/bin"})
+        self.assertIn(pin, facts["exposed"])
+        self.assertNotIn("/usr/bin", facts["exposed"])
+        facts = self.facts(env={"SANDBOX_RUNTIME": "1", "PATH": scope + os.pathsep + "/usr/bin"})
+        self.assertIn(scope, facts["exposed"])
+
+    def test_the_proxy_url_is_never_in_the_report(self):
+        self.set_profile()
+        env = {"SANDBOX_RUNTIME": "1", "PATH": "/usr/bin",
+               "HTTPS_PROXY": "http://user:secret@localhost:1"}
+        result = doctor.report(cwd=str(self.cwd), env=env, probe=lambda: "unknown")
+        self.assertNotIn("secret", json.dumps(result))
+        self.assertNotIn("localhost:1", json.dumps(result))
+
+    def test_the_default_probe_reads_the_status_line_through_the_proxy(self):
+        import socket
+        import threading
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        seen = []
+
+        def serve(status):
+            conn, _ = server.accept()
+            seen.append(conn.recv(4096).decode("latin-1"))
+            conn.sendall(status)
+            conn.close()
+
+        port = server.getsockname()[1]
+        env = {"HTTPS_PROXY": "http://user:secret@127.0.0.1:%d" % port}
+        from ppl import os_sandbox
+        for status, verdict in (
+                (b"HTTP/1.1 403 host is on the deny list\r\n\r\n", "denied"),
+                (("HTTP/1.1 403 %s\r\n\r\n" % os_sandbox.DENY_REASON).encode(), "denied"),
+                (b"HTTP/1.1 403 Forbidden\r\n\r\n", "unknown"),
+                (b"HTTP/1.1 403 user denied\r\n\r\n", "unknown")):
+            thread = threading.Thread(target=serve, args=(status,), daemon=True)
+            thread.start()
+            with self.subTest(status=status[:40]):
+                # any 403 is not enough: only the deny list's own reason says GitHub is closed
+                self.assertEqual(doctor.probe_github(env), verdict)
+            thread.join()
+        server.close()
+        self.assertIn("CONNECT api.github.com:443 HTTP/1.1", seen[0])
+        self.assertIn("Proxy-Authorization: Basic ", seen[0])
+        self.assertEqual(doctor.probe_github({}), "unknown")
+        self.assertEqual(doctor.probe_github({"HTTPS_PROXY": "http://127.0.0.1:1"}), "unknown")
+
+    def test_gh_checks_are_skipped_inside_the_sandbox(self):
+        fixtures.install_routing()
+        fixtures.install_harness("example-maven")
+        config.ensure()
+        config.set_active_harness("example-maven")
+        with mock.patch.object(doctor, "_gh_kinds", lambda doc: (True, True)):
+            skipped = doctor.inspect_setup(env={"SANDBOX_RUNTIME": "1"})
+        detail = "skipped inside the OS sandbox, run ppl doctor --forge outside it"
+        self.assertEqual(skipped["forge"]["ok"], None)
+        self.assertEqual(skipped["forge"]["detail"], detail)
+        self.assertEqual(skipped["tracker"]["ok"], None)
+        self.assertEqual(skipped["tracker"]["detail"], detail)
+
+    def test_doctor_checks_run_the_pinned_gh(self):
+        from ppl.forges import github as github_forge
+        pin = "/opt/pinned/gh"
+        self.write_facts(pins={"gh": {"path": pin, "realpath": pin}})
+        argv = []
+
+        def runner(cmd, **kwargs):
+            argv.append(cmd[0])
+            return subprocess.CompletedProcess(cmd, 0, stdout="gh version 2\n", stderr="")
+
+        github_forge.doctor_check({}, None, None, runner=runner)
+        github_issues.doctor_check({"repo": "o/r", "task_prefix": "GH"}, runner=runner)
+        self.assertTrue(argv)
+        self.assertEqual(set(argv), {pin})
+        (self.home / "os_sandbox.json").unlink()
+        del argv[:]
+        github_forge.doctor_check({}, None, None, runner=runner)
+        self.assertEqual(set(argv), {"gh"})

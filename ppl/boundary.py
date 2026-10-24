@@ -110,12 +110,12 @@ def patterns_from_snapshot(doc):
 _MISSING = object()
 
 
-def run_test_patterns(task_id):
+def run_test_patterns(task_id, limit=None):
     """The test globs runs/<task>/harness.json froze [R-TEST-PATTERNS-FROM-SNAPSHOT]:
     the Java defaults when nothing is at that path (ppl init always writes one, so
     that is a fixture or a run older than the snapshot), None when it is anything
-    but a regular file (ppl never writes a link there) or cannot be read or
-    parsed, otherwise patterns_from_snapshot of it. Never raises."""
+    but a regular file (ppl never writes a link there), is over `limit` bytes or
+    cannot be read or parsed, otherwise patterns_from_snapshot of it. Never raises."""
     try:
         snapshot = paths.run_dir(task_id) / "harness.json"
         try:
@@ -124,7 +124,7 @@ def run_test_patterns(task_id):
             return TEST_PATTERNS
         if not stat.S_ISREG(mode):
             return None
-        doc = store.read_json(snapshot, _MISSING)
+        doc = store.read_json(snapshot, _MISSING, limit)
         # gone between the two looks: not the missing file decision 1 means
         if doc is _MISSING:
             return None

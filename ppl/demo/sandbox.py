@@ -28,7 +28,9 @@ class Sandbox:
         self.home = self.root / "home"
         self.ppl_home = self.root / "ppl"
         self.workspace = self.root / "workspace"
-        self.repo = self.workspace / "shop"
+        # beside the workspace, not in it: the OS sandbox profile denies every write under the
+        # workspace, to sandboxed Bash and to the guard's edit tools alike
+        self.repo = self.root / "shop"
         self.bin = self.root / "bin"
         self.env = self._env()
 
@@ -118,14 +120,16 @@ class Sandbox:
         for rel, text in fragments.items():
             (source / rel).parent.mkdir(parents=True, exist_ok=True)
             (source / rel).write_text(text, encoding="utf-8")
-        gh = self.bin / "gh"
-        gh.write_text(sample.gh_source(), encoding="utf-8")
-        gh.chmod(0o755)
+        # first on PATH, so harness apply pins these and never a ppl or gh installed elsewhere
+        for name, text in (("gh", sample.gh_source()), ("ppl", sample.ppl_source())):
+            target = self.bin / name
+            target.write_text(text, encoding="utf-8")
+            target.chmod(0o755)
         self._step("setup", "--non-interactive", "--skip", "models", "--skip", "forge",
                    "--answer", "workspace=%s" % self.workspace, "--answer", "hooks=local",
                    "--answer", "harness_from=%s" % source, "--answer", "harness_name=demo")
         self._step("init", TASK, "--tracker-url", "https://github.com/demo/shop/issues/1",
-                   "--repo", str(self.repo), "--harness", "demo", "--skip-model-check")
+                   "--repo", str(self.repo), "--harness", "demo", "--skip-model-check", "--no-os-sandbox")
 
     def remove(self):
         shutil.rmtree(self.root, ignore_errors=True)

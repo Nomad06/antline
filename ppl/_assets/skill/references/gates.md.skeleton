@@ -13,16 +13,15 @@ Every path below is spelled out literally, on purpose. The guard hook fails clos
 redirect whose target it cannot resolve, and a `$VAR/...` or `$(...)` target is exactly
 that: an earlier version of this recipe used `RUN=$(mktemp -d)` and `> "$RUN/install.log"`,
 and the hook refused the build line for any role that ran it, and for the orchestrator whenever
-its session's cwd sat inside the worktree (post-branch review, finding 3)
-[R-GUARD-BASH-WRITE-BOUNDARY]. So: one scratch
-directory per task, `/tmp/ppl-<TASK-ID>`, written into every line by hand; `<SHA>` read off
+its session's cwd sat inside the worktree [R-GUARD-BASH-WRITE-BOUNDARY]. So: one scratch
+directory per task, `<!-- include: harness/scratch -->/<TASK-ID>`, written into every line by hand; `<SHA>` read off
 `git -C <worktree> rev-parse HEAD` in its own call and pasted in; `<GENERATION>` from
 `ppl stage enter` or `ppl recover` (SKILL.md "The lease"). Run each line below as its own
 Bash call. `tests/test_guard.py` feeds this whole block, placeholders substituted, through
 the hook - a change here that the hook would refuse fails the suite.
 
-None of the calls below pass `--producer`, and that is deliberate, not an omission: when it
-is left out, `ppl evidence add` fills it with `{"provider": "claude-code-subagent", "model":
+No call below passes `--producer`, on purpose: when it is left out, `ppl evidence add` fills it
+with `{"provider": "claude-code-subagent", "model":
 "unknown", "params_hash": ""}`. Pass `--producer '<json object>'` only if you need to record
 something more specific than that default - it is a free-form object, not schema-checked
 beyond "is a JSON object".
@@ -36,9 +35,9 @@ beyond "is a JSON object".
 
 # secret scan before any push - this check name is load-bearing, see above
 git -C <worktree> diff origin/<!-- include: harness/default-branch -->...HEAD | grep -in -e password -e secret -e token -e 'BEGIN [A-Z ]*PRIVATE KEY' \
-  > /tmp/ppl-<TASK-ID>/secrets.log 2>&1; test ! -s /tmp/ppl-<TASK-ID>/secrets.log; echo $? > /tmp/ppl-<TASK-ID>/secrets.rc
+  > <!-- include: harness/scratch -->/<TASK-ID>/secrets.log 2>&1; test ! -s <!-- include: harness/scratch -->/<TASK-ID>/secrets.log; echo $? > <!-- include: harness/scratch -->/<TASK-ID>/secrets.rc
 ppl evidence add --check secret-scan --result <pass|fail from secrets.rc> --sha <SHA> \
-  --log /tmp/ppl-<TASK-ID>/secrets.log --rc /tmp/ppl-<TASK-ID>/secrets.rc --generation <GENERATION> \
+  --log <!-- include: harness/scratch -->/<TASK-ID>/secrets.log --rc <!-- include: harness/scratch -->/<TASK-ID>/secrets.rc --generation <GENERATION> \
   --from orchestrator
 ```
 

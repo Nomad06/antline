@@ -30,13 +30,16 @@ empty) directory and report clear; and `_has_guard` matches the literal
 substring `ppl_guard.py` in a hook's command, so another pipeline checkout's
 guard hook at a different path would be read as this one's.
 """
+import base64
 import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from .errors import PplError
 
@@ -733,7 +736,7 @@ def setup_state():
     return report
 
 
-def inspect_setup():
+def inspect_setup(env=None):
     """What `ppl setup` left behind, for `ppl doctor` to report: the roots, the
     recorded steps (`setup_state`), the model rows, the active harness and its
     forge and tracker checks.
@@ -770,21 +773,7 @@ def inspect_setup():
         except Exception as exc:
             entry["problem"] = _problem(exc)
         if entry["valid"]:
-            settings = doc["forge"]
-            forge = {"kind": settings["kind"]}
-            try:
-                workspace = config.section("claude").get("workspace") or str(Path.home())
-                check = forges.get(settings["kind"]).doctor_check(
-                    settings, claude_home().parent / ".claude.json", workspace)
-                forge.update(check)
-            except Exception as exc:
-                forge.update(ok=False, detail="the forge check failed: %s" % _problem(exc))
-            table = doc["tracker"]
-            tracker = {"kind": table["kind"]}
-            try:
-                tracker.update(trackers.get(table["kind"]).doctor_check(table))
-            except Exception as exc:
-                tracker.update(ok=False, detail="the tracker check failed: %s" % _problem(exc))
+            forge, tracker = gh_checks(doc, env)
     report["harness"] = entry
     report["forge"] = forge
     report["tracker"] = tracker
@@ -821,7 +810,475 @@ def workspace():
         return os.getcwd()
 
 
-def report(task_id=None, cwd=None):
+SKIPPED_IN_SANDBOX = "skipped inside the OS sandbox, run ppl doctor --forge outside it"
+
+
+def _in_os_sandbox(env):
+    return (os.environ if env is None else env).get("SANDBOX_RUNTIME") == "1"
+
+
+def _gh_kinds(doc):
+    return doc["forge"]["kind"] == "github", doc["tracker"]["kind"] == "github-issues"
+
+
+def gh_checks(doc, env=None):
+    """(forge, tracker) check results of a loaded harness. Inside the OS sandbox the gh
+    checks are skipped, since GitHub is closed there by design."""
+    from . import config, forges, trackers
+    skipped = {"ok": None, "detail": SKIPPED_IN_SANDBOX}
+    forge_gh, tracker_gh = _gh_kinds(doc)
+    inside = _in_os_sandbox(env)
+    settings = doc["forge"]
+    forge = {"kind": settings["kind"]}
+    if inside and forge_gh:
+        forge.update(skipped)
+    else:
+        try:
+            workspace = config.section("claude").get("workspace") or str(Path.home())
+            forge.update(forges.get(settings["kind"]).doctor_check(
+                settings, claude_home().parent / ".claude.json", workspace))
+        except Exception as exc:
+            forge.update(ok=False, detail="the forge check failed: %s" % _problem(exc))
+    table = doc["tracker"]
+    tracker = {"kind": table["kind"]}
+    if inside and tracker_gh:
+        tracker.update(skipped)
+    else:
+        try:
+            tracker.update(trackers.get(table["kind"]).doctor_check(table))
+        except Exception as exc:
+            tracker.update(ok=False, detail="the tracker check failed: %s" % _problem(exc))
+    return forge, tracker
+
+
+def forge_report(env=None):
+    """What `ppl doctor --forge` prints: only the forge and tracker checks."""
+    from . import config, harness
+    result = {"forge": None, "tracker": None}
+    try:
+        active = config.active_harness()
+        if not active:
+            result["problem"] = "no active harness"
+            return result
+        result["forge"], result["tracker"] = gh_checks(harness.load(active), env)
+    except Exception as exc:
+        result["problem"] = _problem(exc)
+    return result
+
+
+def _server_names(doc):
+    servers = doc.get("mcpServers") if isinstance(doc, dict) else None
+    return [name for name in servers if isinstance(name, str)] if isinstance(servers, dict) else []
+
+
+def _json_object(path):
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def mcp_server_names(cwd=None, claude_json=None):
+    """The names, never a command, args or env, of every MCP server a session launched in the
+    workspace sees: its .mcp.json, ~/.claude.json (top level and the workspace's project
+    entry) and the mcpServers of the user, project and local settings files."""
+    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
+    cwd = str(base)
+    claude_json = Path(claude_json) if claude_json else claude_home().parent / ".claude.json"
+    names = []
+    for doc in (_json_object(base / ".mcp.json"),
+                _json_object(global_settings_path()),
+                _json_object(base / ".claude" / "settings.json"),
+                _json_object(local_settings_path(cwd))):
+        names += _server_names(doc)
+    user = _json_object(claude_json)
+    if user is not None:
+        names += _server_names(user)
+        projects = user.get("projects")
+        if isinstance(projects, dict):
+            for key in dict.fromkeys((str(base), os.path.realpath(base))):
+                names += _server_names(projects.get(key))
+    return sorted(dict.fromkeys(names))
+
+
+def mcp_servers_warning(cwd=None, claude_json=None):
+    """One line naming the MCP servers the pipeline workspace's sessions load, when the OS
+    sandbox facts exist: they run outside the sandbox and the edit-tool boundary cannot see
+    them. None without facts or without servers."""
+    from . import os_sandbox
+    try:
+        if os_sandbox.load_facts() is None:
+            return None
+    except PplError:
+        return None
+    names = mcp_server_names(cwd, claude_json)
+    if not names:
+        return None
+    return ("MCP servers run outside the OS sandbox and can write anywhere: %s. Register no "
+            "file-writing MCP server for the pipeline workspace. The list leaves out plugin MCP "
+            "servers and claude.ai connectors, which run outside it as well." % ", ".join(names))
+
+
+# The variables gh and the GitHub tooling read a token from. Every sandboxed command, a role's
+# included, inherits the session's environment, so a token there is one a role can read.
+TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+# How a GitHub token starts, whatever variable holds it.
+TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
+
+
+def github_token_names(env=None):
+    """The names, never a value, of the variables in `env` (this process's environment by
+    default) that hold a GitHub token: TOKEN_VARIABLES when set, then any other whose value
+    starts with a TOKEN_PREFIXES prefix."""
+    env = os.environ if env is None else env
+    named = [name for name in TOKEN_VARIABLES if env.get(name)]
+    found = sorted(name for name, value in env.items()
+                   if name not in named and isinstance(value, str)
+                   and value.lstrip().startswith(TOKEN_PREFIXES))
+    return named + found
+
+
+def github_token_warning(env=None):
+    """One line naming the GitHub token variables set in the session's environment, never a
+    value, or None."""
+    names = github_token_names(env)
+    if not names:
+        return None
+    return ("%s %s a GitHub token in this session's environment, which every sandboxed "
+            "command, a role's included, inherits and can read: unset %s for pipeline sessions "
+            "and let the pinned gh read its own login"
+            % (", ".join(names), "holds" if len(names) == 1 else "hold",
+               "it" if len(names) == 1 else "them"))
+
+
+# The interpreters whose script, not their own name, says which hook runs.
+_INTERPRETER = re.compile(r"(?:python[0-9.]*|node|nodejs|bash|sh|zsh|dash|ruby|perl|deno|bun"
+                          r"|php)")
+# The interpreter options after which what runs is inline code, a module or stdin, never a
+# script file worth naming.
+_INLINE_OPTIONS = ("-c", "-e", "--eval", "-s", "-", "-m", "-p", "--print")
+INLINE_LABEL = "<inline command>"
+
+
+def _filename_like(word):
+    return (bool(word) and not any(char.isspace() for char in word)
+            and not any(char in word for char in "='\"`"))
+
+
+def _hook_label(hook):
+    """A hook as doctor names it: the command's first word, or the script an interpreter runs,
+    by its base name alone, past any NAME=value words with or without env. Inline code, a
+    module or stdin is named by the interpreter alone, and a word that does not look like a
+    file name by INLINE_LABEL, so no argument, which may carry a token, is ever kept."""
+    if not isinstance(hook, dict):
+        return "an unreadable hook"
+    command = hook.get("command")
+    if hook.get("type", "command") != "command" or not isinstance(command, str):
+        return "a %s hook" % hook.get("type") if isinstance(hook.get("type"), str) else \
+            "an unreadable hook"
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return INLINE_LABEL
+    if words and os.path.basename(words[0]) == "env":
+        first = _past_env(words)
+        words = words[words.index(first):] if first else []
+    while words and _ENV_ASSIGNMENT_RE.match(words[0]):
+        words = words[1:]
+    if not words:
+        return "an empty command"
+    if not _filename_like(words[0]):
+        return INLINE_LABEL
+    name = os.path.basename(words[0])
+    if not _INTERPRETER.fullmatch(name):
+        return name
+    for word in words[1:]:
+        if word in _INLINE_OPTIONS or word.startswith(("-c", "-e")) and len(word) > 2 \
+                and not word.startswith("--"):
+            return name
+        if word.startswith("-"):
+            continue
+        return os.path.basename(word) if _filename_like(word) else INLINE_LABEL
+    # no script: the interpreter reads its code from stdin
+    return name
+
+
+def _may_pass_bash(matcher):
+    """Whether a PreToolUse matcher may pass Bash, erring toward yes: a missing, empty or "*"
+    matcher, one a search finds in "Bash", and one that does not compile all count."""
+    if matcher is None:
+        return True
+    text = str(matcher).strip()
+    if text in ("", "*"):
+        return True
+    try:
+        return re.search(text, "Bash") is not None
+    except re.error:
+        return True
+
+
+def _enabled_plugins(documents):
+    """The plugin names the settings documents enable, a later document overriding an earlier
+    one, as Claude Code layers user, project, local and managed settings."""
+    state = {}
+    for doc in documents:
+        enabled = doc.get("enabledPlugins") if isinstance(doc, dict) else None
+        if isinstance(enabled, dict):
+            state.update((name, value) for name, value in enabled.items()
+                         if isinstance(name, str))
+    return [name for name, value in state.items() if value is True]
+
+
+def _plugin_hook_files(names):
+    """The hooks/hooks.json of each install of an enabled plugin, from Claude Code's plugin
+    registry."""
+    registry = _json_object(claude_home() / "plugins" / "installed_plugins.json") or {}
+    plugins = registry.get("plugins")
+    files = []
+    for name in names:
+        installs = plugins.get(name) if isinstance(plugins, dict) else None
+        for install in installs if isinstance(installs, list) else []:
+            root = install.get("installPath") if isinstance(install, dict) else None
+            if isinstance(root, str) and root:
+                files.append(Path(root) / "hooks" / "hooks.json")
+    return files
+
+
+def foreign_bash_hooks(cwd=None):
+    """Every PreToolUse hook other than ppl's guard whose matcher passes Bash, from the user,
+    project, local and managed settings and the hooks/hooks.json of each enabled plugin, as
+    {"source": file, "hook": _hook_label}. Such a hook may rewrite a Bash call with
+    updatedInput, and whether that keeps dangerouslyDisableSandbox is unverified."""
+    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
+    settings = [global_settings_path(), base / ".claude" / "settings.json",
+                local_settings_path(str(base)), managed_settings_path()]
+    documents = [(path, _json_object(path)) for path in settings]
+    sources = documents + [(path, _json_object(path)) for path in
+                           _plugin_hook_files(_enabled_plugins([doc for _, doc in documents]))]
+    found = []
+    for path, doc in sources:
+        hooks = doc.get("hooks") if isinstance(doc, dict) else None
+        entries = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or not _may_pass_bash(entry.get("matcher")):
+                continue
+            inner = entry.get("hooks")
+            for hook in inner if isinstance(inner, list) else []:
+                if isinstance(hook, dict) and GUARD_MARKER in str(hook.get("command", "")):
+                    continue
+                found.append({"source": str(path), "hook": _hook_label(hook)})
+    return found
+
+
+def foreign_bash_hooks_warning(cwd=None):
+    """One line naming the foreign Bash hooks, or None. Not a refusal: Claude Code merges hooks
+    from every source and has no per-workspace switch short of disableAllHooks, which would
+    drop ppl's guard as well."""
+    hooks = foreign_bash_hooks(cwd)
+    if not hooks:
+        return None
+    return ("PreToolUse hooks other than ppl's guard see every Bash call: %s. One that "
+            "rewrites a command with updatedInput may keep or drop dangerouslyDisableSandbox, "
+            "which is unverified, so remove or disable them for pipeline sessions before a "
+            "GitHub run" % ", ".join("%s (%s)" % (item["hook"], item["source"])
+                                     for item in hooks))
+
+
+def managed_settings_path():
+    if sys.platform == "darwin":
+        return Path("/Library/Application Support/ClaudeCode/managed-settings.json")
+    return Path("/etc/claude-code/managed-settings.json")
+
+
+# The reason Claude Code's proxy gives for a host on its deny list when the settings give it
+# no other one.
+DENY_LIST_REASON = "host is on the deny list"
+
+
+def probe_github(env):
+    """"denied" on a 403 whose reason is the deny list's and "open" on a 200 from a CONNECT to
+    api.github.com:443 through the env's HTTPS_PROXY, else "unknown". The proxy URL is read
+    here and never returned."""
+    url = env.get("HTTPS_PROXY") or env.get("https_proxy")
+    if not url:
+        return "unknown"
+    try:
+        parts = urlsplit(url)
+        request = "CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n"
+        if parts.username is not None:
+            user = "%s:%s" % (unquote(parts.username), unquote(parts.password or ""))
+            request += "Proxy-Authorization: Basic %s\r\n" % base64.b64encode(
+                user.encode("utf-8")).decode("ascii")
+        with socket.create_connection((parts.hostname, parts.port or 80), timeout=3) as conn:
+            conn.settimeout(3)
+            conn.sendall((request + "\r\n").encode("ascii"))
+            data = b""
+            while b"\n" not in data and len(data) < 1024:
+                chunk = conn.recv(256)
+                if not chunk:
+                    break
+                data += chunk
+    except (OSError, ValueError):
+        return "unknown"
+    from . import os_sandbox
+    line = data.split(b"\n", 1)[0].decode("ascii", "replace").strip()
+    words = line.split(None, 2)
+    status = words[1] if len(words) > 1 else ""
+    reason = words[2] if len(words) > 2 else ""
+    if status == "200":
+        return "open"
+    # any 403 is not enough: an unlisted host is refused with another reason, and only the
+    # deny list's reason, ppl's own or the default, says GitHub is closed
+    if status == "403" and (DENY_LIST_REASON in reason or os_sandbox.DENY_REASON in reason):
+        return "denied"
+    return "unknown"
+
+
+def _native_windows():
+    return os.name == "nt"
+
+
+def _under(path, scope):
+    scope = scope.rstrip(os.sep) or os.sep
+    return path == scope or path.startswith(scope + os.sep)
+
+
+def _exposed(facts, env):
+    scope = [e for e in facts.get("write_scope") or [] if isinstance(e, str)]
+    candidates = []
+    for pin in (facts.get("pins") or {}).values():
+        if isinstance(pin, dict):
+            candidates += [pin.get("path"), pin.get("realpath")]
+    candidates += [d for d in (env.get("PATH") or "").split(os.pathsep) if d]
+    found = []
+    for item in candidates:
+        if not isinstance(item, str) or not item or item in found:
+            continue
+        forms = {os.path.abspath(item), os.path.realpath(item)}
+        if any(_under(form, entry) for form in forms for entry in scope):
+            found.append(item)
+    return found
+
+
+def _protected(recorded):
+    """escape_paths.protected_paths with the recorded facts when they hold a workspace and
+    every pin, else without them."""
+    from . import escape_paths, paths
+    pins = recorded.get("pins")
+    usable = (isinstance(recorded.get("workspace"), str) and isinstance(pins, dict)
+              and all(isinstance(pins.get(name), dict)
+                      and isinstance(pins[name].get("path"), str)
+                      and isinstance(pins[name].get("realpath"), str)
+                      for name in escape_paths.PIN_NAMES))
+    return escape_paths.protected_paths(paths.home(), recorded if usable else None)
+
+
+def _settings_path(entry, base):
+    """A path from a settings file as Claude Code reads it: ~ expanded, // read as /, and a
+    relative one under the workspace, `realpath`-ed."""
+    text = os.path.expanduser(entry)
+    if text.startswith("//"):
+        text = text[1:]
+    return os.path.realpath(os.path.join(str(base), text))
+
+
+def _covers(entries, protected, base):
+    """The first of `entries` that is, holds or lies under a protected path, with that path."""
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, str) or not entry:
+            continue
+        real = _settings_path(entry, base)
+        for target in protected:
+            if _under(target, real) or _under(real, target):
+                return entry, target
+    return None
+
+
+def _undoing(cwd, recorded=None):
+    """What in a settings source undoes the profile: sandbox.excludedCommands, the sandbox or
+    the unsandboxed retry switched off, a write grant (sandbox.filesystem.allowWrite or
+    permissions.additionalDirectories) over a protected path, and any unix socket allowance.
+    ppl's own block in the local settings, the one apply recorded, is not another source."""
+    recorded = recorded or {}
+    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd())
+    local = local_settings_path(cwd)
+    sources = (global_settings_path(), base / ".claude" / "settings.json", local,
+               managed_settings_path())
+    protected = _protected(recorded)
+    found = []
+    for path in sources:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        permissions = doc.get("permissions")
+        if isinstance(permissions, dict):
+            hit = _covers(permissions.get("additionalDirectories"), protected, base)
+            if hit:
+                found.append("%s sets permissions.additionalDirectories %s, which covers %s"
+                             % ((path,) + hit))
+        block = doc.get("sandbox")
+        if not isinstance(block, dict):
+            continue
+        if block.get("excludedCommands"):
+            found.append("%s sets sandbox.excludedCommands" % path)
+        if block.get("enabled") is False:
+            found.append("%s sets sandbox.enabled to false" % path)
+        if block.get("allowUnsandboxedCommands") is False:
+            found.append("%s sets sandbox.allowUnsandboxedCommands to false" % path)
+        network = block.get("network")
+        if isinstance(network, dict):
+            if network.get("allowUnixSockets"):
+                found.append("%s sets sandbox.network.allowUnixSockets" % path)
+            if network.get("allowAllUnixSockets") is True:
+                found.append("%s sets sandbox.network.allowAllUnixSockets" % path)
+        filesystem = block.get("filesystem")
+        if isinstance(filesystem, dict) and not (path == local
+                                                 and block == recorded.get("written_sandbox")):
+            hit = _covers(filesystem.get("allowWrite"), protected, base)
+            if hit:
+                found.append("%s sets sandbox.filesystem.allowWrite %s, which covers %s"
+                             % ((path,) + hit))
+    return found
+
+
+def os_sandbox_facts(cwd=None, env=None, probe=None):
+    """Whether Claude Code's OS sandbox closes GitHub for this session. `state` is "on" only
+    with the env marker, ppl's profile in the workspace local settings, a denied live probe
+    and nothing undoing it. Nothing here carries the proxy URL."""
+    from . import os_sandbox
+    env = dict(os.environ) if env is None else env
+    marker = env.get("SANDBOX_RUNTIME") == "1"
+    try:
+        recorded = os_sandbox.load_facts() or {}
+    except PplError:
+        recorded = {}
+    written = recorded.get("written_sandbox")
+    try:
+        local = json.loads(local_settings_path(cwd).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        local = None
+    profile = (isinstance(local, dict) and isinstance(written, dict)
+               and local.get("sandbox") == written)
+    windows = _native_windows()
+    live = "unknown"
+    if not windows:
+        live = (probe or (lambda: probe_github(env)))()
+    undoing = _undoing(cwd, recorded)
+    if windows:
+        state = "unavailable"
+    elif marker and profile and live == "denied" and not undoing:
+        state = "on"
+    else:
+        state = "off"
+    return {"state": state, "env_marker": marker, "profile": profile, "live": live,
+            "undoing": undoing, "exposed": _exposed(recorded, env)}
+
+
+def report(task_id=None, cwd=None, env=None, probe=None):
     """What `ppl doctor` prints as JSON: the hook registration, the setup
     report, the active run's isolation and whether the registered guard runs.
     `cwd` is the directory whose .claude/settings.local.json is read, the
@@ -836,7 +1293,11 @@ def report(task_id=None, cwd=None):
         except PplError:
             task_id = None
     result = dict(inspected)
-    result.update(inspect_setup())
+    result.update(inspect_setup(env))
+    result["os_sandbox"] = os_sandbox_facts(cwd, env, probe)
+    result["github_token_env"] = github_token_names(env)
+    result["foreign_bash_hooks"] = foreign_bash_hooks(cwd)
+    result["mcp_servers"] = mcp_server_names(cwd)
     result["task"] = task_id
     result["isolated"] = isolated
     result["mismatch"] = mismatch(isolated, inspected) if isolated is not None else None

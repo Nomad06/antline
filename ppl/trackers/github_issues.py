@@ -7,6 +7,7 @@ variable, an interpreter or a script file, and a gh config the session changed
 outside Bash are not seen. The boundary that would close them is a GitHub
 credential the role sessions never hold."""
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -1074,9 +1075,11 @@ def doctor_check(table, runner=None):
     if errors:
         return {"ok": False, "detail": errors[0]}
     repo = table["repo"]
+    from .. import os_sandbox
+    gh = os_sandbox.gh_path()
     for argv in (["auth", "status"], ["issue", "list", "-R", repo, "-L", "1"]):
         try:
-            done = runner(["gh"] + argv, capture_output=True, text=True, encoding="utf-8",
+            done = runner([gh] + argv, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=GH_TIMEOUT)
         except FileNotFoundError:
             return {"ok": False, "detail": "gh is not installed or not on PATH"}
@@ -1108,26 +1111,31 @@ _VIEW_FIELDS = "number,title,body,state,labels,assignees,author,createdAt,update
 _NOT_FOUND = re.compile(r"\(HTTP 404\)")
 
 
-def _blocked(why):
+SANDBOX_NOTE = "this command reaches GitHub, run it with dangerouslyDisableSandbox"
+
+
+def _blocked(why, command="ppl tracker fetch"):
+    note = " (%s)" % SANDBOX_NOTE if os.environ.get("SANDBOX_RUNTIME") == "1" else ""
     return PplError("EXTERNAL_BLOCKED", "%s. Nothing was written: fix gh access to the "
-                    "repository and run ppl tracker fetch again." % why)
+                    "repository and run %s again%s." % (why, command, note))
 
 
-def _gh(runner, argv, what):
+def _gh(runner, argv, what, command="ppl tracker fetch"):
     """(returncode, stdout, stderr) of one gh call, EXTERNAL_BLOCKED when gh is missing or
-    does not answer in time."""
+    does not answer in time. gh runs by the pinned path when the guard facts name one."""
     import subprocess
+    from .. import os_sandbox
     try:
-        done = runner(["gh"] + argv, capture_output=True, text=True, encoding="utf-8",
-                      errors="replace", timeout=GH_TIMEOUT)
+        done = runner([os_sandbox.gh_path()] + argv, capture_output=True, text=True,
+                      encoding="utf-8", errors="replace", timeout=GH_TIMEOUT)
     except FileNotFoundError:
-        raise _blocked("gh is not on PATH, so %s cannot be read" % what)
+        raise _blocked("gh is not on PATH, so %s cannot be read" % what, command)
     except subprocess.TimeoutExpired:
-        raise _blocked("gh did not answer within %d s reading %s" % (GH_TIMEOUT, what))
+        raise _blocked("gh did not answer within %d s reading %s" % (GH_TIMEOUT, what), command)
     except UnicodeDecodeError:
-        raise _blocked("gh answered %s in text that is not UTF-8" % what)
+        raise _blocked("gh answered %s in text that is not UTF-8" % what, command)
     except OSError as exc:
-        raise _blocked("gh could not run reading %s: %s" % (what, exc))
+        raise _blocked("gh could not run reading %s: %s" % (what, exc), command)
     return done.returncode, done.stdout or "", done.stderr or ""
 
 
@@ -1149,8 +1157,9 @@ def _link(runner, route, what):
 
 def fetch(table, task_id, dest_dir, runner=None):
     """Read the task's issue and its parent and sub-issues with gh, then write issue.json and
-    issue.md under dest_dir. Returns {"revision": updatedAt, "url": the issue url}. A 404 on a
-    link endpoint records "unavailable", any other failure raises EXTERNAL_BLOCKED before a
+    issue.md under dest_dir, a directory under runs/ reached through no link
+    (store.checked_run_path). Returns {"revision": updatedAt, "url": the issue url}. A 404 on
+    a link endpoint records "unavailable", any other failure raises EXTERNAL_BLOCKED before a
     write."""
     import subprocess
     from .. import store
@@ -1170,7 +1179,9 @@ def fetch(table, task_id, dest_dir, runner=None):
              "sub_issues": _link(runner, base + "/sub_issues", "the sub-issues")}
     doc = {"issue": issue, "links": links}
     text = render_issue(doc)
-    dest = Path(dest_dir)
+    # again after the network calls, right before the write, as a role may have swapped a
+    # directory for a link meanwhile
+    dest = store.checked_run_path(dest_dir)
     store.write_json(dest / "issue.json", doc)
     store.write_text(dest / "issue.md", text)
     return {"revision": issue["updatedAt"], "url": issue.get("url")}

@@ -13,7 +13,7 @@ Each tick:
 1. Fetch discussions, approval state and pipelines from GitLab. Build a JSON array, one
    object per thread with `id`, `author` (who opened it), `resolved`, `last_note_id`,
    `last_author` (who wrote the newest note) and `note_count` (non-system notes), and write
-   it to a file. The GitLab MCP wraps list results as `{"items": [...], "pagination": ...}`,
+   it to `<!-- include: harness/scratch -->/<TASK-ID>/threads.json`. The GitLab MCP wraps list results as `{"items": [...], "pagination": ...}`,
    not a bare array: a JMESPath written for an array (`[?...]`) evaluates to `null` on it and
    the tool prints `null` as if there were no threads. On the first tick call `mr_discussions`
    once with no JMESPath to see the real shape, then start every filter with `items[...]`.
@@ -23,7 +23,7 @@ Each tick:
    single JSON object: `{"approval": "current"|"stale"|"none", "approved_sha": ...,
    "head_sha": ...}`. Parse that last line and branch on `approval`; do not branch on the
    prose line above it. A moved head SHA makes every prior approval stale.
-3. `ppl review pending --threads <file> --sha <sha>` is the dispatch filter, not an input to
+3. `ppl review pending --threads <!-- include: harness/scratch -->/<TASK-ID>/threads.json --sha <sha>` is the dispatch filter, not an input to
    one. Parse the JSON array on its last stdout line and dispatch exactly the threads it
    names to `ppl-review-responder`. Do not re-derive that set by reading the discussions
    yourself. The identity from `whoami` is usually the human MR author (the MCP acts as

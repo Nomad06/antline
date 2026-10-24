@@ -69,6 +69,18 @@ class TestStore(unittest.TestCase):
         lines = (paths.run_dir("DEMO-2") / "log.jsonl").read_text().strip().split("\n")
         self.assertEqual([json.loads(x)["event"] for x in lines], ["one", "two"])
 
+    def test_append_log_refuses_a_log_with_a_second_link(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # runs/ is sandbox-writable, and a hard link there is another name of a file outside it
+        (paths.run_dir("DEMO-4")).mkdir(parents=True, exist_ok=True)
+        outside = paths.home() / "outside.txt"
+        outside.write_text("kept\n", encoding="utf-8")
+        os.link(str(outside), str(paths.run_dir("DEMO-4") / "log.jsonl"))
+        with self.assertRaises(PplError) as ctx:
+            store.append_log("DEMO-4", {"event": "e"})
+        self.assertEqual(ctx.exception.code, "EXTERNAL_BLOCKED")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "kept\n")
+
     def test_append_log_stamps_time(self):
         (paths.run_dir("DEMO-3")).mkdir(parents=True, exist_ok=True)
         store.append_log("DEMO-3", {"event": "e"})

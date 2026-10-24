@@ -37,7 +37,7 @@ Rules:
   looking for a shape it cannot parse (an interpreter's own internal write) - that is not
   permission, it is a gap in the hook.
 - Redirect build output only to a literal path outside the repo, e.g.
-  /tmp/ppl-<TASK-ID>/focused.log. The hook fails closed on a redirect whose target it cannot
+  <scratch>/<TASK-ID>/focused.log. The hook fails closed on a redirect whose target it cannot
   resolve: a `$VAR/...` or `$(...)` target is denied before the command runs, not guessed at.
 
 Report the tests you added and the acceptance IDs they prove.

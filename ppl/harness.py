@@ -14,7 +14,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from . import boundary, forges, paths, routing, sequences, trackers
+from . import boundary, escape, forges, os_sandbox, paths, routing, sequences, trackers
 from .errors import PplError
 
 FORMAT = 1
@@ -57,6 +57,7 @@ KNOWN_KEYS = {
                                    for key in trackers.get(kind).KEYS)),
     "forge": ("kind", "mcp_server"),
     "tests": ("sources",),
+    "os_sandbox": ("enabled", "allowed_domains", "allow_write", "allow_ssh_read"),
     "knowledge": ("skills", "extra_tools"),
     "env": None,
     "gate": ("name", "command"),
@@ -80,6 +81,8 @@ AGENT_SOFT_BYTES = AGENT_MEASURED_BYTES * 3 // 2
 AGENT_HARD_BYTES = AGENT_MEASURED_BYTES * 3
 REFERENCE_SOFT_BYTES = REFERENCE_MEASURED_BYTES * 3 // 2
 REFERENCE_HARD_BYTES = REFERENCE_MEASURED_BYTES * 3
+_HOST_RE = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?"
+                      r"(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*")
 _ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _CLONE_TIMEOUT_SECONDS = 120
 _KIND_WORDS = {str: "a non-empty string", int: "an integer", list: "a list"}
@@ -145,8 +148,12 @@ def _check_granted_tools(doc, knowledge, source):
     and its tools line is a comma-joined list: an entry must be exactly one tool
     name, so one string cannot smuggle a second tool, a newline or a key past
     the write-tool check. A harness grants MCP tools only, never a built-in
-    one, and never a write tool of any known tracker."""
+    one, never a write tool of any known tracker, and no tool of a GitHub MCP
+    server, in extra_tools or among the tracker's read tools: those servers run
+    outside the OS sandbox, and the guard denies a role's call to them
+    [R-FORGE-GH-MCP-NO-ROLE]."""
     writes = trackers.role_write_patterns(doc["tracker"])
+    github = escape.forge_github_prefixes(doc.get("forge"))
     for index, tool in enumerate(knowledge.get("extra_tools", [])):
         if not _MCP_TOOL_RE.fullmatch(tool):
             _fail(source, "knowledge.extra_tools[%d] %r is not an MCP tool name "
@@ -155,6 +162,14 @@ def _check_granted_tools(doc, knowledge, source):
         if any(pattern.match(tool) for pattern in writes):
             _fail(source, "knowledge.extra_tools[%d] %r is a tracker write tool, "
                   "no role may hold one" % (index, tool))
+        if escape.github_mcp_tool(tool, github):
+            _fail(source, "knowledge.extra_tools[%d] %r is a tool of a GitHub MCP server, "
+                  "no role may hold one" % (index, tool))
+    # the forge adapter's own role tools meet the same check at render, routing.role_tools
+    for tool in trackers.get(doc["tracker"]["kind"]).mcp_read_tools(doc["tracker"]):
+        if escape.github_mcp_tool(tool, github):
+            _fail(source, "the tracker read tool %r is a tool of a GitHub MCP server, no role "
+                  "may hold one" % (tool,))
 
 
 def _nearest(word, known):
@@ -269,6 +284,57 @@ def _check_test_sources(doc, source):
             _fail(source, "tests.sources[%d] %r %s" % (index, glob, problem))
 
 
+def _allow_write_problem(entry):
+    """Why an [os_sandbox] allow_write entry would hand sandboxed Bash a write it must not have,
+    or None: it is or holds a home directory, or is, holds or lies under a path an unsandboxed
+    gh, git or ppl reads or runs (escape_paths.protected_paths)."""
+    from . import escape_paths
+    real = os.path.realpath(os.path.expanduser(entry))
+    for home in escape_paths.home_dirs():
+        if os_sandbox.is_within(home, real):
+            return "is or holds the home directory %s" % home
+    for protected in escape_paths.protected_paths(paths.home(), None):
+        if os_sandbox.is_within(protected, real) or os_sandbox.is_within(real, protected):
+            return "is, holds or lies under %s, which a command outside the OS sandbox reads" \
+                % protected
+    return None
+
+
+def _check_os_sandbox(doc, source):
+    """A present [os_sandbox] table holds a bool, bare host names and absolute paths. A
+    GitHub harness cannot switch the profile off, since the guard's github rules rest on it."""
+    if "os_sandbox" not in doc:
+        return
+    table = doc["os_sandbox"]
+    if not isinstance(table, dict):
+        _fail(source, "[os_sandbox] must be a table")
+    for key in ("enabled", "allow_ssh_read"):
+        if key in table and not isinstance(table[key], bool):
+            _fail(source, "os_sandbox.%s must be true or false" % key)
+    if table.get("enabled") is False and os_sandbox.needed(dict(doc, os_sandbox={})):
+        _fail(source, "os_sandbox.enabled = false is refused for a GitHub forge or tracker: the "
+              "OS sandbox keeps GitHub credentials from the roles. Run ppl init --no-os-sandbox "
+              "for a run without it")
+    domains = table.get("allowed_domains", [])
+    if not _strings(domains):
+        _fail(source, "os_sandbox.allowed_domains must be a list of host names")
+    for index, host in enumerate(domains):
+        if not _HOST_RE.fullmatch(host):
+            _fail(source, "os_sandbox.allowed_domains[%d] %r must be a bare host name, "
+                  "optionally starting with '*.', with no scheme, path or port" % (index, host))
+    writable = table.get("allow_write", [])
+    if not _strings(writable):
+        _fail(source, "os_sandbox.allow_write must be a list of paths")
+    for index, entry in enumerate(writable):
+        if not (entry.startswith("/") or entry.startswith("~/")):
+            _fail(source, "os_sandbox.allow_write[%d] %r must be an absolute path or start "
+                  "with '~/'" % (index, entry))
+        problem = _allow_write_problem(entry)
+        if problem:
+            _fail(source, "os_sandbox.allow_write[%d] %r %s: list the narrower directories the "
+                  "build writes instead" % (index, entry, problem))
+
+
 def validate(doc, source):
     """Raise HARNESS_INVALID on a structural error, return a list of warnings.
     The checks of the harness directory run when the document carries its _dir,
@@ -332,6 +398,7 @@ def validate(doc, source):
             _fail(source, "gate[%d].command is required" % index)
     _check_gate_commands(doc, gates, source)
     _check_test_sources(doc, source)
+    _check_os_sandbox(doc, source)
     if doc.get("_dir"):
         warnings.extend(_check_files(doc, source))
     for index, row in enumerate(shape_rows(doc, source)):
@@ -485,6 +552,7 @@ def snapshot(doc):
             "task": {"key_pattern": doc["task"]["key_pattern"]},
             "tracker": copy.deepcopy(doc["tracker"]),
             "forge": copy.deepcopy(doc["forge"]),
+            "os_sandbox": {"needed": os_sandbox.needed(doc)},
             "shapes": shape_rows(doc),
             "tests": {"sources": list((doc.get("tests") or {}).get("sources")
                                       or boundary.TEST_PATTERNS)}}
@@ -518,9 +586,9 @@ SKILL_NOTICE = "<!-- generated by ppl harness apply - do not edit by hand -->"
 _INCLUDE_RE = re.compile(r"<!-- include: ([a-z0-9-]+)/([a-z0-9-]+) -->")
 _INCLUDE_OPEN = "<!-- include:"
 _SKELETON_SUFFIX = ".skeleton"
-_RC_IDIOM = "%s > /tmp/ppl-<TASK-ID>/%s.log 2>&1; echo $? > /tmp/ppl-<TASK-ID>/%s.rc"
-_EVIDENCE = ("ppl evidence add --check %s --result <pass|fail from %s.rc> --sha <SHA> \\\n"
-             "  --log /tmp/ppl-<TASK-ID>/%s.log --rc /tmp/ppl-<TASK-ID>/%s.rc --generation <GENERATION> \\\n"
+_RC_IDIOM = "%(command)s > %(dir)s/%(name)s.log 2>&1; echo $? > %(dir)s/%(name)s.rc"
+_EVIDENCE = ("ppl evidence add --check %(name)s --result <pass|fail from %(name)s.rc> --sha <SHA> \\\n"
+             "  --log %(dir)s/%(name)s.log --rc %(dir)s/%(name)s.rc --generation <GENERATION> \\\n"
              "  --from orchestrator")
 _DEFAULT_BASELINE = ("Record what was true before you touched anything: the build, the tests "
                      "and the failures already present on the base revision.")
@@ -531,20 +599,46 @@ DEFAULT_TRACKER_CLOSE = "a short comment saying what was done and how to check i
 # like stay for the orchestrator to fill at run time. This one is the harness's
 # own and is filled at render time.
 _DEFAULT_BRANCH_PLACEHOLDER = "<default-branch>"
+_SCRATCH_PLACEHOLDER = "<scratch>"
 _FRONTMATTER = "---\n"
 _FRONTMATTER_END = "\n---\n"
+# The sentence after each command the skill runs outside the OS sandbox: escape.decide lets the
+# orchestrator out only for one plain command on a pin, and gh and ppl only from a directory
+# no sandboxed command writes.
+OS_FLAG_NOTE = ("Run each command here that starts with an absolute path exactly as written, "
+                "alone in a Bash call with `dangerouslyDisableSandbox: true`, and from the "
+                "workspace when it runs gh or ppl [R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
+# Said once, in stage 1: a gh or ppl call from a directory a sandboxed command can write is
+# denied, and stage 1 leaves the session where it is.
+OS_WORKSPACE_NOTE = ("Run every `gh` and `ppl` call outside the sandbox from the workspace "
+                     "`%s`, and `cd` back there when one is denied for its cwd "
+                     "[R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
+# Stage 1 under the profile: the session stays in the workspace, so a gate names the worktree.
+OS_GATES_WHERE = ("Every gate and every dispatched worker works in this worktree from now on: "
+                  "each gate recipe in `references/gates.md` changes into it in a subshell, so "
+                  "this session stays in the workspace.")
+_UNKNOWN_REPO = "<owner/name>"
+_UNKNOWN_WORKSPACE = "<workspace>"
 
 
 def _gate_recipes(doc):
+    """The harness gates in their log-and-rc shape. Under the OS sandbox profile the
+    orchestrator's session stays in the workspace its gh and ppl calls run from, so each gate
+    changes into the worktree in a subshell, which leaves the session where it is."""
     env = " ".join("%s=%s" % (key, shlex.quote(value))
                    for key, value in sorted((doc.get("env") or {}).items()))
-    lines = ["mkdir -p /tmp/ppl-<TASK-ID>", "git -C <worktree> rev-parse HEAD", ""]
+    run_dir = "%s/<TASK-ID>" % os_sandbox.scratch_root()
+    lines = ["mkdir -p %s" % run_dir, "git -C <worktree> rev-parse HEAD", ""]
+    in_worktree = os_sandbox.needed(doc)
     for gate in doc.get("gate") or []:
         name = gate["name"]
         command = ("%s %s" % (env, gate["command"])).strip()
+        if in_worktree:
+            command = "(cd <worktree> && %s)" % command
         lines.append("# %s" % name)
-        lines.append(_RC_IDIOM % (command, name, name))
-        lines.append(_EVIDENCE % (name, name, name, name))
+        fill = {"command": command, "dir": run_dir, "name": name}
+        lines.append(_RC_IDIOM % fill)
+        lines.append(_EVIDENCE % fill)
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -554,24 +648,91 @@ def _fragment_file(doc, name):
     if not path.is_file():
         return ""
     text = path.read_text(encoding="utf-8").strip()
-    return text.replace(_DEFAULT_BRANCH_PLACEHOLDER, doc["repo"]["default_branch"])
+    return (text.replace(_DEFAULT_BRANCH_PLACEHOLDER, doc["repo"]["default_branch"])
+            .replace(_SCRATCH_PLACEHOLDER, str(os_sandbox.scratch_root())))
 
 
-def _values(doc):
+def _os_values(doc, pins, workspace):
+    """The os/* includes. With the OS sandbox profile the GitHub commands run on the pinned
+    binaries, word for word in the shapes the guard lets out of the sandbox, each followed by
+    OS_FLAG_NOTE, and stage 1 runs git with -C instead of a cd, so the session stays in the
+    workspace its gh and ppl calls run from. The repositories, the checkout and the fetch come
+    from the os_sandbox functions the facts and the allow entries are made with, since apply
+    renders before it writes the facts. Without the profile every include is today's text."""
+    repo = doc["repo"]
+    default_branch = repo["default_branch"]
+    values = {("os", "gh"): "gh", ("os", "ppl"): "ppl", ("os", "flag-note"): "",
+              ("os", "cd"): "cd %s\n" % repo["path"], ("os", "git-dir"): "",
+              ("os", "fetch"): "git fetch origin %s" % default_branch, ("os", "stage1-note"): "",
+              ("os", "push"): "git push -u origin <branch>", ("os", "destroy"): "",
+              ("os", "merge-watch"): "",
+              ("os", "gates-where"): "This is where every gate and every dispatched worker runs "
+                                     "from now on.",
+              ("os", "forge-repo"): _UNKNOWN_REPO, ("os", "tracker-repo"): _UNKNOWN_REPO}
+    if not os_sandbox.needed(doc):
+        return values
+    pins = pins if pins is not None else os_sandbox.pins()
+    if workspace is None:
+        from . import config
+        try:
+            workspace = config.section("claude").get("workspace") or ""
+        except PplError:
+            workspace = ""
+    workspace = os_sandbox.workspace_dir(workspace) if workspace else _UNKNOWN_WORKSPACE
+    checkout = os_sandbox.checkout(doc)
+    forge_repo, tracker_repo = os_sandbox.repos(doc)
+    forge_repo = forge_repo or _UNKNOWN_REPO
+    gh = pins["gh"]["path"]
+    github_forge = doc["forge"]["kind"] == "github"
+    # the one place the workspace is named, for a harness that runs gh or ppl outside
+    note = (OS_WORKSPACE_NOTE % workspace
+            if github_forge or doc["tracker"]["kind"] == "github-issues" else "")
+    values.update({("os", "gh"): gh, ("os", "ppl"): pins["ppl"]["path"],
+                   ("os", "flag-note"): OS_FLAG_NOTE, ("os", "forge-repo"): forge_repo,
+                   ("os", "tracker-repo"): tracker_repo or _UNKNOWN_REPO,
+                   ("os", "cd"): "", ("os", "git-dir"): "-C %s " % checkout,
+                   ("os", "fetch"): "git -C %s fetch origin %s" % (checkout, default_branch),
+                   ("os", "gates-where"): OS_GATES_WHERE,
+                   ("os", "stage1-note"): "\n\n" + note if note else ""})
+    if not github_forge:
+        # git reaches another forge from inside the sandbox
+        return values
+    delete = os_sandbox.push_command(pins, delete=True)
+    values.update({
+        ("os", "fetch"): os_sandbox.fetch_command(doc, pins),
+        ("os", "stage1-note"): "\n\n%s %s" % (OS_FLAG_NOTE, note),
+        ("os", "push"): os_sandbox.push_command(pins),
+        ("os", "destroy"): (" The two GitHub commands are `%s pr close <number> -R %s` and `%s`, "
+                            "`<branch>` the run's branch and `<worktree>` its worktree "
+                            "[R-OS-SANDBOX-GIT-CONFIG]. %s"
+                            % (gh, forge_repo, delete, OS_FLAG_NOTE)),
+        ("os", "merge-watch"): (" Read its state with `%s pr view <number> -R %s "
+                                "--json=state,mergeCommit`. %s" % (gh, forge_repo, OS_FLAG_NOTE)),
+    })
+    return values
+
+
+def _values(doc, pins=None, workspace=None):
     forge = forges.get(doc["forge"]["kind"])
     skills = (doc.get("knowledge") or {}).get("skills") or []
     repo = doc["repo"]
     sequence_values = {("sequence", name): sequences.render(sequence[1])
                        for name, sequence in sequences.SEQUENCES.items()}
+    sequence_values[("harness", "scratch")] = str(os_sandbox.scratch_root())
+    os_values = _os_values(doc, pins, workspace)
+    fragment_values = dict(sequence_values)
+    fragment_values[("harness", "default-branch")] = repo["default_branch"]
+    fragment_values.update(os_values)
 
-    # A forge fragment may include a sequence, so stage 7 and the review loop
-    # state the one close-out. Any other marker in it is refused.
+    # A forge fragment may include a sequence, so stage 7 and the review loop state the one
+    # close-out, and the os/* commands it runs on GitHub with the default branch and the
+    # scratch path they name. Any other marker in it is refused.
     def fragment(name):
-        return _render_text(forge.fragment(name).strip(), sequence_values, "forge/%s" % name)
+        return _render_text(forge.fragment(name).strip(), fragment_values, "forge/%s" % name)
 
     tracker = trackers.get(doc["tracker"]["kind"])
     # A tracker fragment may also name the read tools the harness lists, as it lists them.
-    tracker_values = dict(sequence_values)
+    tracker_values = dict(fragment_values)
     tracker_values[("tracker", "read-tools")] = ", ".join(
         "`%s`" % tool for tool in doc["tracker"].get("read_tools") or [])
 
@@ -580,6 +741,7 @@ def _values(doc):
 
     return {
         **sequence_values,
+        **os_values,
         ("tracker", "admission"): tracker_fragment("admission"),
         ("tracker", "close"): tracker_fragment("close"),
         ("vocab", "noun"): forge.VOCABULARY["noun"],
@@ -590,8 +752,8 @@ def _values(doc):
         # ppl init --harness resolves a directory name, so the skill names the
         # installed directory, not the document's own name.
         ("harness", "name"): installed_name(doc),
-        ("harness", "repo"): repo["path"],
         ("harness", "default-branch"): repo["default_branch"],
+        ("harness", "scratch"): str(os_sandbox.scratch_root()),
         ("harness", "worktrees"): repo.get("worktrees") or (repo["path"].rstrip("/") + "/.worktrees"),
         ("harness", "gates"): _fragment_file(doc, "gates"),
         # One line: the baseline sentence also fills a table cell.
@@ -627,13 +789,15 @@ def _with_frontmatter(text, skill_name):
     return head + sep + SKILL_NOTICE + "\n" + tail
 
 
-def render_skill(doc, skill_name="pipeline"):
+def render_skill(doc, skill_name="pipeline", pins=None, workspace=None):
     """relative path -> text of every file of the skill, nothing written.
     Refuses SCHEMA_INVALID on an include marker it cannot resolve, so a
-    marker never reaches the disk."""
+    marker never reaches the disk. `pins` are the binaries apply pinned, looked
+    up on PATH when it is None and the harness needs the OS sandbox profile,
+    and `workspace` the [claude] workspace, read from the config when None."""
     if not _NAME_RE.match(skill_name or ""):
         raise PplError("SCHEMA_INVALID", "skill name %r is not a plain directory name" % skill_name)
-    values = _values(doc)
+    values = _values(doc, pins, workspace)
     root = paths.root() / "skill"
     rendered = {}
     for path in sorted(root.rglob("*")):
@@ -675,15 +839,46 @@ def apply(name, agents_dir=None, skills_dir=None):
     """Render the six agents and the skill for an installed harness, then
     record it as the active one. Everything is rendered before anything is
     written, so a bad marker or a bad routing.toml leaves the disk as it was."""
-    from . import config
+    from . import config, setup, store
     doc = load(name)
     if os.path.dirname(os.path.abspath(doc["_dir"])) != os.path.abspath(paths.harnesses_dir()):
         _fail(name, "%s is not an installed harness, add it with `ppl harness add` and apply it "
               "by name" % doc["_dir"])
     config.active_harness()
-    skill_files = render_skill(doc)
+    pin_map = os_sandbox.pins() if os_sandbox.needed(doc) else None
+    workspace = config.section("claude").get("workspace") or ""
+    skill_files = render_skill(doc, pins=pin_map, workspace=workspace)
     _size_warnings(skill_files, {role: routing.render(role, doc) for role in routing.REQUIRED_ROLES})
+    try:
+        previous = os_sandbox.load_facts()
+    except PplError:
+        previous = None
+    if not isinstance(previous, dict):
+        previous = {}
+    sandbox_facts = prof = None
+    if os_sandbox.needed(doc):
+        if not workspace:
+            raise PplError("SETUP_INCOMPLETE", "the OS sandbox profile is written to the "
+                           "workspace's local settings and no [claude] workspace is configured. "
+                           "Run ppl setup claude, then ppl harness apply again.")
+        problem = os_sandbox.layout_problem(doc, workspace) or os_sandbox.repo_problem(doc)
+        if problem:
+            raise PplError("SETUP_INCOMPLETE", problem)
+        sandbox_facts = os_sandbox.facts(doc, workspace, pin_map)
+        prof = os_sandbox.profile(doc, workspace, pin_map)
+        sandbox_facts["written_sandbox"] = prof["sandbox"]
+        sandbox_facts["written_allow"] = prof["allow"]
+        setup.check_os_sandbox_settings(workspace, previous)
     skill_target = (Path(skills_dir) if skills_dir is not None else config.skills_dir()) / "pipeline"
+    facts_path = paths.home() / os_sandbox.FACTS_FILE
+    if sandbox_facts is not None:
+        store.write_json(facts_path, sandbox_facts)
+        os_sandbox.scratch_root().mkdir(parents=True, exist_ok=True)
+    if workspace and (prof or previous.get("written_sandbox") is not None
+                      or previous.get("written_allow")):
+        setup.write_os_sandbox_settings(workspace, prof, previous)
+    if sandbox_facts is None and facts_path.exists():
+        facts_path.unlink()
     agents = routing.apply(doc, agents_dir)
     skill = _write_files(skill_files, skill_target)
     active = installed_name(doc)
@@ -794,6 +989,18 @@ def _missing_skills(doc):
     return warnings
 
 
+def _check_pins(doc):
+    """The pins a check renders the skill with: the binaries apply would pin, or their bare
+    names when one is not on PATH. A check measures the rendered text, and apply looks every
+    pin up again and refuses a missing one."""
+    if not os_sandbox.needed(doc):
+        return None
+    try:
+        return os_sandbox.pins()
+    except PplError:
+        return {name: {"path": name, "realpath": name} for name in os_sandbox.PIN_NAMES}
+
+
 def verify(name_or_path, source):
     """{"errors": [...], "warnings": [...]} for the harness at `name_or_path`,
     what `ppl harness validate` prints and the studio shows for a draft or a
@@ -804,7 +1011,9 @@ def verify(name_or_path, source):
         doc = load(str(name_or_path))
         warnings = validate(doc, source)
         require_absolute_repo(doc)
-        warnings += _size_warnings(render_skill(doc), agent_texts(doc))
+        warnings += _size_warnings(render_skill(doc, pins=_check_pins(doc)), agent_texts(doc))
+        if os_sandbox.needed(doc):
+            warnings += [message for message in (os_sandbox.repo_problem(doc),) if message]
         warnings += unrunnable_focused_tests(doc)
         warnings += _missing_skills(doc)
     except PplError as exc:

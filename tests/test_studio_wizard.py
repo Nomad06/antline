@@ -9,8 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
+import fixtures
 import panel_client
-from ppl import config, harness, paths, setup
+from ppl import config, harness, os_sandbox, paths, setup
 from ppl.studio import wizard
 
 
@@ -32,11 +33,15 @@ class WizardTestCase(panel_client.StudioTestCase):
         # the wizard renders into the workspace it configures, as a user's run does
         os.environ.pop("PPL_AGENTS_DIR", None)
         os.environ.pop("PPL_SKILLS_DIR", None)
+        patcher = mock.patch("ppl.setup._origin_repo", lambda checkout: "acme/demo")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.workspace = Path(tmphome.mkdtemp(prefix="pplws-"))
+        self.repo_root = Path(tmphome.mkdtemp(prefix="pplrepo-"))
         self.answers = {
             "claude_binary": "claude", "workspace": str(self.workspace), "hooks": "local",
             "verify": "yes", "harness_from": "example-generic", "harness_name": "mine",
-            "repo": str(self.workspace / "repo"), "default_branch": "main",
+            "repo": str(self.repo_root / "repo"), "default_branch": "main",
             "task_url_template": "https://tracker.example/<TASK-ID>",
             "key_pattern": "^DEMO-[0-9]+$", "forge": "github",
         }
@@ -44,6 +49,10 @@ class WizardTestCase(panel_client.StudioTestCase):
             patcher = mock.patch.object(wizard, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # a github forge pins gh, git and ppl, none looked up on PATH here
+        patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: fixtures.FAKE_PINS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def run_step(self, step, answers=None):
         status, payload, _ = panel_client.call("POST", "/api/setup/" + step,
@@ -182,15 +191,20 @@ class TestWizardApi(WizardTestCase):
 class TestSameResultAsTheTerminal(WizardTestCase):
     def snapshot(self):
         agents = self.workspace / ".claude" / "agents"
-        files = {"settings": (self.workspace / ".claude" / "settings.local.json")
-                 .read_text(encoding="utf-8"),
+        settings = (self.workspace / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+        def unhome(text):
+            for home in (os.path.realpath(paths.home()), str(paths.home())):
+                text = text.replace(home, "<PPL_HOME>")
+            return text
+        settings = unhome(settings)
+        files = {"settings": settings,
                  "config": paths.config_file().read_text(encoding="utf-8"),
                  "routing": paths.routing_file().read_text(encoding="utf-8"),
                  "harness": (paths.harness_dir("mine") / "harness.toml").read_text(encoding="utf-8"),
-                 "skill": (self.workspace / ".claude" / "skills" / "pipeline" / "SKILL.md")
-                 .read_text(encoding="utf-8")}
+                 "skill": unhome((self.workspace / ".claude" / "skills" / "pipeline" / "SKILL.md")
+                                 .read_text(encoding="utf-8"))}
         for path in sorted(agents.glob("*.md")):
-            files["agent:" + path.name] = path.read_text(encoding="utf-8")
+            files["agent:" + path.name] = unhome(path.read_text(encoding="utf-8"))
         return files
 
     def test_the_browser_wizard_writes_what_the_terminal_wizard_writes(self):

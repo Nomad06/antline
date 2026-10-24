@@ -16,7 +16,7 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
 
 import fixtures
-from ppl import boundary, doctor, harness, paths, run, setup, store
+from ppl import boundary, doctor, harness, os_sandbox, paths, run, setup, store
 from ppl.trackers import github_issues, jira
 import ppl_guard
 
@@ -167,7 +167,7 @@ class TestTrackerCliGate(GhRunCase):
 
     def test_the_close_note_is_written_and_posted_once_the_merge_is_recorded(self):
         # the stage 8 close: the note in the run's scratch directory, then gh issue comment
-        note = "/tmp/ppl-GH-7/note.md"
+        note = str(os_sandbox.scratch_dir("GH-7") / "note.md")
         with self.at_merge_watch():
             self.assertIsNone(ppl_guard.decide(payload(None, "Write", {"file_path": note,
                                                                        "content": "Done."},
@@ -370,9 +370,11 @@ class TestTrackerCliNoRole(GhRunCase):
             self.assertIn("BOUNDARY_VIOLATION", reason, command)
             self.assertIn("may run only the forge's read commands", reason, command)
 
-    def test_the_review_responder_keeps_its_bracketed_jq_reads(self):
+    def test_the_review_responder_has_no_gh_read_left(self):
+        # rule: R-REVIEW-RESPONDER-BASH-SHAPES
         for command in JQ_READS:
-            self.assertIsNone(bash("ppl-review-responder", command), command)
+            reason = self.deny_reason(bash("ppl-review-responder", command))
+            self.assertIn("BOUNDARY_VIOLATION", reason, command)
 
     def test_a_role_is_denied_a_brace_or_a_glob_outside_the_jq_word(self):
         # rule: R-TRACKER-CLI-NO-ROLE
@@ -392,8 +394,8 @@ class TestTrackerCliNoRole(GhRunCase):
             self.assertIn("may not write the tracker", reason, command)
 
     def test_a_role_keeps_its_own_commands(self):
-        for command in ("gh api repos/o/r/pulls/12/comments --paginate",
-                        "gh pr view 12 --json=reviews,headRefOid"):
+        for command in ("git -C /work/repo log --oneline abc1234..def5678",
+                        "git -C /work/repo show --no-ext-diff --no-textconv abc1234"):
             self.assertIsNone(bash("ppl-review-responder", command), command)
         for command in ("python3 -m pytest tests -q", "gh issue view 7 -R o/r"):
             self.assertIsNone(bash("ppl-code-worker", command), command)
@@ -475,8 +477,9 @@ class TestTrackerMcpNoRole(GhRunCase):
                 self.assertIn("%s may not write the tracker" % role, reason)
 
     def test_a_role_keeps_the_tracker_read_tools(self):
-        for tool in ("mcp__atlassian__getJiraIssue", "mcp__claude_ai_Atlassian_Rovo__getJiraIssue",
-                     "mcp__github__get_issue"):
+        # a GitHub MCP read is no longer one: no role calls a GitHub MCP server at all
+        # (R-FORGE-GH-MCP-NO-ROLE, tests/test_guard_os_sandbox.py TestGithubMcp)
+        for tool in ("mcp__atlassian__getJiraIssue", "mcp__claude_ai_Atlassian_Rovo__getJiraIssue"):
             self.assertIsNone(ppl_guard.decide(payload("ppl-briefer", tool, {"issueKey": "X-1"})),
                               tool)
 

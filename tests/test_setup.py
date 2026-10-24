@@ -15,7 +15,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 
-from ppl import cli, config, harness, models, paths, setup
+from ppl import cli, config, harness, models, os_sandbox, paths, setup
 from ppl.errors import PplError
 
 SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
@@ -42,15 +42,24 @@ class SetupTestCase(unittest.TestCase):
         # environment first, so the apply step would render into its dirs.
         self._dirs = {name: os.environ.pop(name, None) for name in _DIR_VARS}
         self.workspace = Path(tmphome.mkdtemp(prefix="pplws-"))
+        self.repo_root = Path(tmphome.mkdtemp(prefix="pplrepo-"))
         self.lines = []
         patcher = mock.patch.object(models, "claude_version", lambda binary="claude": "9.9.9")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        pins = {name: {"path": "/usr/bin/" + name, "realpath": "/usr/bin/" + name}
+                for name in os_sandbox.PIN_NAMES}
+        patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: pins)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(os_sandbox, "repo_problem", lambda doc: None)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.answers = {
             "claude_binary": "claude", "workspace": str(self.workspace), "hooks": "local",
             "verify": "yes",
             "harness_from": "example-generic", "harness_name": "mine",
-            "repo": str(self.workspace / "repo"), "default_branch": "main",
+            "repo": str(self.repo_root / "repo"), "default_branch": "main",
             "task_url_template": "https://tracker.example/<TASK-ID>",
             "key_pattern": "^DEMO-[0-9]+$", "forge": "github",
         }
@@ -94,7 +103,7 @@ class TestNonInteractive(SetupTestCase):
         self.assertEqual(doc["harness"]["name"], "mine")
         self.assertEqual(doc["task"]["key_pattern"], "^DEMO-[0-9]+$")
         self.assertEqual(doc["forge"]["kind"], "github")
-        self.assertEqual(doc["repo"]["worktrees"], str(self.workspace / "repo") + "/.worktrees")
+        self.assertEqual(doc["repo"]["worktrees"], str(self.repo_root / "repo") + "/.worktrees")
 
     def test_running_twice_is_idempotent(self):
         from ppl import harness
@@ -643,7 +652,7 @@ class TestTrackerStep(SetupTestCase):
 
     def test_the_repo_defaults_to_the_origin_remote_of_the_checkout(self):
         import subprocess
-        checkout = self.workspace / "repo"
+        checkout = self.repo_root / "repo"
         checkout.mkdir()
         for argv in (["init", "-q"], ["remote", "add", "origin", "git@github.com:acme/widgets.git"]):
             subprocess.run(["git", "-C", str(checkout)] + argv, check=True)
@@ -749,6 +758,88 @@ class TestLocalSettings(SetupTestCase):
                 setup.write_local_settings(self.workspace, SOURCE)
             self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE", text)
             self.assertEqual(path.read_text(encoding="utf-8"), text)
+
+
+class TestOsSandboxSettings(SetupTestCase):
+    SANDBOX = {"enabled": True, "network": {"deniedDomains": ["github.com"]}}
+    PROFILE = {"sandbox": SANDBOX, "allow": ["Bash(/opt/x/gh pr view *)", "Bash(/opt/x/gh auth status)"]}
+
+    def path(self):
+        return self.workspace / ".claude" / "settings.local.json"
+
+    def record(self, **extra):
+        (paths.home() / os_sandbox.FACTS_FILE).write_text(json.dumps(extra), encoding="utf-8")
+
+    def test_a_profile_is_written_with_the_allow_entries_and_the_hooks_kept(self):
+        setup.write_local_settings(self.workspace, SOURCE)
+        setup.write_os_sandbox_settings(self.workspace, self.PROFILE)
+        doc = self.settings()
+        self.assertEqual(doc["sandbox"], self.SANDBOX)
+        self.assertEqual(doc["permissions"]["allow"], self.PROFILE["allow"])
+        self.assertIn("PreToolUse", doc["hooks"])
+
+    def test_a_foreign_sandbox_key_refuses_and_leaves_the_file(self):
+        self.path().parent.mkdir(parents=True)
+        text = json.dumps({"sandbox": {"enabled": False}, "model": "x"})
+        self.path().write_text(text, encoding="utf-8")
+        before = self.path().read_bytes()
+        with self.assertRaises(PplError) as caught:
+            setup.write_os_sandbox_settings(self.workspace, self.PROFILE)
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertIn("sandbox", caught.exception.message)
+        self.assertEqual(self.path().read_bytes(), before)
+
+    def test_a_hand_edited_ppl_block_is_foreign(self):
+        self.record(written_sandbox=self.SANDBOX)
+        self.path().parent.mkdir(parents=True)
+        self.path().write_text(json.dumps({"sandbox": dict(self.SANDBOX, enabled=False)}),
+                               encoding="utf-8")
+        before = self.path().read_bytes()
+        with self.assertRaises(PplError):
+            setup.write_os_sandbox_settings(self.workspace, self.PROFILE)
+        self.assertEqual(self.path().read_bytes(), before)
+
+    def test_the_recorded_block_is_replaced(self):
+        self.record(written_sandbox=self.SANDBOX)
+        self.path().parent.mkdir(parents=True)
+        self.path().write_text(json.dumps({"sandbox": self.SANDBOX}), encoding="utf-8")
+        newer = {"sandbox": {"enabled": True, "x": 1}, "allow": []}
+        setup.write_os_sandbox_settings(self.workspace, newer)
+        self.assertEqual(self.settings()["sandbox"], newer["sandbox"])
+
+    def test_invalid_json_refuses_and_leaves_the_file(self):
+        self.path().parent.mkdir(parents=True)
+        for text in ("{not json", "[]", '{"permissions": []}', '{"permissions": {"allow": 3}}'):
+            self.path().write_text(text, encoding="utf-8")
+            before = self.path().read_bytes()
+            with self.assertRaises(PplError) as caught:
+                setup.write_os_sandbox_settings(self.workspace, self.PROFILE)
+            self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE", text)
+            self.assertEqual(self.path().read_bytes(), before)
+
+    def test_none_removes_the_block_and_the_recorded_entries_only(self):
+        self.record(written_sandbox=self.SANDBOX, written_allow=self.PROFILE["allow"])
+        self.path().parent.mkdir(parents=True)
+        self.path().write_text(json.dumps({
+            "sandbox": self.SANDBOX, "model": "x",
+            "permissions": {"allow": ["Bash(ls *)"] + self.PROFILE["allow"], "deny": ["Bash(rm *)"]}}),
+            encoding="utf-8")
+        setup.write_os_sandbox_settings(self.workspace, None)
+        doc = self.settings()
+        self.assertNotIn("sandbox", doc)
+        self.assertEqual(doc["permissions"], {"allow": ["Bash(ls *)"], "deny": ["Bash(rm *)"]})
+        self.assertEqual(doc["model"], "x")
+
+    def test_none_without_a_file_creates_nothing(self):
+        setup.write_os_sandbox_settings(self.workspace, None)
+        self.assertFalse(self.path().exists())
+
+    def test_none_leaves_a_foreign_block_alone(self):
+        self.path().parent.mkdir(parents=True)
+        text = json.dumps({"sandbox": {"enabled": False}})
+        self.path().write_text(text, encoding="utf-8")
+        setup.write_os_sandbox_settings(self.workspace, None)
+        self.assertEqual(self.path().read_text(encoding="utf-8"), text)
 
 
 class TestInteractive(SetupTestCase):
@@ -933,7 +1024,7 @@ class TestCli(SetupTestCase):
 
     def test_a_second_run_with_identical_answers_exits_zero(self):
         argv = ["setup", "--non-interactive", "--answer", "workspace=%s" % self.workspace,
-                "--answer", "repo=%s" % (self.workspace / "repo"), "--answer", "harness_name=mine"]
+                "--answer", "repo=%s" % (self.repo_root / "repo"), "--answer", "harness_name=mine"]
         with mock.patch.object(models, "probe", ok_probe), \
                 mock.patch.object(setup, "_default_forge_check", ok_forge):
             first = self.call(*argv)
@@ -954,7 +1045,7 @@ class TestCli(SetupTestCase):
         source = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / "x.replacing"
         shutil.copytree(SOURCE / "defaults" / "harnesses" / "example-generic", source)
         base = ["setup", "paths", "harness", "--non-interactive",
-                "--answer", "repo=%s" % (self.workspace / "repo")]
+                "--answer", "repo=%s" % (self.repo_root / "repo")]
         for extra in (["--answer", "harness_from=%s" % source],
                       ["--answer", "harness_from=defaults/harnesses/example-generic"]):
             with self.subTest(extra=extra):

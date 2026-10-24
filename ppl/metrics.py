@@ -63,7 +63,7 @@ import math
 import re
 from datetime import datetime, timedelta, timezone
 
-from . import boundary, config, paths, schema, store, usage
+from . import boundary, config, os_sandbox, paths, schema, store, usage
 from .errors import PplError
 
 # "outcompeted": the accepted candidate was correct but a parallel
@@ -546,6 +546,7 @@ WARNINGS = {
     "LABELS_MISSING": (0.50, 6),
     "FORMAT_REFUSALS": (2.0, 5),
     "CAGE_HITS_HIGH": (5.0, 5),
+    "OS_SANDBOX_OFF": (1.0, 1),
 }
 LABEL_AGE_DAYS = 14
 
@@ -645,14 +646,19 @@ def _run_warnings(limits, run_records):
     """The four run-based warnings, over the whole fleet. A run whose files cannot be
     read, or whose state.json carries no usable budgets, is skipped for what needs them."""
     runs = budgeted = spent = 0
+    github, unsandboxed = 0, []
     parks, refusals, denials = {}, {}, {}
-    for _, directory in run_records:
+    for task_id, directory in run_records:
         try:
             events = store.read_log_at(directory)
             state = store.read_json(directory / "state.json")
         except (PplError, OSError):
             continue
         runs += 1
+        if os_sandbox.dir_needs(directory):
+            github += 1
+            if isinstance(state, dict) and state.get("os_sandboxed") is not True:
+                unsandboxed.append(task_id)
         budgets = state.get("budgets") if isinstance(state, dict) else None
         used = budgets.get("retry_used") if isinstance(budgets, dict) else None
         cap = budgets.get("retry_max") if isinstance(budgets, dict) else None
@@ -671,6 +677,13 @@ def _run_warnings(limits, run_records):
             elif kind == "deny" and ev.get("role") in boundary.ROLE_RULES:
                 denials[ev["role"]] = denials.get(ev["role"], 0) + 1
     out = []
+    if github:
+        listed = sorted(unsandboxed)
+        names = ", ".join(listed[:5]) + (" and %d more" % (len(listed) - 5) if len(listed) > 5 else "")
+        out.append(_warning(
+            limits, "OS_SANDBOX_OFF", None, github, len(unsandboxed),
+            "%d of %d GitHub runs started without the OS sandbox: %s, GitHub credentials were "
+            "reachable from their commands" % (len(unsandboxed), github, names)))
     if budgeted:
         share = spent / budgeted
         out.append(_warning(

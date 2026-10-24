@@ -1,9 +1,10 @@
-"""GitHub through the gh CLI. The review responder gets Bash, caged to read
-shapes. Merge, approve and thread resolution are denied as Bash patterns and
+"""GitHub through the gh CLI. The review responder gets Bash, caged to local git
+read shapes and never reaches GitHub. Merge, approve and thread resolution are denied as Bash patterns and
 as the official GitHub MCP server's tool names."""
 import re
 import subprocess
 
+from .. import os_sandbox
 from . import read_fragment
 
 KIND = "github"
@@ -58,16 +59,28 @@ _DENIED_BASH = (
      _NO_APPROVE),
     (re.compile(r"\bgh\s+api\s+graphql\b[^;&|]*resolveReviewThread\b"), _NO_RESOLVE),
 )
-# Token-level shapes cannot tell a bare value from a subcommand, so every
-# value rides on its flag (`--json=a,b`, `--repo=o/r`) and a bare word that is
-# not the one allowed goal denies: `gh pr close 7` and `gh pr comment 7` fail
-# on `close`/`comment`, `gh api -X POST ...` fails on `-X`.
+# The responder never reaches GitHub, it reads the change with local git. The
+# shape format cannot bind `-C` to the active run's repo, since a shape row is
+# built from the role alone, so `-C` takes any absolute path with no `..`
+# segment and every rev rides as a positional word. A rev is a hex SHA of 7 to
+# 40 characters or `origin/<name>`, a range is two of them. `git diff` and
+# `git show` may run an external diff or textconv driver the repo's config or
+# .gitattributes names, so both require `--no-ext-diff --no-textconv`. Any
+# other token, `-c` and `--output` among them, matches no regex and denies.
+_REPO = r"/(?:[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)*)?/?"
+_REPO_NO_DOTDOT = r"(?!.*(?:^|/)\.\.(?:/|$))" + _REPO
+_REV = r"(?:[0-9a-fA-F]{7,40}|origin/[A-Za-z0-9_][A-Za-z0-9_/-]*(?:\.[A-Za-z0-9_/-]+)*)"
+_RANGE = r"^" + _REV + r"\.\." + _REV + r"$"
+_SINGLE = r"^" + _REV + r"$"
+_C_FLAG = ["-C", _REPO_NO_DOTDOT]
+_NO_DRIVERS = [["--no-ext-diff", ""], ["--no-textconv", ""]]
 _READ_SHAPES = [
-    {"argv0": "gh", "env_prefix": False, "required_flags": [["pr", ""]],
-     "one_goal_of": ["view", "diff", "checks", "status"],
-     "free_args": r"^(?:[0-9]+|--json=[A-Za-z,]+|--jq=\S+|--repo=[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|--comments)$"},
-    {"argv0": "gh", "env_prefix": False, "required_flags": [["api", ""]], "one_goal_of": [],
-     "free_args": r"^(?:repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls/[0-9]+(?:/comments|/reviews|/files)?|user|--paginate|--jq=\S+|-q=\S+)$"},
+    {"argv0": "git", "env_prefix": False, "required_flags": [_C_FLAG] + _NO_DRIVERS,
+     "one_goal_of": ["diff"], "free_args": _RANGE},
+    {"argv0": "git", "env_prefix": False, "required_flags": [_C_FLAG] + _NO_DRIVERS,
+     "one_goal_of": ["show"], "free_args": _SINGLE},
+    {"argv0": "git", "env_prefix": False, "required_flags": [_C_FLAG, ["--oneline", ""]],
+     "one_goal_of": ["log"], "free_args": _RANGE},
 ]
 
 
@@ -92,11 +105,12 @@ def fragment(name):
 
 
 def doctor_check(settings, claude_json_path, workspace, runner=subprocess.run):
+    gh = os_sandbox.gh_path()
     try:
-        version = runner(["gh", "--version"], capture_output=True, text=True, timeout=20)
+        version = runner([gh, "--version"], capture_output=True, text=True, timeout=20)
         if version.returncode != 0:
             return {"ok": False, "detail": "gh --version failed: %s" % (version.stderr or "").strip()}
-        auth = runner(["gh", "auth", "status"], capture_output=True, text=True, timeout=20)
+        auth = runner([gh, "auth", "status"], capture_output=True, text=True, timeout=20)
     except FileNotFoundError:
         return {"ok": False, "detail": "gh is not installed or not on PATH"}
     except OSError as exc:

@@ -27,7 +27,8 @@ Each tick, in this order:
    `list_merge_request_pipelines`. Build a JSON array, one object per thread, each with
    `id`, `author` (author of the first note), `resolved`, `last_note_id` (id of the newest
    note), `last_author` (author of the newest note) and `note_count` (notes that are not
-   `system: true`), and write it to a file. The MCP returns `{"items": [...], "pagination":
+   `system: true`), and write it to
+   `<!-- include: harness/scratch -->/<TASK-ID>/threads.json`. The MCP returns `{"items": [...], "pagination":
    ...}` - an object, not an array. A JMESPath that starts with `[?...]` evaluates to `null`
    on it and the tool prints `null`, which reads exactly like "no threads". On the first
    tick run the call once without JMESPath and look at the shape; afterwards start every
@@ -38,7 +39,7 @@ Each tick, in this order:
    line and branch on `approval`, not on the human-readable line above it. If it says
    `stale`, previous approvals do not count - say so in the tick summary rather than quietly
    proceeding.
-4. `ppl review pending --threads <file> --sha <sha>`. This is the dispatch filter, not an
+4. `ppl review pending --threads <!-- include: harness/scratch -->/<TASK-ID>/threads.json --sha <sha>`. This is the dispatch filter, not an
    input to one - do not re-derive "which threads need a reply" by reading the discussions
    yourself. Parse the JSON array on the command's last stdout line (the human-readable
    count above it is not the contract, same rule as `ppl approval check`) and dispatch every

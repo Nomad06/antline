@@ -2567,6 +2567,20 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         self.assertIn(str(old), err)
         self.assertIn("ppl setup claude", err)
 
+    def test_init_prints_the_mcp_warning(self):
+        home = Path(os.environ["PPL_HOME"])
+        facts = home / "os_sandbox.json"
+        facts.write_text('{"version": 1}', encoding="utf-8")
+        self.addCleanup(lambda: facts.unlink() if facts.exists() else None)
+        (Path(self.local_dir) / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"serena": {"command": "uvx"}}}), encoding="utf-8")
+        self.write({})
+        code, _, err = self.init("DEMO-9928")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: MCP servers run outside the OS sandbox", err)
+        self.assertIn("serena", err)
+        self.assertNotIn("uvx", err)
+
     def test_init_is_quiet_when_the_entries_are_the_ones_setup_writes(self):
         self.write({})
         code, _, err = self.init("DEMO-9923")
@@ -2750,6 +2764,15 @@ class TestDoctorCommand(unittest.TestCase):
         self.assertTrue(doc["harness"]["valid"])
         self.assertEqual(doc["forge"]["kind"], "gitlab")
         self.assertEqual({row["state"] for row in doc["models"]}, {"verified"})
+
+    def test_doctor_forge_runs_only_the_gh_checks(self):
+        self.addCleanup(seed_setup)
+        code, out, err = call("doctor", "--forge")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(out.splitlines()), 1)
+        doc = json.loads(out)
+        self.assertEqual(set(doc), {"forge", "tracker"})
+        self.assertEqual(doc["forge"]["kind"], "gitlab")
 
     def test_doctor_exits_zero_on_an_unreadable_config(self):
         self.addCleanup(seed_setup)
@@ -3183,7 +3206,7 @@ class TestInitRequiresSetup(unittest.TestCase):
         config.set_active_harness("example-generic")
         with mock.patch("ppl.forges.github.doctor_check",
                         return_value={"ok": True, "detail": ""}) as forge_check:
-            code, out, err = self.init("DEMO-813", "--harness", "example-generic")
+            code, out, err = self.init("DEMO-813", "--harness", "example-generic", "--no-os-sandbox")
         self.assertEqual(code, 0, err)
         forge_check.assert_not_called()
         state = json.loads((paths.run_dir("DEMO-813") / "state.json").read_text(encoding="utf-8"))
@@ -3420,6 +3443,120 @@ class TestTrackerFetch(unittest.TestCase):
         self.assertEqual([e["revision"] for e in events], ["2026-10-02T11:30:00Z"])
         self.assertEqual(self.argvs(), [GH_VIEW.split(" "), GH_PARENT.split(" "),
                                         GH_SUBS.split(" ")])
+
+    def write_guard_facts(self, **repos):
+        """A guard facts file in the data root, gone again after the test."""
+        from ppl import os_sandbox, store
+        path = paths.home() / os_sandbox.FACTS_FILE
+        store.write_json(path, dict({"version": 1, "forge_repo": "o/r", "tracker_repo": "o/r"},
+                                    **repos))
+        self.addCleanup(lambda: path.unlink() if path.exists() else None)
+
+    def outside_dir(self):
+        outside = Path(tmphome.mkdtemp(prefix="ghoutside-"))
+        self.addCleanup(shutil.rmtree, str(outside), True)
+        return outside
+
+    def test_the_repository_comes_from_the_guard_facts(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # the run snapshot sits in role-writable runs/, the guard facts do not
+        from ppl import run
+        task = self.run_with("GH-7")
+        self.write_guard_facts(tracker_repo="o/other")
+        code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertIn("o/other", json.loads(err)["message"])
+        self.assertEqual(self.argvs(), [])
+        self.assertFalse(self.tracker_dir(task).exists())
+        self.assertIsNone(run.load(task).get("tracker_revision"))
+        self.write_guard_facts(tracker_repo=None)
+        self.assertEqual(json.loads(call("tracker", "fetch", "--task", task)[2])["error_code"],
+                         "SCHEMA_INVALID")
+        self.write_guard_facts(tracker_repo="o/r")
+        code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.argvs()[0], GH_VIEW.split(" "))
+
+    def test_a_tracker_dir_linked_outside_the_run_is_refused_and_nothing_is_written(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        from ppl import run
+        task = self.run_with("GH-7")
+        outside = self.outside_dir()
+        os.symlink(str(outside), str(self.tracker_dir(task)))
+        code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "EXTERNAL_BLOCKED")
+        self.assertIn(str(self.tracker_dir(task)), error["message"])
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(self.argvs(), [])
+        self.assertIsNone(run.load(task).get("tracker_revision"))
+
+    def test_a_run_dir_linked_elsewhere_is_refused_and_nothing_is_written(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        task = self.run_with("GH-7")
+        moved = self.outside_dir() / "GH-7"
+        shutil.move(str(paths.run_dir(task)), str(moved))
+        os.symlink(str(moved), str(paths.run_dir(task)))
+        self.addCleanup(lambda: os.unlink(str(paths.run_dir(task))))
+        before = sorted(item.name for item in moved.iterdir())
+        state_before = (moved / "state.json").read_text(encoding="utf-8")
+        code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "EXTERNAL_BLOCKED")
+        self.assertIn(str(paths.run_dir(task)), error["message"])
+        self.assertEqual(sorted(item.name for item in moved.iterdir()), before)
+        self.assertEqual((moved / "state.json").read_text(encoding="utf-8"), state_before)
+        self.assertEqual(self.argvs(), [])
+
+    def test_a_tracker_dir_swapped_for_a_link_while_gh_answers_is_refused(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # the check runs again right before the write, after the network calls
+        from ppl.trackers import github_issues
+        task = self.run_with("GH-7")
+        dest = self.tracker_dir(task)
+        dest.mkdir()
+        outside = self.outside_dir()
+        epic = {"number": 3, "title": "Epic", "url": "https://github.com/o/r/issues/3"}
+        answers = {GH_VIEW: json.dumps(GH_ISSUE), GH_PARENT: json.dumps(epic), GH_SUBS: "[]"}
+
+        def runner(argv, **kwargs):
+            if dest.is_dir() and not dest.is_symlink():
+                dest.rmdir()
+                os.symlink(str(outside), str(dest))
+            return subprocess.CompletedProcess(argv, 0, stdout=answers[" ".join(argv[1:])],
+                                               stderr="")
+
+        with self.assertRaises(PplError) as caught:
+            github_issues.fetch({"repo": "o/r", "kind": "github-issues"}, task, dest,
+                                runner=runner)
+        self.assertEqual(caught.exception.code, "EXTERNAL_BLOCKED")
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_a_log_linked_outside_the_run_is_not_appended_through(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        task = self.run_with("GH-7")
+        target = self.outside_dir() / "rc"
+        target.write_text("untouched\n", encoding="utf-8")
+        log = paths.run_dir(task) / "log.jsonl"
+        log.unlink()
+        os.symlink(str(target), str(log))
+        code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "EXTERNAL_BLOCKED")
+        self.assertEqual(target.read_text(encoding="utf-8"), "untouched\n")
+
+    def test_a_write_path_outside_the_runs_dir_is_refused(self):
+        from ppl import store
+        self.run_with("GH-7")
+        for path in (Path(self.outside_dir()) / "x", paths.runs_dir() / "GH-7" / ".." / ".." / "x"):
+            with self.subTest(path=path), self.assertRaises(PplError) as caught:
+                store.checked_run_path(path)
+            self.assertEqual(caught.exception.code, "EXTERNAL_BLOCKED")
+        self.assertEqual(store.checked_run_path(paths.run_dir("GH-7") / "tracker"),
+                         paths.run_dir("GH-7") / "tracker")
 
     def test_a_404_on_the_link_endpoints_records_unavailable(self):
         task = self.run_with("GH-7")
@@ -4019,6 +4156,118 @@ class TestVersion(unittest.TestCase):
         code, out, _ = call("--version")
         self.assertEqual(code, 0)
         self.assertEqual(out, "antline %s\n" % ppl.__version__)
+
+
+class TestInitRequiresTheOsSandbox(unittest.TestCase):
+    """A run on a GitHub harness starts only inside the OS sandbox that denies GitHub, with the
+    guard registered in the workspace's local settings, unless the operator opts out."""
+
+    COUNTER = iter(range(8100, 8200))
+
+    def setUp(self):
+        fixtures.install_variant("example-generic", "gh-issues", **fixtures.GITHUB_ISSUES)
+        config.set_active_harness("gh-issues")
+        self.addCleanup(config.set_active_harness, "example-maven")
+
+    def start(self, state, registration, *flags, harness="gh-issues", task=None):
+        facts = {"state": state, "env_marker": state == "on", "profile": state == "on",
+                 "live": "denied" if state == "on" else "reachable", "undoing": [],
+                 "exposed": []}
+        inspected = dict(doctor.inspect(), registration=registration)
+        task = task or "GH-%d" % next(self.COUNTER)
+        with mock.patch.object(doctor, "os_sandbox_facts", return_value=facts), \
+                mock.patch.object(doctor, "inspect", return_value=inspected):
+            code, out, err = call("init", task, "--tracker-url", "u", "--repo", "/tmp/repo",
+                                  "--harness", harness, *flags)
+        return task, code, out, err
+
+    def test_init_refuses_a_github_run_outside_the_os_sandbox(self):
+        # rule: R-OS-SANDBOX-INIT-REQUIRED
+        task, code, _, err = self.start("off", "local")
+        self.assertEqual(code, 2)
+        doc = json.loads(err)
+        self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
+        self.assertIn("--no-os-sandbox", doc["message"])
+        self.assertFalse(paths.run_dir(task).exists())
+
+    def test_init_refuses_when_the_guard_is_only_global(self):
+        # rule: R-OS-SANDBOX-INIT-REQUIRED
+        # --no-isolated, so the isolation check passes and the OS sandbox one is what refuses
+        task, code, _, err = self.start("on", "global", "--no-isolated")
+        self.assertEqual(code, 2)
+        doc = json.loads(err)
+        self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
+        self.assertIn("registered global", doc["message"])
+        self.assertIn("settings.local.json", doc["message"])
+        self.assertFalse(paths.run_dir(task).exists())
+
+    def test_init_refuses_when_the_guard_is_absent(self):
+        # rule: R-OS-SANDBOX-INIT-REQUIRED
+        task, code, _, err = self.start("on", "none", "--no-isolated")
+        self.assertEqual(code, 2)
+        doc = json.loads(err)
+        self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
+        self.assertIn("registered none", doc["message"])
+        self.assertIn("settings.local.json", doc["message"])
+        self.assertFalse(paths.run_dir(task).exists())
+
+    def test_init_records_os_sandboxed_true_when_on(self):
+        task, code, out, err = self.start("on", "local")
+        self.assertEqual(code, 0, err)
+        _, shown, _ = call("show", "--task", task, "--json")
+        self.assertIs(json.loads(shown)["os_sandboxed"], True)
+        self.assertIn("OS sandbox: on", out)
+
+    def test_no_os_sandbox_records_false_and_starts(self):
+        task, code, out, err = self.start("off", "none", "--no-os-sandbox")
+        self.assertEqual(code, 0, err)
+        _, shown, _ = call("show", "--task", task, "--json")
+        self.assertIs(json.loads(shown)["os_sandboxed"], False)
+        self.assertIn("OS sandbox: off", out)
+
+    def test_init_warns_about_a_github_token_in_the_environment_by_name(self):
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_secretvalue"}):
+            task, code, out, err = self.start("on", "local")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: GITHUB_TOKEN", err)
+        self.assertNotIn("secretvalue", err + out)
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_secretvalue"}):
+            _, doctor_out, _ = call("doctor")
+        self.assertIn("warning: GITHUB_TOKEN", doctor_out)
+        self.assertNotIn("secretvalue", doctor_out)
+
+    def test_init_names_a_variable_holding_a_github_token_never_its_value(self):
+        value = "github_pat_11ABCDEFG0secretvalue"
+        with mock.patch.dict(os.environ, {"FOO": value, "BAR": "ordinary"}):
+            task, code, out, err = self.start("on", "local")
+            _, doctor_out, doctor_err = call("doctor")
+        self.assertEqual(code, 0, err)
+        self.assertIn("FOO", err)
+        self.assertNotIn("BAR", err)
+        log = (paths.run_dir(task) / "log.jsonl")
+        logged = log.read_text(encoding="utf-8") if log.exists() else ""
+        for text in (err, out, doctor_out, doctor_err, logged):
+            self.assertNotIn("secretvalue", text)
+            self.assertNotIn("github_pat_", text)
+        self.assertIn("FOO", doctor_out)
+
+    def test_init_warns_about_foreign_bash_hooks_and_still_starts(self):
+        hooks = [{"source": "/home/u/.claude/settings.json", "hook": "sqz"}]
+        with mock.patch.object(doctor, "foreign_bash_hooks", return_value=hooks):
+            task, code, out, err = self.start("on", "local")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: ", err)
+        self.assertIn("sqz", err)
+        self.assertIn("remove or disable", err)
+
+    def test_a_gitlab_harness_needs_no_os_sandbox(self):
+        config.set_active_harness("example-maven")
+        task, code, out, err = self.start("off", "none", harness="example-maven",
+                                          task="DEMO-%d" % next(self.COUNTER))
+        self.assertEqual(code, 0, err)
+        _, shown, _ = call("show", "--task", task, "--json")
+        self.assertIs(json.loads(shown)["os_sandboxed"], False)
+        self.assertNotIn("OS sandbox:", out)
 
 
 if __name__ == "__main__":

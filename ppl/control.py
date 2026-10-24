@@ -34,12 +34,14 @@ def _invalid(path, reason):
             "reason": "control file %s %s" % (path, reason)}
 
 
-def read(task_id):
+def read(task_id, limit=None):
+    """The operator's control record, None when there is none, an invalid marker when it
+    cannot be used. `limit` caps the read as store.read_regular_text does."""
     path = _path(task_id)
     if not path.exists():
         return None
     try:
-        record = store.read_json(path)
+        record = store.read_json(path, limit=limit)
     except PplError as exc:
         return _invalid(path, "is not valid JSON: %s" % exc.message)
     except (OSError, ValueError) as exc:

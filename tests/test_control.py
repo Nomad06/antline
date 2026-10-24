@@ -72,6 +72,18 @@ class TestDestroy(unittest.TestCase):
         self.assertTrue(any(paths.runs_dir().glob("_archive/DEMO-430-*")))
         self.assertIsNone(run.active())
 
+    def test_local_destroy_removes_the_scratch_dir(self):
+        from ppl import os_sandbox
+        run.init("DEMO-432", "u", "/tmp/repo")
+        scratch = os_sandbox.scratch_dir("DEMO-432")
+        scratch.mkdir(parents=True)
+        (scratch / "install.log").write_text("x", encoding="utf-8")
+        other = os_sandbox.scratch_dir("DEMO-433")
+        other.mkdir(parents=True)
+        run.destroy("DEMO-432", "local")
+        self.assertFalse(scratch.exists())
+        self.assertTrue(other.exists())
+
     def test_full_destroy_queues_remote_cleanup_and_keeps_the_run(self):
         # rule: R-DESTROY-REMOTE-QUEUED
         run.init("DEMO-431", "u", "/tmp/repo")
@@ -211,6 +223,16 @@ class TestStatus(unittest.TestCase):
         self.assertIn("DEMO-420", text)
         self.assertIn("Needs you:", text)
         self.assertIn("Next:", text)
+
+    def test_the_card_shows_the_os_sandbox_line(self):
+        for task, on in (("GH-4211", True), ("GH-4221", False)):
+            run.init(task, "u", "/tmp/repo", os_sandboxed=on)
+            store.write_json(paths.run_dir(task) / "harness.json",
+                             {"os_sandbox": {"needed": True}})
+        self.assertIn("OS sandbox: on\n", status.card("GH-4211"))
+        self.assertIn("OS sandbox: off\n", status.card("GH-4221"))
+        run.init("DEMO-4299", "u", "/tmp/repo")
+        self.assertNotIn("OS sandbox", status.card("DEMO-4299"))
 
     def test_card_reports_paused_state(self):
         run.init("DEMO-421", "u", "/tmp/repo")

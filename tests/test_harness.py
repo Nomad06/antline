@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,7 +16,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import boundary, cli, config, forges, harness, models, paths
+from ppl import boundary, cli, config, forges, harness, models, os_sandbox, paths, setup
 from ppl.errors import PplError
 from ppl.trackers import jira
 
@@ -339,6 +340,13 @@ class TestVerify(HarnessTestCase):
                                                "PPL_SKILLS_DIR": str(self.skills)})
         patcher.start()
         self.addCleanup(patcher.stop)
+        # apply renders a GitHub harness on pinned binaries, none looked up on PATH here
+        patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: PINS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(setup, "_origin_repo", lambda checkout: "acme/demo")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.claude_skills = Path(claude_home) / "skills"
 
     def overlay(self, name, role, size):
@@ -361,7 +369,7 @@ class TestVerify(HarnessTestCase):
         for name in ("example-generic", "example-maven"):
             fixtures.install_harness(name)
             doc = harness.load(name)
-            rendered = harness.render_skill(doc)
+            rendered = harness.render_skill(doc, pins=PINS)
             largest_skill = max(largest_skill, len(rendered["SKILL.md"].encode("utf-8")))
             largest_reference = max(largest_reference, *(len(text.encode("utf-8"))
                                                          for path, text in rendered.items()
@@ -621,7 +629,7 @@ class TestMalformedInputIsRefusedNotATraceback(HarnessTestCase):
             self.assertIn(bad, caught.exception.message)
 
     def test_a_github_issues_harness_cannot_grant_a_github_mcp_issue_write(self):
-        knowledge = {"skills": [], "extra_tools": ["mcp__github__get_issue",
+        knowledge = {"skills": [], "extra_tools": ["mcp__corp__code_search",
                                                    "mcp__github__add_issue_comment"]}
         fixtures.install_variant("example-generic", "gh-mcp", knowledge=knowledge,
                                  **fixtures.GITHUB_ISSUES)
@@ -630,6 +638,35 @@ class TestMalformedInputIsRefusedNotATraceback(HarnessTestCase):
         self.assertEqual(caught.exception.code, "HARNESS_INVALID")
         self.assertIn("knowledge.extra_tools[1] 'mcp__github__add_issue_comment' is a tracker "
                       "write tool", caught.exception.message)
+
+    def test_a_role_cannot_be_granted_a_github_mcp_tool(self):
+        # rule: R-FORGE-GH-MCP-NO-ROLE
+        for bad in ("mcp__github__get_issue", "mcp__GitHub_2__get_pull_request",
+                    "mcp__claude_ai_GitHub__search_code"):
+            name = self.mutate("example-maven", "extra_tools = []",
+                               'extra_tools = ["mcp__corp__code_search", "%s"]' % bad)
+            with self.assertRaises(PplError) as caught:
+                harness.load(name)
+            self.assertEqual(caught.exception.code, "HARNESS_INVALID", bad)
+            self.assertIn("knowledge.extra_tools[1] %r is a tool of a GitHub MCP server" % bad,
+                          caught.exception.message)
+        # the server a github forge names, and a tracker's read tools under a GitHub prefix
+        knowledge = {"skills": [], "extra_tools": ["mcp__corp-gh__get_issue"]}
+        fixtures.install_variant("example-generic", "gh-corp-mcp", knowledge=knowledge,
+                                 forge={"kind": "github", "mcp_server": "corp-gh"})
+        with self.assertRaises(PplError) as caught:
+            harness.load("gh-corp-mcp")
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("'mcp__corp-gh__get_issue' is a tool of a GitHub MCP server",
+                      caught.exception.message)
+        name = self.mutate("example-maven", 'mcp_prefixes = ["mcp__atlassian__", ',
+                           'mcp_prefixes = ["mcp__github__", "mcp__atlassian__", ')
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("the tracker read tool 'mcp__github__getJiraIssue' is a tool of a GitHub "
+                      "MCP server",
+                      caught.exception.message)
 
     def test_a_jira_harness_cannot_grant_a_github_mcp_issue_write(self):
         # rule: R-JIRA-NO-ROLE-TOOL
@@ -1125,6 +1162,327 @@ class TestTestGlobs(HarnessTestCase):
         self.assertEqual(harness.validate(harness.load(name), name), [])
 
 
+class TestOsSandboxTable(HarnessTestCase):
+    def install(self, text, base="example-generic"):
+        path = fixtures.install_harness(base) / "harness.toml"
+        path.write_text(path.read_text(encoding="utf-8") + "\n[os_sandbox]\n" + text,
+                        encoding="utf-8")
+        return base
+
+    def refused(self, text, base="example-generic"):
+        name = self.install(text, base)
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        return caught.exception.message
+
+    def test_os_sandbox_is_a_known_table(self):
+        name = self.install('enabled = true\nallowed_domains = ["pypi.org", "*.example.com"]\n'
+                            'allow_write = ["/var/cache/x", "~/.npm"]\n')
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
+    def test_os_sandbox_unknown_key_is_refused(self):
+        message = self.refused("allowed_domain = []\n")
+        self.assertIn("os_sandbox.allowed_domain", message)
+        self.assertIn("os_sandbox.allowed_domains", message)
+
+    def test_allowed_domains_refuse_a_scheme_or_path(self):
+        for host in ("https://pypi.org", "pypi.org/simple", "pypi.org:443", "", "a b"):
+            with self.subTest(host=host):
+                message = self.refused('allowed_domains = ["%s"]\n' % host)
+                self.assertIn("os_sandbox.allowed_domains[0]", message)
+        self.assertIn("os_sandbox.allowed_domains must", self.refused('allowed_domains = "x"\n'))
+
+    def test_allow_write_refuses_a_relative_path(self):
+        message = self.refused('allow_write = ["cache/x"]\n')
+        self.assertIn("os_sandbox.allow_write[0]", message)
+
+    def test_allow_write_refuses_the_home_directory_or_a_protected_path(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # a harness that needs to write under the home directory lists narrower directories
+        home = os.path.expanduser("~")
+        for entry in ("~/", "/", os.path.dirname(home), "~/.ssh", "~/.ssh/keys", "~/.config",
+                      "~/.claude", str(paths.home()), str(paths.home() / "harnesses")):
+            with self.subTest(entry=entry):
+                name = self.install('allow_write = ["%s"]\n' % entry)
+                with self.assertRaises(PplError) as caught:
+                    harness.load(name)
+                self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+                self.assertIn("os_sandbox.allow_write[0]", caught.exception.message)
+                self.assertIn("narrower", caught.exception.message)
+
+    def test_enabled_must_be_a_bool(self):
+        self.assertIn("os_sandbox.enabled", self.refused('enabled = "yes"\n'))
+
+    def test_allow_ssh_read_must_be_a_bool(self):
+        self.assertIn("os_sandbox.allow_ssh_read", self.refused('allow_ssh_read = "yes"\n'))
+        name = self.install("allow_ssh_read = true\n")
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
+    def test_enabled_false_on_a_github_harness_is_refused(self):
+        message = self.refused("enabled = false\n")
+        self.assertIn("os_sandbox.enabled", message)
+        self.assertIn("--no-os-sandbox", message)
+
+    def test_enabled_false_on_a_gitlab_jira_harness_is_accepted(self):
+        path = fixtures.install_harness("example-generic") / "harness.toml"
+        text = path.read_text(encoding="utf-8").replace('kind = "github"', 'kind = "gitlab"\n'
+                                                       'mcp_server = "GitLab-MCP"')
+        path.write_text(text + "\n[os_sandbox]\nenabled = false\n", encoding="utf-8")
+        self.assertEqual(harness.validate(harness.load("example-generic"), "x"), [])
+
+    def test_the_snapshot_records_whether_the_profile_is_needed(self):
+        fixtures.install_harness("example-generic")
+        self.assertEqual(harness.snapshot(harness.load("example-generic"))["os_sandbox"],
+                         {"needed": True})
+
+
+PINS = {"gh": {"path": "/opt/x/gh", "realpath": "/opt/x/gh"},
+        "git": {"path": "/usr/bin/git", "realpath": "/usr/bin/git"},
+        "ppl": {"path": "/opt/y/bin/ppl", "realpath": "/opt/y/bin/ppl"}}
+
+
+class TestApplyOsSandbox(HarnessTestCase):
+    def setUp(self):
+        super().setUp()
+        self.workspace = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplws-")))
+        self.agents = tmphome.mkdtemp(prefix="pplagents-")
+        self.skills = tmphome.mkdtemp(prefix="pplskills-")
+        fixtures.install_routing()
+        config.update("claude", {"workspace": str(self.workspace)})
+        patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: PINS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.origin = mock.patch.object(setup, "_origin_repo", lambda checkout: "acme/demo")
+        self.origin.start()
+        self.addCleanup(self.origin.stop)
+        self.settings_path = self.workspace / ".claude" / "settings.local.json"
+        self.facts_path = paths.home() / os_sandbox.FACTS_FILE
+
+    def apply(self, name="example-generic"):
+        return harness.apply(name, agents_dir=self.agents, skills_dir=self.skills)
+
+    def settings(self):
+        return json.loads(self.settings_path.read_text(encoding="utf-8"))
+
+    def test_apply_writes_the_profile_and_the_facts_for_a_github_harness(self):
+        fixtures.install_harness("example-generic")
+        self.settings_path.parent.mkdir(parents=True)
+        hooks = {"PreToolUse": [{"matcher": "Bash", "hooks": []}]}
+        self.settings_path.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+        self.apply()
+        doc = self.settings()
+        self.assertEqual(doc["hooks"], hooks)
+        self.assertEqual(doc["sandbox"]["network"]["deniedDomains"], ["github.com", "*.github.com"])
+        self.assertNotIn("ppl", doc["sandbox"])
+        self.assertIn("Bash(/opt/x/gh auth status)", doc["permissions"]["allow"])
+        facts = json.loads(self.facts_path.read_text(encoding="utf-8"))
+        expected = os_sandbox.facts(harness.load("example-generic"), self.workspace, PINS)
+        self.assertEqual({k: v for k, v in facts.items() if k in expected}, expected)
+        self.assertEqual(facts["written_sandbox"], doc["sandbox"])
+        self.assertEqual(facts["written_allow"], doc["permissions"]["allow"])
+        self.assertEqual(facts["deny_write"], list(dict.fromkeys(
+            os.path.realpath(entry) for entry in doc["sandbox"]["filesystem"]["denyWrite"])))
+
+    def test_apply_removes_both_when_the_harness_no_longer_needs_them(self):
+        fixtures.install_harness("example-generic")
+        self.apply()
+        fixtures.install_harness("example-maven")
+        self.apply("example-maven")
+        self.assertFalse(self.facts_path.exists())
+        doc = self.settings()
+        self.assertNotIn("sandbox", doc)
+        self.assertEqual(doc.get("permissions", {}).get("allow", []), [])
+
+    def test_reapply_replaces_ppl_entries_and_keeps_others(self):
+        fixtures.install_harness("example-generic")
+        self.settings_path.parent.mkdir(parents=True)
+        self.settings_path.write_text(json.dumps(
+            {"model": "m", "permissions": {"allow": ["Bash(ls *)"]}}), encoding="utf-8")
+        self.apply()
+        self.apply()
+        doc = self.settings()
+        self.assertEqual(doc["model"], "m")
+        allow = doc["permissions"]["allow"]
+        self.assertEqual(allow.count("Bash(ls *)"), 1)
+        self.assertEqual(allow.count("Bash(/opt/x/gh auth status)"), 1)
+        self.assertEqual(len(allow), 10)
+
+    def test_a_foreign_sandbox_key_refuses_and_leaves_the_file(self):
+        fixtures.install_harness("example-generic")
+        self.settings_path.parent.mkdir(parents=True)
+        self.settings_path.write_text('{"sandbox": {"enabled": false}}', encoding="utf-8")
+        before = self.settings_path.read_bytes()
+        with self.assertRaises(PplError) as caught:
+            self.apply()
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertEqual(self.settings_path.read_bytes(), before)
+        self.assertFalse(self.facts_path.exists())
+        self.assertIsNone(config.active_harness())
+
+    def test_invalid_json_refuses_and_leaves_the_file(self):
+        fixtures.install_harness("example-generic")
+        self.settings_path.parent.mkdir(parents=True)
+        self.settings_path.write_text("{oops", encoding="utf-8")
+        with self.assertRaises(PplError) as caught:
+            self.apply()
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertEqual(self.settings_path.read_text(encoding="utf-8"), "{oops")
+
+    def test_global_hook_mode_still_writes_the_workspace_profile(self):
+        config.update("claude", {"hooks": "global"})
+        fixtures.install_harness("example-generic")
+        self.apply()
+        self.assertIn("sandbox", self.settings())
+
+    def test_apply_without_a_workspace_refuses_for_a_github_harness(self):
+        config.update("claude", {"workspace": ""})
+        fixtures.install_harness("example-generic")
+        with self.assertRaises(PplError) as caught:
+            self.apply()
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertIn("workspace", caught.exception.message)
+        self.assertIsNone(config.active_harness())
+
+    def test_apply_without_a_workspace_is_fine_for_a_gitlab_harness(self):
+        config.update("claude", {"workspace": ""})
+        fixtures.install_harness("example-maven")
+        self.apply("example-maven")
+        self.assertEqual(config.active_harness(), "example-maven")
+
+    def test_a_corrupt_facts_file_is_removed_when_the_harness_does_not_need_it(self):
+        config.update("claude", {"workspace": ""})
+        fixtures.install_harness("example-maven")
+        for garbage in ("{oops", "[1]", ""):
+            self.facts_path.write_text(garbage, encoding="utf-8")
+            self.apply("example-maven")
+            self.assertFalse(self.facts_path.exists(), garbage)
+
+    def test_a_corrupt_facts_file_is_rewritten_for_a_github_harness(self):
+        fixtures.install_harness("example-generic")
+        self.facts_path.write_text("{oops", encoding="utf-8")
+        self.apply()
+        facts = json.loads(self.facts_path.read_text(encoding="utf-8"))
+        self.assertEqual(facts["written_sandbox"], self.settings()["sandbox"])
+
+    def test_a_corrupt_facts_file_makes_an_existing_sandbox_block_foreign(self):
+        fixtures.install_harness("example-generic")
+        self.apply()
+        self.facts_path.write_text("{oops", encoding="utf-8")
+        with self.assertRaises(PplError) as caught:
+            self.apply()
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertIn("sandbox", caught.exception.message)
+
+    def test_apply_creates_the_scratch_root(self):
+        fixtures.install_harness("example-generic")
+        self.apply()
+        self.assertTrue(os_sandbox.scratch_root().is_dir())
+
+
+class TestApplyRefusesSandboxLayouts(HarnessTestCase):
+    SETTINGS = '{"hooks": {"keep": true}}\n'
+    FACTS = '{"sentinel": 1}\n'
+
+    def setUp(self):
+        super().setUp()
+        self.workspace = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplws-")))
+        self.elsewhere = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplrepo-")))
+        self.agents = tmphome.mkdtemp(prefix="pplagents-")
+        self.skills = tmphome.mkdtemp(prefix="pplskills-")
+        fixtures.install_routing()
+        config.update("claude", {"workspace": str(self.workspace)})
+        for patcher in (mock.patch.object(os_sandbox, "pins", lambda which=None: PINS),
+                        mock.patch.object(setup, "_origin_repo", lambda checkout: "acme/demo")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.settings_path = self.workspace / ".claude" / "settings.local.json"
+        self.settings_path.parent.mkdir(parents=True)
+        self.settings_path.write_text(self.SETTINGS, encoding="utf-8")
+        self.facts_path = paths.home() / os_sandbox.FACTS_FILE
+        self.facts_path.write_text(self.FACTS, encoding="utf-8")
+        self.config_bytes = paths.config_file().read_bytes()
+
+    def install(self, name="layout", **tables):
+        fixtures.install_variant("example-generic", name, **tables)
+        return name
+
+    def refused(self, name):
+        with self.assertRaises(PplError) as caught:
+            harness.apply(name, agents_dir=self.agents, skills_dir=self.skills)
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertEqual(self.settings_path.read_text(encoding="utf-8"), self.SETTINGS)
+        self.assertEqual(self.facts_path.read_text(encoding="utf-8"), self.FACTS)
+        self.assertEqual(paths.config_file().read_bytes(), self.config_bytes)
+        return caught.exception.message
+
+    def repo(self, path, worktrees):
+        return {"path": str(path), "default_branch": "main", "worktrees": str(worktrees)}
+
+    def test_apply_refuses_a_checkout_inside_the_workspace(self):
+        checkout = self.workspace / "project"
+        name = self.install(repo=self.repo(checkout, self.elsewhere / "wt"))
+        message = self.refused(name)
+        self.assertIn(str(checkout), message)
+        self.assertIn(str(self.workspace), message)
+        self.assertIn("write-denied", message)
+
+    def test_apply_refuses_worktrees_inside_the_workspace(self):
+        worktrees = self.workspace / "wt"
+        name = self.install(repo=self.repo(self.elsewhere / "project", worktrees))
+        message = self.refused(name)
+        self.assertIn(str(worktrees), message)
+        self.assertIn(str(self.workspace), message)
+
+    def test_apply_refuses_a_workspace_inside_the_checkout(self):
+        name = self.install(repo=self.repo(self.workspace.parent, self.elsewhere / "wt"))
+        message = self.refused(name)
+        self.assertIn(str(self.workspace.parent), message)
+        self.assertIn(str(self.workspace), message)
+
+    def test_apply_refuses_a_symlinked_checkout_that_lands_inside_the_workspace(self):
+        (self.workspace / "real").mkdir()
+        link = self.elsewhere / "link"
+        link.symlink_to(self.workspace / "real")
+        name = self.install(repo=self.repo(link, self.elsewhere / "wt"))
+        self.assertIn(str(self.workspace / "real"), self.refused(name))
+
+    def test_apply_refuses_a_github_forge_without_a_derivable_repo(self):
+        name = self.install(repo=self.repo(self.elsewhere / "project", self.elsewhere / "wt"))
+        with mock.patch.object(setup, "_origin_repo", lambda checkout: None):
+            message = self.refused(name)
+        self.assertIn("forge_repo", message)
+        self.assertIn("origin", message)
+
+    def test_apply_refuses_a_github_issues_tracker_without_a_repo(self):
+        name = self.install(repo=self.repo(self.elsewhere / "project", self.elsewhere / "wt"),
+                            tracker={"kind": "github-issues"})
+        # validate already demands the repo, so it is switched off to reach apply's own refusal
+        with mock.patch.object(harness, "validate", lambda doc, source: []):
+            message = self.refused(name)
+        self.assertIn("[tracker] repo", message)
+
+    def test_verify_warns_about_a_missing_forge_repo(self):
+        name = self.install(repo=self.repo(self.elsewhere / "project", self.elsewhere / "wt"))
+        with mock.patch.object(setup, "_origin_repo", lambda checkout: None):
+            result = harness.verify(name, name)
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(any("forge_repo" in warning for warning in result["warnings"]),
+                        result["warnings"])
+        result = harness.verify(name, name)
+        self.assertFalse(any("forge_repo" in warning for warning in result["warnings"]))
+
+    def test_a_gitlab_harness_is_not_refused_for_layout_or_repo(self):
+        fixtures.install_variant("example-maven", "lab", repo=self.repo(
+            self.workspace / "project", self.workspace / "wt"))
+        name = "lab"
+        with mock.patch.object(setup, "_origin_repo", lambda checkout: None):
+            harness.apply(name, agents_dir=self.agents, skills_dir=self.skills)
+            result = harness.verify(name, name)
+        self.assertEqual(config.active_harness(), name)
+        self.assertFalse(any("forge_repo" in w or "workspace" in w for w in result["warnings"]))
+
+
 class TestSnapshotAndApplied(HarnessTestCase):
     def activate(self, name):
         paths.config_file().write_text('[harness]\nactive = "%s"\n' % name, encoding="utf-8")
@@ -1133,7 +1491,8 @@ class TestSnapshotAndApplied(HarnessTestCase):
         fixtures.install_harness("example-maven")
         doc = harness.load("example-maven")
         snap = harness.snapshot(doc)
-        self.assertEqual(set(snap), {"format", "name", "task", "tracker", "forge", "shapes", "tests"})
+        self.assertEqual(set(snap), {"format", "name", "task", "tracker", "forge", "os_sandbox", "shapes",
+                                    "tests"})
         self.assertEqual(snap["format"], harness.FORMAT)
         self.assertEqual(snap["name"], "example-maven")
         self.assertEqual(snap["task"], {"key_pattern": doc["task"]["key_pattern"]})
@@ -1239,6 +1598,13 @@ class TestSnapshotAndApplied(HarnessTestCase):
 
 
 class TestRenderSkill(HarnessTestCase):
+    def setUp(self):
+        super().setUp()
+        # a GitHub harness renders on the pinned binaries, none looked up on PATH here
+        patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: PINS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def render(self, name, installed=None):
         fixtures.install_harness(name, as_name=installed)
         return harness.render_skill(harness.load(installed or name))
@@ -1326,11 +1692,27 @@ class TestRenderSkill(HarnessTestCase):
         for relative in forge_files:
             self.assertNotIn("merge request", generic[relative].lower(), relative)
 
+    def test_no_rendered_file_mentions_tmp_ppl_dash(self):
+        from ppl import routing
+        fixtures.install_routing()
+        for name in ("example-maven", "example-generic"):
+            fixtures.install_harness(name)
+            doc = harness.load(name)
+            rendered = dict(harness.render_skill(doc))
+            for role in routing.REQUIRED_ROLES:
+                rendered["agent/%s" % role] = routing.render(role, doc)
+            for relative, text in rendered.items():
+                self.assertNotIn("/tmp/ppl-", text, "%s %s" % (name, relative))
+                self.assertNotIn("<scratch>", text, "%s %s" % (name, relative))
+        self.assertIn("%s/<TASK-ID>/build.log" % os_sandbox.scratch_root(),
+                      rendered["agent/ppl-code-worker"])
+
     def test_gate_recipes_render_with_rc_files_and_evidence_lines(self):
         fixtures.install_harness("example-maven")
         gates = harness.render_skill(harness.load("example-maven"))["references/gates.md"]
+        scratch = "%s/<TASK-ID>" % os_sandbox.scratch_root()
         self.assertIn("mvn install -pl :<module> -am -DskipTests -Dmaven.gitcommitid.skip=true "
-                      "> /tmp/ppl-<TASK-ID>/install.log 2>&1; echo $? > /tmp/ppl-<TASK-ID>/install.rc", gates)
+                      "> %(d)s/install.log 2>&1; echo $? > %(d)s/install.rc" % {"d": scratch}, gates)
         self.assertIn("ppl evidence add --check install --result <pass|fail from install.rc>", gates)
         self.assertIn("ppl evidence add --check focused-tests", gates)
         self.assertIn("ppl evidence add --check secret-scan", gates)
@@ -1396,10 +1778,26 @@ class TestRenderSkill(HarnessTestCase):
         self.assertIn("(no knowledge skills are configured for this harness)",
                       maven["references/stage-2-briefing.md"])
         generic = self.render("example-generic")
-        self.assertIn("git fetch origin main\n", generic["references/stage-1-baseline.md"])
+        # a GitHub harness fetches outside the OS sandbox, on the pinned git
+        self.assertIn("\n/usr/bin/git -c core.hooksPath=/dev/null -c core.sshCommand=ssh "
+                      "-c credential.helper= -c core.askPass= -c protocol.ext.allow=never "
+                      "-c protocol.file.allow=never -c protocol.allow=never "
+                      "-c protocol.ssh.allow=always -c protocol.git.allow=never "
+                      "-c push.gpgSign=false -c gpg.program= -c core.alternateRefsCommand= "
+                      "-c core.fsmonitor=false -c gc.auto=0 -c maintenance.auto=false -C %s fetch "
+                      "--no-recurse-submodules origin main\n"
+                      % os.path.realpath("/home/dev/src/project"),
+                      generic["references/stage-1-baseline.md"])
         self.assertIn("diff origin/main...HEAD", generic["references/gates.md"])
-        self.assertIn("make test TEST=<test_class> > /tmp/ppl-<TASK-ID>/focused-tests.log 2>&1",
+        # the session stays in the workspace, so each gate changes into the worktree itself
+        self.assertIn("(cd <worktree> && make test TEST=<test_class>) > "
+                      "%s/<TASK-ID>/focused-tests.log 2>&1" % os_sandbox.scratch_root(),
                       generic["references/gates.md"])
+        self.assertIn("changes into it in a subshell",
+                      generic["references/stage-1-baseline.md"])
+        self.assertNotIn("This is where every gate", generic["references/stage-1-baseline.md"])
+        self.assertNotIn("(cd <worktree>", maven["references/gates.md"])
+        self.assertIn("This is where every gate", maven["references/stage-1-baseline.md"])
 
     def test_the_harness_name_in_the_skill_is_the_installed_directory(self):
         # The document inside "mine" still says name = "example-maven", and
@@ -1420,11 +1818,12 @@ class TestRenderSkill(HarnessTestCase):
         text = harness.render_skill(harness.load("example-maven"))["references/stage-2-briefing.md"]
         self.assertIn("(`kb-core`, `kb-build`)", text)
 
-    def test_every_include_value_is_used_by_a_skeleton_or_a_forge_fragment(self):
+    def test_every_include_value_is_used_by_a_skeleton_or_a_fragment(self):
         fixtures.install_harness("example-maven")
         offered = set(harness._values(harness.load("example-maven")))
         sources = list((fixtures.SOURCE / "skill").rglob("*.skeleton"))
         sources += list((fixtures.SOURCE.parent / "forges" / "fragments").rglob("*.md"))
+        sources += list((fixtures.SOURCE.parent / "trackers" / "fragments").rglob("*.md"))
         used = set()
         for path in sources:
             used.update(harness._INCLUDE_RE.findall(path.read_text(encoding="utf-8")))
@@ -1501,6 +1900,101 @@ class TestRenderSkill(HarnessTestCase):
             harness.apply("example-maven", agents_dir=tmphome.mkdtemp(prefix="pplagents-"),
                           skills_dir=tmphome.mkdtemp(prefix="pplskills-"))
             self.assertEqual(os.environ["PPL_AGENTS_DIR"], "/nonexistent/keep")
+
+
+class TestRenderOsSandbox(HarnessTestCase):
+    """A GitHub harness's skill names the pinned binaries and asks for the flag that runs
+    them outside the OS sandbox, and a harness without the profile keeps today's commands."""
+
+    def render(self, name, **tables):
+        if tables:
+            fixtures.install_variant(name, name, **tables)
+        else:
+            fixtures.install_harness(name)
+        with mock.patch.object(os_sandbox, "pins", lambda which=None: PINS):
+            return harness.render_skill(harness.load(name))
+
+    def test_a_github_harness_renders_pinned_flagged_commands(self):
+        rendered = self.render("example-generic", **fixtures.GITHUB_ISSUES)
+        stage6 = rendered["references/stage-6-mr.md"]
+        self.assertIn("`/opt/x/gh pr create -R o/r --head <branch> --base main ", stage6)
+        self.assertIn("dangerouslyDisableSandbox", stage6)
+        self.assertIn("/opt/y/bin/ppl tracker fetch --task <TASK-ID>",
+                      rendered["references/stage-0-admission.md"])
+        self.assertIn("/opt/x/gh issue comment <number> -R o/r --body-file",
+                      rendered["references/stage-8-after-merge.md"])
+        self.assertIn("/opt/x/gh pr close <number> -R o/r", rendered["SKILL.md"])
+        # the checkout as the facts hold it, which ppl's allow entry for the fetch spells, and no
+        # cd into it: the session stays in the workspace its gh and ppl calls run from
+        checkout = os.path.realpath("/home/dev/src/project")
+        self.assertIn("```bash\n/usr/bin/git -c core.hooksPath=/dev/null "
+                      "-c core.sshCommand=ssh -c credential.helper= -c core.askPass= "
+                      "-c protocol.ext.allow=never -c protocol.file.allow=never "
+                      "-c protocol.allow=never -c protocol.ssh.allow=always "
+                      "-c protocol.git.allow=never -c push.gpgSign=false -c gpg.program= "
+                      "-c core.alternateRefsCommand= -c core.fsmonitor=false -c gc.auto=0 "
+                      "-c maintenance.auto=false -C %s fetch "
+                      "--no-recurse-submodules origin main\ngit -C %s worktree add "
+                      % (checkout, checkout),
+                      rendered["references/stage-1-baseline.md"])
+        self.assertIn("watching the PR. Read its state with `/opt/x/gh pr view <number> -R o/r "
+                      "--json=state,mergeCommit`. Run each command here",
+                      rendered["references/stage-8-after-merge.md"])
+        for relative in ("references/stage-0-admission.md", "references/stage-6-mr.md",
+                         "references/stage-7-review.md", "references/review-loop.md",
+                         "references/stage-8-after-merge.md"):
+            text = rendered[relative]
+            bare = [line for line in text.splitlines()
+                    if re.match(r"\s*(?:[0-9]+\.\s+|-\s+)?`?gh ", line)]
+            self.assertEqual(bare, [], relative)
+        # the forge fragments name no gh command but a pinned one, stage 8's `gh issue` is prose
+        for relative in ("references/stage-6-mr.md", "references/stage-7-review.md",
+                         "references/review-loop.md"):
+            self.assertNotIn("`gh ", rendered[relative], relative)
+
+    def test_a_gitlab_harness_renders_todays_commands(self):
+        rendered = self.render("example-maven")
+        self.assertIn("```bash\ncd /home/dev/src/project\ngit fetch origin master\n"
+                      "git worktree add ", rendered["references/stage-1-baseline.md"])
+        self.assertIn("close the merge request,\ndelete the remote branch, then run "
+                      "`ppl destroy --scope local`. That is the only outward", rendered["SKILL.md"])
+        self.assertIn("keep\nwatching the MR. Once the merge is actually observed",
+                      rendered["references/stage-8-after-merge.md"])
+        self.assertIn("now on.\n\nThen record the baseline.",
+                      rendered["references/stage-1-baseline.md"])
+        for relative, text in rendered.items():
+            self.assertNotIn("dangerouslyDisableSandbox", text, relative)
+            self.assertNotIn("/opt/x/gh", text, relative)
+            self.assertNotIn("core.hooksPath", text, relative)
+
+    def test_a_gitlab_harness_with_the_profile_leaves_the_session_where_it_is(self):
+        path = fixtures.install_harness("example-maven") / "harness.toml"
+        path.write_text(path.read_text(encoding="utf-8") + "\n[os_sandbox]\nenabled = true\n",
+                        encoding="utf-8")
+        with mock.patch.object(os_sandbox, "pins", lambda which=None: PINS):
+            rendered = harness.render_skill(harness.load("example-maven"))
+        stage1 = rendered["references/stage-1-baseline.md"]
+        checkout = os.path.realpath("/home/dev/src/project")
+        # git reaches GitLab from inside the sandbox, so nothing here is flagged
+        self.assertIn("```bash\ngit -C %s fetch origin master\ngit -C %s worktree add "
+                      % (checkout, checkout), stage1)
+        self.assertNotIn("\ncd ", stage1)
+        for relative, text in rendered.items():
+            self.assertNotIn("dangerouslyDisableSandbox", text, relative)
+
+    def test_a_check_renders_a_github_harness_without_its_binaries_on_path(self):
+        # apply looks the pins up again and refuses a missing one, a check only measures
+        fixtures.install_harness("example-generic")
+        missing = PplError("SETUP_INCOMPLETE", "no gh is on PATH")
+        with mock.patch.object(os_sandbox, "pins", side_effect=missing):
+            result = harness.verify("example-generic", "example-generic")
+        self.assertEqual(result["errors"], [])
+
+    def test_render_takes_the_pins_apply_found(self):
+        fixtures.install_variant("example-generic", "example-generic", **fixtures.GITHUB_ISSUES)
+        with mock.patch.object(os_sandbox, "pins", side_effect=AssertionError("looked up")):
+            rendered = harness.render_skill(harness.load("example-generic"), pins=PINS)
+        self.assertIn("`/opt/x/gh pr create -R o/r ", rendered["references/stage-6-mr.md"])
 
 
 if __name__ == "__main__":

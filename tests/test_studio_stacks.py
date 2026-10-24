@@ -107,6 +107,43 @@ class TestTestSources(unittest.TestCase):
             self.assertIn("tests.sources", str(caught.exception), stack)
 
 
+class TestOsSandboxPresets(unittest.TestCase):
+    def draft(self, stack):
+        return stacks.draft(stack, project(empty_dir("pplrepo-")))
+
+    def test_python_stack_draft_carries_pypi_hosts(self):
+        table = self.draft("python")["doc"]["os_sandbox"]
+        self.assertEqual(table["allowed_domains"], ["pypi.org", "files.pythonhosted.org"])
+        self.assertIn("~/.cache/pip", table["allow_write"])
+
+    def test_node_stack_draft_carries_the_npm_registry(self):
+        table = self.draft("node")["doc"]["os_sandbox"]
+        self.assertEqual(table["allowed_domains"], ["registry.npmjs.org"])
+        self.assertIn("~/.npm", table["allow_write"])
+
+    def test_go_and_java_stacks_carry_their_hosts_and_caches(self):
+        cases = {"go": (["proxy.golang.org", "sum.golang.org"], "~/go/pkg/mod"),
+                 "maven": (["repo.maven.apache.org", "repo1.maven.org"], "~/.m2"),
+                 "gradle": (["repo.maven.apache.org", "repo1.maven.org", "plugins.gradle.org"],
+                            "~/.gradle")}
+        for stack, (hosts, cache) in cases.items():
+            table = self.draft(stack)["doc"]["os_sandbox"]
+            self.assertEqual(table["allowed_domains"], hosts, stack)
+            self.assertIn(cache, table["allow_write"], stack)
+
+    def test_a_stack_without_hosts_writes_no_table_and_every_draft_validates(self):
+        for stack in ("rust", "make", "generic"):
+            self.assertNotIn("os_sandbox", self.draft(stack)["doc"], stack)
+        for stack in stacks.STACKS:
+            if stack not in ("make", "generic"):
+                doc = install_draft(self.draft(stack))
+                self.assertEqual(harness.validate(doc, "demo"), [], stack)
+
+
+PINS = {name: {"path": "/opt/pin/bin/" + name, "realpath": "/opt/pin/bin/" + name}
+        for name in ("gh", "git", "ppl")}
+
+
 def install_draft_validated(draft):
     return harness.validate(install_draft(draft), "demo")
 
@@ -119,7 +156,8 @@ class TestDrafts(unittest.TestCase):
             doc = install_draft(stacks.draft(stack, project(empty_dir("pplrepo-"))))
             warnings = harness.validate(doc, "demo")
             self.assertEqual(warnings, [], stack)
-            rendered = harness.render_skill(doc)
+            # a GitHub draft renders on pinned binaries, none looked up on PATH here
+            rendered = harness.render_skill(doc, pins=PINS)
             self.assertFalse(any("<!-- include:" in text for text in rendered.values()), stack)
 
     def test_every_stack_focused_test_command_is_allowed_for_the_test_worker(self):

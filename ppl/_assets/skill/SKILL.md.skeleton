@@ -144,7 +144,7 @@ own session it does so under the same isolated-scoping rule as the tracker gate
 is not registered, `ppl`'s own checks above are what a pause has - it still blocks the next
 `ppl` call, just not the tool call the operator actually wanted stopped. If a run carries
 `remote_cleanup.json`, the operator asked for a full destroy: close the <!-- include: vocab/noun -->,
-delete the remote branch, then run `ppl destroy --scope local`. That is the only outward
+delete the remote branch, then run `ppl destroy --scope local`.<!-- include: os/destroy --> That is the only outward
 mutation the panel can ask you for, and it only ever happens after the operator typed the
 task id to confirm it.
 

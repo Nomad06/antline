@@ -28,7 +28,7 @@ from .errors import PplError
 # `<check>` a check name, `<n>` a history number and `<id>` a finding id.
 ALLOWLIST = (
     "state.json", "log.jsonl", "brief.json", "challenge.json", "boundary.json",
-    "baseline.json", "harness.json", "threads.json", "parking.json",
+    "baseline.json", "harness.json", "threads.json", "review-threads.json", "parking.json",
     "tracker/issue.json", "tracker/issue.md",
     "evidence/<sha>/<check>.json",
     "verdicts/<sha>.json", "verdicts/<sha>/<n>.json",

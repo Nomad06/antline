@@ -39,10 +39,14 @@ if not _PPL_FILE or not Path(_PPL_FILE).resolve().is_relative_to(_PACKAGE_PARENT
     sys.stderr.write("ppl_guard: imported ppl from %s, not the one beside this hook in %s\n"
                      % (_PPL_FILE, _PACKAGE_PARENT))
 
-from ppl import boundary, control, gitfacts, paths, run, store, trackers
+from ppl import boundary, control, escape, gitfacts, paths, run, store, trackers
 from ppl import forges as _forges
 from ppl.errors import PplError
 from ppl.trackers import jira as _jira
+
+# Every run file the hook reads is read through this cap, so one a role made huge is refused
+# unread instead of holding the hook past its timeout [R-OS-SANDBOX-FAIL-CLOSED].
+_READ_LIMIT = store.HOOK_READ_LIMIT
 
 # The Atlassian remote MCP server is registered under different names on different
 # machines: `mcp__atlassian__` where it was added by hand, `mcp__claude_ai_Atlassian_Rovo__`
@@ -146,9 +150,15 @@ def any_tracker_write_tool(tool, task_id):
     # every tracker write tool is mcp__-shaped, so other tools skip the snapshot read
     if not isinstance(tool, str) or not tool.startswith("mcp__"):
         return False
-    if any(pattern.match(tool) for _, pattern in _DEFAULT_MCP_WRITES):
+    if default_tracker_write_tool(tool):
         return True
     return tracker_mcp_write(tool, tracker_from_snapshot(task_id))
+
+
+def default_tracker_write_tool(tool):
+    """True for a tracker MCP write tool under an adapter's defaults, read from no file."""
+    return (isinstance(tool, str)
+            and any(pattern.match(tool) for _, pattern in _DEFAULT_MCP_WRITES))
 
 
 # What a role is told for a tracker write through either transport.
@@ -224,6 +234,10 @@ READ_TOOLS = ("Read", "Grep", "Glob")
 # subagent exists, and a deny stops the spawn (R-TEST-WORKER-DISPATCH-LEAK).
 AGENT_TOOLS = ("Agent", "Task")
 
+# The tool that fetches a URL. It runs outside the OS sandbox, so a role's fetch of
+# GitHub is denied here [R-WEBFETCH-GITHUB-NO-ROLE].
+FETCH_TOOLS = ("WebFetch",)
+
 # Every tool name this cage acts on. `ppl doctor` judges the registered PreToolUse
 # matcher against this list: a name the matcher never passes to the hook is a denial
 # that cannot fire, however correct the code behind it reads [R-GUARD-MATCHER]. The
@@ -241,6 +255,7 @@ GUARDED_TOOL_NAMES = (
             for operation in JIRA_WRITE_OPERATIONS)
     + READ_TOOLS
     + AGENT_TOOLS
+    + FETCH_TOOLS
 )
 
 # Global git flags (-C <dir>, --git-dir=<x>, -c k=v, ...) sit between "git" and the
@@ -834,7 +849,7 @@ def load_snapshot(task_id):
     if not task_id:
         return None
     try:
-        doc = store.read_json(paths.run_dir(task_id) / "harness.json", None)
+        doc = store.read_json(paths.run_dir(task_id) / "harness.json", None, _READ_LIMIT)
     except Exception:
         return None
     return doc if isinstance(doc, dict) else None
@@ -857,7 +872,7 @@ def test_patterns(task_id):
     [R-TEST-PATTERNS-FROM-SNAPSHOT]. Unlike load_snapshot it tells a missing
     file from an unreadable one."""
     try:
-        return boundary.run_test_patterns(task_id)
+        return boundary.run_test_patterns(task_id, _READ_LIMIT)
     except Exception:
         return None
 
@@ -872,7 +887,7 @@ def _active_task_id():
     """run.active(), or None when the ACTIVE file cannot be read at all, so the
     forge denials fall back to the union instead of raising into main()."""
     try:
-        return run.active()
+        return run.active(_READ_LIMIT)
     except Exception:
         return None
 
@@ -889,6 +904,37 @@ def forge_from_snapshot(task_id):
         return _forges.get(settings["kind"]), settings
     except Exception:
         return None, None
+
+
+def github_mcp_prefixes(task_id):
+    """The mcp__<server>__ prefix of the GitHub MCP server the run's harness snapshot names
+    in forge.mcp_server, as a list, empty when the snapshot names none or is not there.
+    Never raises [R-FORGE-GH-MCP-NO-ROLE]."""
+    return escape.forge_github_prefixes(forge_from_snapshot(task_id)[1])
+
+
+def protected_edit_denial(payload):
+    """(code, reason) when an edit tool call may not write its target, else None: while the
+    guard facts exist it writes only inside the OS sandbox's write scope and Claude Code's
+    projects and plans directories, and never a protected path [R-OS-SANDBOX-PROTECTED-PATHS].
+    Facts that cannot be read put every session in scope with no write scope to check, so
+    every edit is refused until `ppl harness apply` repairs them. No run file is read: the
+    check holds only while the facts exist, which an active run does not change."""
+    home = paths.home()
+    try:
+        facts = escape.load_facts(home)
+    except ValueError as err:
+        return ("OWNER_DECISION",
+                "the guard's OS sandbox facts are unusable (%s), so an edit tool's target cannot "
+                "be checked against the write scope: %s" % (err, escape.APPLY))
+    reason = escape.edit_denial(payload, home, facts)
+    return ("BOUNDARY_VIOLATION", reason) if reason else None
+
+
+def _github_mcp_denial(agent, tool):
+    return deny("BOUNDARY_VIOLATION",
+                "%s may not call %s: no role reaches a GitHub MCP server, which runs outside "
+                "the OS sandbox" % (agent, tool))
 
 
 def denied_tools(task_id):
@@ -2025,7 +2071,7 @@ def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state, p
     bound = None
     if is_role:
         bound = store.read_json(paths.run_dir(task_id) / "boundary.json",
-                                {"write": [], "forbid": []})
+                                {"write": [], "forbid": []}, _READ_LIMIT)
     for raw, seg_cwd, _removal in targets:
         if agent == "ppl-test-worker" and raw and _has_dotdot(raw):
             return deny("BOUNDARY_VIOLATION", _dotdot_reason("Bash write", raw))
@@ -2104,11 +2150,11 @@ def active_state():
     raises OSError; neither is a PplError. This hook must never raise regardless of
     which of those it hits.
     """
-    task_id = run.active()
+    task_id = run.active(_READ_LIMIT)
     if not task_id:
         return None, None
     try:
-        state = run.load(task_id)
+        state = run.load(task_id, _READ_LIMIT)
     except (PplError, OSError, ValueError):
         return task_id, None
     if not isinstance(state, dict):
@@ -2224,7 +2270,7 @@ def dispatch_leak_deny(prompt, task_id, state, patterns):
         return deny("BOUNDARY_VIOLATION",
                     "ppl-test-worker dispatch could not be checked for implementation "
                     "content: %s" % err.message)
-    brief = store.read_json(paths.run_dir(task_id) / "brief.json", {})
+    brief = store.read_json(paths.run_dir(task_id) / "brief.json", {}, _READ_LIMIT)
     agreed = {_leak_key(line) for text in _strings(brief) for line in text.splitlines()}
     in_prompt = {_leak_key(line) for line in lines}
     hits = {}
@@ -2253,6 +2299,41 @@ def _decide(payload):
     if not isinstance(tool_input, dict):
         tool_input = {}
     agent = payload.get("agent_type")
+    # R-OS-SANDBOX-ROLE-NO-ESCAPE, R-OS-SANDBOX-ORCHESTRATOR-SHAPE: a call that asks to run
+    # outside the OS sandbox is decided first, before any file read, so a ppl-* role is
+    # refused from the call alone. One the escape check lets through still meets every
+    # check below, the tracker gate and the forge denials included.
+    if escape.flagged(payload):
+        refusal = escape.decide(payload, paths.home(), active_state)
+        if refusal:
+            return deny(*refusal)
+
+    # R-FORGE-GH-MCP-NO-ROLE, R-WEBFETCH-GITHUB-NO-ROLE: an MCP server and WebFetch run
+    # outside the OS sandbox, so no role reaches GitHub through either, run or no run. The
+    # orchestrator's GitHub MCP reads stay open. Decided before any run file is read, so a run
+    # file a role made unreadable or huge cannot hold these back. The server name the run's
+    # snapshot gives is matched further down.
+    if escape.is_role(agent):
+        # a tracker write keeps the tracker's reason (R-JIRA-NO-ROLE-TOOL below)
+        if agent in boundary.ROLE_RULES and default_tracker_write_tool(tool):
+            return deny("BOUNDARY_VIOLATION", _ROLE_TRACKER_WRITE % agent)
+        if (isinstance(tool, str) and tool.startswith("mcp__")
+                and escape.github_mcp_tool(tool, ())):
+            return _github_mcp_denial(agent, tool)
+        if tool in FETCH_TOOLS and escape.webfetch_github(tool_input):
+            return deny("BOUNDARY_VIOLATION",
+                        "%s may not WebFetch %s: no role reaches GitHub, and WebFetch runs "
+                        "outside the OS sandbox" % (agent, str(tool_input.get("url"))[:200]))
+
+    # R-OS-SANDBOX-PROTECTED-PATHS: an edit tool runs outside the OS sandbox too, so while the
+    # guard facts exist it writes only where sandboxed Bash may, and never what an unsandboxed
+    # gh, git or ppl reads, for roles and the orchestrator alike, before any run file is read.
+    # Every path key of the call is checked, not only the one target_path takes.
+    if tool in WRITE_TOOLS:
+        refusal = protected_edit_denial(payload)
+        if refusal:
+            return deny(*refusal)
+
     active = _active_task_id()
 
     denied = denied_tools(active)
@@ -2264,6 +2345,11 @@ def _decide(payload):
     if (isinstance(agent, str) and agent in boundary.ROLE_RULES
             and any_tracker_write_tool(tool, active)):
         return deny("BOUNDARY_VIOLATION", _ROLE_TRACKER_WRITE % agent)
+
+    # R-FORGE-GH-MCP-NO-ROLE under the GitHub MCP server name the run's snapshot gives.
+    if (escape.is_role(agent) and isinstance(tool, str) and tool.startswith("mcp__")
+            and escape.github_mcp_tool(tool, github_mcp_prefixes(active))):
+        return _github_mcp_denial(agent, tool)
 
     runs_root = str(paths.runs_dir())
 
@@ -2400,7 +2486,7 @@ def _decide(payload):
         if denial:
             return denial
 
-    record = control.read(task_id)
+    record = control.read(task_id, _READ_LIMIT)
     if record and record.get("invalid"):
         # control.read's own invalid marker carries command=None, so testing only
         # `record["command"] in HALTING` would miss it and permit every tool call
@@ -2478,7 +2564,7 @@ def _decide(payload):
             return unknown_patterns_deny(task_id)
         try:
             bound = store.read_json(paths.run_dir(task_id) / "boundary.json",
-                                    {"write": [], "forbid": []})
+                                    {"write": [], "forbid": []}, _READ_LIMIT)
             boundary.check_path(agent, relative_to_repo(path, state), bound, patterns)
         except PplError as err:
             return deny(err.code, err.message)
@@ -2518,12 +2604,14 @@ def log_denial(payload, result):
         if _is_doctor_probe(payload):
             return
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        task_id = run.active()
+        task_id = run.active(_READ_LIMIT)
         if not task_id:
             return
         log = paths.run_dir(task_id) / "log.jsonl"
         if os.path.lexists(log) and not os.path.isfile(log):
             return
+        # runs/ is sandbox-writable: no append through a run directory a role made a link
+        store.checked_run_path(log)
         tool_input = payload.get("tool_input")
         if not isinstance(tool_input, dict):
             tool_input = {}
@@ -2556,15 +2644,22 @@ def main():
     except Exception as err:
         # Claude Code reads exit 0 with no output as allow. A ppl-* role is
         # refused instead, an unroled session keeps the allow so a hook defect
-        # cannot lock the operator out of unrelated sessions
-        # [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. The deny goes out before the
+        # cannot lock the operator out of unrelated sessions, unless the call
+        # asks to leave the OS sandbox [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. The deny goes out before the
         # diagnostic, and a broken stderr is swallowed, since a nonzero exit
         # would not block the call either.
         agent = payload.get("agent_type") if isinstance(payload, dict) else None
-        if isinstance(agent, str) and agent in boundary.ROLE_RULES:
+        # A call that asks to leave the OS sandbox is refused whatever its agent
+        # [R-OS-SANDBOX-FAIL-CLOSED]. A check that fails reads as flagged.
+        try:
+            unsandboxed = escape.flagged(payload)
+        except Exception:
+            unsandboxed = True
+        if unsandboxed or (isinstance(agent, str) and agent in boundary.ROLE_RULES):
             refusal = deny(
                 "BOUNDARY_VIOLATION",
-                "guard internal error, role call refused: %s" % type(err).__name__)
+                "guard internal error, %s call refused: %s"
+                % ("unsandboxed" if unsandboxed else "role", type(err).__name__))
             sys.stdout.write(json.dumps(refusal))
             sys.stdout.flush()
             log_denial(payload, refusal)

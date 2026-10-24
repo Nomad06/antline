@@ -1,6 +1,6 @@
 import math
 
-from . import control, paths, run, usage
+from . import control, os_sandbox, paths, run, usage
 from .errors import PplError
 
 TEMPLATE = """Task:     {task_id}  {tracker_url}
@@ -10,12 +10,18 @@ Progress: {proven}/{total} acceptance criteria proven
 Proof:    {last_fact}
 Risk:     {risk}
 Models:   {models}
-Tokens:   {tokens}
+{os_sandbox}Tokens:   {tokens}
 Budget:   dispatch {d_used}/{d_hard}, retry {r_used}/{r_max}, {usd}
 MR:       {mr}
 Needs you: {needs}
 Next:     {next_action}
 """
+
+
+def _os_sandbox_line(task_id, state):
+    if not os_sandbox.run_needs(task_id):
+        return ""
+    return "OS sandbox: %s\n" % ("on" if state.get("os_sandboxed") else "off")
 
 
 def _short(count):
@@ -137,6 +143,7 @@ def card(task_id):
         last_fact=state.get("last_durable_fact") or "none",
         risk=state.get("risk", "normal"),
         models=state.get("model_check", "verified"),
+        os_sandbox=_os_sandbox_line(task_id, state),
         d_used=budgets["dispatch_used"], d_hard=budgets["dispatch_hard"],
         r_used=budgets["retry_used"], r_max=budgets["retry_max"],
         usd=usd_text(task_id), tokens=tokens_line(task_id),

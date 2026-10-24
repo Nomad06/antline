@@ -220,17 +220,18 @@ denial the hook never sees, and a denial the hook never sees cannot fire, howeve
 code behind it reads [R-GUARD-MATCHER]. So `ppl doctor` judges whatever matcher is registered:
 every tool name the cage acts on (`ppl/_assets/hooks/ppl_guard.py:GUARDED_TOOL_NAMES` - the four editing
 tools, the three read tools, Bash, the forge adapters' denied tools, the tracker write tools
-under every default prefix) must be a full regex match of some registered guard entry's
-matcher, the names left uncovered are reported per settings file as `uncovered` under a
-top-level `matcher` verdict of `ok` or `incomplete`, and `ppl init` refuses `SCHEMA_INVALID` to
-create a run while a confirmed registration leaves any of them uncovered, `--no-isolated` or
-not [R-GUARD-MATCHER]. That list holds the default tracker prefixes and the default forge server names only, so an
-operator who keeps an explicit matcher and names a custom tracker prefix or `forge.mcp_server`
-in the harness covers those names by hand. The GitHub MCP server's issue writes are not on it:
-the tracker gate and the role ban match them under any server name, and many installs have
-no GitHub MCP server, so `ppl doctor` and `ppl init` only warn, and refuse nothing, when a
-registration's matchers cannot pass `mcp__github__add_issue_comment` (`matcher_warning`)
-[R-GUARD-MATCHER]. The `.*` that `ppl setup` registers passes every one of them.
+under every default prefix, the agent tools and WebFetch) must be a full regex match of some
+registered guard entry's matcher, the names left uncovered are reported per settings file as
+`uncovered` under a top-level `matcher` verdict of `ok` or `incomplete`, and `ppl init` refuses
+`SCHEMA_INVALID` to create a run while a confirmed registration leaves any of them uncovered,
+`--no-isolated` or not [R-GUARD-MATCHER]. That list holds the default tracker prefixes and the
+default forge server names only, so an operator who keeps an explicit matcher and names a
+custom tracker prefix or `forge.mcp_server` in the harness covers those names by hand. The
+GitHub MCP server's issue writes are not on it: the tracker gate and the role ban match them
+under any server name, and many installs have no GitHub MCP server, so `ppl doctor` and
+`ppl init` only warn, and refuse nothing, when a registration's matchers cannot pass
+`mcp__github__add_issue_comment` (`matcher_warning`) [R-GUARD-MATCHER]. The `.*` that
+`ppl setup` registers passes every one of them.
 
 The tracker gate reads its MCP prefixes and write operations from the run's harness snapshot
 (5.6). The defaults are the Atlassian server's two registration names, `mcp__atlassian__`
@@ -262,8 +263,12 @@ hook past its own timeout lets the call through [R-TRACKER-CLI-GATE] [R-TRACKER-
 denied a tracker write through a CLI before and after the merge, run or no run, since the
 tracker is the orchestrator's [R-TRACKER-CLI-NO-ROLE], and a call to any known tracker's MCP
 write tool the same way, the defaults of every adapter and the run's own prefixes alike
-(`any_tracker_write_tool`) [R-JIRA-NO-ROLE-TOOL]. The check reads the command's words, so
-a renamed `gh` binary, an API host held in a variable, an interpreter or a script file are not
+(`any_tracker_write_tool`) [R-JIRA-NO-ROLE-TOOL]. On a run in the OS sandbox a
+role reaches GitHub through none of a renamed `gh` binary, an API host held in a variable, an
+interpreter or a script file: its Bash cannot reach github.com [R-OS-SANDBOX-NETWORK] and
+cannot leave the sandbox [R-OS-SANDBOX-ROLE-NO-ESCAPE], and what stays lexical is the
+orchestrator's own stage gate [R-TRACKER-CLI-GATE]. A run started with `--no-os-sandbox`, or on
+Windows, keeps the old residual: the check reads the command's words, so those shapes are not
 seen, and the boundary that would close them is a GitHub credential the role sessions never
 hold [R-TRACKER-CLI-GATE]. The hook reads `agent_type` from the stdin
 payload (present when the hook fires inside a subagent), loads `runs/<active>/boundary.json`,
@@ -567,6 +572,111 @@ for it without this flag. `--no-isolated` restores the plain cwd check instead, 
 operator who registered the hook more broadly (e.g. in global settings) and knows scoping by
 "run active" would reach their other projects.
 
+**The `os_sandboxed` flag.** On a harness that reaches GitHub, `ppl init` also requires
+that this session runs inside Claude Code's OS sandbox with GitHub denied
+(`doctor.os_sandbox_facts()` reports `"on"`) and that the guard is registered in the
+workspace's local settings, and refuses with `SCHEMA_INVALID` naming the first failing fact
+otherwise [R-OS-SANDBOX-INIT-REQUIRED]. `--no-os-sandbox` skips the check. The run records
+`os_sandboxed` true or false (false for a harness that does not need the profile), the card
+shows `OS sandbox: on|off` for a run whose frozen harness needs it, the panel row carries the
+field, and `ppl metrics` warns `OS_SANDBOX_OFF` for a GitHub run that started without it.
+
+**Leaving the OS sandbox.** A pipeline command reaches GitHub only outside Claude Code's OS
+sandbox, which takes `dangerouslyDisableSandbox: true` on the Bash call, so the guard decides
+who may set it (`ppl/escape.py`), first and before any other check
+[R-OS-SANDBOX-ROLE-NO-ESCAPE]. A ppl-* role is denied from the call and its `agent_type`
+alone, before any file is read, run or no run [R-OS-SANDBOX-ROLE-NO-ESCAPE]. A call of any other
+tool whose input carries the flag is decided the same way, never passed as unflagged
+[R-OS-SANDBOX-ROLE-NO-ESCAPE]. While
+`PPL_HOME/os_sandbox.json` exists or a run is active, every flagged call is the pipeline's
+whatever its `cwd`, since a `cwd` and the run's recorded repo are both in a role's reach: any
+other subagent, or a call carrying an `agent_id`, is denied, and the unroled session always
+meets the shape check [R-OS-SANDBOX-ROLE-NO-ESCAPE] [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. With
+neither, a flagged call goes on to the guard's other checks. The unroled orchestrator leaves
+the sandbox only for one plain command, with no separator, redirect, subshell, group, glob,
+expansion, comment, newline or leading assignment outside single quotes and nothing zsh reads
+otherwise than a POSIX shell, whose `argv0` is spelled exactly as a binary `ppl harness
+apply` pinned in `PPL_HOME/os_sandbox.json`, in a shape from the guard's table
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For gh that table holds `issue view` and `issue comment`,
+`pr create`, `pr view`, `pr checks` and `pr close`, `api user`, a review reply and `auth
+status`, each naming the harness's own repository, with any body file a plain file directly
+in the run's scratch directory [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For ppl it holds `tracker
+fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For git (`ppl/escape_git.py`) every shape starts with
+the fixed `-c` words of `escape_git.PINNED_CONFIG`, in this order and as its only `-c` words:
+`core.hooksPath=/dev/null`, `core.sshCommand=ssh`, an empty `credential.helper` and
+`core.askPass`, `protocol.ext.allow`, `protocol.file.allow` and `protocol.allow` `never`,
+`protocol.ssh.allow=always`, `protocol.git.allow=never`, `push.gpgSign=false`, an empty
+`gpg.program` and `core.alternateRefsCommand`, `core.fsmonitor=false`, `gc.auto=0` and
+`maintenance.auto=false`, each after its own `-c` (`<pinned -c>` below)
+[R-OS-SANDBOX-GIT-CONFIG]. It holds `<pinned -c> -C <checkout> fetch --no-recurse-submodules
+origin <default branch>`, word for word ppl's allow entry, so no submodule is fetched with its
+own config, and, in the run's repo, `<pinned -c> -C <repo> push --no-verify --no-follow-tags
+--no-recurse-submodules [-u] origin refs/heads/<branch>:refs/heads/<branch>` or the same
+three words then `origin --delete refs/heads/<branch>`, the branch being the one git reports
+HEAD on, never the default branch, and a plain name with no `/`, `:` or `+`
+[R-OS-SANDBOX-GIT-CONFIG]. The qualified refspec pins the destination ref, and the command line
+switches tags and submodules off whatever the operator's global config, which the guard cannot
+read, says [R-OS-SANDBOX-GIT-CONFIG]. The pinned `-c` words win over a local config a role
+rewrites between the guard's check and the call for every key known to run a program at
+fetch or push time, and leave ssh the one transport, so an https remote is refused under the
+profile, fetch included: give the checkout an ssh remote [R-OS-SANDBOX-GIT-CONFIG]. A
+redirect to another ssh host still sends the content there with the operator's key, as the
+rule's residual says, until fetch and push run through a gitdir ppl owns.
+Before it lets one through the guard runs the pinned git on that repository, each call held
+to 0.2 s, and denies unless its local and worktree config set only keys that run nothing,
+with no include, and give the remote one url, the forge repo on github.com
+[R-OS-SANDBOX-GIT-CONFIG]. Both gh and ppl run only from a `cwd` that is the workspace or
+lies under it, which the profile write-denies, and outside every write-scope entry, so
+neither loads a repo a role wrote: being outside the write scope alone is not enough, since a
+temp directory is sandbox-writable and in no entry [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. An
+allowed ppl command trusts no run file a role can write: `ppl tracker fetch` and `ppl review
+fetch` take their repository from `os_sandbox.json`, with no git run in the run's repo, and
+refuse a run snapshot that names another, and refuse with `EXTERNAL_BLOCKED` to write or append
+through a run directory or a log that is a link or has a second hard link
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. `ppl review fetch` also refuses with `EXTERNAL_BLOCKED` a
+pull request with more than one page (100) of review threads, whose later threads would read
+as unresolved [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A command the check
+lets through still meets the tracker gate and the forge denials below it
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-TRACKER-CLI-GATE]. Where the guard cannot decide a
+flagged call it denies it: an internal error, a non-string `agent_type`, an unreadable
+`os_sandbox.json` or run state, or a missing `os_sandbox.json` while a run is active, the
+facts cases naming `ppl harness apply`, or, for a run whose harness snapshot needs no profile,
+telling the orchestrator to run the command without the flag [R-OS-SANDBOX-FAIL-CLOSED]. Run files are opened
+without blocking and read only when regular, so a FIFO a role leaves in `runs/` is refused
+rather than holding the hook past its timeout, which would deny nothing
+[R-OS-SANDBOX-FAIL-CLOSED]. The hook and `ppl/escape.py` also read no run file or facts file
+over 1 MiB (`store.HOOK_READ_LIMIT`), so a huge sparse file a role leaves there is refused
+unread, and the role's GitHub MCP, WebFetch and edit-tool checks are decided before any run
+file is read [R-OS-SANDBOX-FAIL-CLOSED] [R-OS-SANDBOX-PROTECTED-PATHS].
+
+**The edit allowlist.** Edit tools run outside the OS sandbox, so the profile does not confine
+them. While `PPL_HOME/os_sandbox.json` exists every session the guard sees is in scope, and an
+edit tool writes only inside the facts' `write_scope` and Claude Code's own `~/.claude/projects`
+and `~/.claude/plans`, and never under a `deny_write` entry even inside an allowed root
+(`ppl/escape_paths.py`) [R-OS-SANDBOX-PROTECTED-PATHS]. A path with leading or trailing
+JavaScript whitespace or a control character is denied, and the rest is resolved right before the
+call [R-OS-SANDBOX-PROTECTED-PATHS]. While an OS sandbox profile is applied no guarded session
+can therefore edit ppl's own source, `~/.claude` outside projects and plans, or a file outside the
+write scope with an edit tool [R-OS-SANDBOX-PROTECTED-PATHS]. The profile write-denies the same
+protected paths to sandboxed Bash, so the deny wins over a write grant from any settings source,
+though how Seatbelt holds an entry that names a file is unverified until the live rehearsal,
+and `ppl harness validate` refuses an `[os_sandbox] allow_write` entry that is or holds the
+home directory or a protected path [R-OS-SANDBOX-PROTECTED-PATHS]. `ppl doctor` lists another
+settings file's write grant over a protected path, and any unix socket allowance, under
+`os_sandbox.undoing`. It also lists, as `foreign_bash_hooks`, every other `PreToolUse` hook
+whose matcher may pass Bash (a missing, empty or `*` matcher, one a search finds in `Bash`, and
+one that does not compile), from the user, project, local and managed settings and each
+enabled plugin's `hooks/hooks.json`, by the command's first word or script name, or the
+interpreter alone for inline code, never its arguments: one that rewrites a
+call with `updatedInput` may keep or drop `dangerouslyDisableSandbox`, which is unverified, so
+`ppl init` warns on a GitHub run that they should be removed or disabled for pipeline sessions
+[R-OS-SANDBOX-INIT-REQUIRED]. Without the facts the allowlist stands aside and the older path
+rules apply. An MCP server runs outside the OS sandbox and is not
+checked here, so the pipeline workspace should register no file-writing one
+[R-OS-SANDBOX-PROTECTED-PATHS]. A role's call to a GitHub MCP tool is denied
+[R-FORGE-GH-MCP-NO-ROLE], and so is its WebFetch of a github.com URL [R-WEBFETCH-GITHUB-NO-ROLE].
+
 **Checked, not just trusted.** `ppl` cannot see how the guard hook is registered
 from inside `decide()` - that lives in a `.claude/settings*.json` file, not in run state -
 but it can be checked separately, on disk, before a run even starts
@@ -718,7 +828,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 179 rows: 133 `blocking`, 19 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 188 rows: 141 `blocking`, 20 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -878,7 +988,9 @@ is denied [R-REVIEW-RESPONDER-BASH-SHAPES].
 The hook's own failure modes are decided the same way. When `decide()` raises, the call is
 denied for any role in `boundary.ROLE_RULES` (all six generated roles) and allowed for an
 unroled session, so a hook defect cannot lock
-the operator out of unrelated work [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A role's Bash command
+the operator out of unrelated work [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A call that asks to
+run outside the OS sandbox is the exception: it is denied whoever makes it
+[R-OS-SANDBOX-FAIL-CLOSED]. A role's Bash command
 longer than 4096 characters is denied before any pattern runs, so a padded command cannot
 outlast the hook's timeout [R-GUARD-ROLE-COMMAND-LENGTH]. While a run is active, every deny the guard returns is
 also appended to the run's `log.jsonl` as a `deny` event with the role, the tool, the code and
@@ -905,6 +1017,31 @@ registered but the dispatch hook is missing or malformed, since the dispatch cap
 only the spends recorded by hand, or the usage hook is, since no tokens are then recorded, and
 when a registered hook script is not under this install's `paths.root()/hooks` (a clone or an
 older install left behind keeps running its own copy) [R-DOCTOR-HOOK-SHAPE].
+
+For a GitHub forge or tracker, `ppl harness apply` also writes the OS sandbox profile into
+`<workspace>/.claude/settings.local.json`, whatever the hooks mode: a `sandbox` block that denies
+github.com and every subdomain to each sandboxed Bash command, the write scope, a denyWrite of
+the workspace, the pins' directories and every path the edit allowlist protects, a denyRead of
+gh's config, git's credential store, `.netrc` and `~/.ssh` (`[os_sandbox] allow_ssh_read = true`
+keeps `~/.ssh` readable for a build that needs ssh), and the `permissions.allow` entries for
+nine read-only commands on the pinned `gh`, `git` and `ppl` paths [R-OS-SANDBOX-NETWORK]. A
+`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN` in the session's
+environment, or any variable whose value starts like a GitHub token (`ghp_`, `gho_`, `ghu_`,
+`ghs_`, `ghr_`, `github_pat_`), reaches every sandboxed command, so `ppl doctor` and `ppl init`
+name the variable, not its value. Content a role
+writes, commits and scratch bodies, is published by the orchestrator unread, and the macOS
+keychain stays readable from the sandbox unless the live rehearsal shows otherwise
+[R-OS-SANDBOX-NETWORK]. It records the block and the entries it wrote, with the guard's facts
+(workspace, checkout, default branch, repositories, scratch root, pins, `write_scope`, the
+profile's `deny_write`), in `PPL_HOME/os_sandbox.json`.
+Once a profile exists, `ppl harness apply` and `ppl setup claude` run from a terminal, not from a
+pipeline session: the profile write-denies the workspace, ppl's config and harnesses, which they
+write [R-OS-SANDBOX-PROTECTED-PATHS]. Under the profile the rendered skill keeps the orchestrator's session in the workspace its gh
+and ppl calls run from: stage 1 runs git with `-C`, and each gate recipe changes into the
+worktree in a subshell, `(cd <worktree> && <gate>)`.
+A `sandbox` key in the settings file is ppl's only when it equals the recorded block. Any other one,
+and invalid JSON, is a `SETUP_INCOMPLETE` that leaves the file as it was [R-OS-SANDBOX-NETWORK]. A harness that no
+longer needs the profile has the block, the entries and the facts file removed on the next apply.
 
 ## 6. State machine
 
@@ -2546,8 +2683,14 @@ The build is finished when all of these are demonstrably true:
   the diff, the hook denies a dispatch prompt carrying it verbatim
   [R-TEST-WORKER-DISPATCH-LEAK], and a paraphrase still passes [R-TEST-WORKER-NO-DIFF n/a])
   and deterministic gates between roles. This is a stated limitation, not an oversight.
-- **Worktree is not a sandbox.** It isolates changes. A process can still read credentials
-  or write outside the tree if the OS permits. OS-level isolation is not part of v1.
+- **A worktree is not a sandbox, and the OS sandbox covers GitHub and the write scope only.**
+  A worktree isolates changes. On a GitHub harness GitHub network access is OS-enforced through
+  Claude Code's sandbox on macOS and Linux [R-OS-SANDBOX-NETWORK]. Other network and most of the
+  filesystem are not confined beyond the sandbox's write scope, a process can still read
+  credentials, and Windows has no OS sandbox, so `ppl init` refuses there without
+  `--no-os-sandbox` [R-OS-SANDBOX-INIT-REQUIRED]. Git LFS pushes are not supported under it
+  [R-OS-SANDBOX-GIT-CONFIG]. This is a recorded departure from v1's stated limitation, which
+  was no OS-level isolation at all.
 - **The orchestrator is a model.** Determinism comes from `ppl` refusing illegal
   transitions and hooks refusing illegal writes, not from the orchestrator's discipline.
   Every rule that matters is expected to live in code, not merely in the skill prompt.

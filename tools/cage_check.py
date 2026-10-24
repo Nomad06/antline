@@ -184,6 +184,7 @@ def main():
         run_cases(cages[-1])
         cages.append(Cage(layout="python"))
         run_python_cases(cages[-1])
+        run_os_sandbox_cases(cages[-1])
         return report([result for cage in cages for result in cage.results])
     finally:
         # This harness used to leave three directories per invocation behind in
@@ -1030,6 +1031,117 @@ def run_cases(cage):
         "a ppl-test-worker dispatch of acceptance criteria only is allowed",
         dispatch("AC-1: 10 percent off 1000 gives 900.\nAC-2: never below zero."),
         "allow")
+
+
+def run_os_sandbox_cases(cage):
+    """Who may leave the OS sandbox, on the python cage's GitHub Issues run: the guard facts
+    `ppl harness apply` writes, gh and ppl pins that need not exist, the git on PATH, and the
+    unrelated directory as the workspace, which no sandboxed command can write
+    [R-OS-SANDBOX-ROLE-NO-ESCAPE] [R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-OS-SANDBOX-GIT-CONFIG]."""
+    from ppl import escape_git  # noqa: E402
+    real = os.path.realpath
+    home = cage.ppl_home
+    workspace = str(cage.unrelated)
+    pins = {name: {"path": "/opt/pin/" + name, "realpath": real("/opt/pin/" + name)}
+            for name in ("gh", "git", "ppl")}
+    # the guard runs the pinned git on the run's repo, so this one must exist
+    git_bin = shutil.which("git")
+    pins["git"] = {"path": git_bin, "realpath": real(git_bin)}
+    facts = {"version": 1, "workspace": real(workspace), "checkout": real(str(cage.worktree)),
+             "worktrees": real(str(cage.worktree) + "/.worktrees"), "default_branch": "main",
+             "forge_repo": "o/r", "tracker_repo": "o/r", "scratch": real(str(home / "scratch")),
+             "write_scope": [real(str(home / part)) for part in ("runs", "labels", "scratch")]
+             + [real(str(cage.worktree))],
+             "pins": pins}
+    cage._store.write_json(home / "os_sandbox.json", facts)
+    state = cage._run.load(cage.task_id)
+    state["branch"] = "cage-branch"
+    cage._run.save(state)
+    body = home / "scratch" / cage.task_id / "pr-body.md"
+    body.parent.mkdir(parents=True, exist_ok=True)
+    body.write_text("body\n", encoding="utf-8")
+    gh = pins["gh"]["path"]
+
+    def flagged(agent, command, cwd):
+        return cage.payload(agent, "Bash",
+                            {"command": command, "dangerouslyDisableSandbox": True}, cwd)
+
+    cage.check(
+        "os-sandbox role escape denied",
+        flagged("ppl-code-worker", "ls", str(cage.worktree)),
+        "BOUNDARY_VIOLATION", reason="outside the OS sandbox")
+
+    cage.check(
+        "os-sandbox orchestrator plain pr create allowed",
+        flagged(None, "%s pr create -R o/r --head cage-branch --base main --title 'Fix $HOME' "
+                "--body-file %s" % (gh, body), workspace),
+        "allow")
+
+    cage.check(
+        "os-sandbox orchestrator compound denied",
+        flagged(None, gh + " auth status; id", workspace),
+        "BOUNDARY_VIOLATION", reason="one plain command")
+
+    # The run's repo on its own branch with origin on the forge repo. -C spells the repo as
+    # ppl init recorded it [R-OS-SANDBOX-GIT-CONFIG].
+    repo = str(cage.worktree)
+    for args in (("remote", "add", "origin", "https://github.com/o/r.git"),
+                 ("checkout", "-q", "-b", "cage-branch")):
+        subprocess.run([git_bin, "-C", repo] + list(args), check=True, capture_output=True)
+    push = ("%s %s -C %s push --no-verify --no-follow-tags --no-recurse-submodules origin "
+            "refs/heads/cage-branch:refs/heads/cage-branch"
+            % (git_bin, " ".join(escape_git.PINNED_CONFIG), repo))
+
+    cage.check(
+        "os-sandbox push run branch allowed",
+        flagged(None, push, workspace),
+        "allow")
+
+    subprocess.run([git_bin, "-C", repo, "config", "core.sshCommand", "ssh -i /tmp/cage-key"],
+                   check=True, capture_output=True)
+    cage.check(
+        "os-sandbox push with sshCommand denied",
+        flagged(None, push, workspace),
+        "BOUNDARY_VIOLATION", reason="core.sshcommand")
+
+    # The routes that run outside the sandbox anyway. HOME is the cage's own, so `~` lands
+    # in it [R-OS-SANDBOX-PROTECTED-PATHS] [R-FORGE-GH-MCP-NO-ROLE] [R-WEBFETCH-GITHUB-NO-ROLE].
+    cage.check(
+        "os-sandbox orchestrator edit of the gitconfig denied",
+        cage.payload(None, "Edit", {"file_path": "~/.gitconfig", "old_string": "a",
+                                    "new_string": "b"}, workspace),
+        "BOUNDARY_VIOLATION", reason="a command outside the OS sandbox reads")
+
+    # While the facts exist an edit tool writes only where sandboxed Bash may.
+    cage.check(
+        "os-sandbox orchestrator edit of a claude hook script denied",
+        cage.payload(None, "Write", {"file_path": str(home.parent / ".claude" / "hooks" / "x.sh"),
+                                     "content": "id\n"}, workspace),
+        "BOUNDARY_VIOLATION", reason="writes only where sandboxed Bash may")
+
+    cage.check(
+        "os-sandbox orchestrator edit in the scratch dir allowed",
+        cage.payload(None, "Write", {"file_path": str(body.parent / "reply.md"),
+                                     "content": "text\n"}, workspace),
+        "allow")
+
+    cage.check(
+        "os-sandbox role github mcp tool denied",
+        cage.payload("ppl-code-worker", "mcp__github__create_pull_request",
+                     {"owner": "o", "repo": "r"}, repo),
+        "BOUNDARY_VIOLATION", reason="GitHub MCP")
+
+    cage.check(
+        "os-sandbox orchestrator github mcp read allowed",
+        cage.payload(None, "mcp__github__get_pull_request", {"owner": "o", "repo": "r"},
+                     workspace),
+        "allow")
+
+    cage.check(
+        "os-sandbox role webfetch of github denied",
+        cage.payload("ppl-verifier", "WebFetch", {"url": "https://API.GitHub.com./repos",
+                                                  "prompt": "list"}, repo),
+        "BOUNDARY_VIOLATION", reason="WebFetch")
 
 
 if __name__ == "__main__":

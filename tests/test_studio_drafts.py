@@ -21,6 +21,9 @@ from ppl.studio import drafts, project, stacks
 class DraftTestCase(panel_client.StudioTestCase):
     def setUp(self):
         super().setUp()
+        patcher = mock.patch("ppl.setup._origin_repo", lambda checkout: "acme/demo")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         config.ensure()
         self.repo = panel_client.make_repo({"Makefile": "test:\n\ttrue\n"})
 

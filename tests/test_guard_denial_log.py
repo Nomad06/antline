@@ -171,6 +171,26 @@ class TestGuardDenialLogFromMain(unittest.TestCase):
                       result["hookSpecificOutput"]["permissionDecisionReason"])
         append.assert_not_called()
 
+    def test_a_run_dir_linked_elsewhere_gets_no_deny_event(self):
+        # rule: R-GUARD-DENIAL-LOGGED
+        # runs/ is sandbox-writable: a run directory a role swapped for a link would steer the
+        # hook's append anywhere
+        repo = tmphome.mkdtemp(prefix="repo-")
+        run.init("DEMO-8897", "u", repo)
+        run.set_active("DEMO-8897")
+        elsewhere = Path(tmphome.mkdtemp(prefix="elsewhere-"))
+        real_dir = paths.run_dir("DEMO-8897")
+        for item in real_dir.iterdir():
+            item.rename(elsewhere / item.name)
+        real_dir.rmdir()
+        real_dir.symlink_to(elsewhere)
+        before = (elsewhere / "log.jsonl").read_text(encoding="utf-8")
+        result = ppl_guard.decide(edit(repo + "/src/App.java"))
+        self.assertIn("BOUNDARY_VIOLATION",
+                      result["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertEqual((elsewhere / "log.jsonl").read_text(encoding="utf-8"), before)
+        self.assertNotIn("deny", before)
+
     def test_a_log_that_does_not_exist_yet_is_still_created(self):
         repo = self.active_run("DEMO-8814")
         (paths.run_dir("DEMO-8814") / "log.jsonl").unlink()

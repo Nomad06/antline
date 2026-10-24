@@ -5,6 +5,8 @@ import itertools
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -22,7 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" /
 import ppl_guard
 
 import fixtures
-from ppl import cli, forges, fsm, gitfacts, harness, rules, run, sequences, verdict
+from ppl import (cli, config, escape, forges, fsm, gitfacts, harness, os_sandbox, rules, run,
+                 sequences, verdict)
 
 # The skill on disk is rendered from skill/ skeletons, so the contract is
 # checked on a rendered copy, never on the real home.
@@ -548,13 +551,17 @@ class TestTrackerNeutralSkill(unittest.TestCase):
 
     def test_the_rendered_close_command_is_a_tracker_write_held_until_the_merge_is_recorded(self):
         stage8 = self.stage("github-issues", "stage-8-after-merge.md")
-        found = re.findall(r"`(gh issue comment [^`]+)`", stage8)
+        gh = fixtures.FAKE_PINS["gh"]["path"]
+        found = re.findall(r"`(%s issue comment [^`]+)`" % re.escape(gh), stage8)
         self.assertEqual(len(found), 1, found)
         # the run's scratch directory, since a write into the worktree or runs/ is denied
-        self.assertIn("write the note to `/tmp/ppl-<TASK-ID>/note.md`", stage8)
-        command = (found[0].replace("<number>", "45").replace("<owner/name>", "o/r")
-                   .replace("<TASK-ID>", "GH-45"))
-        self.assertEqual(command, "gh issue comment 45 -R o/r --body-file /tmp/ppl-GH-45/note.md")
+        written = re.search(r"write the note to `(/[^`]*)/<TASK-ID>/note\.md`", stage8)
+        self.assertTrue(written, stage8)
+        scratch = written.group(1)
+        self.assertEqual(os.path.basename(scratch), "scratch")
+        command = found[0].replace("<number>", "45").replace("<TASK-ID>", "GH-45")
+        self.assertEqual(command, "%s issue comment 45 -R o/r --body-file %s/GH-45/note.md"
+                         % (gh, scratch))
         self.assertNotIn("$", found[0])
         self.assertTrue(ppl_guard.tracker_cli_write(command), "the close is not read as a write")
         for stage in ("review", "closure", "merge_watch"):
@@ -766,6 +773,200 @@ class TestSeededDrift(unittest.TestCase):
         refused = walk(("ppl stage enter merge_wach",), "closure", "done")
         self.assertIn("SCHEMA_INVALID", refused)
         self.assertIn("invalid choice", refused)
+
+
+# Every command the skill runs outside the OS sandbox, by the kind of call it is. A rendered
+# GitHub skill that lost one of them would pass the shape check below with nothing to check.
+GITHUB_COMMAND_KINDS = {
+    "ppl tracker fetch": r"ppl tracker fetch ", "ppl review fetch": r"ppl review fetch ",
+    "gh issue view": r"gh issue view ", "gh issue comment": r"gh issue comment ",
+    "gh pr create": r"gh pr create ", "gh pr view": r"gh pr view ",
+    "gh pr checks": r"gh pr checks ", "gh pr close": r"gh pr close ",
+    "gh api user": r"gh api user ", "gh api replies": r"gh api repos/\S+/replies ",
+    "git fetch": r"git (?:-c \S+ )+-C \S+ fetch ",
+    "git push": r"git (?:-c \S+ )+-C \S+ push .* -u ",
+    "git push --delete": r"git (?:-c \S+ )+-C \S+ push .* --delete ",
+    "gh pr view for the merge": r"gh pr view \S+ -R \S+ --json=state,mergeCommit$",
+}
+# The run-time placeholders of those commands, as the orchestrator fills them.
+SHAPE_TASK = "GH-7"
+SHAPE_BRANCH = "GH-7-cart-total"
+
+
+def pinned_commands(files, pins):
+    """(path, command) for every command that starts with a pinned binary in a rendered file,
+    after a backtick or at the start of a code block line, up to the closing backtick or the
+    end of the line: the commands the skill runs outside the OS sandbox. A pin named anywhere
+    else is reported as a command of its own, so it fails the shape check."""
+    pin_paths = sorted((pin["path"] for pin in pins.values()), key=len, reverse=True)
+    pinned = "|".join(re.escape(path) for path in pin_paths)
+    command = re.compile(r"(?:`|^[ \t]*)((?:%s) [^`\n]*)" % pinned, re.MULTILINE)
+    found = []
+    for path, text in sorted(files.items()):
+        commands = command.findall(text)
+        named = len(re.findall(r"(?:%s)\b" % pinned, text))
+        if named != len(commands):
+            commands.append("%d pinned paths named outside a command" % (named - len(commands)))
+        found += [(path, each) for each in commands]
+    return found
+
+
+def run_git(directory, *args):
+    subprocess.run(["git", "-C", directory] + list(args), check=True, capture_output=True)
+
+
+class TestGithubCommandsLeaveTheSandbox(unittest.TestCase):
+    """A GitHub harness's skill reaches GitHub only through the orchestrator's pinned,
+    unsandboxed commands, rendered word for word in the shapes the guard allows
+    [R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-OS-SANDBOX-GIT-CONFIG]."""
+
+    def setUp(self):
+        git_bin = shutil.which("git")
+        if not git_bin:
+            self.skipTest("the guard reads the repositories with a real git")
+        git_bin = os.path.abspath(git_bin)
+        home = tmphome.mkdtemp(prefix="pplshapes-")
+        patcher = mock.patch.dict(os.environ, {"PPL_HOME": home})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        root = os.path.realpath(tmphome.mkdtemp(prefix="pplshapes-repo-"))
+        self.checkout = os.path.join(root, "checkout")
+        self.worktree = os.path.join(root, "worktrees", "r-" + SHAPE_TASK)
+        run_git(root, "init", "-q", "--template=", "-b", "main", self.checkout)
+        run_git(self.checkout, "-c", "user.name=t", "-c", "user.email=t@example.com",
+                "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "base")
+        run_git(self.checkout, "remote", "add", "origin", "https://github.com/o/r.git")
+        run_git(self.checkout, "worktree", "add", "-q", "-b", SHAPE_BRANCH, self.worktree)
+        self.workspace = os.path.realpath(tmphome.mkdtemp(prefix="pplshapes-ws-"))
+        self.pins = dict(fixtures.FAKE_PINS, git={"path": git_bin,
+                                                  "realpath": os.path.realpath(git_bin)})
+        tables = dict(fixtures.GITHUB_ISSUES, repo={"path": self.checkout, "default_branch": "main",
+                                                    "worktrees": os.path.join(root, "worktrees")})
+        fixtures.install_variant("example-generic", "example-generic", **tables)
+        config.update("claude", {"workspace": self.workspace})
+        doc = harness.load("example-generic")
+        with mock.patch.object(os_sandbox, "pins", lambda which=None: self.pins):
+            self.files = harness.render_skill(doc)
+        self.facts = os_sandbox.facts(doc, self.workspace, self.pins)
+        self.state = {"task_id": SHAPE_TASK, "branch": SHAPE_BRANCH, "repo": self.worktree}
+
+    def fill(self, command):
+        for placeholder, value in (("<TASK-ID>", SHAPE_TASK), ("<number>", "12"), ("<id>", "345"),
+                                   ("<branch>", SHAPE_BRANCH), ("<worktree>", self.worktree),
+                                   ("<summary>", "add the cart total")):
+            command = command.replace(placeholder, value)
+        self.assertIsNone(re.search(r"<[A-Za-z][^<>]*>", command), command)
+        return command
+
+    def rendered_workspace(self):
+        """The directory the skill says its gh and ppl calls run from."""
+        named = re.findall(r"from the workspace `([^`]+)`", _flat("".join(self.files.values())))
+        self.assertEqual(len(named), 1, named)
+        return named[0]
+
+    def test_stage_one_leaves_the_session_in_the_workspace(self):
+        # a cd into the checkout would put the next gh or ppl call inside the write scope
+        stage1 = self.files["references/stage-1-baseline.md"]
+        block = stage1[stage1.index("```bash"):stage1.index("```", stage1.index("```bash") + 3)]
+        self.assertEqual([line for line in block.splitlines() if line.startswith("cd ")], [])
+        self.assertIn("\ngit -C %s worktree add " % self.facts["checkout"], block)
+        self.assertEqual(self.rendered_workspace(), self.facts["workspace"])
+        self.assertIn("from the workspace `%s`" % self.facts["workspace"], _flat(stage1))
+
+    def test_every_rendered_github_command_passes_the_guard_shapes(self):
+        cwd = self.rendered_workspace()
+        found = pinned_commands(self.files, self.pins)
+        kinds = {kind for kind, pattern in GITHUB_COMMAND_KINDS.items()
+                 for _, command in found if re.search(r"(?:^|/)" + pattern, command)}
+        self.assertEqual(kinds, set(GITHUB_COMMAND_KINDS), found)
+        scratch = os.path.join(str(os_sandbox.scratch_root()), SHAPE_TASK)
+        os.makedirs(scratch, exist_ok=True)
+        for path, raw in found:
+            command = self.fill(raw)
+            for body in re.findall(re.escape(scratch) + r"/[\w.-]+", command):
+                Path(body).write_text("text\n", encoding="utf-8")
+            with self.subTest(path=path, command=raw):
+                argv = escape.plain_argv(command)
+                self.assertIsNotNone(argv, command)
+                self.assertIsNone(escape.orchestrator_shape(argv, cwd, self.facts, self.state),
+                                  command)
+                hits = [why for pattern, why in forges.get("github").denied_bash()
+                        if pattern.search(command)]
+                self.assertEqual(hits, [], command)
+
+    def test_the_fetch_and_the_login_read_are_the_allow_entries_word_for_word(self):
+        # the profile allows them with no prompt only as spelled there
+        allow = os_sandbox.profile(harness.load("example-generic"), self.workspace,
+                                   self.pins)["allow"]
+        commands = [command for _, command in pinned_commands(self.files, self.pins)]
+        for entry in allow:
+            if entry.endswith(" fetch --no-recurse-submodules origin main)") or \
+                    entry.endswith(" api user --jq .login)"):
+                self.assertIn(entry[len("Bash("):-1], commands, entry)
+        fetch = [c for c in commands if " fetch --no-recurse-submodules " in c]
+        self.assertEqual(fetch, ["%s -c core.hooksPath=/dev/null -c core.sshCommand=ssh "
+                                 "-c credential.helper= -c core.askPass= "
+                                 "-c protocol.ext.allow=never -c protocol.file.allow=never "
+                                 "-c protocol.allow=never -c protocol.ssh.allow=always "
+                                 "-c protocol.git.allow=never -c push.gpgSign=false "
+                                 "-c gpg.program= -c core.alternateRefsCommand= "
+                                 "-c core.fsmonitor=false -c gc.auto=0 "
+                                 "-c maintenance.auto=false "
+                                 "-C %s fetch --no-recurse-submodules origin main"
+                                 % (self.pins["git"]["path"], self.facts["checkout"])])
+
+
+class TestGithubSkillText(unittest.TestCase):
+    """What the GitHub skill says around its pinned commands."""
+
+    def test_the_review_loop_fetches_through_ppl(self):
+        ppl = fixtures.FAKE_PINS["ppl"]["path"]
+        for name in ("example-generic", "github-issues"):
+            for path in ("references/stage-7-review.md", "references/review-loop.md"):
+                text = _flat(RENDERED[name][path])
+                where = "%s %s" % (name, path)
+                self.assertIn("`%s review fetch --pr <number>`" % ppl, text, where)
+                self.assertIn("`ppl review pending --threads <the path", text, where)
+                self.assertLess(text.index("review fetch --pr"),
+                                text.index("ppl review pending --threads"), where)
+                for gone in ("graphql", "--paginate", "in_reply_to_id", "`gh "):
+                    self.assertNotIn(gone, text, where)
+                self.assertIn("dangerouslyDisableSandbox", text, where)
+
+    def test_every_file_the_orchestrator_writes_is_in_the_run_scratch_dir(self):
+        # an edit tool writes only inside the OS sandbox's write scope, and of that the
+        # orchestrator's own files go in the run's scratch directory
+        named = re.compile(r"(?:(?:ppl (?:baseline record|brief set|brief challenge|verdict record)"
+                           r"|--body-file|--threads|Save that message to|Save its JSON to"
+                           r"|(?:write|save) (?:it|the note|the draft|the pull request body|the "
+                           r"verifier's verdict) to) `?|body=@)([^\s`]+)", re.IGNORECASE)
+        for name, files in RENDERED.items():
+            scratch = re.search(r"mkdir -p (\S+/scratch/<TASK-ID>)",
+                                files["references/gates.md"]).group(1) + "/"
+            for path, text in sorted(files.items()):
+                if not (path == "SKILL.md" or path.startswith(("references/stage-",
+                                                               "references/review-loop"))):
+                    continue
+                for target in named.findall(_flat(text)):
+                    if target == "<the":
+                        continue  # the review threads ppl review fetch wrote itself
+                    self.assertTrue(target.startswith(scratch), "%s %s: %s" % (name, path, target))
+
+    def test_size_limits_hold_with_the_os_sandbox_text(self):
+        # pins as long as a home-directory install puts them
+        bin_dir = "/Users/someone-with-a-long-name/.local/share/pipeline/bin/"
+        pins = {name: {"path": bin_dir + name, "realpath": bin_dir + name}
+                for name in ("gh", "git", "ppl")}
+        for name, tables in (("example-maven", None), ("example-generic", None),
+                             ("example-generic", fixtures.GITHUB_ISSUES)):
+            files = fixtures.skill_files(name, tables=tables, pins=pins)
+            size = len(files["SKILL.md"].encode("utf-8"))
+            self.assertLessEqual(size, SKILL_BUDGET_BYTES, "%s SKILL.md %d" % (name, size))
+            for path, text in sorted(files.items()):
+                if path.startswith("references/"):
+                    size = len(text.encode("utf-8"))
+                    self.assertLessEqual(size, STAGE_REFERENCE_BUDGET_BYTES,
+                                         "%s %s %d" % (name, path, size))
 
 
 if __name__ == "__main__":

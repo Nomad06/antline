@@ -523,5 +523,18 @@ class TestPanelApi(unittest.TestCase):
             httpd.server_close()
 
 
+class TestPanelRowOsSandbox(unittest.TestCase):
+    def test_the_panel_row_carries_os_sandboxed(self):
+        saved = os.environ.get("PPL_HOME")
+        os.environ["PPL_HOME"] = HOME
+        self.addCleanup(lambda: os.environ.__setitem__("PPL_HOME", saved) if saved
+                        else os.environ.pop("PPL_HOME", None))
+        task = "DEMO-%d" % next(COUNTER)
+        run.init(task, "https://j/x", "/tmp/repo", os_sandboxed=True)
+        row = [r for r in server.list_runs() if r["task_id"] == task][0]
+        self.assertIs(row["os_sandboxed"], True)
+        self.assertIsNone(server._error_row("X-1", ValueError("bad"))["os_sandboxed"])
+
+
 if __name__ == "__main__":
     unittest.main()

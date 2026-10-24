@@ -37,9 +37,12 @@ def state_path(task_id):
     return paths.run_dir(task_id) / "state.json"
 
 
-def active():
+def active(limit=None):
+    """The active run's task id, or None. A pointer that is not a regular file, or with
+    `limit` one over that many bytes, is refused SCHEMA_INVALID without blocking
+    (store.read_regular_text)."""
     try:
-        return paths.active_file().read_text(encoding="utf-8").strip() or None
+        return store.read_regular_text(paths.active_file(), limit).strip() or None
     except FileNotFoundError:
         return None
 
@@ -49,8 +52,8 @@ def set_active(task_id):
     paths.active_file().write_text(paths.check_task_id(task_id) + "\n", encoding="utf-8")
 
 
-def load(task_id):
-    state = store.read_json(state_path(task_id))
+def load(task_id, limit=None):
+    state = store.read_json(state_path(task_id), limit=limit)
     if state is None:
         raise PplError("SCHEMA_INVALID", "no run for %s. Run ppl init first." % task_id)
     return state
@@ -64,7 +67,8 @@ RISK_TIERS = ("low", "normal", "high")
 
 
 def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check="verified",
-               harness=None, usd_max=0.0, prices=None, routing_preset=None):
+               harness=None, usd_max=0.0, prices=None, routing_preset=None,
+               os_sandboxed=False):
     pid = os.getpid()
     budgets = dict(DEFAULT_BUDGETS)
     budgets["usd_max"] = usd_max
@@ -80,6 +84,7 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "routing_preset": routing_preset,
         "repo": repo,
         "isolated": isolated,
+        "os_sandboxed": os_sandboxed,
         "branch": None,
         "base_sha": None,
         "candidate_sha": None,
@@ -108,7 +113,7 @@ def _routing_preset(presets, routing):
 
 
 def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="verified",
-         harness=None):
+         harness=None, os_sandboxed=False):
     paths.check_task_id(task_id)
     if risk not in RISK_TIERS:
         raise PplError("SCHEMA_INVALID", "risk must be one of %s" % ", ".join(RISK_TIERS))
@@ -122,7 +127,8 @@ def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="
     # editable mid-run.
     state = _new_state(task_id, tracker_url, repo, isolated, risk, model_check, harness,
                        usd_max=config.budgets_usd_max(), prices=usage.prices(),
-                       routing_preset=_routing_preset(presets, routing))
+                       routing_preset=_routing_preset(presets, routing),
+                       os_sandboxed=os_sandboxed)
     save(state)
     set_active(task_id)
     store.append_log(task_id, {"event": "init", "tracker_url": tracker_url, "repo": repo,
@@ -523,6 +529,8 @@ def destroy(task_id, scope):
             worktree = "left_behind"
             worktree_error = (removal.stderr.strip() or removal.stdout.strip()
                               or "git worktree remove exited %d" % removal.returncode)
+    from . import os_sandbox
+    shutil.rmtree(os_sandbox.scratch_dir(task_id), ignore_errors=True)
     # Logged before the move: append_log would otherwise recreate the run
     # directory it has just archived.
     store.append_log(task_id, {"event": "destroy", "scope": "local",

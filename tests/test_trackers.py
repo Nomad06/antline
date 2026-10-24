@@ -1,3 +1,4 @@
+import os
 import random
 import re
 import subprocess
@@ -241,6 +242,33 @@ class FakeGh:
             raise answer
         code, out, err = answer
         return subprocess.CompletedProcess(argv, code, out, err)
+
+
+class TestGithubIssuesFetchGh(GithubIssuesCase):
+    def fetch(self, gh):
+        import tempfile
+        from ppl import store
+        with mock.patch.object(store, "checked_run_path", side_effect=lambda p: p):
+            return self.adapter.fetch({"repo": "o/r"}, "GH-7", tempfile.mkdtemp(), runner=gh)
+
+    def test_gh_runs_by_the_pinned_path(self):
+        from ppl import os_sandbox
+        gh = FakeGh((1, "", "boom"))
+        with mock.patch.object(os_sandbox, "gh_path", return_value="/pin/gh"):
+            with self.assertRaises(PplError):
+                self.fetch(gh)
+        self.assertEqual(gh.calls[0][0][0], "/pin/gh")
+
+    def test_inside_the_sandbox_the_block_names_the_flag(self):
+        with mock.patch.dict(os.environ, {"SANDBOX_RUNTIME": "1"}):
+            with self.assertRaises(PplError) as ctx:
+                self.fetch(FakeGh((1, "", "boom")))
+        self.assertIn("this command reaches GitHub, run it with dangerouslyDisableSandbox",
+                      str(ctx.exception))
+        with mock.patch.dict(os.environ, {"SANDBOX_RUNTIME": ""}):
+            with self.assertRaises(PplError) as ctx:
+                self.fetch(FakeGh((1, "", "boom")))
+        self.assertNotIn("dangerouslyDisableSandbox", str(ctx.exception))
 
 
 class TestTrackerChoice(GithubIssuesCase):
@@ -777,15 +805,17 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
         # The review loop runs before the merge is observed, so a denial here
         # would stop it.
         github = forges.get("github")
-        spans = [span for name in ("stage6", "stage7", "review-loop")
-                 for span in re.findall(r"`(gh [^`]+)`", github.fragment(name))]
+        # the include markers filled as a render fills them, the pinned gh as it is named
+        markers = {"os/gh": "/opt/pin/bin/gh", "os/forge-repo": "o/r",
+                   "harness/scratch": "/tmp/s", "harness/default-branch": "main"}
+        spans = [re.sub(r"<!-- include: ([a-z/-]+) -->", lambda m: markers[m.group(1)], span)
+                 for name in ("stage6", "stage7", "review-loop")
+                 for span in re.findall(r"`(<!-- include: os/gh -->[^`]+)`", github.fragment(name))]
         self.assertTrue(spans)
-        forbidden = {"gh pr review --approve", "gh pr merge"}
-        values = {"<owner>": "o", "<repo>": "r", "<number>": "7", "<id>": "123",
-                  "<text>": "'Fixed in abc123, see the issue: done; thanks'",
-                  "<TASK-ID>": "GH-12", "<summary>": "fix the issue view", "<file>": "/tmp/b.md"}
+        values = {"<number>": "7", "<id>": "123", "<branch>": "GH-12-fix",
+                  "<TASK-ID>": "GH-12", "<summary>": "fix the issue view"}
         filled = [re.sub(r"<[A-Za-z-]+>", lambda m: values[m.group(0)], span) for span in spans]
-        self.assert_allowed(spans + [span for span in filled if span not in forbidden])
+        self.assert_allowed(spans + filled)
 
     def test_prose_naming_gh_issue_is_not_a_write(self):
         self.assert_allowed(

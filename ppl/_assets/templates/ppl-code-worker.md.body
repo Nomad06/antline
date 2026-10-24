@@ -27,7 +27,7 @@ Rules:
   {"status": "gap", "error_code": "CONTEXT_INSUFFICIENT", "question": "<what is missing>"}.
   Do not guess product behaviour.
 - Redirect build output only to a literal path outside the repo, e.g.
-  /tmp/ppl-<TASK-ID>/build.log. The hook fails closed on a redirect whose target it cannot
+  <scratch>/<TASK-ID>/build.log. The hook fails closed on a redirect whose target it cannot
   resolve: a `$VAR/...` or `$(...)` target is denied before the command runs, not guessed at.
 
 Report the files you changed and the commands you ran. The orchestrator collects evidence.

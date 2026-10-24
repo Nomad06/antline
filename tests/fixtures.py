@@ -11,6 +11,11 @@ from ppl import paths, tomlout
 
 SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
 
+# The pins a GitHub harness renders its commands outside the OS sandbox on. None is looked up
+# on PATH, so a render needs no gh or ppl installed.
+FAKE_PINS = {name: {"path": "/opt/pin/bin/" + name, "realpath": "/opt/pin/bin/" + name}
+             for name in ("gh", "git", "ppl")}
+
 # The tables that turn an example harness into a GitHub Issues one.
 GITHUB_ISSUES = {"tracker": {"kind": "github-issues", "repo": "o/r", "task_prefix": "GH"},
                  "task": {"key_pattern": "^GH-[0-9]+$",
@@ -47,12 +52,14 @@ def render_skill_to(directory, name="example-maven"):
     <directory>/pipeline and return that directory. The harness is installed
     into a throwaway PPL_HOME: a module that renders at import time must not
     leave a harness behind in the data root the other test modules share."""
-    from ppl import harness
+    from unittest import mock
+    from ppl import harness, os_sandbox
     saved = os.environ.get("PPL_HOME")
     os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplrender-")
     try:
         install_harness(name)
-        harness.write_skill(harness.load(name), Path(directory))
+        with mock.patch.object(os_sandbox, "pins", lambda which=None: FAKE_PINS):
+            harness.write_skill(harness.load(name), Path(directory))
     finally:
         if saved is None:
             os.environ.pop("PPL_HOME", None)
@@ -61,13 +68,14 @@ def render_skill_to(directory, name="example-maven"):
     return Path(directory) / "pipeline"
 
 
-def skill_files(name="example-maven", fragments=None, tables=None):
+def skill_files(name="example-maven", fragments=None, tables=None, pins=None):
     """relative path -> text of every file of the skill rendered for an example harness,
     nothing written. `fragments` maps a forge fragment name to the text rendered in its
     place, so a drift can be seeded where the real text comes from. `tables` replaces
-    whole tables of the harness, installed under `name` itself in the throwaway home."""
+    whole tables of the harness, installed under `name` itself in the throwaway home.
+    `pins` stands in for the binaries found on PATH, FAKE_PINS by default."""
     from unittest import mock
-    from ppl import forges, harness
+    from ppl import forges, harness, os_sandbox
     saved = os.environ.get("PPL_HOME")
     os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplrender-")
     try:
@@ -79,7 +87,9 @@ def skill_files(name="example-maven", fragments=None, tables=None):
         module = forges.get(doc["forge"]["kind"])
         real = module.fragment
         seeded = dict(fragments or {})
-        with mock.patch.object(module, "fragment", lambda part: seeded[part] if part in seeded else real(part)):
+        with mock.patch.object(module, "fragment",
+                               lambda part: seeded[part] if part in seeded else real(part)), \
+                mock.patch.object(os_sandbox, "pins", lambda which=None: pins or FAKE_PINS):
             return harness.render_skill(doc)
     finally:
         if saved is None:

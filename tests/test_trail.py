@@ -191,6 +191,16 @@ class TestTrailExport(unittest.TestCase):
         self.assertEqual(manifest["head_sha"], self.passed)
         self.assertEqual(manifest["antline_version"], ppl.__version__)
 
+    def test_the_trail_copies_review_threads(self):
+        store.write_json(paths.run_dir(self.task) / "review-threads.json",
+                         {"fetched_at": "2026-10-24T10:00:00Z", "pr": 5, "reviews": [],
+                          "threads": [{"id": "101", "author": "alice", "resolved": False,
+                                       "last_note_id": "103", "last_author": "alice",
+                                       "note_count": 3}]})
+        manifest = self.export()
+        listed = {entry["path"] for entry in manifest["files"]}
+        self.assertIn("docs/review-threads.json", listed)
+
     def test_the_repo_home_and_tmp_paths_are_redacted(self):
         self.export()
         found = texts(self.out)

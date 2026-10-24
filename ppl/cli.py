@@ -6,9 +6,10 @@ import stat
 import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
-               harness, metrics, models, paths, recover, refusals, review, routing, run, schema,
+               harness, metrics, models, os_sandbox, paths, recover, refusals, review, routing, run, schema,
                setup, status, store, trackers, trail, usage, verdict, watchdog)
 from .errors import PplError, role_output
+from .forges import github_fetch
 
 
 def resolve_task(args):
@@ -108,7 +109,8 @@ def parse_json_doc(text, path, what, kind):
     if kind is not None and not isinstance(doc, kind):
         raise PplError("SCHEMA_INVALID",
                        "%s file %s must contain a JSON %s"
-                       % (what, path, "array" if kind is list else "object"))
+                       % (what, path, "array" if kind is list else
+                          "array or object" if isinstance(kind, tuple) else "object"))
     return doc
 
 
@@ -117,6 +119,33 @@ def parse_json_arg(text, what):
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise PplError("SCHEMA_INVALID", "%s is not valid JSON: %s" % (what, exc))
+
+
+def os_sandbox_problem(inspected):
+    """None when this session's OS sandbox denies GitHub and the guard is registered in the
+    workspace's local settings, else a message naming the first failing fact."""
+    facts = doctor.os_sandbox_facts()
+    if facts["state"] != "on":
+        return ("this harness reaches GitHub and the OS sandbox is %s for this session (%s): "
+                "start Claude Code in the workspace after `ppl harness apply`, or pass "
+                "--no-os-sandbox to record a run without it" % (facts["state"], _why_off(facts)))
+    if inspected["registration"] != "local":
+        return ("the guard hook is registered %s, not in the workspace's settings.local.json: "
+                "`ppl setup claude` registers it there, or pass --no-os-sandbox to record a run "
+                "without the OS sandbox" % inspected["registration"])
+    return None
+
+
+def _why_off(facts):
+    if facts["state"] == "unavailable":
+        return "native Windows has no OS sandbox"
+    if not facts["env_marker"]:
+        return "this session is not running inside it"
+    if not facts["profile"]:
+        return "ppl's profile is missing from the workspace settings.local.json"
+    if facts["undoing"]:
+        return "a setting undoes it"
+    return "GitHub is reachable from here"
 
 
 def cmd_init(args):
@@ -157,6 +186,12 @@ def cmd_init(args):
         model_check = "verified"
     doc = harness.load(args.harness)
     harness.require_applied(doc)
+    os_sandboxed = False
+    if os_sandbox.needed(doc) and args.os_sandbox:
+        problem = os_sandbox_problem(inspected)
+        if problem:
+            raise PplError("SCHEMA_INVALID", problem)
+        os_sandboxed = True
     pattern = doc["task"]["key_pattern"]
     if not re.match(pattern, args.task_id):
         raise PplError("SCHEMA_INVALID",
@@ -165,11 +200,15 @@ def cmd_init(args):
                       "format": harness.FORMAT}
     snapshot = harness.snapshot(doc)
     state = run.init(args.task_id, args.tracker_url, args.repo, isolated=args.isolated,
-                     risk=args.risk, model_check=model_check, harness=harness_record)
+                     risk=args.risk, model_check=model_check, harness=harness_record,
+                     os_sandboxed=os_sandboxed)
     store.write_json(paths.run_dir(args.task_id) / "harness.json", snapshot)
     # after the run exists, so a refusal's stderr stays the one JSON line it is
     for warning in (doctor.dispatch_warning(), doctor.usage_warning(),
-                    doctor.hook_location_warning(), doctor.matcher_warning()):
+                    doctor.hook_location_warning(), doctor.matcher_warning(),
+                    doctor.mcp_servers_warning(),
+                    doctor.github_token_warning() if os_sandbox.needed(doc) else None,
+                    doctor.foreign_bash_hooks_warning() if os_sandbox.needed(doc) else None):
         if warning:
             sys.stderr.write("warning: %s\n" % warning)
     print(status.card(state["task_id"]))
@@ -177,6 +216,9 @@ def cmd_init(args):
 
 
 def cmd_doctor(args):
+    if getattr(args, "forge", False):
+        print(json.dumps(doctor.forge_report(), sort_keys=True))
+        return 0
     result = doctor.report(getattr(args, "task", None))
     print(json.dumps(result, sort_keys=True))
     if result["mismatch"]:
@@ -188,12 +230,22 @@ def cmd_doctor(args):
                  doctor.hook_location_warning()):
         if line:
             print(line)
-    warning = doctor.matcher_warning()
-    if warning:
-        print("warning: %s" % warning)
+    for warning in (doctor.matcher_warning(), doctor.mcp_servers_warning(),
+                    doctor.github_token_warning(), _foreign_hooks_warning()):
+        if warning:
+            print("warning: %s" % warning)
     if result.get("hook_runs_problem"):
         print(result["hook_runs_problem"])
     return 0
+
+
+def _foreign_hooks_warning():
+    """The foreign Bash hook warning while an OS sandbox profile is applied, else None."""
+    try:
+        applied = os_sandbox.load_facts() is not None
+    except PplError:
+        applied = True
+    return doctor.foreign_bash_hooks_warning() if applied else None
 
 
 def cmd_show(args):
@@ -333,15 +385,21 @@ def require_tracker_fetched(task_id):
 
 
 def cmd_tracker(args):
+    # It runs outside the OS sandbox with gh's credentials, so it trusts no file a role can
+    # write for where it reaches or where it writes: the run directory is checked before
+    # anything is written there, the repository comes from the guard facts.
     task_id = resolve_task(args)
+    dest = store.checked_run_path(paths.run_dir(task_id) / "tracker")
     control.enforce(task_id)
     adapter, table = _run_tracker(task_id)
     if adapter.TRANSPORT != "cli":
         raise PplError("SCHEMA_INVALID",
                        "the %s tracker of %s is read through MCP tools, ppl tracker fetch is "
                        "for a CLI tracker" % (adapter.KIND, task_id))
-    dest = paths.run_dir(task_id) / "tracker"
+    if adapter.KIND == "github-issues":
+        table = dict(table, repo=os_sandbox.pinned_repo("tracker_repo", table.get("repo")))
     result = adapter.fetch(table, task_id, dest)
+    store.checked_run_path(paths.run_dir(task_id))
     run.record_tracker_fetch(task_id, result["revision"])
     print("issue: %s" % (dest / "issue.md"))
     print("revision: %s" % result["revision"])
@@ -722,7 +780,70 @@ def cmd_merge(args):
     return 0
 
 
+def _review_repo(task_id):
+    """The GitHub repository `ppl review fetch` reaches: the guard facts' forge_repo when the
+    facts exist, which a github-issues repo the run's snapshot names must agree with, else the
+    snapshot's github-issues repo or the checkout's origin. With the facts no git runs: the
+    run's repo is role-writable, and this command runs outside the OS sandbox."""
+    snapshot = paths.run_dir(task_id) / "harness.json"
+    try:
+        doc = store.read_json(snapshot) if stat.S_ISREG(os.lstat(snapshot).st_mode) else None
+    except (OSError, PplError):
+        doc = None
+    forge = doc.get("forge") if isinstance(doc, dict) else None
+    if not (isinstance(forge, dict) and forge.get("kind") == "github"):
+        raise PplError("SCHEMA_INVALID",
+                       "ppl review fetch reads GitHub pull requests, and the harness snapshot "
+                       "of %s does not name the github forge" % task_id)
+    tracker = doc.get("tracker")
+    repo = tracker.get("repo") if isinstance(tracker, dict) and \
+        tracker.get("kind") == "github-issues" else None
+    facts = os_sandbox.load_facts()
+    if facts is not None:
+        forge_repo = facts.get("forge_repo")
+        if not (isinstance(forge_repo, str) and github_fetch.is_repo(forge_repo)):
+            raise PplError("SCHEMA_INVALID",
+                           "%s names no GitHub forge repository (forge_repo is %r), so ppl "
+                           "review fetch reaches none: run ppl harness apply"
+                           % (os_sandbox.FACTS_FILE, forge_repo))
+        repo = repo or forge_repo
+    else:
+        repo = repo or setup._origin_repo(run.load(task_id).get("repo") or "")
+    repo = os_sandbox.pinned_repo("forge_repo", repo)
+    if not repo:
+        raise PplError("SCHEMA_INVALID",
+                       "no GitHub repository is known for %s: its checkout has no github.com "
+                       "origin" % task_id)
+    return repo
+
+
+def cmd_review_fetch(args):
+    # Like cmd_tracker it runs outside the OS sandbox with gh's credentials: the repository
+    # comes from the guard facts and the run directory is checked, before the network calls
+    # and again right before the write, as a role may swap a directory for a link meanwhile.
+    task_id = resolve_task(args)
+    target = paths.run_dir(task_id) / "review-threads.json"
+    store.checked_run_path(paths.run_dir(task_id))
+    store.checked_run_path(target.parent)
+    control.enforce(task_id)
+    if args.pr is None or args.pr < 1:
+        raise PplError("SCHEMA_INVALID", "review fetch requires --pr <number>")
+    repo = _review_repo(task_id)
+    doc = github_fetch.fetch(repo, args.pr)
+    store.checked_run_path(paths.run_dir(task_id))
+    store.checked_run_path(target.parent)
+    store.checked_run_path(target)
+    store.write_json(target, doc)
+    print("threads: %s" % target)
+    print("%d threads" % len(doc["threads"]))
+    return 0
+
+
 def cmd_review(args):
+    if args.action == "fetch":
+        return cmd_review_fetch(args)
+    if not args.sha:
+        raise PplError("SCHEMA_INVALID", "review %s requires --sha" % args.action)
     task_id = resolve_task(args)
     if args.action == "answered":
         # refresh=False: require_current_generation below is a second gate
@@ -739,7 +860,12 @@ def cmd_review(args):
     elif args.action == "pending":
         if not args.threads:
             raise PplError("SCHEMA_INVALID", "review pending requires --threads")
-        threads = load_json_arg(args.threads, "threads", kind=list)
+        threads = load_json_arg(args.threads, "threads", kind=(list, dict))
+        if isinstance(threads, dict):
+            threads = threads.get("threads")
+            if not isinstance(threads, list):
+                raise PplError("SCHEMA_INVALID", "threads file %s has no threads list"
+                               % args.threads)
         # Three states, not two: omitted (args.author is None) falls through
         # to review.pending's own stored-identity/nothing-configured
         # resolution. An explicit empty string is a deliberate "no filter,
@@ -1123,6 +1249,9 @@ def build_parser():
     # registered somewhere broader (e.g. global settings), so scoping falls back
     # to cwd instead of reaching their other projects.
     p.add_argument("--isolated", action=argparse.BooleanOptionalAction, default=True)
+    # A harness that reaches GitHub needs the OS sandbox that denies it. --no-os-sandbox is the
+    # operator's per-run opt-out, and the run records it.
+    p.add_argument("--os-sandbox", action=argparse.BooleanOptionalAction, default=True)
     # The risk tier routes the code worker to a stronger model on high-risk
     # tasks (routing.toml by_risk) - see routing.resolve.
     p.add_argument("--risk", choices=list(run.RISK_TIERS), default="normal")
@@ -1258,10 +1387,11 @@ def build_parser():
     p.add_argument("--task")
 
     p = sub.add_parser("review")
-    p.add_argument("action", choices=["answered", "approved", "pending"])
+    p.add_argument("action", choices=["answered", "approved", "pending", "fetch"])
     p.add_argument("--thread")
     p.add_argument("--threads")
-    p.add_argument("--sha", required=True)
+    p.add_argument("--sha")
+    p.add_argument("--pr", type=int)
     p.add_argument("--classification", choices=list(review.CLASSIFICATIONS))
     p.add_argument("--last-note-id", dest="last_note_id")
     p.add_argument("--author")
@@ -1355,6 +1485,7 @@ def build_parser():
 
     p = sub.add_parser("doctor")
     p.add_argument("--task")
+    p.add_argument("--forge", action="store_true")
 
     p = sub.add_parser("metrics")
     p.add_argument("--text", action="store_true")

@@ -563,6 +563,19 @@ class TestNoRoleHoldsAJiraWriteTool(_PinnedEnv):
             self.assertIn("role 'ppl-briefer' would hold tracker write tool %r" % bad,
                           caught.exception.message)
 
+    def test_a_doc_that_would_grant_a_github_mcp_tool_is_refused_at_render(self):
+        # rule: R-FORGE-GH-MCP-NO-ROLE
+        for bad in ("mcp__github__get_issue", "mcp__github_2__get_pull_request"):
+            doc = harness.load("example-maven")
+            doc["knowledge"]["extra_tools"] = [bad]
+            with self.assertRaises(PplError) as caught:
+                routing.role_tools("ppl-briefer", doc)
+            self.assertEqual(caught.exception.code, "SCHEMA_INVALID", bad)
+            self.assertIn("role 'ppl-briefer' would hold %r, a tool of a GitHub MCP server" % bad,
+                          caught.exception.message)
+            with self.assertRaises(PplError):
+                routing.render("ppl-briefer", doc)
+
     def test_a_github_issues_doc_that_would_grant_a_jira_write_tool_is_refused_at_render(self):
         # rule: R-JIRA-NO-ROLE-TOOL
         fixtures.install_variant("example-generic", "gh-render", **fixtures.GITHUB_ISSUES)
