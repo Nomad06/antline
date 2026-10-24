@@ -341,7 +341,7 @@ class TestOrchestratorShape(OsSandboxCase):
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide("ls", cwd=OTHER)))
         with self.no_active_run():
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide("ls", cwd=OTHER)))
-            self.assertIsNone(self.decide(GH + " auth status", cwd=OTHER))
+            self.assertIsNone(self.decide(GH + " auth status", cwd=WS))
         with self.facts_text(None):
             result = self.decide("ls", cwd=OTHER)
             self.assertIn("ppl harness apply", self.deny_reason(result))
@@ -459,6 +459,28 @@ class TestOrchestratorShape(OsSandboxCase):
                 result = self.decide(command, cwd=REPO)
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
                 self.assertIn("write", self.deny_reason(result))
+
+    def test_gh_and_ppl_from_outside_the_workspace_are_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # a temp directory is sandbox-writable and in no write_scope entry, so a role could
+        # plant a repository there for gh's or ppl's own git to load
+        temp = real(tempfile.mkdtemp(prefix="ppl-cwd-"))
+        self.addCleanup(shutil.rmtree, temp, True)
+        for cwd in ("/private/tmp/claude/x", temp, OTHER, os.path.dirname(real(WS))):
+            for command in (GH + " auth status", GH + " pr view 1 -R o/r",
+                            PPL + " doctor --forge", PPL + " tracker fetch --task GH-7",
+                            pr_create()):
+                with self.subTest(cwd=cwd, command=command[:40]):
+                    reason = self.deny_reason(self.decide(command, cwd=cwd))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn(facts_doc()["workspace"], reason)
+
+    def test_gh_and_ppl_from_inside_the_workspace_are_allowed(self):
+        sub = os.path.join(real(WS), "notes")
+        for cwd in (WS, real(WS), sub):
+            for command in (GH + " auth status", PPL + " doctor --forge"):
+                with self.subTest(cwd=cwd, command=command):
+                    self.assertIsNone(self.decide(command, cwd=cwd))
 
     def test_pr_create_with_head_base_and_body_file_is_allowed(self):
         self.assertIsNone(self.decide(pr_create()))

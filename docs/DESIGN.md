@@ -624,9 +624,10 @@ rule's residual says, until fetch and push run through a gitdir ppl owns.
 Before it lets one through the guard runs the pinned git on that repository, each call held
 to 0.2 s, and denies unless its local and worktree config set only keys that run nothing,
 with no include, and give the remote one url, the forge repo on github.com
-[R-OS-SANDBOX-GIT-CONFIG]. Both gh and ppl run only from a `cwd` outside
-every path a sandboxed command can write, so neither loads a repo a role wrote
-[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. An allowed ppl command trusts no run file a role can
+[R-OS-SANDBOX-GIT-CONFIG]. Both gh and ppl run only from a `cwd` that is the workspace or
+lies under it, which the profile write-denies, and outside every write-scope entry, so
+neither loads a repo a role wrote: being outside the write scope alone is not enough, since a
+temp directory is sandbox-writable and in no entry [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. An allowed ppl command trusts no run file a role can
 write: `ppl tracker fetch` takes its repository from `os_sandbox.json` and refuses a run
 snapshot that names another, and refuses with `EXTERNAL_BLOCKED` to write or append through a
 run directory or a log that is a link [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A command the check
