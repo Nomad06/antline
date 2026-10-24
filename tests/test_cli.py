@@ -4216,6 +4216,17 @@ class TestInitRequiresTheOsSandbox(unittest.TestCase):
         self.assertIs(json.loads(shown)["os_sandboxed"], False)
         self.assertIn("OS sandbox: off", out)
 
+    def test_init_warns_about_a_github_token_in_the_environment_by_name(self):
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_secretvalue"}):
+            task, code, out, err = self.start("on", "local")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: GITHUB_TOKEN", err)
+        self.assertNotIn("secretvalue", err + out)
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_secretvalue"}):
+            _, doctor_out, _ = call("doctor")
+        self.assertIn("warning: GITHUB_TOKEN", doctor_out)
+        self.assertNotIn("secretvalue", doctor_out)
+
     def test_a_gitlab_harness_needs_no_os_sandbox(self):
         config.set_active_harness("example-maven")
         task, code, out, err = self.start("off", "none", harness="example-maven",

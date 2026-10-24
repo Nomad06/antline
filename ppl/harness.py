@@ -57,7 +57,7 @@ KNOWN_KEYS = {
                                    for key in trackers.get(kind).KEYS)),
     "forge": ("kind", "mcp_server"),
     "tests": ("sources",),
-    "os_sandbox": ("enabled", "allowed_domains", "allow_write"),
+    "os_sandbox": ("enabled", "allowed_domains", "allow_write", "allow_ssh_read"),
     "knowledge": ("skills", "extra_tools"),
     "env": None,
     "gate": ("name", "command"),
@@ -308,8 +308,9 @@ def _check_os_sandbox(doc, source):
     table = doc["os_sandbox"]
     if not isinstance(table, dict):
         _fail(source, "[os_sandbox] must be a table")
-    if "enabled" in table and not isinstance(table["enabled"], bool):
-        _fail(source, "os_sandbox.enabled must be true or false")
+    for key in ("enabled", "allow_ssh_read"):
+        if key in table and not isinstance(table[key], bool):
+            _fail(source, "os_sandbox.%s must be true or false" % key)
     if table.get("enabled") is False and os_sandbox.needed(dict(doc, os_sandbox={})):
         _fail(source, "os_sandbox.enabled = false is refused for a GitHub forge or tracker: the "
               "OS sandbox keeps GitHub credentials from the roles. Run ppl init --no-os-sandbox "

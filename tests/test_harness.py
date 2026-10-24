@@ -1214,6 +1214,11 @@ class TestOsSandboxTable(HarnessTestCase):
     def test_enabled_must_be_a_bool(self):
         self.assertIn("os_sandbox.enabled", self.refused('enabled = "yes"\n'))
 
+    def test_allow_ssh_read_must_be_a_bool(self):
+        self.assertIn("os_sandbox.allow_ssh_read", self.refused('allow_ssh_read = "yes"\n'))
+        name = self.install("allow_ssh_read = true\n")
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
     def test_enabled_false_on_a_github_harness_is_refused(self):
         message = self.refused("enabled = false\n")
         self.assertIn("os_sandbox.enabled", message)

@@ -919,6 +919,30 @@ def mcp_servers_warning(cwd=None, claude_json=None):
             "file-writing MCP server for the pipeline workspace." % ", ".join(names))
 
 
+# The variables gh and the GitHub tooling read a token from. Every sandboxed command, a role's
+# included, inherits the session's environment, so a token there is one a role can read.
+TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
+
+
+def github_token_names(env=None):
+    """The TOKEN_VARIABLES set in `env` (this process's environment by default), by name."""
+    env = os.environ if env is None else env
+    return [name for name in TOKEN_VARIABLES if env.get(name)]
+
+
+def github_token_warning(env=None):
+    """One line naming the GitHub token variables set in the session's environment, never a
+    value, or None."""
+    names = github_token_names(env)
+    if not names:
+        return None
+    return ("%s %s set in this session's environment, which every sandboxed command, a role's "
+            "included, inherits and can read: unset %s for pipeline sessions and let the "
+            "pinned gh read its own login" % (", ".join(names),
+                                              "is" if len(names) == 1 else "are",
+                                              "it" if len(names) == 1 else "them"))
+
+
 def managed_settings_path():
     if sys.platform == "darwin":
         return Path("/Library/Application Support/ClaudeCode/managed-settings.json")
@@ -1114,6 +1138,7 @@ def report(task_id=None, cwd=None, env=None, probe=None):
     result = dict(inspected)
     result.update(inspect_setup(env))
     result["os_sandbox"] = os_sandbox_facts(cwd, env, probe)
+    result["github_token_env"] = github_token_names(env)
     result["mcp_servers"] = mcp_server_names(cwd)
     result["task"] = task_id
     result["isolated"] = isolated

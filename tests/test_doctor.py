@@ -1204,6 +1204,19 @@ class TestOsSandboxFacts(unittest.TestCase):
         self.write_settings(self.cwd / ".claude" / "settings.local.json", {"sandbox": block})
         self.assertEqual(self.facts()["undoing"], [])
 
+    def test_a_github_token_in_the_environment_is_named_never_its_value(self):
+        env = {"GH_TOKEN": "gho_secretvalue1", "GITHUB_TOKEN": "ghp_secretvalue2",
+               "GH_ENTERPRISE_TOKEN": "", "OTHER": "x"}
+        self.assertEqual(doctor.github_token_names(env), ["GH_TOKEN", "GITHUB_TOKEN"])
+        warning = doctor.github_token_warning(env)
+        self.assertIn("GH_TOKEN, GITHUB_TOKEN", warning)
+        self.assertNotIn("secretvalue", warning)
+        self.assertIsNone(doctor.github_token_warning({"PATH": "/usr/bin"}))
+        result = doctor.report(cwd=str(self.cwd), env=dict(env, PATH="/usr/bin"),
+                               probe=lambda: "unknown")
+        self.assertEqual(result["github_token_env"], ["GH_TOKEN", "GITHUB_TOKEN"])
+        self.assertNotIn("secretvalue", json.dumps(result))
+
     def test_a_pin_inside_the_write_scope_is_exposed(self):
         scope = tmphome.mkdtemp(prefix="pplscope-")
         pin = os.path.join(scope, "bin", "gh")

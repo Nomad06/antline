@@ -125,6 +125,23 @@ class TestProfile(Home):
             self.assertIn(os.path.realpath(entry), deny)
         self.assertEqual(len(deny), len(set(deny)))
 
+    def test_the_profile_denies_reading_the_github_and_ssh_credentials(self):
+        # what a role could copy into a commit or a scratch body the orchestrator publishes
+        moved = {"GH_CONFIG_DIR": "/srv/ghcfg", "XDG_CONFIG_HOME": "/srv/xdg"}
+        with mock.patch.dict(os.environ, moved):
+            deny = self.profile()["sandbox"]["filesystem"]["denyRead"]
+        for entry in ("~/.config/gh", "~/.git-credentials", "~/.config/git/credentials",
+                      "~/.netrc", "~/.ssh", "/srv/ghcfg", "/srv/xdg/gh",
+                      "/srv/xdg/git/credentials"):
+            self.assertIn(os.path.realpath(os.path.expanduser(entry)), deny)
+        self.assertEqual(len(deny), len(set(deny)))
+
+    def test_allow_ssh_read_keeps_ssh_readable(self):
+        deny = self.profile(os_sandbox={"allow_ssh_read": True})["sandbox"]["filesystem"][
+            "denyRead"]
+        self.assertNotIn(os.path.realpath(os.path.expanduser("~/.ssh")), deny)
+        self.assertIn(os.path.realpath(os.path.expanduser("~/.config/gh")), deny)
+
     def test_pin_dirs_are_write_denied_both_path_and_realpath(self):
         deny = self.profile()["sandbox"]["filesystem"]["denyWrite"]
         for entry in ("/opt/x", "/usr/bin", "/opt/y/bin", "/opt/y/lib"):

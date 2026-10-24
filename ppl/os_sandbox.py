@@ -236,6 +236,35 @@ def deny_write(workspace, pin_map):
     return entries
 
 
+# What holds a GitHub or ssh credential a sandboxed command could read and copy into a commit
+# or a scratch body the orchestrator publishes: gh's config, git's credential store, netrc and
+# the ssh keys, under each home directory, and where GH_CONFIG_DIR or XDG_CONFIG_HOME moves gh's
+# config or git's store.
+_SECRETS = (".config/gh", ".git-credentials", ".config/git/credentials", ".netrc")
+_MOVED_SECRETS = (("GH_CONFIG_DIR", ""), ("XDG_CONFIG_HOME", "gh"),
+                  ("XDG_CONFIG_HOME", "git/credentials"))
+
+
+def deny_read(doc):
+    """The profile's filesystem.denyRead, each entry as found and `realpath`-ed: the
+    credential files of _SECRETS under each home directory, ~/.ssh unless [os_sandbox]
+    allow_ssh_read is true, and the moved ones of _MOVED_SECRETS."""
+    from . import escape_paths
+    names = _SECRETS + (() if _table(doc).get("allow_ssh_read") is True else (".ssh",))
+    homes = dict.fromkeys([os.path.expanduser("~")] + escape_paths.home_dirs())
+    found = [os.path.join(home, name) for home in homes for name in names]
+    for variable, name in _MOVED_SECRETS:
+        value = os.environ.get(variable)
+        if value and os.path.isabs(value):
+            found.append(os.path.join(value, name) if name else value)
+    entries = []
+    for entry in found:
+        for form in (entry, os.path.realpath(entry)):
+            if form not in entries:
+                entries.append(form)
+    return entries
+
+
 def profile(doc, workspace, pin_map):
     """The sandbox settings block and the permissions.allow entries ppl owns."""
     denied = deny_write(workspace, pin_map)
@@ -245,7 +274,8 @@ def profile(doc, workspace, pin_map):
                "network": {"deniedDomains": list(DENIED_DOMAINS),
                            "deniedDomainReasons": {d: DENY_REASON for d in DENIED_DOMAINS},
                            "allowedDomains": list(_table(doc).get("allowed_domains") or [])},
-               "filesystem": {"allowWrite": write_scope(doc), "denyWrite": denied}}
+               "filesystem": {"allowWrite": write_scope(doc), "denyWrite": denied,
+                              "denyRead": deny_read(doc)}}
     return {"sandbox": sandbox, "allow": _allow_entries(doc, pin_map)}
 
 

@@ -1007,8 +1007,14 @@ older install left behind keeps running its own copy) [R-DOCTOR-HOOK-SHAPE].
 For a GitHub forge or tracker, `ppl harness apply` also writes the OS sandbox profile into
 `<workspace>/.claude/settings.local.json`, whatever the hooks mode: a `sandbox` block that denies
 github.com and every subdomain to each sandboxed Bash command, the write scope, a denyWrite of
-the workspace, the pins' directories and every path the edit allowlist protects, and the
-`permissions.allow` entries for nine read-only commands on the pinned `gh`, `git` and `ppl` paths
+the workspace, the pins' directories and every path the edit allowlist protects, a denyRead of
+gh's config, git's credential store, `.netrc` and `~/.ssh` (`[os_sandbox] allow_ssh_read = true`
+keeps `~/.ssh` readable for a build that needs ssh), and the `permissions.allow` entries for
+nine read-only commands on the pinned `gh`, `git` and `ppl` paths [R-OS-SANDBOX-NETWORK]. A
+`GH_TOKEN`, `GITHUB_TOKEN` or `GH_ENTERPRISE_TOKEN` in the session's environment reaches every
+sandboxed command, so `ppl doctor` and `ppl init` name it, not its value. Content a role
+writes, commits and scratch bodies, is published by the orchestrator unread, and the macOS
+keychain stays readable from the sandbox unless the live rehearsal shows otherwise
 [R-OS-SANDBOX-NETWORK]. It records the block and the entries it wrote, with the guard's facts
 (workspace, checkout, default branch, repositories, scratch root, pins, `write_scope`, the
 profile's `deny_write`), in `PPL_HOME/os_sandbox.json`.

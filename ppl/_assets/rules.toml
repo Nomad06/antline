@@ -2249,9 +2249,9 @@ event = "ppl harness apply"
 enforcement = "soft"
 hook_or_check = "ppl/setup.py:write_os_sandbox_settings"
 deny_test = ""
-allow_test = "tests/test_harness.py::TestApplyOsSandbox::test_apply_writes_the_profile_and_the_facts_for_a_github_harness"
+allow_test = "tests/test_harness.py::TestApplyOsSandbox::test_apply_writes_the_profile_and_the_facts_for_a_github_harness, tests/test_os_sandbox.py::TestProfile::test_the_profile_denies_reading_the_github_and_ssh_credentials, tests/test_os_sandbox.py::TestProfile::test_allow_ssh_read_keeps_ssh_readable"
 owner = "claude-code"
-residual = "Claude Code enforces it, not ppl, on macOS and Linux only. strictAllowlist is not available from a local settings file, so an unlisted host prompts"
+residual = "Claude Code enforces it, not ppl, on macOS and Linux only. strictAllowlist is not available from a local settings file, so an unlisted host prompts. The profile also denies sandboxed commands a read of gh's config, git's credential store, .netrc and ~/.ssh, under each home directory and where GH_CONFIG_DIR or XDG_CONFIG_HOME moves them, and [os_sandbox] allow_ssh_read = true keeps ~/.ssh readable for a build that needs ssh. A GH_TOKEN, GITHUB_TOKEN or GH_ENTERPRISE_TOKEN in the session's environment is inherited by every sandboxed command, so ppl doctor and ppl init name it, never its value. Content a role writes, commits and scratch bodies, is published by the orchestrator unread, and the macOS keychain stays readable from the sandbox unless the live rehearsal's U2 shows otherwise"
 
 [[rule]]
 id = "R-OS-SANDBOX-ROLE-NO-ESCAPE"

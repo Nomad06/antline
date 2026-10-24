@@ -363,6 +363,12 @@ What this costs and leaves open:
   protected path, and any unix socket allowance, under `os_sandbox.undoing`.
 - MCP servers run outside the OS sandbox and are not checked, so register no file-writing MCP
   server for the pipeline workspace [R-OS-SANDBOX-PROTECTED-PATHS].
+- The profile keeps sandboxed commands from reading gh's config, git's credential store,
+  `.netrc` and `~/.ssh`; set `[os_sandbox] allow_ssh_read = true` for a build that needs ssh
+  [R-OS-SANDBOX-NETWORK]. Unset `GH_TOKEN`, `GITHUB_TOKEN` and `GH_ENTERPRISE_TOKEN` for
+  pipeline sessions: every sandboxed command inherits them, and `ppl doctor` and `ppl init`
+  name one that is set. What a role writes, commits and scratch bodies, the orchestrator
+  publishes unread, and the macOS keychain may stay readable from the sandbox.
 - Use a fine-grained personal access token limited to the one repository the pipeline works on
   for the pipeline's `gh` login. The orchestrator's `gh` holds that credential, so its reach
   is the token's reach.

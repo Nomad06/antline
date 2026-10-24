@@ -206,7 +206,8 @@ def cmd_init(args):
     # after the run exists, so a refusal's stderr stays the one JSON line it is
     for warning in (doctor.dispatch_warning(), doctor.usage_warning(),
                     doctor.hook_location_warning(), doctor.matcher_warning(),
-                    doctor.mcp_servers_warning()):
+                    doctor.mcp_servers_warning(),
+                    doctor.github_token_warning() if os_sandbox.needed(doc) else None):
         if warning:
             sys.stderr.write("warning: %s\n" % warning)
     print(status.card(state["task_id"]))
@@ -228,7 +229,8 @@ def cmd_doctor(args):
                  doctor.hook_location_warning()):
         if line:
             print(line)
-    for warning in (doctor.matcher_warning(), doctor.mcp_servers_warning()):
+    for warning in (doctor.matcher_warning(), doctor.mcp_servers_warning(),
+                    doctor.github_token_warning()):
         if warning:
             print("warning: %s" % warning)
     if result.get("hook_runs_problem"):
