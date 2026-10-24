@@ -2961,6 +2961,37 @@ class TestGuard(unittest.TestCase):
                         "ppl-test-worker", "Bash", {"command": command}, cwd="/tmp/repo")))
         self.assertGreaterEqual(checked, 4, substituted)
 
+    def test_the_os_sandbox_gates_recipe_is_allowed_from_the_workspace(self):
+        # under the OS sandbox profile the orchestrator stays in the workspace, and each gate
+        # changes into the worktree itself
+        import re
+        rendered = fixtures.render_skill_to(tmphome.mkdtemp(prefix="pplskill-"),
+                                            "example-generic")
+        recipe = (rendered / "references" / "gates.md").read_text(encoding="utf-8")
+        block = recipe.split("```bash", 1)[1].split("```", 1)[0]
+        commands, current = [], ""
+        for line in block.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            current += line.rstrip().rstrip("\\") + " "
+            if line.rstrip().endswith("\\"):
+                continue
+            commands.append(current.strip())
+            current = ""
+        gates = [command for command in commands if command.startswith("(cd <worktree> && ")]
+        self.assertEqual(len(gates), 4, commands)
+        for command in commands:
+            command = re.sub(r"<pass\|fail from [^>]*>", "pass", command)
+            for placeholder, value in (("<worktree>", "/tmp/repo"), ("<test_class>", "FooTest"),
+                                       ("<TASK-ID>", "DEMO-700"), ("<SHA>", "abc123"),
+                                       ("<GENERATION>", "1")):
+                command = command.replace(placeholder, value)
+            self.assertIsNone(re.search(r"<[A-Za-z]", command), command)
+            for cwd in ("/home/dev/ppl-workspace", "/tmp/repo"):
+                with self.subTest(command=command, cwd=cwd):
+                    self.assertIsNone(ppl_guard.decide(payload(
+                        None, "Bash", {"command": command}, cwd=cwd)))
+
     # --- Forge denials come from the adapter the run's harness snapshot names. ---
 
     def test_resolve_merge_and_approve_are_denied_under_the_snapshot_server_name(self):

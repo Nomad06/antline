@@ -1034,6 +1034,9 @@ keychain stays readable from the sandbox unless the live rehearsal shows otherwi
 [R-OS-SANDBOX-NETWORK]. It records the block and the entries it wrote, with the guard's facts
 (workspace, checkout, default branch, repositories, scratch root, pins, `write_scope`, the
 profile's `deny_write`), in `PPL_HOME/os_sandbox.json`.
+Under the profile the rendered skill keeps the orchestrator's session in the workspace its gh
+and ppl calls run from: stage 1 runs git with `-C`, and each gate recipe changes into the
+worktree in a subshell, `(cd <worktree> && <gate>)`.
 A `sandbox` key in the settings file is ppl's only when it equals the recorded block. Any other one,
 and invalid JSON, is a `SETUP_INCOMPLETE` that leaves the file as it was [R-OS-SANDBOX-NETWORK]. A harness that no
 longer needs the profile has the block, the entries and the facts file removed on the next apply.

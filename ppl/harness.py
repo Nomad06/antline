@@ -613,18 +613,28 @@ OS_FLAG_NOTE = ("Run each command here that starts with an absolute path exactly
 OS_WORKSPACE_NOTE = ("Run every `gh` and `ppl` call outside the sandbox from the workspace "
                      "`%s`, and `cd` back there when one is denied for its cwd "
                      "[R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
+# Stage 1 under the profile: the session stays in the workspace, so a gate names the worktree.
+OS_GATES_WHERE = ("Every gate and every dispatched worker works in this worktree from now on: "
+                  "each gate recipe in `references/gates.md` changes into it in a subshell, so "
+                  "this session stays in the workspace.")
 _UNKNOWN_REPO = "<owner/name>"
 _UNKNOWN_WORKSPACE = "<workspace>"
 
 
 def _gate_recipes(doc):
+    """The harness gates in their log-and-rc shape. Under the OS sandbox profile the
+    orchestrator's session stays in the workspace its gh and ppl calls run from, so each gate
+    changes into the worktree in a subshell, which leaves the session where it is."""
     env = " ".join("%s=%s" % (key, shlex.quote(value))
                    for key, value in sorted((doc.get("env") or {}).items()))
     run_dir = "%s/<TASK-ID>" % os_sandbox.scratch_root()
     lines = ["mkdir -p %s" % run_dir, "git -C <worktree> rev-parse HEAD", ""]
+    in_worktree = os_sandbox.needed(doc)
     for gate in doc.get("gate") or []:
         name = gate["name"]
         command = ("%s %s" % (env, gate["command"])).strip()
+        if in_worktree:
+            command = "(cd <worktree> && %s)" % command
         lines.append("# %s" % name)
         fill = {"command": command, "dir": run_dir, "name": name}
         lines.append(_RC_IDIOM % fill)
@@ -656,6 +666,8 @@ def _os_values(doc, pins, workspace):
               ("os", "fetch"): "git fetch origin %s" % default_branch, ("os", "stage1-note"): "",
               ("os", "push"): "git push -u origin <branch>", ("os", "destroy"): "",
               ("os", "merge-watch"): "",
+              ("os", "gates-where"): "This is where every gate and every dispatched worker runs "
+                                     "from now on.",
               ("os", "forge-repo"): _UNKNOWN_REPO, ("os", "tracker-repo"): _UNKNOWN_REPO}
     if not os_sandbox.needed(doc):
         return values
@@ -680,6 +692,7 @@ def _os_values(doc, pins, workspace):
                    ("os", "tracker-repo"): tracker_repo or _UNKNOWN_REPO,
                    ("os", "cd"): "", ("os", "git-dir"): "-C %s " % checkout,
                    ("os", "fetch"): "git -C %s fetch origin %s" % (checkout, default_branch),
+                   ("os", "gates-where"): OS_GATES_WHERE,
                    ("os", "stage1-note"): "\n\n" + note if note else ""})
     if not github_forge:
         # git reaches another forge from inside the sandbox

@@ -1789,8 +1789,15 @@ class TestRenderSkill(HarnessTestCase):
                       % os.path.realpath("/home/dev/src/project"),
                       generic["references/stage-1-baseline.md"])
         self.assertIn("diff origin/main...HEAD", generic["references/gates.md"])
-        self.assertIn("make test TEST=<test_class> > %s/<TASK-ID>/focused-tests.log 2>&1"
-                      % os_sandbox.scratch_root(), generic["references/gates.md"])
+        # the session stays in the workspace, so each gate changes into the worktree itself
+        self.assertIn("(cd <worktree> && make test TEST=<test_class>) > "
+                      "%s/<TASK-ID>/focused-tests.log 2>&1" % os_sandbox.scratch_root(),
+                      generic["references/gates.md"])
+        self.assertIn("changes into it in a subshell",
+                      generic["references/stage-1-baseline.md"])
+        self.assertNotIn("This is where every gate", generic["references/stage-1-baseline.md"])
+        self.assertNotIn("(cd <worktree>", maven["references/gates.md"])
+        self.assertIn("This is where every gate", maven["references/stage-1-baseline.md"])
 
     def test_the_harness_name_in_the_skill_is_the_installed_directory(self):
         # The document inside "mine" still says name = "example-maven", and

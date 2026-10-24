@@ -14,7 +14,7 @@ convention `<TASK-ID>-<short-slug>`:
 git <!-- include: os/git-dir -->worktree add <!-- include: harness/worktrees -->/<repo-name>-<TASK-ID> -b <TASK-ID>-<short-slug> origin/<!-- include: harness/default-branch -->
 ```
 
-This is where every gate and every dispatched worker runs from now on.<!-- include: os/stage1-note -->
+<!-- include: os/gates-where --><!-- include: os/stage1-note -->
 
 Then record the baseline. <!-- include: harness/baseline -->
 Commands are in `references/gates.md`. Then save it to
