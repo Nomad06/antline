@@ -11,6 +11,9 @@ import subprocess
 
 HOOKS_OFF = ["-c", "core.hooksPath=/dev/null"]
 FETCH_FLAG = "--no-recurse-submodules"
+# A push's first words. The command line wins over a global push.followTags or
+# push.recurseSubmodules the guard cannot read, so no tag a role made and no submodule goes too.
+PUSH_FLAGS = ["--no-verify", "--no-follow-tags", "--no-recurse-submodules"]
 # Every git the guard runs gets this long: a hook that runs past its own timeout denies nothing.
 TIMEOUT_SECONDS = 0.2
 # Config keys known to run nothing and to send nothing elsewhere. core.hooksPath is here
@@ -35,11 +38,12 @@ _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _PSEUDO_REF = re.compile(r"(?:[A-Z_]*_)?HEAD", re.IGNORECASE)
 _UPSTREAM = ("-u", "--set-upstream")
 _SHAPE = ("git leaves the OS sandbox only as `git -c core.hooksPath=/dev/null -C <dir> fetch "
-          "--no-recurse-submodules origin <default branch>` or `... push --no-verify ...`, with "
-          "one -c and no other option, so no hook runs there")
-_PUSH_SHAPE = ("git push takes only --no-verify [-u|--set-upstream] origin "
-               "refs/heads/<branch>:refs/heads/<branch> or --no-verify origin --delete "
-               "refs/heads/<branch>")
+          "--no-recurse-submodules origin <default branch>` or `... push --no-verify "
+          "--no-follow-tags --no-recurse-submodules ...`, with one -c and no other option, so no "
+          "hook runs there")
+_PUSH_SHAPE = ("git push takes only --no-verify --no-follow-tags --no-recurse-submodules "
+               "[-u|--set-upstream] origin refs/heads/<branch>:refs/heads/<branch>, or the same "
+               "three words then origin --delete refs/heads/<branch>")
 
 
 def _short(value):
@@ -97,7 +101,7 @@ def _push_words(directory, rest, facts, state):
     if directory != repo:
         return None, None, ("git push runs only in the run's repo %s, not %s"
                             % (repo, _short(directory)))
-    words = rest[1:] if rest[:1] == ["--no-verify"] else None
+    words = rest[len(PUSH_FLAGS):] if rest[:len(PUSH_FLAGS)] == PUSH_FLAGS else None
     if words and len(words) == 3 and words[0] in _UPSTREAM:
         remote, refspec, delete = words[1], words[2], False
     elif words and len(words) == 3 and words[1] == "--delete":

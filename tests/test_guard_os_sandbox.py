@@ -800,6 +800,8 @@ GIT_BIN = shutil.which("git") or "/usr/bin/git"
 # The one push refspec the guard takes: the run branch to itself, both named in full.
 SPEC = "refs/heads/%s:refs/heads/%s" % (BRANCH, BRANCH)
 HEAD_REF = "refs/heads/" + BRANCH
+# The words every push carries first: hooks, tags and submodules off whatever the config says.
+PUSH_FLAGS = ("--no-verify", "--no-follow-tags", "--no-recurse-submodules")
 
 
 def spec(name):
@@ -854,7 +856,7 @@ class GitShapes(OsSandboxCase):
                         + list(words))
 
     def push(self, *words):
-        return self.command(self.repo, "push", "--no-verify", *words)
+        return self.command(self.repo, "push", *(PUSH_FLAGS + words))
 
     def fetch(self, *words):
         return self.command(self.checkout, "fetch", "--no-recurse-submodules", *words)
@@ -891,16 +893,48 @@ class GitShapes(OsSandboxCase):
         reason = self.deny_reason(self.decide(self.push("origin", BRANCH)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
 
-    def test_a_qualified_push_lands_on_the_run_branch_whatever_the_merge_key(self):
-        # what git does with the accepted words, against a local stand-in for the forge repo
-        # and the push.default=upstream an operator's global config may set
+    def test_a_push_without_no_follow_tags_or_no_recurse_submodules_is_denied(self):
+        # rule: R-OS-SANDBOX-GIT-CONFIG
+        # the operator's global config may follow tags or recurse into submodules, which the
+        # guard cannot read, and only the command line overrides it
+        for flags in (("--no-verify",), ("--no-verify", "--no-follow-tags"),
+                      ("--no-verify", "--no-recurse-submodules"),
+                      ("--no-verify", "--no-recurse-submodules", "--no-follow-tags"),
+                      ("--no-follow-tags", "--no-verify", "--no-recurse-submodules"),
+                      PUSH_FLAGS + ("--no-follow-tags",),
+                      ("--no-verify", "--no-follow-tags", "--recurse-submodules=no")):
+            for tail in (("origin", SPEC), ("-u", "origin", SPEC), ("origin", "--delete", HEAD_REF)):
+                command = self.command(self.repo, "push", *(flags + tail))
+                with self.subTest(command=command):
+                    reason = self.deny_reason(self.decide(command))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn(" ".join(PUSH_FLAGS), reason)
+
+    def test_the_accepted_push_lands_only_the_run_branch_whatever_the_global_config(self):
+        # the guard allows the words, then git runs the same words against a local stand-in
+        # for the forge repo, under a global config the guard cannot read that follows tags,
+        # recurses into submodules and pushes to the upstream, with a role's merge key on main
+        # and a role's annotated tag on the run branch
+        from ppl import escape_git
         forge = os.path.join(self.root, "forge.git")
         git(self.root, "init", "-q", "--bare", "--template=", forge)
         git(self.checkout, "config", "branch.%s.remote" % BRANCH, "origin")
         git(self.checkout, "config", "branch.%s.merge" % BRANCH, "refs/heads/main")
-        git(self.repo, "-c", "url.%s.insteadOf=https://github.com/o/r.git" % forge,
-            "-c", "push.default=upstream", "-c", "core.hooksPath=/dev/null",
-            "push", "-q", "--no-verify", "origin", SPEC)
+        identity = ("-c", "user.name=t", "-c", "user.email=t@example.com",
+                    "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false")
+        git(self.repo, *(identity + ("commit", "-q", "--allow-empty", "-m", "work")))
+        git(self.repo, *(identity + ("tag", "-a", "v9.9.9", "-m", "release")))
+        global_config = os.path.join(self.root, "global.gitconfig")
+        with open(global_config, "w", encoding="utf-8") as handle:
+            handle.write("[push]\n\tfollowTags = true\n\trecurseSubmodules = on-demand\n"
+                         "\tdefault = upstream\n[url \"%s\"]\n"
+                         "\tinsteadOf = https://github.com/o/r.git\n" % forge)
+        argv = escape.plain_argv(self.push("origin", SPEC))
+        self.assertIsNone(escape_git.git_shape(argv, escape.load_facts(paths.home()),
+                                               run.load(TASK)))
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=global_config, GIT_CONFIG_NOSYSTEM="1")
+        done = subprocess.run(argv, capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(git(forge, "for-each-ref", "--format=%(refname)"), HEAD_REF)
 
     def test_fetch_of_the_default_branch_from_the_checkout_is_allowed(self):
@@ -954,7 +988,7 @@ class GitShapes(OsSandboxCase):
                 self.assertIn("default branch", reason)
         # from a repo whose HEAD is on it as well
         with self.run_state(repo=self.checkout):
-            command = self.command(self.checkout, "push", "--no-verify", "origin", spec("main"))
+            command = self.command(self.checkout, "push", *(PUSH_FLAGS + ("origin", spec("main"))))
             self.assertIn("default branch", self.deny_reason(self.decide(command)))
 
     def test_a_colon_refspec_is_denied(self):
@@ -1015,7 +1049,7 @@ class GitShapes(OsSandboxCase):
             for words in (("origin", spec("heads/main")),
                           ("origin", "--delete", "refs/heads/heads/main")):
                 with self.subTest(words=words):
-                    command = self.command(repo, "push", "--no-verify", *words)
+                    command = self.command(repo, "push", *(PUSH_FLAGS + words))
                     reason = self.deny_reason(self.decide(command))
                     self.assertIn("BOUNDARY_VIOLATION", reason)
                     self.assertIn("heads/main", reason)
@@ -1028,7 +1062,7 @@ class GitShapes(OsSandboxCase):
 
     def test_a_push_without_the_hooks_off_flag_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
-        tail = " push --no-verify origin " + SPEC
+        tail = " push %s origin %s" % (" ".join(PUSH_FLAGS), SPEC)
         for command, part in (
                 ("%s -C %s%s" % (GIT_BIN, self.repo, tail), "core.hooksPath=/dev/null"),
                 ("%s -c core.hooksPath=/tmp/hooks -C %s%s" % (GIT_BIN, self.repo, tail),
@@ -1047,7 +1081,7 @@ class GitShapes(OsSandboxCase):
 
     def test_a_second_dash_c_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
-        tail = " push --no-verify origin " + SPEC
+        tail = " push %s origin %s" % (" ".join(PUSH_FLAGS), SPEC)
         for middle in ("-c core.sshCommand=/tmp/evil -C " + self.repo,
                        "-c core.hooksPath=/dev/null -C " + self.repo,
                        "-C %s -c core.sshCommand=/tmp/evil" % self.repo,
@@ -1094,10 +1128,11 @@ class GitShapes(OsSandboxCase):
 
         facts = escape.load_facts(paths.home())
         for command, part in (
-                (self.command(self.checkout, "push", "--no-verify", "origin", SPEC), "run's repo"),
-                (self.command(self.repo + "/", "push", "--no-verify", "origin", SPEC),
+                (self.command(self.checkout, "push", *(PUSH_FLAGS + ("origin", SPEC))),
                  "run's repo"),
-                (self.command("worktrees/r-GH-7", "push", "--no-verify", "origin", SPEC),
+                (self.command(self.repo + "/", "push", *(PUSH_FLAGS + ("origin", SPEC))),
+                 "run's repo"),
+                (self.command("worktrees/r-GH-7", "push", *(PUSH_FLAGS + ("origin", SPEC))),
                  "run's repo"),
                 (self.command(self.repo, "fetch", "origin", "main"), "checkout"),
                 (self.command(self.root, "fetch", "origin", "main"), "checkout")):
@@ -1242,7 +1277,8 @@ class GitShapes(OsSandboxCase):
             handle.write("#!/bin/sh\nexec sleep 5\n")
         os.chmod(slow, 0o755)
         self.write_facts(git_path=slow)
-        command = self.command(self.repo, "push", "--no-verify", "origin", SPEC, git_path=slow)
+        command = self.command(self.repo, "push", *(PUSH_FLAGS + ("origin", SPEC)),
+                               git_path=slow)
         started = time.monotonic()
         reason = self.deny_reason(self.decide(command))
         self.assertLess(time.monotonic() - started, 3)

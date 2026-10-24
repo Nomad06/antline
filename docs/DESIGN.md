@@ -598,11 +598,13 @@ fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`
 [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For git (`ppl/escape_git.py`) it holds `-c
 core.hooksPath=/dev/null -C <checkout> fetch --no-recurse-submodules origin <default branch>`,
 word for word ppl's allow entry, so no submodule is fetched with its own config, and, in the
-run's repo, `-c core.hooksPath=/dev/null -C <repo> push --no-verify [-u] origin
-refs/heads/<branch>:refs/heads/<branch>` or `push --no-verify origin --delete
-refs/heads/<branch>`, both refs named in full so no config moves the push onto another ref,
-the branch being the one git reports HEAD on, never the default branch, and a plain name with
-no `/`, `:` or `+` [R-OS-SANDBOX-GIT-CONFIG].
+run's repo, `-c core.hooksPath=/dev/null -C <repo> push --no-verify --no-follow-tags
+--no-recurse-submodules [-u] origin refs/heads/<branch>:refs/heads/<branch>` or the same
+three words then `origin --delete refs/heads/<branch>`, the branch being the one git reports
+HEAD on, never the default branch, and a plain name with no `/`, `:` or `+`
+[R-OS-SANDBOX-GIT-CONFIG]. The qualified refspec pins the destination ref, and the command line
+switches tags and submodules off whatever the operator's global config, which the guard cannot
+read, says [R-OS-SANDBOX-GIT-CONFIG].
 Before it lets one through the guard runs the pinned git on that repository, each call held
 to 0.2 s, and denies unless its local and worktree config set only keys that run nothing,
 with no include, and give the remote one url, the forge repo on github.com
