@@ -907,6 +907,11 @@ class TestGithubCommandsLeaveTheSandbox(unittest.TestCase):
         self.assertEqual(fetch, ["%s -c core.hooksPath=/dev/null -c core.sshCommand=ssh "
                                  "-c credential.helper= -c core.askPass= "
                                  "-c protocol.ext.allow=never -c protocol.file.allow=never "
+                                 "-c protocol.allow=never -c protocol.ssh.allow=always "
+                                 "-c protocol.git.allow=never -c push.gpgSign=false "
+                                 "-c gpg.program= -c core.alternateRefsCommand= "
+                                 "-c core.fsmonitor=false -c gc.auto=0 "
+                                 "-c maintenance.auto=false "
                                  "-C %s fetch --no-recurse-submodules origin main"
                                  % (self.pins["git"]["path"], self.facts["checkout"])])
 

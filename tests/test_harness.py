@@ -1762,7 +1762,10 @@ class TestRenderSkill(HarnessTestCase):
         # a GitHub harness fetches outside the OS sandbox, on the pinned git
         self.assertIn("\n/usr/bin/git -c core.hooksPath=/dev/null -c core.sshCommand=ssh "
                       "-c credential.helper= -c core.askPass= -c protocol.ext.allow=never "
-                      "-c protocol.file.allow=never -C %s fetch "
+                      "-c protocol.file.allow=never -c protocol.allow=never "
+                      "-c protocol.ssh.allow=always -c protocol.git.allow=never "
+                      "-c push.gpgSign=false -c gpg.program= -c core.alternateRefsCommand= "
+                      "-c core.fsmonitor=false -c gc.auto=0 -c maintenance.auto=false -C %s fetch "
                       "--no-recurse-submodules origin main\n"
                       % os.path.realpath("/home/dev/src/project"),
                       generic["references/stage-1-baseline.md"])
@@ -1900,7 +1903,11 @@ class TestRenderOsSandbox(HarnessTestCase):
         checkout = os.path.realpath("/home/dev/src/project")
         self.assertIn("```bash\n/usr/bin/git -c core.hooksPath=/dev/null "
                       "-c core.sshCommand=ssh -c credential.helper= -c core.askPass= "
-                      "-c protocol.ext.allow=never -c protocol.file.allow=never -C %s fetch "
+                      "-c protocol.ext.allow=never -c protocol.file.allow=never "
+                      "-c protocol.allow=never -c protocol.ssh.allow=always "
+                      "-c protocol.git.allow=never -c push.gpgSign=false -c gpg.program= "
+                      "-c core.alternateRefsCommand= -c core.fsmonitor=false -c gc.auto=0 "
+                      "-c maintenance.auto=false -C %s fetch "
                       "--no-recurse-submodules origin main\ngit -C %s worktree add "
                       % (checkout, checkout),
                       rendered["references/stage-1-baseline.md"])

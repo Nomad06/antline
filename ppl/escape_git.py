@@ -10,14 +10,21 @@ import re
 import subprocess
 
 # The -c words every fetch and push outside the OS sandbox carries first, in this order, as its
-# only -c words. They turn off a hook, the repository's own ssh command, credential helper and
-# askpass program, and the ext:: and local-path transports, since the command line wins over the
-# repository's config, which a role can rewrite between the guard's check and the call.
-# core.gitProxy and core.alternateRefsCommand are not among them, see the residual of
-# R-OS-SANDBOX-GIT-CONFIG. os_sandbox renders the commands and the fetch allow entry from it.
+# only -c words. The command line wins over the repository's config, which a role can rewrite
+# between the guard's check and the call, for each key git reads at fetch or push time that
+# can run a program from it: a hook, the ssh command, a credential helper, an askpass program,
+# a gpg program for a signed push, an alternate-refs command, an fsmonitor, and an automatic gc
+# or maintenance run. ssh is the one transport: protocol.allow=never shuts the rest, and the
+# ext, file and git words stay because a per-protocol key a role sets would beat
+# protocol.allow alone, git:// with it, where core.gitProxy runs a program. os_sandbox
+# renders the commands and the fetch allow entry from this list.
 PINNED_CONFIG = ["-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=ssh",
                  "-c", "credential.helper=", "-c", "core.askPass=",
-                 "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never"]
+                 "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never",
+                 "-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always",
+                 "-c", "protocol.git.allow=never", "-c", "push.gpgSign=false",
+                 "-c", "gpg.program=", "-c", "core.alternateRefsCommand=",
+                 "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"]
 FETCH_FLAG = "--no-recurse-submodules"
 # A push's first words. The command line wins over a global push.followTags or
 # push.recurseSubmodules the guard cannot read, so no tag a role made and no submodule goes too.
@@ -48,7 +55,8 @@ _UPSTREAM = ("-u", "--set-upstream")
 _SHAPE = ("git leaves the OS sandbox only as `git %s -C <dir> fetch --no-recurse-submodules "
           "origin <default branch>` or `... push --no-verify --no-follow-tags "
           "--no-recurse-submodules ...`, those -c words first, in that order, and no other "
-          "option, so no hook, helper or local transport runs there" % " ".join(PINNED_CONFIG))
+          "option, so no program of the repository's config runs there and ssh is the one "
+          "transport" % " ".join(PINNED_CONFIG))
 _PUSH_SHAPE = ("git push takes only --no-verify --no-follow-tags --no-recurse-submodules "
                "[-u|--set-upstream] origin refs/heads/<branch>:refs/heads/<branch>, or the same "
                "three words then origin --delete refs/heads/<branch>")

@@ -602,8 +602,11 @@ in the run's scratch directory [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For ppl it hol
 fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`
 [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For git (`ppl/escape_git.py`) every shape starts with
 the fixed `-c` words of `escape_git.PINNED_CONFIG`, in this order and as its only `-c` words:
-`-c core.hooksPath=/dev/null -c core.sshCommand=ssh -c credential.helper= -c core.askPass= -c
-protocol.ext.allow=never -c protocol.file.allow=never` (`<pinned -c>` below)
+`core.hooksPath=/dev/null`, `core.sshCommand=ssh`, an empty `credential.helper` and
+`core.askPass`, `protocol.ext.allow`, `protocol.file.allow` and `protocol.allow` `never`,
+`protocol.ssh.allow=always`, `protocol.git.allow=never`, `push.gpgSign=false`, an empty
+`gpg.program` and `core.alternateRefsCommand`, `core.fsmonitor=false`, `gc.auto=0` and
+`maintenance.auto=false`, each after its own `-c` (`<pinned -c>` below)
 [R-OS-SANDBOX-GIT-CONFIG]. It holds `<pinned -c> -C <checkout> fetch --no-recurse-submodules
 origin <default branch>`, word for word ppl's allow entry, so no submodule is fetched with its
 own config, and, in the run's repo, `<pinned -c> -C <repo> push --no-verify --no-follow-tags
@@ -613,11 +616,11 @@ HEAD on, never the default branch, and a plain name with no `/`, `:` or `+`
 [R-OS-SANDBOX-GIT-CONFIG]. The qualified refspec pins the destination ref, and the command line
 switches tags and submodules off whatever the operator's global config, which the guard cannot
 read, says [R-OS-SANDBOX-GIT-CONFIG]. The pinned `-c` words win over a local config a role
-rewrites between the guard's check and the call for a hook, the ssh command, a credential
-helper, an askpass program and the ext and local-path transports, so an https remote has no
-credential under the profile and its push fails: give the checkout an ssh remote
-[R-OS-SANDBOX-GIT-CONFIG]. They leave `core.gitProxy` behind a `git://` redirect and
-`core.alternateRefsCommand` on a fetch open, as the rule's residual says.
+rewrites between the guard's check and the call for every key known to run a program at
+fetch or push time, and leave ssh the one transport, so an https remote is refused under the
+profile, fetch included: give the checkout an ssh remote [R-OS-SANDBOX-GIT-CONFIG]. A
+redirect to another ssh host still sends the content there with the operator's key, as the
+rule's residual says, until fetch and push run through a gitdir ppl owns.
 Before it lets one through the guard runs the pinned git on that repository, each call held
 to 0.2 s, and denies unless its local and worktree config set only keys that run nothing,
 with no include, and give the remote one url, the forge repo on github.com

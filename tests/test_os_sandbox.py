@@ -95,7 +95,10 @@ class TestProfile(Home):
             "Bash(/opt/x/gh auth status)",
             "Bash(/usr/bin/git -c core.hooksPath=/dev/null -c core.sshCommand=ssh "
             "-c credential.helper= -c core.askPass= -c protocol.ext.allow=never "
-            "-c protocol.file.allow=never -C %s fetch --no-recurse-submodules origin main)"
+            "-c protocol.file.allow=never -c protocol.allow=never -c protocol.ssh.allow=always "
+            "-c protocol.git.allow=never -c push.gpgSign=false -c gpg.program= "
+            "-c core.alternateRefsCommand= -c core.fsmonitor=false -c gc.auto=0 "
+            "-c maintenance.auto=false -C %s fetch --no-recurse-submodules origin main)"
             % os.path.realpath("/srv/repo"),
             "Bash(/opt/y/bin/ppl tracker fetch --task *)",
             "Bash(/opt/y/bin/ppl review fetch --pr *)",
@@ -103,7 +106,8 @@ class TestProfile(Home):
 
     def test_no_allow_entry_covers_a_github_write(self):
         text = " ".join(self.profile()["allow"])
-        for write in ("pr create", "issue comment", "pr close", "api *", "push"):
+        # " push " as a git verb: the fetch entry's push.gpgSign=false is a config key
+        for write in ("pr create", "issue comment", "pr close", "api *", " push "):
             self.assertNotIn(write, text)
 
     def test_pin_dirs_are_write_denied_both_path_and_realpath(self):
