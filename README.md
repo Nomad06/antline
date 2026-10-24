@@ -122,7 +122,7 @@ the test writer tries to `cat` product code and the hook denies it
 - Independent tests by construction, not by a line in a prompt.
 - The limits that matter are code. `ppl/_assets/rules.toml` holds 188 rules, 141 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 2577 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 2834 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
@@ -144,12 +144,13 @@ the test writer tries to `cat` product code and the hook denies it
 - The test/main split comes from the harness's `[tests]` globs (the Java and Maven
   defaults when it has none), and the split is by path, so tests inside product files
   (Rust `#[cfg(test)]`, doctests) are not isolated.
-- A worktree is not a sandbox. A process can still read credentials or write outside the
-  tree if the operating system lets it.
-- The `gh` tracker gate reads the command's words, so a renamed binary, an API host held in a
-  variable, an interpreter or a script file is not seen. The boundary that closes this is a
-  GitHub credential the role sessions never hold, which is planned follow-up work
-  [R-TRACKER-CLI-GATE].
+- A worktree is not a sandbox. On a GitHub harness Claude Code's OS sandbox confines GitHub
+  access and writes from Bash, and nothing else: other network and most reads are open, and
+  Windows has no OS sandbox (see Credential separation).
+- Without the OS sandbox (`--no-os-sandbox`, or Windows) the `gh` tracker gate reads only the
+  command's words, so a renamed binary, an API host held in a variable, an interpreter or a
+  script file is not seen. The boundary that closes this is a GitHub credential the role
+  sessions never hold [R-TRACKER-CLI-GATE].
 - The done gate mostly checks documents the same session wrote. SHA binding and
   consistency checks catch drift and omissions, but a model that is wrong in a
   self-consistent way passes. Real independence needs CI or a verifier on separate
@@ -326,6 +327,42 @@ problem, and warns when the dispatch or the usage hook is missing or malformed, 
 a hook script is not the one under this install's `_assets/hooks` (a clone or an older
 install left behind) [R-DOCTOR-HOOK-SHAPE]. Neither runs anything to judge the shape: the interpreter's
 version is asked by `ppl doctor` when it runs the guard (`hook_runs`).
+
+## Credential separation
+
+On a GitHub harness (a GitHub forge or the GitHub Issues tracker) no role can reach GitHub.
+`ppl harness apply` writes an OS sandbox profile into the workspace's
+`.claude/settings.local.json`. Every pipeline Bash command then runs in Claude Code's OS sandbox
+with `github.com` and every subdomain denied, which Claude Code enforces on macOS and Linux
+[R-OS-SANDBOX-NETWORK]. A role's Bash call that asks to leave the sandbox is denied by the guard
+[R-OS-SANDBOX-ROLE-NO-ESCAPE], a role's call to a GitHub MCP tool is denied
+[R-FORGE-GH-MCP-NO-ROLE], and so is its WebFetch of a github.com URL
+[R-WEBFETCH-GITHUB-NO-ROLE].
+
+Only the unroled orchestrator leaves the sandbox, and only for one plain command on a `gh`, `git`
+or `ppl` that apply pinned, in a shape the guard lists, against the harness's own repository
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A fetch, push or branch delete also needs a repository whose
+local git config runs nothing and points the remote at the forge repo
+[R-OS-SANDBOX-GIT-CONFIG]. If the guard cannot decide such a call it denies it
+[R-OS-SANDBOX-FAIL-CLOSED]. `ppl init` refuses to start a GitHub run in a session that is not
+sandboxed this way, unless you pass `--no-os-sandbox`, which the run records
+[R-OS-SANDBOX-INIT-REQUIRED]. `ppl doctor` shows `os_sandbox.state`.
+
+What this costs and leaves open:
+
+- While a GitHub harness is applied no guarded session can edit ppl's own source, `~/.claude`
+  outside `projects` and `plans`, or a file outside the sandbox write scope with an edit tool
+  [R-OS-SANDBOX-PROTECTED-PATHS].
+- MCP servers run outside the OS sandbox and are not checked, so register no file-writing MCP
+  server for the pipeline workspace [R-OS-SANDBOX-PROTECTED-PATHS].
+- Use a fine-grained personal access token limited to the one repository the pipeline works on
+  for the pipeline's `gh` login. The orchestrator's `gh` holds that credential, so its reach
+  is the token's reach.
+- Windows has no OS sandbox: `ppl init` refuses there without `--no-os-sandbox`
+  [R-OS-SANDBOX-INIT-REQUIRED]. Git LFS pushes are not supported under the sandbox, since a
+  local LFS install sets filter keys the push check refuses [R-OS-SANDBOX-GIT-CONFIG].
+- The orchestrator is still a model, and its stage gate still reads the command's words
+  [R-TRACKER-CLI-GATE].
 
 ## Harness
 

@@ -624,6 +624,20 @@ without blocking and read only when regular, so a FIFO a role leaves in `runs/` 
 rather than holding the hook past its timeout, which would deny nothing
 [R-OS-SANDBOX-FAIL-CLOSED].
 
+**The edit allowlist.** Edit tools run outside the OS sandbox, so the profile does not confine
+them. While `PPL_HOME/os_sandbox.json` exists every session the guard sees is in scope, and an
+edit tool writes only inside the facts' `write_scope` and Claude Code's own `~/.claude/projects`
+and `~/.claude/plans`, and never under a `deny_write` entry even inside an allowed root
+(`ppl/escape_paths.py`) [R-OS-SANDBOX-PROTECTED-PATHS]. A path with leading or trailing
+JavaScript whitespace or a control character is denied, and the rest is resolved right before the
+call [R-OS-SANDBOX-PROTECTED-PATHS]. While a GitHub harness is applied no guarded session can
+therefore edit ppl's own source, `~/.claude` outside projects and plans, or a file outside the
+write scope with an edit tool [R-OS-SANDBOX-PROTECTED-PATHS]. Without the facts the allowlist
+stands aside and the older path rules apply. An MCP server runs outside the OS sandbox and is not
+checked here, so the pipeline workspace should register no file-writing one
+[R-OS-SANDBOX-PROTECTED-PATHS]. A role's call to a GitHub MCP tool is denied
+[R-FORGE-GH-MCP-NO-ROLE], and so is its WebFetch of a github.com URL [R-WEBFETCH-GITHUB-NO-ROLE].
+
 **Checked, not just trusted.** `ppl` cannot see how the guard hook is registered
 from inside `decide()` - that lives in a `.claude/settings*.json` file, not in run state -
 but it can be checked separately, on disk, before a run even starts
@@ -970,7 +984,8 @@ For a GitHub forge or tracker, `ppl harness apply` also writes the OS sandbox pr
 github.com and every subdomain to each sandboxed Bash command, the write scope, and the
 `permissions.allow` entries for nine read-only commands on the pinned `gh`, `git` and `ppl` paths
 [R-OS-SANDBOX-NETWORK]. It records the block and the entries it wrote, with the guard's facts
-(workspace, checkout, default branch, repositories, scratch root, pins), in `PPL_HOME/os_sandbox.json`.
+(workspace, checkout, default branch, repositories, scratch root, pins, `write_scope`, the
+profile's `deny_write`), in `PPL_HOME/os_sandbox.json`.
 A `sandbox` key in the settings file is ppl's only when it equals the recorded block. Any other one,
 and invalid JSON, is a `SETUP_INCOMPLETE` that leaves the file as it was [R-OS-SANDBOX-NETWORK]. A harness that no
 longer needs the profile has the block, the entries and the facts file removed on the next apply.
@@ -2615,8 +2630,14 @@ The build is finished when all of these are demonstrably true:
   the diff, the hook denies a dispatch prompt carrying it verbatim
   [R-TEST-WORKER-DISPATCH-LEAK], and a paraphrase still passes [R-TEST-WORKER-NO-DIFF n/a])
   and deterministic gates between roles. This is a stated limitation, not an oversight.
-- **Worktree is not a sandbox.** It isolates changes. A process can still read credentials
-  or write outside the tree if the OS permits. OS-level isolation is not part of v1.
+- **A worktree is not a sandbox, and the OS sandbox covers GitHub and the write scope only.**
+  A worktree isolates changes. On a GitHub harness GitHub network access is OS-enforced through
+  Claude Code's sandbox on macOS and Linux [R-OS-SANDBOX-NETWORK]. Other network and most of the
+  filesystem are not confined beyond the sandbox's write scope, a process can still read
+  credentials, and Windows has no OS sandbox, so `ppl init` refuses there without
+  `--no-os-sandbox` [R-OS-SANDBOX-INIT-REQUIRED]. Git LFS pushes are not supported under it
+  [R-OS-SANDBOX-GIT-CONFIG]. This is a recorded departure from v1's stated limitation, which
+  was no OS-level isolation at all.
 - **The orchestrator is a model.** Determinism comes from `ppl` refusing illegal
   transitions and hooks refusing illegal writes, not from the orchestrator's discipline.
   Every rule that matters is expected to live in code, not merely in the skill prompt.
