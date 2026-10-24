@@ -516,13 +516,16 @@ def _value_problem(kind, flag, value, facts, state):
 
 def _cwd_problem(name, cwd, facts):
     """gh, and ppl whose own gh and git calls inherit the cwd, never load a repo a role can
-    write, so they run only from a directory outside every write scope entry."""
+    write, so they run only from a directory outside every write scope entry. The reason names
+    the workspace, the directory the skill runs them from."""
     if not (isinstance(cwd, str) and os.path.isabs(cwd)):
-        return "%s runs only from a known directory, and this call names no cwd" % name
+        return ("%s runs only from a known directory, and this call names no cwd: run it from "
+                "the workspace %s" % (name, facts["workspace"]))
     for entry in facts["write_scope"]:
         if _inside(cwd, entry):
             return ("%s runs only from a directory no sandboxed command can write, and %s is "
-                    "inside %s: run it from the workspace" % (name, cwd, entry))
+                    "inside %s: cd to the workspace %s and run it from there"
+                    % (name, cwd, entry, facts["workspace"]))
     return None
 
 

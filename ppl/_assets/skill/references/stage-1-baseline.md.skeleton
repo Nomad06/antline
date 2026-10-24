@@ -10,12 +10,11 @@ path you already passed to `ppl init --repo` in Stage 0, with the branch name ma
 convention `<TASK-ID>-<short-slug>`:
 
 ```bash
-cd <!-- include: harness/repo -->
-<!-- include: os/fetch -->
-git worktree add <!-- include: harness/worktrees -->/<repo-name>-<TASK-ID> -b <TASK-ID>-<short-slug> origin/<!-- include: harness/default-branch -->
+<!-- include: os/cd --><!-- include: os/fetch -->
+git <!-- include: os/git-dir -->worktree add <!-- include: harness/worktrees -->/<repo-name>-<TASK-ID> -b <TASK-ID>-<short-slug> origin/<!-- include: harness/default-branch -->
 ```
 
-<!-- include: os/fetch-note -->This is where every gate and every dispatched worker runs from now on.
+This is where every gate and every dispatched worker runs from now on.<!-- include: os/stage1-note -->
 
 Then record the baseline. <!-- include: harness/baseline -->
 Commands are in `references/gates.md`. Then save it to

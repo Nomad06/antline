@@ -1,7 +1,7 @@
 # Stage 8 - after merge only
 
 The pipeline ends at approval, not at merge. `merge_watch` is a low-frequency tail: keep
-watching the <!-- include: vocab/short -->. Once the merge is actually observed on the forge,
+watching the <!-- include: vocab/short -->.<!-- include: os/merge-watch --> Once the merge is actually observed on the forge,
 first record it: <!-- include: sequence/after-merge -->, once per run - a second call is
 refused [R-MERGE-OBSERVED-ONCE]. Then write to the tracker <!-- include: harness/tracker-close -->: <!-- include: tracker/close -->.
 Only after the merge is observed and recorded, and always in plain informal English, not a formal template.

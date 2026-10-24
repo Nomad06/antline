@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" /
 import ppl_guard
 
 import fixtures
-from ppl import (cli, escape, forges, fsm, gitfacts, harness, os_sandbox, rules, run,
+from ppl import (cli, config, escape, forges, fsm, gitfacts, harness, os_sandbox, rules, run,
                  sequences, verdict)
 
 # The skill on disk is rendered from skill/ skeletons, so the contract is
@@ -785,6 +785,7 @@ GITHUB_COMMAND_KINDS = {
     "gh api user": r"gh api user ", "gh api replies": r"gh api repos/\S+/replies ",
     "git fetch": r"git -c \S+ -C \S+ fetch ", "git push": r"git -c \S+ -C \S+ push .* -u ",
     "git push --delete": r"git -c \S+ -C \S+ push .* --delete ",
+    "gh pr view for the merge": r"gh pr view \S+ -R \S+ --json=state,mergeCommit$",
 }
 # The run-time placeholders of those commands, as the orchestrator fills them.
 SHAPE_TASK = "GH-7"
@@ -841,6 +842,7 @@ class TestGithubCommandsLeaveTheSandbox(unittest.TestCase):
         tables = dict(fixtures.GITHUB_ISSUES, repo={"path": self.checkout, "default_branch": "main",
                                                     "worktrees": os.path.join(root, "worktrees")})
         fixtures.install_variant("example-generic", "example-generic", **tables)
+        config.update("claude", {"workspace": self.workspace})
         doc = harness.load("example-generic")
         with mock.patch.object(os_sandbox, "pins", lambda which=None: self.pins):
             self.files = harness.render_skill(doc)
@@ -855,7 +857,23 @@ class TestGithubCommandsLeaveTheSandbox(unittest.TestCase):
         self.assertIsNone(re.search(r"<[A-Za-z][^<>]*>", command), command)
         return command
 
+    def rendered_workspace(self):
+        """The directory the skill says its gh and ppl calls run from."""
+        named = re.findall(r"from the workspace `([^`]+)`", _flat("".join(self.files.values())))
+        self.assertEqual(len(named), 1, named)
+        return named[0]
+
+    def test_stage_one_leaves_the_session_in_the_workspace(self):
+        # a cd into the checkout would put the next gh or ppl call inside the write scope
+        stage1 = self.files["references/stage-1-baseline.md"]
+        block = stage1[stage1.index("```bash"):stage1.index("```", stage1.index("```bash") + 3)]
+        self.assertEqual([line for line in block.splitlines() if line.startswith("cd ")], [])
+        self.assertIn("\ngit -C %s worktree add " % self.facts["checkout"], block)
+        self.assertEqual(self.rendered_workspace(), self.facts["workspace"])
+        self.assertIn("from the workspace `%s`" % self.facts["workspace"], _flat(stage1))
+
     def test_every_rendered_github_command_passes_the_guard_shapes(self):
+        cwd = self.rendered_workspace()
         found = pinned_commands(self.files, self.pins)
         kinds = {kind for kind, pattern in GITHUB_COMMAND_KINDS.items()
                  for _, command in found if re.search(r"(?:^|/)" + pattern, command)}
@@ -869,8 +887,8 @@ class TestGithubCommandsLeaveTheSandbox(unittest.TestCase):
             with self.subTest(path=path, command=raw):
                 argv = escape.plain_argv(command)
                 self.assertIsNotNone(argv, command)
-                self.assertIsNone(escape.orchestrator_shape(argv, self.workspace, self.facts,
-                                                            self.state), command)
+                self.assertIsNone(escape.orchestrator_shape(argv, cwd, self.facts, self.state),
+                                  command)
                 hits = [why for pattern, why in forges.get("github").denied_bash()
                         if pattern.search(command)]
                 self.assertEqual(hits, [], command)

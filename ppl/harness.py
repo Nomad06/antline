@@ -587,7 +587,13 @@ _FRONTMATTER_END = "\n---\n"
 OS_FLAG_NOTE = ("Run each command here that starts with an absolute path exactly as written, "
                 "alone in a Bash call with `dangerouslyDisableSandbox: true`, and from the "
                 "workspace when it runs gh or ppl [R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
+# Said once, in stage 1: a gh or ppl call from a directory a sandboxed command can write is
+# denied, and stage 1 leaves the session where it is.
+OS_WORKSPACE_NOTE = ("Run every `gh` and `ppl` call outside the sandbox from the workspace "
+                     "`%s`, and `cd` back there when one is denied for its cwd "
+                     "[R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
 _UNKNOWN_REPO = "<owner/name>"
+_UNKNOWN_WORKSPACE = "<workspace>"
 
 
 def _gate_recipes(doc):
@@ -615,49 +621,70 @@ def _fragment_file(doc, name):
             .replace(_SCRATCH_PLACEHOLDER, str(os_sandbox.scratch_root())))
 
 
-def _os_values(doc, pins):
+def _os_values(doc, pins, workspace):
     """The os/* includes. With the OS sandbox profile the GitHub commands run on the pinned
     binaries, word for word in the shapes the guard lets out of the sandbox, each followed by
-    OS_FLAG_NOTE. The repositories and the fetch come from the os_sandbox functions the facts
-    and the allow entries are made with, since apply renders before it writes the facts.
-    Without the profile every include is today's bare command, and the notes are empty."""
-    default_branch = doc["repo"]["default_branch"]
+    OS_FLAG_NOTE, and stage 1 runs git with -C instead of a cd, so the session stays in the
+    workspace its gh and ppl calls run from. The repositories, the checkout and the fetch come
+    from the os_sandbox functions the facts and the allow entries are made with, since apply
+    renders before it writes the facts. Without the profile every include is today's text."""
+    repo = doc["repo"]
+    default_branch = repo["default_branch"]
     values = {("os", "gh"): "gh", ("os", "ppl"): "ppl", ("os", "flag-note"): "",
-              ("os", "fetch"): "git fetch origin %s" % default_branch, ("os", "fetch-note"): "",
+              ("os", "cd"): "cd %s\n" % repo["path"], ("os", "git-dir"): "",
+              ("os", "fetch"): "git fetch origin %s" % default_branch, ("os", "stage1-note"): "",
               ("os", "push"): "git push -u origin <branch>", ("os", "destroy"): "",
+              ("os", "merge-watch"): "",
               ("os", "forge-repo"): _UNKNOWN_REPO, ("os", "tracker-repo"): _UNKNOWN_REPO}
     if not os_sandbox.needed(doc):
         return values
     pins = pins if pins is not None else os_sandbox.pins()
+    if workspace is None:
+        from . import config
+        try:
+            workspace = config.section("claude").get("workspace") or ""
+        except PplError:
+            workspace = ""
+    workspace = os_sandbox.workspace_dir(workspace) if workspace else _UNKNOWN_WORKSPACE
+    checkout = os_sandbox.checkout(doc)
     forge_repo, tracker_repo = os_sandbox.repos(doc)
     forge_repo = forge_repo or _UNKNOWN_REPO
     gh = pins["gh"]["path"]
+    github_forge = doc["forge"]["kind"] == "github"
+    # the one place the workspace is named, for a harness that runs gh or ppl outside
+    note = (OS_WORKSPACE_NOTE % workspace
+            if github_forge or doc["tracker"]["kind"] == "github-issues" else "")
     values.update({("os", "gh"): gh, ("os", "ppl"): pins["ppl"]["path"],
                    ("os", "flag-note"): OS_FLAG_NOTE, ("os", "forge-repo"): forge_repo,
-                   ("os", "tracker-repo"): tracker_repo or _UNKNOWN_REPO})
-    if doc["forge"]["kind"] != "github":
+                   ("os", "tracker-repo"): tracker_repo or _UNKNOWN_REPO,
+                   ("os", "cd"): "", ("os", "git-dir"): "-C %s " % checkout,
+                   ("os", "fetch"): "git -C %s fetch origin %s" % (checkout, default_branch),
+                   ("os", "stage1-note"): "\n\n" + note if note else ""})
+    if not github_forge:
         # git reaches another forge from inside the sandbox
         return values
+    delete = os_sandbox.push_command(pins, delete=True)
     values.update({
         ("os", "fetch"): os_sandbox.fetch_command(doc, pins),
-        ("os", "fetch-note"): OS_FLAG_NOTE + "\n\n",
+        ("os", "stage1-note"): "\n\n%s %s" % (OS_FLAG_NOTE, note),
         ("os", "push"): os_sandbox.push_command(pins),
         ("os", "destroy"): (" The two GitHub commands are `%s pr close <number> -R %s` and `%s`, "
                             "`<branch>` the run's branch and `<worktree>` its worktree. %s"
-                            % (gh, forge_repo, os_sandbox.push_command(pins, delete=True),
-                               OS_FLAG_NOTE)),
+                            % (gh, forge_repo, delete, OS_FLAG_NOTE)),
+        ("os", "merge-watch"): (" Read its state with `%s pr view <number> -R %s "
+                                "--json=state,mergeCommit`. %s" % (gh, forge_repo, OS_FLAG_NOTE)),
     })
     return values
 
 
-def _values(doc, pins=None):
+def _values(doc, pins=None, workspace=None):
     forge = forges.get(doc["forge"]["kind"])
     skills = (doc.get("knowledge") or {}).get("skills") or []
     repo = doc["repo"]
     sequence_values = {("sequence", name): sequences.render(sequence[1])
                        for name, sequence in sequences.SEQUENCES.items()}
     sequence_values[("harness", "scratch")] = str(os_sandbox.scratch_root())
-    os_values = _os_values(doc, pins)
+    os_values = _os_values(doc, pins, workspace)
     fragment_values = dict(sequence_values)
     fragment_values[("harness", "default-branch")] = repo["default_branch"]
     fragment_values.update(os_values)
@@ -690,7 +717,6 @@ def _values(doc, pins=None):
         # ppl init --harness resolves a directory name, so the skill names the
         # installed directory, not the document's own name.
         ("harness", "name"): installed_name(doc),
-        ("harness", "repo"): repo["path"],
         ("harness", "default-branch"): repo["default_branch"],
         ("harness", "scratch"): str(os_sandbox.scratch_root()),
         ("harness", "worktrees"): repo.get("worktrees") or (repo["path"].rstrip("/") + "/.worktrees"),
@@ -728,14 +754,15 @@ def _with_frontmatter(text, skill_name):
     return head + sep + SKILL_NOTICE + "\n" + tail
 
 
-def render_skill(doc, skill_name="pipeline", pins=None):
+def render_skill(doc, skill_name="pipeline", pins=None, workspace=None):
     """relative path -> text of every file of the skill, nothing written.
     Refuses SCHEMA_INVALID on an include marker it cannot resolve, so a
     marker never reaches the disk. `pins` are the binaries apply pinned, looked
-    up on PATH when it is None and the harness needs the OS sandbox profile."""
+    up on PATH when it is None and the harness needs the OS sandbox profile,
+    and `workspace` the [claude] workspace, read from the config when None."""
     if not _NAME_RE.match(skill_name or ""):
         raise PplError("SCHEMA_INVALID", "skill name %r is not a plain directory name" % skill_name)
-    values = _values(doc, pins)
+    values = _values(doc, pins, workspace)
     root = paths.root() / "skill"
     rendered = {}
     for path in sorted(root.rglob("*")):
@@ -784,9 +811,9 @@ def apply(name, agents_dir=None, skills_dir=None):
               "by name" % doc["_dir"])
     config.active_harness()
     pin_map = os_sandbox.pins() if os_sandbox.needed(doc) else None
-    skill_files = render_skill(doc, pins=pin_map)
-    _size_warnings(skill_files, {role: routing.render(role, doc) for role in routing.REQUIRED_ROLES})
     workspace = config.section("claude").get("workspace") or ""
+    skill_files = render_skill(doc, pins=pin_map, workspace=workspace)
+    _size_warnings(skill_files, {role: routing.render(role, doc) for role in routing.REQUIRED_ROLES})
     try:
         previous = os_sandbox.load_facts()
     except PplError:

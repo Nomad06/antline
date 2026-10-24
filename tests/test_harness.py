@@ -1784,11 +1784,16 @@ class TestRenderOsSandbox(HarnessTestCase):
         self.assertIn("/opt/x/gh issue comment <number> -R o/r --body-file",
                       rendered["references/stage-8-after-merge.md"])
         self.assertIn("/opt/x/gh pr close <number> -R o/r", rendered["SKILL.md"])
-        # the checkout as the facts hold it, which ppl's allow entry for the fetch spells
-        self.assertIn("\ncd /home/dev/src/project\n/usr/bin/git -c core.hooksPath=/dev/null -C %s "
-                      "fetch --no-recurse-submodules origin main\n"
-                      % os.path.realpath("/home/dev/src/project"),
+        # the checkout as the facts hold it, which ppl's allow entry for the fetch spells, and no
+        # cd into it: the session stays in the workspace its gh and ppl calls run from
+        checkout = os.path.realpath("/home/dev/src/project")
+        self.assertIn("```bash\n/usr/bin/git -c core.hooksPath=/dev/null -C %s fetch "
+                      "--no-recurse-submodules origin main\ngit -C %s worktree add "
+                      % (checkout, checkout),
                       rendered["references/stage-1-baseline.md"])
+        self.assertIn("watching the PR. Read its state with `/opt/x/gh pr view <number> -R o/r "
+                      "--json=state,mergeCommit`. Run each command here",
+                      rendered["references/stage-8-after-merge.md"])
         for relative in ("references/stage-0-admission.md", "references/stage-6-mr.md",
                          "references/stage-7-review.md", "references/review-loop.md",
                          "references/stage-8-after-merge.md"):
@@ -1807,10 +1812,29 @@ class TestRenderOsSandbox(HarnessTestCase):
                       "git worktree add ", rendered["references/stage-1-baseline.md"])
         self.assertIn("close the merge request,\ndelete the remote branch, then run "
                       "`ppl destroy --scope local`. That is the only outward", rendered["SKILL.md"])
+        self.assertIn("keep\nwatching the MR. Once the merge is actually observed",
+                      rendered["references/stage-8-after-merge.md"])
+        self.assertIn("now on.\n\nThen record the baseline.",
+                      rendered["references/stage-1-baseline.md"])
         for relative, text in rendered.items():
             self.assertNotIn("dangerouslyDisableSandbox", text, relative)
             self.assertNotIn("/opt/x/gh", text, relative)
             self.assertNotIn("core.hooksPath", text, relative)
+
+    def test_a_gitlab_harness_with_the_profile_leaves_the_session_where_it_is(self):
+        path = fixtures.install_harness("example-maven") / "harness.toml"
+        path.write_text(path.read_text(encoding="utf-8") + "\n[os_sandbox]\nenabled = true\n",
+                        encoding="utf-8")
+        with mock.patch.object(os_sandbox, "pins", lambda which=None: PINS):
+            rendered = harness.render_skill(harness.load("example-maven"))
+        stage1 = rendered["references/stage-1-baseline.md"]
+        checkout = os.path.realpath("/home/dev/src/project")
+        # git reaches GitLab from inside the sandbox, so nothing here is flagged
+        self.assertIn("```bash\ngit -C %s fetch origin master\ngit -C %s worktree add "
+                      % (checkout, checkout), stage1)
+        self.assertNotIn("\ncd ", stage1)
+        for relative, text in rendered.items():
+            self.assertNotIn("dangerouslyDisableSandbox", text, relative)
 
     def test_a_check_renders_a_github_harness_without_its_binaries_on_path(self):
         # apply looks the pins up again and refuses a missing one, a check only measures

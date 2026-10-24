@@ -467,6 +467,15 @@ class TestOrchestratorShape(OsSandboxCase):
             "-R o/r", "-R=o/r")
         self.assertIsNone(self.decide(spaced))
 
+    def test_the_cwd_deny_reason_names_the_workspace(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # the orchestrator learns where to cd back to from the denial itself
+        for cwd in (REPO, None):
+            with self.subTest(cwd=cwd):
+                reason = self.deny_reason(self.decide(pr_create(), cwd=cwd))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn(facts_doc()["workspace"], reason)
+
     def test_pr_create_from_a_cwd_inside_the_write_scope_is_denied(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
         for cwd in (REPO, REPO + "/src"):

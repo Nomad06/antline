@@ -106,14 +106,24 @@ def repos(doc):
     return forge_repo, tracker_repo
 
 
+def checkout(doc):
+    """The checkout as the facts hold it, `realpath`-ed."""
+    return _real(_repo(doc)[0])
+
+
+def workspace_dir(workspace):
+    """The workspace as the facts hold it, `realpath`-ed."""
+    return _real(workspace)
+
+
 def facts(doc, workspace, pin_map):
     """The slice the guard reads, the shape of PPL_HOME/os_sandbox.json. deny_write is the
     profile's denyWrite, `realpath`-ed, which the guard holds edit tools to as well."""
-    checkout, worktrees = _repo(doc)
+    _, worktrees = _repo(doc)
     forge_repo, tracker_repo = repos(doc)
     return {"version": 1,
-            "workspace": _real(workspace),
-            "checkout": _real(checkout),
+            "workspace": workspace_dir(workspace),
+            "checkout": checkout(doc),
             "worktrees": _real(worktrees),
             "default_branch": doc["repo"]["default_branch"],
             "forge_repo": forge_repo,
@@ -138,8 +148,7 @@ def fetch_command(doc, pin_map):
     """The orchestrator's fetch of the default branch into the checkout, outside the OS
     sandbox: word for word the shape escape_git.git_shape lets through and ppl's allow entry,
     the checkout `realpath`-ed as the facts hold it."""
-    checkout, _ = _repo(doc)
-    return "%s origin %s" % (_git_outside(pin_map, _real(checkout), "fetch"),
+    return "%s origin %s" % (_git_outside(pin_map, checkout(doc), "fetch"),
                              doc["repo"]["default_branch"])
 
 
