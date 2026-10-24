@@ -64,3 +64,10 @@ def gh_source():
         "    sys.stderr.write(\"gh: Not Found (HTTP 404)\\n\")\n"
         "    sys.exit(1)\n"
         "sys.exit(1)\n") % (sys.executable, json.dumps(ISSUE))
+
+
+def ppl_source():
+    """The ppl launcher the OS sandbox profile pins: this interpreter running the ppl package."""
+    return ("#!%s\n"
+            "import runpy\n\n"
+            "runpy.run_module(\"ppl\", run_name=\"__main__\", alter_sys=True)\n") % sys.executable

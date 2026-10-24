@@ -120,9 +120,11 @@ class Sandbox:
         for rel, text in fragments.items():
             (source / rel).parent.mkdir(parents=True, exist_ok=True)
             (source / rel).write_text(text, encoding="utf-8")
-        gh = self.bin / "gh"
-        gh.write_text(sample.gh_source(), encoding="utf-8")
-        gh.chmod(0o755)
+        # first on PATH, so harness apply pins these and never a ppl or gh installed elsewhere
+        for name, text in (("gh", sample.gh_source()), ("ppl", sample.ppl_source())):
+            target = self.bin / name
+            target.write_text(text, encoding="utf-8")
+            target.chmod(0o755)
         self._step("setup", "--non-interactive", "--skip", "models", "--skip", "forge",
                    "--answer", "workspace=%s" % self.workspace, "--answer", "hooks=local",
                    "--answer", "harness_from=%s" % source, "--answer", "harness_name=demo")

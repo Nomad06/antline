@@ -9,8 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
+import fixtures
 import panel_client
-from ppl import config, harness, paths, setup
+from ppl import config, harness, os_sandbox, paths, setup
 from ppl.studio import wizard
 
 
@@ -48,6 +49,10 @@ class WizardTestCase(panel_client.StudioTestCase):
             patcher = mock.patch.object(wizard, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # a github forge pins gh, git and ppl, none looked up on PATH here
+        patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: fixtures.FAKE_PINS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def run_step(self, step, answers=None):
         status, payload, _ = panel_client.call("POST", "/api/setup/" + step,
