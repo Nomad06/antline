@@ -797,6 +797,15 @@ class TestEscapeFacts(unittest.TestCase):
 GIT_BIN = shutil.which("git") or "/usr/bin/git"
 
 
+# The one push refspec the guard takes: the run branch to itself, both named in full.
+SPEC = "refs/heads/%s:refs/heads/%s" % (BRANCH, BRANCH)
+HEAD_REF = "refs/heads/" + BRANCH
+
+
+def spec(name):
+    return "refs/heads/%s:refs/heads/%s" % (name, name)
+
+
 def git(directory, *args):
     """The test's own git in `directory`, which never meets the guard."""
     done = subprocess.run([GIT_BIN, "-C", str(directory)] + list(args),
@@ -851,13 +860,48 @@ class GitShapes(OsSandboxCase):
         return self.command(self.checkout, "fetch", "--no-recurse-submodules", *words)
 
     def test_push_of_the_run_branch_is_allowed(self):
-        for words in (("origin", BRANCH), ("-u", "origin", BRANCH),
-                      ("--set-upstream", "origin", BRANCH)):
+        for words in (("origin", SPEC), ("-u", "origin", SPEC), ("--set-upstream", "origin", SPEC)):
             with self.subTest(words=words):
                 self.assertIsNone(self.decide(self.push(*words)))
 
     def test_branch_delete_of_the_run_branch_is_allowed(self):
-        self.assertIsNone(self.decide(self.push("origin", "--delete", BRANCH)))
+        self.assertIsNone(self.decide(self.push("origin", "--delete", HEAD_REF)))
+
+    def test_a_bare_branch_refspec_is_denied(self):
+        # rule: R-OS-SANDBOX-GIT-CONFIG
+        # git takes the destination of a bare or unqualified refspec from config a role can
+        # write, branch.<b>.merge under push.default=upstream, so a push names both refs in full
+        for words in (("origin", BRANCH), ("-u", "origin", BRANCH),
+                      ("origin", BRANCH + ":" + BRANCH), ("origin", HEAD_REF),
+                      ("origin", BRANCH + ":" + HEAD_REF), ("origin", HEAD_REF + ":" + BRANCH),
+                      ("origin", "HEAD:" + HEAD_REF), ("origin", "--delete", BRANCH),
+                      ("origin", "--delete", "heads/" + BRANCH)):
+            with self.subTest(words=words):
+                reason = self.deny_reason(self.decide(self.push(*words)))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn("refs/heads/<branch>", reason)
+
+    def test_a_branch_merge_key_cannot_steer_a_qualified_push(self):
+        # rule: R-OS-SANDBOX-GIT-CONFIG
+        # branch.<b>.merge stays a safe key: -u writes it, and a full refspec never reads it
+        git(self.checkout, "config", "branch.%s.remote" % BRANCH, "origin")
+        git(self.checkout, "config", "branch.%s.merge" % BRANCH, "refs/heads/main")
+        self.assertIsNone(self.decide(self.push("origin", SPEC)))
+        self.assertIsNone(self.decide(self.push("-u", "origin", SPEC)))
+        reason = self.deny_reason(self.decide(self.push("origin", BRANCH)))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+
+    def test_a_qualified_push_lands_on_the_run_branch_whatever_the_merge_key(self):
+        # what git does with the accepted words, against a local stand-in for the forge repo
+        # and the push.default=upstream an operator's global config may set
+        forge = os.path.join(self.root, "forge.git")
+        git(self.root, "init", "-q", "--bare", "--template=", forge)
+        git(self.checkout, "config", "branch.%s.remote" % BRANCH, "origin")
+        git(self.checkout, "config", "branch.%s.merge" % BRANCH, "refs/heads/main")
+        git(self.repo, "-c", "url.%s.insteadOf=https://github.com/o/r.git" % forge,
+            "-c", "push.default=upstream", "-c", "core.hooksPath=/dev/null",
+            "push", "-q", "--no-verify", "origin", SPEC)
+        self.assertEqual(git(forge, "for-each-ref", "--format=%(refname)"), HEAD_REF)
 
     def test_fetch_of_the_default_branch_from_the_checkout_is_allowed(self):
         self.assertIsNone(self.decide(self.fetch("origin", "main")))
@@ -897,37 +941,42 @@ class GitShapes(OsSandboxCase):
     def test_core_hookspath_in_local_config_is_tolerated(self):
         # the -c on the command line wins over it
         git(self.checkout, "config", "core.hooksPath", ".githooks")
-        self.assertIsNone(self.decide(self.push("origin", BRANCH)))
+        self.assertIsNone(self.decide(self.push("origin", SPEC)))
         self.assertIsNone(self.decide(self.fetch("origin", "main")))
 
     def test_a_push_of_the_default_branch_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
-        for words in (("origin", "main"), ("-u", "origin", "main"), ("origin", "--delete", "main"),
-                      ("origin", "Main")):
+        for words in (("origin", spec("main")), ("-u", "origin", spec("main")),
+                      ("origin", "--delete", "refs/heads/main"), ("origin", spec("Main"))):
             with self.subTest(words=words):
                 reason = self.deny_reason(self.decide(self.push(*words)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn("default branch", reason)
         # from a repo whose HEAD is on it as well
         with self.run_state(repo=self.checkout):
-            command = self.command(self.checkout, "push", "--no-verify", "origin", "main")
+            command = self.command(self.checkout, "push", "--no-verify", "origin", spec("main"))
             self.assertIn("default branch", self.deny_reason(self.decide(command)))
 
     def test_a_colon_refspec_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
-        for refspec in (BRANCH + ":main", ":main", "HEAD:main", BRANCH + ":" + BRANCH):
+        # the one colon taken is the one between refs/heads/<branch> and itself
+        for refspec in (BRANCH + ":main", ":main", "HEAD:main", ":refs/heads/main",
+                        "refs/heads/%s:refs/heads/main" % BRANCH, SPEC + ":x"):
             with self.subTest(refspec=refspec):
                 reason = self.deny_reason(self.decide(self.push("origin", refspec)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
-                self.assertIn("':'", reason)
+                self.assertIn("refs/heads/<branch>:refs/heads/<branch>", reason)
+        reason = self.deny_reason(self.decide(self.push("origin", "--delete", HEAD_REF + ":x")))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("':'", reason)
         reason = self.deny_reason(self.decide(self.fetch("origin", "main:main")))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("fetch", reason)
 
     def test_a_plus_refspec_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
-        for words in (("origin", "+" + BRANCH), ("-u", "origin", "+" + BRANCH),
-                      ("origin", "--delete", "+" + BRANCH)):
+        for words in (("origin", "+" + SPEC), ("-u", "origin", "+" + SPEC),
+                      ("origin", "--delete", "+" + HEAD_REF)):
             with self.subTest(words=words):
                 reason = self.deny_reason(self.decide(self.push(*words)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
@@ -939,7 +988,7 @@ class GitShapes(OsSandboxCase):
     def test_a_detached_head_push_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
         git(self.repo, "checkout", "-q", "--detach")
-        for words in (("origin", BRANCH), ("origin", "--delete", BRANCH)):
+        for words in (("origin", SPEC), ("origin", "--delete", HEAD_REF)):
             with self.subTest(words=words):
                 reason = self.deny_reason(self.decide(self.push(*words)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
@@ -948,13 +997,13 @@ class GitShapes(OsSandboxCase):
     def test_a_branch_head_is_not_on_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
         git(self.checkout, "branch", "gh-7-other")
-        reason = self.deny_reason(self.decide(self.push("origin", "gh-7-other")))
+        reason = self.deny_reason(self.decide(self.push("origin", spec("gh-7-other"))))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("refs/heads/" + BRANCH, reason)
         # a HEAD on a tag names no branch, even when the word matches it
         git(self.repo, "tag", "gh-7-tag")
         git(self.repo, "symbolic-ref", "HEAD", "refs/tags/gh-7-tag")
-        reason = self.deny_reason(self.decide(self.push("origin", "gh-7-tag")))
+        reason = self.deny_reason(self.decide(self.push("origin", spec("gh-7-tag"))))
         self.assertIn("not on a branch", reason)
 
     def test_a_branch_named_like_a_ref_namespace_is_denied(self):
@@ -963,7 +1012,8 @@ class GitShapes(OsSandboxCase):
         # delete of the run branch would delete the default branch on GitHub
         repo = new_repo(os.path.join(self.root, "solo"), branch="heads/main")
         with self.run_state(repo=repo):
-            for words in (("origin", "heads/main"), ("origin", "--delete", "heads/main")):
+            for words in (("origin", spec("heads/main")),
+                          ("origin", "--delete", "refs/heads/heads/main")):
                 with self.subTest(words=words):
                     command = self.command(repo, "push", "--no-verify", *words)
                     reason = self.deny_reason(self.decide(command))
@@ -972,12 +1022,13 @@ class GitShapes(OsSandboxCase):
         for name in ("refs/heads/main", "tags/v1", "HEAD", "FETCH_HEAD", "head", "-f", ".x",
                      "a@{1}"):
             with self.subTest(name=name):
-                reason = self.deny_reason(self.decide(self.push("origin", "--delete", name)))
+                command = self.push("origin", "--delete", "refs/heads/" + name)
+                reason = self.deny_reason(self.decide(command))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
 
     def test_a_push_without_the_hooks_off_flag_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
-        tail = " push --no-verify origin " + BRANCH
+        tail = " push --no-verify origin " + SPEC
         for command, part in (
                 ("%s -C %s%s" % (GIT_BIN, self.repo, tail), "core.hooksPath=/dev/null"),
                 ("%s -c core.hooksPath=/tmp/hooks -C %s%s" % (GIT_BIN, self.repo, tail),
@@ -986,8 +1037,8 @@ class GitShapes(OsSandboxCase):
                  "core.hooksPath=/dev/null"),
                 ("%s -C %s -c core.hooksPath=/dev/null%s" % (GIT_BIN, self.repo, tail),
                  "core.hooksPath=/dev/null"),
-                (self.command(self.repo, "push", "origin", BRANCH), "--no-verify"),
-                (self.command(self.repo, "push", "-u", "--no-verify", "origin", BRANCH),
+                (self.command(self.repo, "push", "origin", SPEC), "--no-verify"),
+                (self.command(self.repo, "push", "-u", "--no-verify", "origin", SPEC),
                  "--no-verify")):
             with self.subTest(command=command):
                 reason = self.deny_reason(self.decide(command))
@@ -996,7 +1047,7 @@ class GitShapes(OsSandboxCase):
 
     def test_a_second_dash_c_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
-        tail = " push --no-verify origin " + BRANCH
+        tail = " push --no-verify origin " + SPEC
         for middle in ("-c core.sshCommand=/tmp/evil -C " + self.repo,
                        "-c core.hooksPath=/dev/null -C " + self.repo,
                        "-C %s -c core.sshCommand=/tmp/evil" % self.repo,
@@ -1010,14 +1061,14 @@ class GitShapes(OsSandboxCase):
 
     def test_push_and_fetch_options_outside_the_shape_are_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
-        for words in (("--force", "origin", BRANCH), ("-f", "origin", BRANCH),
-                      ("origin", BRANCH, "--force"), ("--force-with-lease", "origin", BRANCH),
-                      ("--mirror", "origin"), ("--all", "origin"), ("--tags", "origin", BRANCH),
-                      ("--exec=/tmp/evil", "origin", BRANCH),
-                      ("--receive-pack=/tmp/evil", "origin", BRANCH), ("--repo=origin", BRANCH),
-                      ("-d", "origin", BRANCH), ("origin", "-d", BRANCH),
-                      ("origin", BRANCH, BRANCH), ("origin", "--", BRANCH),
-                      ("-u", "origin", "--delete", BRANCH), ("origin", BRANCH, "-u"),
+        for words in (("--force", "origin", SPEC), ("-f", "origin", SPEC),
+                      ("origin", SPEC, "--force"), ("--force-with-lease", "origin", SPEC),
+                      ("--mirror", "origin"), ("--all", "origin"), ("--tags", "origin", SPEC),
+                      ("--exec=/tmp/evil", "origin", SPEC),
+                      ("--receive-pack=/tmp/evil", "origin", SPEC), ("--repo=origin", SPEC),
+                      ("-d", "origin", HEAD_REF), ("origin", "-d", HEAD_REF),
+                      ("origin", SPEC, SPEC), ("origin", "--", SPEC),
+                      ("-u", "origin", "--delete", HEAD_REF), ("origin", SPEC, "-u"),
                       ("origin",), ()):
             with self.subTest(push=words):
                 reason = self.deny_reason(self.decide(self.push(*words)))
@@ -1043,10 +1094,10 @@ class GitShapes(OsSandboxCase):
 
         facts = escape.load_facts(paths.home())
         for command, part in (
-                (self.command(self.checkout, "push", "--no-verify", "origin", BRANCH), "run's repo"),
-                (self.command(self.repo + "/", "push", "--no-verify", "origin", BRANCH),
+                (self.command(self.checkout, "push", "--no-verify", "origin", SPEC), "run's repo"),
+                (self.command(self.repo + "/", "push", "--no-verify", "origin", SPEC),
                  "run's repo"),
-                (self.command("worktrees/r-GH-7", "push", "--no-verify", "origin", BRANCH),
+                (self.command("worktrees/r-GH-7", "push", "--no-verify", "origin", SPEC),
                  "run's repo"),
                 (self.command(self.repo, "fetch", "origin", "main"), "checkout"),
                 (self.command(self.root, "fetch", "origin", "main"), "checkout")):
@@ -1061,7 +1112,7 @@ class GitShapes(OsSandboxCase):
     def test_core_sshcommand_in_local_config_denies(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
         git(self.checkout, "config", "core.sshCommand", "/tmp/evil")
-        for command in (self.push("origin", BRANCH), self.push("origin", "--delete", BRANCH),
+        for command in (self.push("origin", SPEC), self.push("origin", "--delete", HEAD_REF),
                         self.fetch("origin", "main")):
             with self.subTest(command=command):
                 reason = self.deny_reason(self.decide(command))
@@ -1077,7 +1128,7 @@ class GitShapes(OsSandboxCase):
         for key in ("include.path", "includeIf.gitdir:/.path"):
             with self.subTest(key=key):
                 git(self.checkout, "config", key, included)
-                reason = self.deny_reason(self.decide(self.push("origin", BRANCH)))
+                reason = self.deny_reason(self.decide(self.push("origin", SPEC)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn(key.lower(), reason)
                 git(self.checkout, "config", "--unset", key)
@@ -1100,7 +1151,7 @@ class GitShapes(OsSandboxCase):
                            ("core.bareX", "true")):
             with self.subTest(key=key):
                 git(self.checkout, "config", key, value)
-                reason = self.deny_reason(self.decide(self.push("origin", BRANCH)))
+                reason = self.deny_reason(self.decide(self.push("origin", SPEC)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn(key.lower(), reason)
                 git(self.checkout, "config", "--unset", key)
@@ -1108,9 +1159,9 @@ class GitShapes(OsSandboxCase):
     def test_a_worktree_level_config_key_denies(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
         git(self.checkout, "config", "extensions.worktreeConfig", "true")
-        self.assertIsNone(self.decide(self.push("origin", BRANCH)))
+        self.assertIsNone(self.decide(self.push("origin", SPEC)))
         git(self.repo, "config", "--worktree", "core.sshCommand", "/tmp/evil")
-        reason = self.deny_reason(self.decide(self.push("origin", BRANCH)))
+        reason = self.deny_reason(self.decide(self.push("origin", SPEC)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("worktree", reason)
         self.assertIn("core.sshcommand", reason)
@@ -1122,7 +1173,7 @@ class GitShapes(OsSandboxCase):
                     "git@evil.example:o/r.git", "ssh://git@github.com/o/r.git",
                     "/tmp/elsewhere.git", "ext::sh -c id"):
             git(self.checkout, "remote", "set-url", "origin", url)
-            for command in (self.push("origin", BRANCH), self.fetch("origin", "main")):
+            for command in (self.push("origin", SPEC), self.fetch("origin", "main")):
                 with self.subTest(url=url, command=command):
                     reason = self.deny_reason(self.decide(command))
                     self.assertIn("BOUNDARY_VIOLATION", reason)
@@ -1130,28 +1181,28 @@ class GitShapes(OsSandboxCase):
         # a second url, which a push reaches as well
         git(self.checkout, "remote", "set-url", "origin", "https://github.com/o/r.git")
         git(self.checkout, "config", "--add", "remote.origin.url", "https://evil.example/x.git")
-        reason = self.deny_reason(self.decide(self.push("origin", BRANCH)))
+        reason = self.deny_reason(self.decide(self.push("origin", SPEC)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("evil.example", reason)
         # the same url twice is still two
         git(self.checkout, "config", "--replace-all", "remote.origin.url",
             "https://github.com/o/r.git")
         git(self.checkout, "config", "--add", "remote.origin.url", "https://github.com/o/r.git")
-        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(self.push("origin", BRANCH))))
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(self.push("origin", SPEC))))
 
     def test_a_remote_the_config_does_not_name_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
         for remote in ("upstream", "Origin", "https://github.com/o/r.git",
                        "git@github.com:o/r.git", "/tmp/elsewhere.git", "-v"):
             with self.subTest(remote=remote):
-                reason = self.deny_reason(self.decide(self.push(remote, BRANCH)))
+                reason = self.deny_reason(self.decide(self.push(remote, SPEC)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
-                self.assertIn("remote", reason)
+                self.assertIn("origin", reason)
 
     def test_git_without_a_forge_repo_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
         self.write_facts(forge_repo=None)
-        for command in (self.push("origin", BRANCH), self.fetch("origin", "main")):
+        for command in (self.push("origin", SPEC), self.fetch("origin", "main")):
             with self.subTest(command=command):
                 reason = self.deny_reason(self.decide(command))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
@@ -1160,7 +1211,7 @@ class GitShapes(OsSandboxCase):
     def test_a_push_with_no_active_run_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
         with self.no_active_run():
-            for words in (("origin", BRANCH), ("origin", "--delete", BRANCH)):
+            for words in (("origin", SPEC), ("origin", "--delete", HEAD_REF)):
                 with self.subTest(words=words):
                     reason = self.deny_reason(self.decide(self.push(*words)))
                     self.assertIn("BOUNDARY_VIOLATION", reason)
@@ -1176,7 +1227,7 @@ class GitShapes(OsSandboxCase):
             raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
 
         facts = escape.load_facts(paths.home())
-        for command in (self.push("origin", BRANCH), self.fetch("origin", "main")):
+        for command in (self.push("origin", SPEC), self.fetch("origin", "main")):
             with self.subTest(command=command):
                 result = escape_git.git_shape(escape.plain_argv(command), facts, run.load(TASK),
                                               run_git=hung)
@@ -1191,7 +1242,7 @@ class GitShapes(OsSandboxCase):
             handle.write("#!/bin/sh\nexec sleep 5\n")
         os.chmod(slow, 0o755)
         self.write_facts(git_path=slow)
-        command = self.command(self.repo, "push", "--no-verify", "origin", BRANCH, git_path=slow)
+        command = self.command(self.repo, "push", "--no-verify", "origin", SPEC, git_path=slow)
         started = time.monotonic()
         reason = self.deny_reason(self.decide(command))
         self.assertLess(time.monotonic() - started, 3)
@@ -1204,7 +1255,7 @@ class GitShapes(OsSandboxCase):
         git(self.repo, "checkout", "-q", "--detach")
         env = dict(os.environ, PPL_HOME=str(paths.home()))
         done = subprocess.run([sys.executable, str(GUARD)],
-                              input=json.dumps(flagged(None, self.push("origin", BRANCH))),
+                              input=json.dumps(flagged(None, self.push("origin", SPEC))),
                               capture_output=True, text=True, env=env, timeout=HOOK_BOUND_SECONDS)
         self.assertEqual(done.stderr, "")
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(json.loads(done.stdout)))

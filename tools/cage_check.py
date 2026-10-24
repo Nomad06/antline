@@ -1087,8 +1087,8 @@ def run_os_sandbox_cases(cage):
     for args in (("remote", "add", "origin", "https://github.com/o/r.git"),
                  ("checkout", "-q", "-b", "cage-branch")):
         subprocess.run([git_bin, "-C", repo] + list(args), check=True, capture_output=True)
-    push = "%s -c core.hooksPath=/dev/null -C %s push --no-verify origin cage-branch" % (
-        git_bin, repo)
+    push = ("%s -c core.hooksPath=/dev/null -C %s push --no-verify origin "
+            "refs/heads/cage-branch:refs/heads/cage-branch" % (git_bin, repo))
 
     cage.check(
         "os-sandbox push run branch allowed",

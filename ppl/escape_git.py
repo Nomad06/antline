@@ -27,7 +27,7 @@ GIT_SAFE_KEYS = (
 _SAFE_KEY = re.compile("|".join("(?:%s)" % key for key in GIT_SAFE_KEYS), re.IGNORECASE)
 # The scopes a role can write: the repository's own config and its worktree's.
 _CHECKED_SCOPES = ("local", "worktree")
-_REMOTE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+_HEADS = "refs/heads/"
 # The pipeline's <TASK-ID>-<slug>. A slash would let git read the word in another ref
 # namespace: with no local main, `heads/main` is the remote's refs/heads/main to a push
 # or a delete.
@@ -37,8 +37,9 @@ _UPSTREAM = ("-u", "--set-upstream")
 _SHAPE = ("git leaves the OS sandbox only as `git -c core.hooksPath=/dev/null -C <dir> fetch "
           "--no-recurse-submodules origin <default branch>` or `... push --no-verify ...`, with "
           "one -c and no other option, so no hook runs there")
-_PUSH_SHAPE = ("git push takes only --no-verify [-u|--set-upstream] <remote> <branch> or "
-               "--no-verify <remote> --delete <branch>")
+_PUSH_SHAPE = ("git push takes only --no-verify [-u|--set-upstream] origin "
+               "refs/heads/<branch>:refs/heads/<branch> or --no-verify origin --delete "
+               "refs/heads/<branch>")
 
 
 def _short(value):
@@ -98,22 +99,36 @@ def _push_words(directory, rest, facts, state):
                             % (repo, _short(directory)))
     words = rest[1:] if rest[:1] == ["--no-verify"] else None
     if words and len(words) == 3 and words[0] in _UPSTREAM:
-        remote, branch = words[1], words[2]
+        remote, refspec, delete = words[1], words[2], False
     elif words and len(words) == 3 and words[1] == "--delete":
-        remote, branch = words[0], words[2]
+        remote, refspec, delete = words[0], words[2], True
     elif words and len(words) == 2:
-        remote, branch = words
+        remote, refspec, delete = words[0], words[1], False
     else:
         return None, None, _PUSH_SHAPE
-    problem = _remote_problem(remote) or _branch_problem(branch, facts["default_branch"])
-    return remote, branch, problem
+    if remote != "origin":
+        return None, None, "%s: %s is not origin" % (_PUSH_SHAPE, _short(remote))
+    branch, problem = _refspec_branch(refspec, delete)
+    if problem:
+        return None, None, problem
+    return remote, branch, _branch_problem(branch, facts["default_branch"])
 
 
-def _remote_problem(remote):
-    if not _REMOTE.fullmatch(remote):
-        return "%s is not a remote name: git reaches only a remote its config names" % (
-            _short(remote))
-    return None
+def _refspec_branch(refspec, delete):
+    """(branch, None) for refs/heads/<branch>:refs/heads/<branch>, or refs/heads/<branch> for a
+    delete, else (None, why). A bare or unqualified refspec takes its destination from config a
+    role can write: branch.<b>.merge under push.default=upstream moves it onto main."""
+    if refspec.startswith("+"):
+        return None, "%s is a refspec with a leading '+', a force push" % _short(refspec)
+    if delete and refspec.startswith(_HEADS):
+        return refspec[len(_HEADS):], None
+    source, colon, destination = refspec.partition(":")
+    if not delete and colon and source == destination and source.startswith(_HEADS):
+        return source[len(_HEADS):], None
+    return None, ("%s is not %s: a push names its source and its destination in full, so no "
+                  "config can move it onto another ref"
+                  % (_short(refspec), "refs/heads/<branch>" if delete
+                     else "refs/heads/<branch>:refs/heads/<branch>"))
 
 
 def _branch_problem(branch, default_branch):
