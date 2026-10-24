@@ -18,6 +18,11 @@ _QUERY = ("query { repository(owner: \"%s\", name: \"%s\") { pullRequest(number:
 _PAGE = 100
 
 
+def is_repo(text):
+    """True for an owner/name repository."""
+    return isinstance(text, str) and _REPO.fullmatch(text) is not None
+
+
 def _blocked(why):
     return github_issues._blocked(why, COMMAND)
 

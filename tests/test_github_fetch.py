@@ -220,6 +220,23 @@ class TestReviewFetchCli(unittest.TestCase):
         self.assertNotIn("SCHEMA_INVALID", err)
         self.assertIn("repos/o/r/pulls/5/comments", self.gh.argvs[0])
 
+    def test_facts_without_a_forge_repo_refuse_and_run_no_git(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        fixtures.install_variant("example-generic", "gh-jira", forge={"kind": "github"})
+        store.write_json(paths.run_dir(self.task) / "harness.json",
+                         harness.snapshot(harness.load("gh-jira")))
+        for forge_repo in (None, "", "not a repo", 7):
+            with self.subTest(forge_repo=forge_repo):
+                self.write_facts(forge_repo=forge_repo)
+                with mock.patch("ppl.setup._origin_repo",
+                                side_effect=AssertionError("git ran in the run's repo")):
+                    code, _, err = call("review", "fetch", "--pr", "5")
+                self.assertEqual(code, 2, err)
+                self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+                self.assertIn("ppl harness apply", json.loads(err)["message"])
+                self.assertEqual(self.gh.argvs, [])
+                self.assertFalse(self.target().exists())
+
     def test_a_non_github_forge_is_refused(self):
         fixtures.install_variant("example-generic", "gl-forge", forge={"kind": "gitlab",
                                  "mcp_server": "gitlab"})

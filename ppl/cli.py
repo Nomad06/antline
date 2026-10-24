@@ -799,10 +799,16 @@ def _review_repo(task_id):
     repo = tracker.get("repo") if isinstance(tracker, dict) and \
         tracker.get("kind") == "github-issues" else None
     facts = os_sandbox.load_facts()
-    if facts is not None and not repo:
-        repo = facts.get("forge_repo")
-    if not repo:
-        repo = setup._origin_repo(run.load(task_id).get("repo") or "")
+    if facts is not None:
+        forge_repo = facts.get("forge_repo")
+        if not (isinstance(forge_repo, str) and github_fetch.is_repo(forge_repo)):
+            raise PplError("SCHEMA_INVALID",
+                           "%s names no GitHub forge repository (forge_repo is %r), so ppl "
+                           "review fetch reaches none: run ppl harness apply"
+                           % (os_sandbox.FACTS_FILE, forge_repo))
+        repo = repo or forge_repo
+    else:
+        repo = repo or setup._origin_repo(run.load(task_id).get("repo") or "")
     repo = os_sandbox.pinned_repo("forge_repo", repo)
     if not repo:
         raise PplError("SCHEMA_INVALID",
