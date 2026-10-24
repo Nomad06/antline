@@ -207,7 +207,8 @@ def cmd_init(args):
     for warning in (doctor.dispatch_warning(), doctor.usage_warning(),
                     doctor.hook_location_warning(), doctor.matcher_warning(),
                     doctor.mcp_servers_warning(),
-                    doctor.github_token_warning() if os_sandbox.needed(doc) else None):
+                    doctor.github_token_warning() if os_sandbox.needed(doc) else None,
+                    doctor.foreign_bash_hooks_warning() if os_sandbox.needed(doc) else None):
         if warning:
             sys.stderr.write("warning: %s\n" % warning)
     print(status.card(state["task_id"]))
@@ -230,12 +231,21 @@ def cmd_doctor(args):
         if line:
             print(line)
     for warning in (doctor.matcher_warning(), doctor.mcp_servers_warning(),
-                    doctor.github_token_warning()):
+                    doctor.github_token_warning(), _foreign_hooks_warning()):
         if warning:
             print("warning: %s" % warning)
     if result.get("hook_runs_problem"):
         print(result["hook_runs_problem"])
     return 0
+
+
+def _foreign_hooks_warning():
+    """The foreign Bash hook warning while an OS sandbox profile is applied, else None."""
+    try:
+        applied = os_sandbox.load_facts() is not None
+    except PplError:
+        applied = True
+    return doctor.foreign_bash_hooks_warning() if applied else None
 
 
 def cmd_show(args):

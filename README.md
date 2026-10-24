@@ -363,6 +363,11 @@ What this costs and leaves open:
   protected path, and any unix socket allowance, under `os_sandbox.undoing`.
 - MCP servers run outside the OS sandbox and are not checked, so register no file-writing MCP
   server for the pipeline workspace [R-OS-SANDBOX-PROTECTED-PATHS].
+- Another `PreToolUse` hook that sees Bash (a command rewriter such as sqz or rtk, from any
+  settings file or an enabled plugin) can rewrite a call, and whether that keeps or drops
+  `dangerouslyDisableSandbox` is unverified. `ppl doctor` lists such hooks as
+  `foreign_bash_hooks` and `ppl init` warns on a GitHub run: remove or disable them for
+  pipeline sessions before a GitHub run.
 - The profile keeps sandboxed commands from reading gh's config, git's credential store,
   `.netrc` and `~/.ssh`; set `[os_sandbox] allow_ssh_read = true` for a build that needs ssh
   [R-OS-SANDBOX-NETWORK]. Unset `GH_TOKEN`, `GITHUB_TOKEN` and `GH_ENTERPRISE_TOKEN` for

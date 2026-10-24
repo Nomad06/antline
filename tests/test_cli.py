@@ -4227,6 +4227,15 @@ class TestInitRequiresTheOsSandbox(unittest.TestCase):
         self.assertIn("warning: GITHUB_TOKEN", doctor_out)
         self.assertNotIn("secretvalue", doctor_out)
 
+    def test_init_warns_about_foreign_bash_hooks_and_still_starts(self):
+        hooks = [{"source": "/home/u/.claude/settings.json", "hook": "sqz"}]
+        with mock.patch.object(doctor, "foreign_bash_hooks", return_value=hooks):
+            task, code, out, err = self.start("on", "local")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: ", err)
+        self.assertIn("sqz", err)
+        self.assertIn("remove or disable", err)
+
     def test_a_gitlab_harness_needs_no_os_sandbox(self):
         config.set_active_harness("example-maven")
         task, code, out, err = self.start("off", "none", harness="example-maven",

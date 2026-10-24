@@ -943,6 +943,104 @@ def github_token_warning(env=None):
                                               "it" if len(names) == 1 else "them"))
 
 
+# The interpreters whose script, not their own name, says which hook runs.
+_INTERPRETER = re.compile(r"(?:python[0-9.]*|node|nodejs|bash|sh|zsh|dash|ruby|perl|deno|bun"
+                          r"|php)")
+
+
+def _hook_label(hook):
+    """A hook as doctor names it: the command's first word, or the script an interpreter runs,
+    by its base name alone. Its arguments, which may carry a token, are never kept."""
+    if not isinstance(hook, dict):
+        return "an unreadable hook"
+    command = hook.get("command")
+    if hook.get("type", "command") != "command" or not isinstance(command, str):
+        return "a %s hook" % hook.get("type") if isinstance(hook.get("type"), str) else \
+            "an unreadable hook"
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    if words and os.path.basename(words[0]) == "env":
+        first = _past_env(words)
+        words = words[words.index(first):] if first else []
+    if not words:
+        return "an empty command"
+    name = os.path.basename(words[0])
+    if _INTERPRETER.fullmatch(name):
+        script = next((word for word in words[1:] if not word.startswith("-")), None)
+        if script:
+            return os.path.basename(script)
+    return name
+
+
+def _enabled_plugins(documents):
+    """The plugin names the settings documents enable, a later document overriding an earlier
+    one, as Claude Code layers user, project, local and managed settings."""
+    state = {}
+    for doc in documents:
+        enabled = doc.get("enabledPlugins") if isinstance(doc, dict) else None
+        if isinstance(enabled, dict):
+            state.update((name, value) for name, value in enabled.items()
+                         if isinstance(name, str))
+    return [name for name, value in state.items() if value is True]
+
+
+def _plugin_hook_files(names):
+    """The hooks/hooks.json of each install of an enabled plugin, from Claude Code's plugin
+    registry."""
+    registry = _json_object(claude_home() / "plugins" / "installed_plugins.json") or {}
+    plugins = registry.get("plugins")
+    files = []
+    for name in names:
+        installs = plugins.get(name) if isinstance(plugins, dict) else None
+        for install in installs if isinstance(installs, list) else []:
+            root = install.get("installPath") if isinstance(install, dict) else None
+            if isinstance(root, str) and root:
+                files.append(Path(root) / "hooks" / "hooks.json")
+    return files
+
+
+def foreign_bash_hooks(cwd=None):
+    """Every PreToolUse hook other than ppl's guard whose matcher passes Bash, from the user,
+    project, local and managed settings and the hooks/hooks.json of each enabled plugin, as
+    {"source": file, "hook": _hook_label}. Such a hook may rewrite a Bash call with
+    updatedInput, and whether that keeps dangerouslyDisableSandbox is unverified."""
+    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
+    settings = [global_settings_path(), base / ".claude" / "settings.json",
+                local_settings_path(str(base)), managed_settings_path()]
+    documents = [(path, _json_object(path)) for path in settings]
+    sources = documents + [(path, _json_object(path)) for path in
+                           _plugin_hook_files(_enabled_plugins([doc for _, doc in documents]))]
+    found = []
+    for path, doc in sources:
+        hooks = doc.get("hooks") if isinstance(doc, dict) else None
+        entries = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or not matcher_covers(entry.get("matcher"), "Bash"):
+                continue
+            inner = entry.get("hooks")
+            for hook in inner if isinstance(inner, list) else []:
+                if isinstance(hook, dict) and GUARD_MARKER in str(hook.get("command", "")):
+                    continue
+                found.append({"source": str(path), "hook": _hook_label(hook)})
+    return found
+
+
+def foreign_bash_hooks_warning(cwd=None):
+    """One line naming the foreign Bash hooks, or None. Not a refusal: Claude Code merges hooks
+    from every source and has no per-workspace switch short of disableAllHooks, which would
+    drop ppl's guard as well."""
+    hooks = foreign_bash_hooks(cwd)
+    if not hooks:
+        return None
+    return ("PreToolUse hooks other than ppl's guard see every Bash call: %s. One that "
+            "rewrites a command with updatedInput may keep or drop dangerouslyDisableSandbox, "
+            "which is unverified, so remove or disable them for pipeline sessions before a "
+            "GitHub run" % ", ".join("%s (%s)" % (item["hook"], item["source"])
+                                     for item in hooks))
+
+
 def managed_settings_path():
     if sys.platform == "darwin":
         return Path("/Library/Application Support/ClaudeCode/managed-settings.json")
@@ -1139,6 +1237,7 @@ def report(task_id=None, cwd=None, env=None, probe=None):
     result.update(inspect_setup(env))
     result["os_sandbox"] = os_sandbox_facts(cwd, env, probe)
     result["github_token_env"] = github_token_names(env)
+    result["foreign_bash_hooks"] = foreign_bash_hooks(cwd)
     result["mcp_servers"] = mcp_server_names(cwd)
     result["task"] = task_id
     result["isolated"] = isolated

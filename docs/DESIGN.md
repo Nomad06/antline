@@ -657,8 +657,13 @@ though how Seatbelt holds an entry that names a file is unverified until the liv
 and `ppl harness validate` refuses an `[os_sandbox] allow_write` entry that is or holds the
 home directory or a protected path [R-OS-SANDBOX-PROTECTED-PATHS]. `ppl doctor` lists another
 settings file's write grant over a protected path, and any unix socket allowance, under
-`os_sandbox.undoing`. Without the facts the allowlist stands aside and the older path rules
-apply. An MCP server runs outside the OS sandbox and is not
+`os_sandbox.undoing`. It also lists, as `foreign_bash_hooks`, every other `PreToolUse` hook
+whose matcher passes Bash, from the user, project, local and managed settings and each enabled
+plugin's `hooks/hooks.json`, by the command's first word or script name: one that rewrites a
+call with `updatedInput` may keep or drop `dangerouslyDisableSandbox`, which is unverified, so
+`ppl init` warns on a GitHub run that they should be removed or disabled for pipeline sessions
+[R-OS-SANDBOX-INIT-REQUIRED]. Without the facts the allowlist stands aside and the older path
+rules apply. An MCP server runs outside the OS sandbox and is not
 checked here, so the pipeline workspace should register no file-writing one
 [R-OS-SANDBOX-PROTECTED-PATHS]. A role's call to a GitHub MCP tool is denied
 [R-FORGE-GH-MCP-NO-ROLE], and so is its WebFetch of a github.com URL [R-WEBFETCH-GITHUB-NO-ROLE].

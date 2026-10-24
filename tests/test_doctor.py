@@ -1082,6 +1082,87 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestForeignBashHooks(unittest.TestCase):
+    """Another PreToolUse hook that sees Bash may rewrite a call with updatedInput, and
+    whether that keeps or drops dangerouslyDisableSandbox is unverified, so doctor names
+    every such hook, by its first word or script name only."""
+
+    def setUp(self):
+        self.home = Path(tmphome.mkdtemp(prefix="pplhome-"))
+        self.claude = Path(tmphome.mkdtemp(prefix="pplclaude-"))
+        self.cwd = Path(tmphome.mkdtemp(prefix="pplcwd-"))
+        self.managed = self.home / "managed-settings.json"
+        for patcher in (mock.patch.dict(os.environ, {"PPL_HOME": str(self.home),
+                                                     "PPL_CLAUDE_HOME": str(self.claude)}),
+                        mock.patch.object(doctor, "managed_settings_path",
+                                          lambda: self.managed)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def write(self, path, doc):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+    def pre_tool_use(self, *entries):
+        return {"hooks": {"PreToolUse": [{"matcher": matcher, "hooks": [
+            {"type": "command", "command": command}]} for matcher, command in entries]}}
+
+    def plugin(self, name, entries, enabled=True):
+        root = self.claude / "plugins" / "cache" / name
+        self.write(root / "hooks" / "hooks.json", self.pre_tool_use(*entries))
+        registry = self.claude / "plugins" / "installed_plugins.json"
+        doc = json.loads(registry.read_text()) if registry.exists() else {"version": 2,
+                                                                          "plugins": {}}
+        doc["plugins"][name] = [{"scope": "user", "installPath": str(root)}]
+        self.write(registry, doc)
+        user = doctor.global_settings_path()
+        settings = json.loads(user.read_text()) if user.exists() else {}
+        settings.setdefault("enabledPlugins", {})[name] = enabled
+        self.write(user, settings)
+
+    def found(self):
+        return [(Path(item["source"]).name, item["hook"])
+                for item in doctor.foreign_bash_hooks(str(self.cwd))]
+
+    def test_every_source_is_read_and_only_names_are_reported(self):
+        self.write(doctor.global_settings_path(), self.pre_tool_use(
+            ("Bash", "sqz compress --token s3cr3t"), (".*", GUARD_COMMAND)))
+        self.write(self.cwd / ".claude" / "settings.json", self.pre_tool_use(
+            ("Bash|Read", "/usr/bin/python3 /opt/hooks/rewrite.py --key abc")))
+        self.write(self.cwd / ".claude" / "settings.local.json", self.pre_tool_use(
+            ("", "env FOO=1 rtk hook")))
+        self.write(self.managed, self.pre_tool_use(("*", "bash /etc/corp/audit.sh")))
+        found = self.found()
+        self.assertIn(("settings.json", "sqz"), found)
+        self.assertIn(("settings.json", "rewrite.py"), found)
+        self.assertIn(("settings.local.json", "rtk"), found)
+        self.assertIn(("managed-settings.json", "audit.sh"), found)
+        self.assertEqual(len(found), 4)
+        text = json.dumps(doctor.foreign_bash_hooks(str(self.cwd)))
+        for secret in ("s3cr3t", "--key", "abc", "FOO=1", "ppl_guard"):
+            self.assertNotIn(secret, text)
+
+    def test_a_hook_whose_matcher_misses_bash_is_not_reported(self):
+        self.write(doctor.global_settings_path(), self.pre_tool_use(
+            ("Edit|Write", "fmt-hook"), ("mcp__.*", "mcp-audit"), ("Bash", "sqz")))
+        self.assertEqual(self.found(), [("settings.json", "sqz")])
+
+    def test_an_enabled_plugins_hooks_are_reported(self):
+        self.plugin("lint@market", [("Bash", "${CLAUDE_PLUGIN_ROOT}/hooks/check.sh x")])
+        self.plugin("off@market", [("Bash", "offhook")], enabled=False)
+        self.assertEqual(self.found(), [("hooks.json", "check.sh")])
+
+    def test_the_report_and_the_warning_name_them(self):
+        self.write(doctor.global_settings_path(), self.pre_tool_use(("Bash", "sqz compress")))
+        result = doctor.report(cwd=str(self.cwd), env={"PATH": "/usr/bin"},
+                               probe=lambda: "unknown")
+        self.assertEqual([item["hook"] for item in result["foreign_bash_hooks"]], ["sqz"])
+        warning = doctor.foreign_bash_hooks_warning(str(self.cwd))
+        self.assertIn("sqz", warning)
+        self.assertIn("remove or disable", warning)
+        self.assertIn("before a GitHub run", warning)
+
+
 class TestOsSandboxFacts(unittest.TestCase):
     BLOCK = {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": True}
 
