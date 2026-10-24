@@ -106,6 +106,44 @@ def repos(doc):
     return forge_repo, tracker_repo
 
 
+def _inside(path, parent):
+    return path == parent or path.startswith(parent.rstrip(os.sep) + os.sep)
+
+
+def layout_problem(doc, workspace):
+    """A refusal message when the checkout or the worktrees lie inside the workspace or contain
+    it, else None. The profile write-denies the whole workspace, so such a layout would deny
+    the run its own repository."""
+    root = workspace_dir(workspace)
+    for key, entry in zip(("[repo] path", "[repo] worktrees"), _repo(doc)):
+        real = _real(entry)
+        if _inside(real, root) or _inside(root, real):
+            return ("%s %s and the workspace %s overlap, and the OS sandbox keeps the workspace "
+                    "wholly write-denied (it holds CLAUDE.md, agents, skills and settings), so "
+                    "the run could not write its own repository. Move the checkout or the "
+                    "workspace so neither lies inside the other, then run ppl harness apply "
+                    "again." % (key, real, root))
+    return None
+
+
+def repo_problem(doc):
+    """A message when a GitHub forge or tracker names no repository the guard could allow, else
+    None. Such a harness renders -R <owner/name> and every GitHub command is denied."""
+    forge_repo, _ = repos(doc)
+    tracker = doc.get("tracker") or {}
+    if tracker.get("kind") == "github-issues" and not tracker.get("repo"):
+        return ("[tracker] repo is not set for the github-issues tracker, so the OS sandbox "
+                "guard has no repository to allow. Set repo = \"owner/name\" in the harness "
+                "[tracker] table, then run ppl harness apply again.")
+    if (doc.get("forge") or {}).get("kind") == "github" and not forge_repo:
+        return ("forge_repo cannot be derived: the checkout %s has no github.com origin remote "
+                "and the tracker names no GitHub repository, so the OS sandbox guard has no "
+                "repository to allow. Add a github.com origin to the checkout, or use a "
+                "github-issues tracker with [tracker] repo = \"owner/name\", then run ppl "
+                "harness apply again." % checkout(doc))
+    return None
+
+
 def checkout(doc):
     """The checkout as the facts hold it, `realpath`-ed."""
     return _real(_repo(doc)[0])

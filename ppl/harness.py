@@ -826,6 +826,9 @@ def apply(name, agents_dir=None, skills_dir=None):
             raise PplError("SETUP_INCOMPLETE", "the OS sandbox profile is written to the "
                            "workspace's local settings and no [claude] workspace is configured. "
                            "Run ppl setup claude, then ppl harness apply again.")
+        problem = os_sandbox.layout_problem(doc, workspace) or os_sandbox.repo_problem(doc)
+        if problem:
+            raise PplError("SETUP_INCOMPLETE", problem)
         sandbox_facts = os_sandbox.facts(doc, workspace, pin_map)
         prof = os_sandbox.profile(doc, workspace, pin_map)
         sandbox_facts["written_sandbox"] = prof["sandbox"]
@@ -974,6 +977,8 @@ def verify(name_or_path, source):
         warnings = validate(doc, source)
         require_absolute_repo(doc)
         warnings += _size_warnings(render_skill(doc, pins=_check_pins(doc)), agent_texts(doc))
+        if os_sandbox.needed(doc):
+            warnings += [message for message in (os_sandbox.repo_problem(doc),) if message]
         warnings += unrunnable_focused_tests(doc)
         warnings += _missing_skills(doc)
     except PplError as exc:

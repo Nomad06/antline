@@ -32,11 +32,15 @@ class WizardTestCase(panel_client.StudioTestCase):
         # the wizard renders into the workspace it configures, as a user's run does
         os.environ.pop("PPL_AGENTS_DIR", None)
         os.environ.pop("PPL_SKILLS_DIR", None)
+        patcher = mock.patch("ppl.setup._origin_repo", lambda checkout: "acme/demo")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.workspace = Path(tmphome.mkdtemp(prefix="pplws-"))
+        self.repo_root = Path(tmphome.mkdtemp(prefix="pplrepo-"))
         self.answers = {
             "claude_binary": "claude", "workspace": str(self.workspace), "hooks": "local",
             "verify": "yes", "harness_from": "example-generic", "harness_name": "mine",
-            "repo": str(self.workspace / "repo"), "default_branch": "main",
+            "repo": str(self.repo_root / "repo"), "default_branch": "main",
             "task_url_template": "https://tracker.example/<TASK-ID>",
             "key_pattern": "^DEMO-[0-9]+$", "forge": "github",
         }

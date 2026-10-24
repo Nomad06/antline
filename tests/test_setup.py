@@ -42,6 +42,7 @@ class SetupTestCase(unittest.TestCase):
         # environment first, so the apply step would render into its dirs.
         self._dirs = {name: os.environ.pop(name, None) for name in _DIR_VARS}
         self.workspace = Path(tmphome.mkdtemp(prefix="pplws-"))
+        self.repo_root = Path(tmphome.mkdtemp(prefix="pplrepo-"))
         self.lines = []
         patcher = mock.patch.object(models, "claude_version", lambda binary="claude": "9.9.9")
         patcher.start()
@@ -51,11 +52,14 @@ class SetupTestCase(unittest.TestCase):
         patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: pins)
         patcher.start()
         self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(os_sandbox, "repo_problem", lambda doc: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.answers = {
             "claude_binary": "claude", "workspace": str(self.workspace), "hooks": "local",
             "verify": "yes",
             "harness_from": "example-generic", "harness_name": "mine",
-            "repo": str(self.workspace / "repo"), "default_branch": "main",
+            "repo": str(self.repo_root / "repo"), "default_branch": "main",
             "task_url_template": "https://tracker.example/<TASK-ID>",
             "key_pattern": "^DEMO-[0-9]+$", "forge": "github",
         }
@@ -99,7 +103,7 @@ class TestNonInteractive(SetupTestCase):
         self.assertEqual(doc["harness"]["name"], "mine")
         self.assertEqual(doc["task"]["key_pattern"], "^DEMO-[0-9]+$")
         self.assertEqual(doc["forge"]["kind"], "github")
-        self.assertEqual(doc["repo"]["worktrees"], str(self.workspace / "repo") + "/.worktrees")
+        self.assertEqual(doc["repo"]["worktrees"], str(self.repo_root / "repo") + "/.worktrees")
 
     def test_running_twice_is_idempotent(self):
         from ppl import harness
@@ -648,7 +652,7 @@ class TestTrackerStep(SetupTestCase):
 
     def test_the_repo_defaults_to_the_origin_remote_of_the_checkout(self):
         import subprocess
-        checkout = self.workspace / "repo"
+        checkout = self.repo_root / "repo"
         checkout.mkdir()
         for argv in (["init", "-q"], ["remote", "add", "origin", "git@github.com:acme/widgets.git"]):
             subprocess.run(["git", "-C", str(checkout)] + argv, check=True)
@@ -1020,7 +1024,7 @@ class TestCli(SetupTestCase):
 
     def test_a_second_run_with_identical_answers_exits_zero(self):
         argv = ["setup", "--non-interactive", "--answer", "workspace=%s" % self.workspace,
-                "--answer", "repo=%s" % (self.workspace / "repo"), "--answer", "harness_name=mine"]
+                "--answer", "repo=%s" % (self.repo_root / "repo"), "--answer", "harness_name=mine"]
         with mock.patch.object(models, "probe", ok_probe), \
                 mock.patch.object(setup, "_default_forge_check", ok_forge):
             first = self.call(*argv)
@@ -1041,7 +1045,7 @@ class TestCli(SetupTestCase):
         source = Path(tmphome.mkdtemp(prefix="pplharnesssrc-")) / "x.replacing"
         shutil.copytree(SOURCE / "defaults" / "harnesses" / "example-generic", source)
         base = ["setup", "paths", "harness", "--non-interactive",
-                "--answer", "repo=%s" % (self.workspace / "repo")]
+                "--answer", "repo=%s" % (self.repo_root / "repo")]
         for extra in (["--answer", "harness_from=%s" % source],
                       ["--answer", "harness_from=defaults/harnesses/example-generic"]):
             with self.subTest(extra=extra):

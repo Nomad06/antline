@@ -16,7 +16,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import boundary, cli, config, forges, harness, models, os_sandbox, paths
+from ppl import boundary, cli, config, forges, harness, models, os_sandbox, paths, setup
 from ppl.errors import PplError
 from ppl.trackers import jira
 
@@ -342,6 +342,9 @@ class TestVerify(HarnessTestCase):
         self.addCleanup(patcher.stop)
         # apply renders a GitHub harness on pinned binaries, none looked up on PATH here
         patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: PINS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(setup, "_origin_repo", lambda checkout: "acme/demo")
         patcher.start()
         self.addCleanup(patcher.stop)
         self.claude_skills = Path(claude_home) / "skills"
@@ -1231,6 +1234,9 @@ class TestApplyOsSandbox(HarnessTestCase):
         patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: PINS)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.origin = mock.patch.object(setup, "_origin_repo", lambda checkout: "acme/demo")
+        self.origin.start()
+        self.addCleanup(self.origin.stop)
         self.settings_path = self.workspace / ".claude" / "settings.local.json"
         self.facts_path = paths.home() / os_sandbox.FACTS_FILE
 
@@ -1353,6 +1359,107 @@ class TestApplyOsSandbox(HarnessTestCase):
         fixtures.install_harness("example-generic")
         self.apply()
         self.assertTrue(os_sandbox.scratch_root().is_dir())
+
+
+class TestApplyRefusesSandboxLayouts(HarnessTestCase):
+    SETTINGS = '{"hooks": {"keep": true}}\n'
+    FACTS = '{"sentinel": 1}\n'
+
+    def setUp(self):
+        super().setUp()
+        self.workspace = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplws-")))
+        self.elsewhere = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplrepo-")))
+        self.agents = tmphome.mkdtemp(prefix="pplagents-")
+        self.skills = tmphome.mkdtemp(prefix="pplskills-")
+        fixtures.install_routing()
+        config.update("claude", {"workspace": str(self.workspace)})
+        for patcher in (mock.patch.object(os_sandbox, "pins", lambda which=None: PINS),
+                        mock.patch.object(setup, "_origin_repo", lambda checkout: "acme/demo")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.settings_path = self.workspace / ".claude" / "settings.local.json"
+        self.settings_path.parent.mkdir(parents=True)
+        self.settings_path.write_text(self.SETTINGS, encoding="utf-8")
+        self.facts_path = paths.home() / os_sandbox.FACTS_FILE
+        self.facts_path.write_text(self.FACTS, encoding="utf-8")
+
+    def install(self, name="layout", **tables):
+        fixtures.install_variant("example-generic", name, **tables)
+        return name
+
+    def refused(self, name):
+        with self.assertRaises(PplError) as caught:
+            harness.apply(name, agents_dir=self.agents, skills_dir=self.skills)
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertEqual(self.settings_path.read_text(encoding="utf-8"), self.SETTINGS)
+        self.assertEqual(self.facts_path.read_text(encoding="utf-8"), self.FACTS)
+        return caught.exception.message
+
+    def repo(self, path, worktrees):
+        return {"path": str(path), "default_branch": "main", "worktrees": str(worktrees)}
+
+    def test_apply_refuses_a_checkout_inside_the_workspace(self):
+        checkout = self.workspace / "project"
+        name = self.install(repo=self.repo(checkout, self.elsewhere / "wt"))
+        message = self.refused(name)
+        self.assertIn(str(checkout), message)
+        self.assertIn(str(self.workspace), message)
+        self.assertIn("write-denied", message)
+
+    def test_apply_refuses_worktrees_inside_the_workspace(self):
+        worktrees = self.workspace / "wt"
+        name = self.install(repo=self.repo(self.elsewhere / "project", worktrees))
+        message = self.refused(name)
+        self.assertIn(str(worktrees), message)
+        self.assertIn(str(self.workspace), message)
+
+    def test_apply_refuses_a_workspace_inside_the_checkout(self):
+        name = self.install(repo=self.repo(self.workspace.parent, self.elsewhere / "wt"))
+        message = self.refused(name)
+        self.assertIn(str(self.workspace.parent), message)
+        self.assertIn(str(self.workspace), message)
+
+    def test_apply_refuses_a_symlinked_checkout_that_lands_inside_the_workspace(self):
+        (self.workspace / "real").mkdir()
+        link = self.elsewhere / "link"
+        link.symlink_to(self.workspace / "real")
+        name = self.install(repo=self.repo(link, self.elsewhere / "wt"))
+        self.assertIn(str(self.workspace / "real"), self.refused(name))
+
+    def test_apply_refuses_a_github_forge_without_a_derivable_repo(self):
+        name = self.install(repo=self.repo(self.elsewhere / "project", self.elsewhere / "wt"))
+        with mock.patch.object(setup, "_origin_repo", lambda checkout: None):
+            message = self.refused(name)
+        self.assertIn("forge_repo", message)
+        self.assertIn("origin", message)
+
+    def test_apply_refuses_a_github_issues_tracker_without_a_repo(self):
+        name = self.install(repo=self.repo(self.elsewhere / "project", self.elsewhere / "wt"),
+                            tracker={"kind": "github-issues"})
+        # validate already demands the repo, so it is switched off to reach apply's own refusal
+        with mock.patch.object(harness, "validate", lambda doc, source: []):
+            message = self.refused(name)
+        self.assertIn("[tracker] repo", message)
+
+    def test_verify_warns_about_a_missing_forge_repo(self):
+        name = self.install(repo=self.repo(self.elsewhere / "project", self.elsewhere / "wt"))
+        with mock.patch.object(setup, "_origin_repo", lambda checkout: None):
+            result = harness.verify(name, name)
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(any("forge_repo" in warning for warning in result["warnings"]),
+                        result["warnings"])
+        result = harness.verify(name, name)
+        self.assertFalse(any("forge_repo" in warning for warning in result["warnings"]))
+
+    def test_a_gitlab_harness_is_not_refused_for_layout_or_repo(self):
+        fixtures.install_variant("example-maven", "lab", repo=self.repo(
+            self.workspace / "project", self.workspace / "wt"))
+        name = "lab"
+        with mock.patch.object(setup, "_origin_repo", lambda checkout: None):
+            harness.apply(name, agents_dir=self.agents, skills_dir=self.skills)
+            result = harness.verify(name, name)
+        self.assertEqual(config.active_harness(), name)
+        self.assertFalse(any("forge_repo" in w or "workspace" in w for w in result["warnings"]))
 
 
 class TestSnapshotAndApplied(HarnessTestCase):

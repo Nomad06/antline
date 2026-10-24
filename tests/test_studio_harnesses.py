@@ -28,6 +28,9 @@ class HarnessApiTestCase(panel_client.StudioTestCase):
         patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: pins)
         patcher.start()
         self.addCleanup(patcher.stop)
+        patcher = mock.patch("ppl.setup._origin_repo", lambda checkout: "acme/demo")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def get(self, name="demo"):
         status, data, _ = panel_client.call("GET", "/api/harnesses/" + name)

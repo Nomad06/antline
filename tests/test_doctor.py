@@ -1008,6 +1008,65 @@ class TestHookShape(unittest.TestCase):
         self.assertEqual(result["global"]["dispatch_hook"], "missing")
 
 
+class TestMcpServersWarning(unittest.TestCase):
+    TOKEN = "ghp_FAKETOKEN0123456789"
+
+    def setUp(self):
+        self.home = Path(tmphome.mkdtemp(prefix="pplhome-"))
+        self.claude = Path(tmphome.mkdtemp(prefix="pplclaude-"))
+        self.cwd = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplcwd-")))
+        self.user_json = self.home / "dot-claude.json"
+        patcher = mock.patch.dict(os.environ, {"PPL_HOME": str(self.home),
+                                               "PPL_CLAUDE_HOME": str(self.claude)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, path, doc):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+    def facts(self):
+        self.write(self.home / "os_sandbox.json", {"version": 1})
+
+    def warning(self):
+        return doctor.mcp_servers_warning(cwd=str(self.cwd), claude_json=self.user_json)
+
+    def test_mcp_warning_lists_workspace_and_user_servers_by_name_only(self):
+        self.facts()
+        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {
+            "command": "uvx", "args": ["serena", "--token", self.TOKEN]}}})
+        self.write(self.user_json, {"projects": {str(self.cwd): {"mcpServers": {
+            "jetbrains": {"command": "npx", "env": {"TOKEN": self.TOKEN}}}}},
+            "mcpServers": {"globalone": {"command": "node"}}})
+        self.write(self.claude / "settings.json", {"mcpServers": {"fromuser": {"command": "x"}}})
+        self.write(self.cwd / ".claude" / "settings.local.json",
+                   {"mcpServers": {"fromlocal": {"command": "x"}}})
+        warning = self.warning()
+        for name in ("serena", "jetbrains", "globalone", "fromuser", "fromlocal"):
+            self.assertIn(name, warning)
+        self.assertIn("outside the OS sandbox", warning)
+        for secret in (self.TOKEN, "uvx", "npx", "--token", "node"):
+            self.assertNotIn(secret, warning)
+        self.assertNotIn("\n", warning)
+
+    def test_no_mcp_warning_without_facts(self):
+        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {"command": "uvx"}}})
+        self.assertIsNone(self.warning())
+
+    def test_no_mcp_warning_without_servers(self):
+        self.facts()
+        self.write(self.cwd / ".mcp.json", {"mcpServers": {}})
+        self.write(self.user_json, {"projects": {"/elsewhere": {"mcpServers": {"x": {}}}}})
+        self.assertIsNone(self.warning())
+
+    def test_doctor_report_carries_mcp_server_names(self):
+        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {"args": [self.TOKEN]}}})
+        result = doctor.report(cwd=str(self.cwd), env={"PATH": "/usr/bin"},
+                               probe=lambda: "unknown")
+        self.assertEqual(result["mcp_servers"], ["serena"])
+        self.assertNotIn(self.TOKEN, json.dumps(result))
+
+
 if __name__ == "__main__":
     unittest.main()
 

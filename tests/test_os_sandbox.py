@@ -219,5 +219,32 @@ class TestLoadFacts(Home):
         self.assertEqual(os_sandbox.gh_path(), "gh")
 
 
+class TestSetupChecks(Home):
+    def test_layout_problem_names_both_paths_for_nesting_either_way(self):
+        ws = os.path.realpath(tmphome.mkdtemp(prefix="pplws-"))
+        inside = doc(checkout=ws + "/repo")
+        self.assertIn(ws + "/repo", os_sandbox.layout_problem(inside, ws))
+        around = doc(checkout=os.path.dirname(ws))
+        self.assertIn(os.path.dirname(ws), os_sandbox.layout_problem(around, ws))
+        apart = doc(checkout="/srv/repo")
+        apart["repo"]["worktrees"] = "/srv/wt"
+        self.assertIsNone(os_sandbox.layout_problem(apart, ws))
+
+    def test_a_sibling_with_a_common_name_prefix_is_not_nested(self):
+        ws = os.path.realpath(tmphome.mkdtemp(prefix="pplws-"))
+        apart = doc(checkout=ws + "-repo")
+        apart["repo"]["worktrees"] = ws + "-wt"
+        self.assertIsNone(os_sandbox.layout_problem(apart, ws))
+
+    def test_repo_problem_covers_forge_and_tracker(self):
+        with mock.patch("ppl.setup._origin_repo", lambda checkout: None):
+            self.assertIn("forge_repo", os_sandbox.repo_problem(doc()))
+            self.assertIn("[tracker] repo", os_sandbox.repo_problem(
+                doc(forge="gitlab", tracker="github-issues")))
+            self.assertIsNone(os_sandbox.repo_problem(doc(forge="gitlab")))
+        with mock.patch("ppl.setup._origin_repo", lambda checkout: "acme/demo"):
+            self.assertIsNone(os_sandbox.repo_problem(doc()))
+
+
 if __name__ == "__main__":
     unittest.main()

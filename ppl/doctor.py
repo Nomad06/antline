@@ -866,6 +866,58 @@ def forge_report(env=None):
     return result
 
 
+def _server_names(doc):
+    servers = doc.get("mcpServers") if isinstance(doc, dict) else None
+    return [name for name in servers if isinstance(name, str)] if isinstance(servers, dict) else []
+
+
+def _json_object(path):
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def mcp_server_names(cwd=None, claude_json=None):
+    """The names, never a command, args or env, of every MCP server a session launched in the
+    workspace sees: its .mcp.json, ~/.claude.json (top level and the workspace's project
+    entry) and the mcpServers of the user, project and local settings files."""
+    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd())
+    claude_json = Path(claude_json) if claude_json else claude_home().parent / ".claude.json"
+    names = []
+    for doc in (_json_object(base / ".mcp.json"),
+                _json_object(global_settings_path()),
+                _json_object(base / ".claude" / "settings.json"),
+                _json_object(local_settings_path(cwd))):
+        names += _server_names(doc)
+    user = _json_object(claude_json)
+    if user is not None:
+        names += _server_names(user)
+        projects = user.get("projects")
+        if isinstance(projects, dict):
+            for key in dict.fromkeys((str(base), os.path.realpath(base))):
+                names += _server_names(projects.get(key))
+    return sorted(dict.fromkeys(names))
+
+
+def mcp_servers_warning(cwd=None, claude_json=None):
+    """One line naming the MCP servers the pipeline workspace's sessions load, when the OS
+    sandbox facts exist: they run outside the sandbox and the edit-tool boundary cannot see
+    them. None without facts or without servers."""
+    from . import os_sandbox
+    try:
+        if os_sandbox.load_facts() is None:
+            return None
+    except PplError:
+        return None
+    names = mcp_server_names(cwd, claude_json)
+    if not names:
+        return None
+    return ("MCP servers run outside the OS sandbox and can write anywhere: %s. Register no "
+            "file-writing MCP server for the pipeline workspace." % ", ".join(names))
+
+
 def managed_settings_path():
     if sys.platform == "darwin":
         return Path("/Library/Application Support/ClaudeCode/managed-settings.json")
@@ -999,6 +1051,7 @@ def report(task_id=None, cwd=None, env=None, probe=None):
     result = dict(inspected)
     result.update(inspect_setup(env))
     result["os_sandbox"] = os_sandbox_facts(cwd, env, probe)
+    result["mcp_servers"] = mcp_server_names(cwd)
     result["task"] = task_id
     result["isolated"] = isolated
     result["mismatch"] = mismatch(isolated, inspected) if isolated is not None else None

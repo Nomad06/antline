@@ -2567,6 +2567,20 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         self.assertIn(str(old), err)
         self.assertIn("ppl setup claude", err)
 
+    def test_init_prints_the_mcp_warning(self):
+        home = Path(os.environ["PPL_HOME"])
+        facts = home / "os_sandbox.json"
+        facts.write_text('{"version": 1}', encoding="utf-8")
+        self.addCleanup(lambda: facts.unlink() if facts.exists() else None)
+        (Path(self.local_dir) / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"serena": {"command": "uvx"}}}), encoding="utf-8")
+        self.write({})
+        code, _, err = self.init("DEMO-9928")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: MCP servers run outside the OS sandbox", err)
+        self.assertIn("serena", err)
+        self.assertNotIn("uvx", err)
+
     def test_init_is_quiet_when_the_entries_are_the_ones_setup_writes(self):
         self.write({})
         code, _, err = self.init("DEMO-9923")
