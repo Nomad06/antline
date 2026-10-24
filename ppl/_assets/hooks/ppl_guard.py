@@ -2311,7 +2311,7 @@ def _decide(payload):
     # R-FORGE-GH-MCP-NO-ROLE, R-WEBFETCH-GITHUB-NO-ROLE: an MCP server and WebFetch run
     # outside the OS sandbox, so no role reaches GitHub through either, run or no run. The
     # orchestrator's GitHub MCP reads stay open. Decided before any run file is read, so a run
-    # file a role made unreadable or huge cannot hold these back; the server name the run's
+    # file a role made unreadable or huge cannot hold these back. The server name the run's
     # snapshot gives is matched further down.
     if escape.is_role(agent):
         # a tracker write keeps the tracker's reason (R-JIRA-NO-ROLE-TOOL below)
