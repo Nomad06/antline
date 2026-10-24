@@ -21,11 +21,14 @@ read_tools = ["getJiraIssue", "getConfluenceContent", "getConfluencePage", "sear
 kind = "gitlab"
 mcp_server = "GitLab-MCP"
 
-# The OS sandbox profile is on for a GitHub forge or tracker. List the hosts and the
-# cache directories the build needs, nothing else is reachable or writable.
+# The OS sandbox profile is on for a GitHub forge or tracker, and enabled = true opts this
+# GitLab harness in. List the hosts and the cache directories the build needs, nothing else
+# is reachable or writable. allow_ssh_read = true keeps ~/.ssh readable for a build that
+# needs ssh.
 # [os_sandbox]
-# allowed_domains = ["pypi.org", "files.pythonhosted.org"]
-# allow_write = ["~/.cache/pip"]
+# enabled = true
+# allowed_domains = ["repo.maven.apache.org", "repo1.maven.org"]
+# allow_write = ["~/.m2"]
 
 [knowledge]
 skills = []

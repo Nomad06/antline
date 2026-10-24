@@ -4191,16 +4191,25 @@ class TestInitRequiresTheOsSandbox(unittest.TestCase):
         self.assertFalse(paths.run_dir(task).exists())
 
     def test_init_refuses_when_the_guard_is_only_global(self):
-        _, code, _, err = self.start("on", "global")
-        self.assertEqual(code, 2)
-        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
-
-    def test_init_refuses_when_the_guard_is_absent(self):
-        _, code, _, err = self.start("on", "none")
+        # rule: R-OS-SANDBOX-INIT-REQUIRED
+        # --no-isolated, so the isolation check passes and the OS sandbox one is what refuses
+        task, code, _, err = self.start("on", "global", "--no-isolated")
         self.assertEqual(code, 2)
         doc = json.loads(err)
         self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
+        self.assertIn("registered global", doc["message"])
         self.assertIn("settings.local.json", doc["message"])
+        self.assertFalse(paths.run_dir(task).exists())
+
+    def test_init_refuses_when_the_guard_is_absent(self):
+        # rule: R-OS-SANDBOX-INIT-REQUIRED
+        task, code, _, err = self.start("on", "none", "--no-isolated")
+        self.assertEqual(code, 2)
+        doc = json.loads(err)
+        self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
+        self.assertIn("registered none", doc["message"])
+        self.assertIn("settings.local.json", doc["message"])
+        self.assertFalse(paths.run_dir(task).exists())
 
     def test_init_records_os_sandboxed_true_when_on(self):
         task, code, out, err = self.start("on", "local")

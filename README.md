@@ -330,9 +330,9 @@ version is asked by `ppl doctor` when it runs the guard (`hook_runs`).
 
 ## Credential separation
 
-On a GitHub harness (a GitHub forge or the GitHub Issues tracker) no role can reach GitHub.
-`ppl harness apply` writes an OS sandbox profile into the workspace's
-`.claude/settings.local.json`. Every pipeline Bash command then runs in Claude Code's OS sandbox
+In a run on a GitHub harness (a GitHub forge or the GitHub Issues tracker) that `ppl init`
+recorded as OS-sandboxed, no role can reach GitHub. `ppl harness apply` writes an OS sandbox
+profile into the workspace's `.claude/settings.local.json`. Every pipeline Bash command then runs in Claude Code's OS sandbox
 with `github.com` and every subdomain denied, which Claude Code enforces on macOS and Linux
 [R-OS-SANDBOX-NETWORK]. A role's Bash call that asks to leave the sandbox is denied by the guard
 [R-OS-SANDBOX-ROLE-NO-ESCAPE], a role's call to a GitHub MCP tool is denied
@@ -354,6 +354,10 @@ to start a GitHub run in a session that is not sandboxed this way, unless you pa
 list's own 403, not any 403.
 
 What this costs and leaves open:
+
+- Once a profile exists, run `ppl harness apply` and `ppl setup claude` from a terminal, not
+  from a pipeline session: the profile write-denies the workspace and ppl's own config,
+  which both of them write [R-OS-SANDBOX-PROTECTED-PATHS].
 
 - While an OS sandbox profile is applied no guarded session can edit ppl's own source,
   `~/.claude` outside `projects` and `plans`, or a file outside the sandbox write scope with an
