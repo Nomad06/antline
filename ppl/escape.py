@@ -3,8 +3,9 @@ command reaches GitHub. The guard asks this first for a Bash call that sets
 dangerouslyDisableSandbox: a ppl-* role never may, and while the guard facts exist or a run
 is active no other subagent may and the unroled orchestrator may only for one plain command
 on a pinned gh, git or ppl in the shapes below and in escape_git. It also closes the routes
-that run outside the sandbox anyway: an edit tool writing what those commands read, and a
-role's GitHub MCP call or WebFetch of GitHub. The guard hook imports this module, so it
+that run outside the sandbox anyway: an edit tool writing outside the sandbox's write scope
+or what those commands read (escape_paths), and a role's GitHub MCP call or WebFetch of
+GitHub. The guard hook imports this module, so it
 parses on Python 3.9, carries no annotations and reads JSON only."""
 import json
 import os
@@ -15,18 +16,11 @@ import stringprep
 import unicodedata
 import urllib.parse
 
-from . import boundary, escape_git, paths, store
+from . import boundary, escape_git, escape_paths, paths, store
+# protected_paths is ppl.escape's as well, the name the brief and the rule rows give it.
+from .escape_paths import EDIT_TOOLS, FACTS_FILE, PIN_NAMES, protected_paths  # noqa: F401
 
-try:
-    import pwd
-except ImportError:
-    # no passwd database off POSIX, where HOME is the only home there is
-    pwd = None
-
-# Its own copy of os_sandbox.FACTS_FILE, so the hook never imports that module.
-FACTS_FILE = "os_sandbox.json"
 FLAG = "dangerouslyDisableSandbox"
-PIN_NAMES = ("gh", "git", "ppl")
 APPLY = "run `ppl harness apply`"
 
 # What the shell reads as more than one plain word, outside single quotes.
@@ -150,213 +144,12 @@ def is_role(agent):
     return isinstance(agent, str) and bool(agent) and _is_role(agent)
 
 
-# What an unsandboxed git, ssh or gh reads under a home directory, gh's extensions included.
-_HOME_CONFIG = (".gitconfig", ".config/git", ".ssh", ".config/gh", ".local/share/gh")
-# Where git and gh read the same instead when the environment moves it: the variable, and
-# the part under its value.
-_MOVED_CONFIG = (("XDG_CONFIG_HOME", "git"), ("XDG_CONFIG_HOME", "gh"), ("XDG_DATA_HOME", "gh"),
-                 ("GH_CONFIG_DIR", ""), ("GIT_CONFIG_GLOBAL", ""))
-# Claude Code's settings, which hold the hooks, the permissions and the sandbox, in its
-# config directory. The rest of that directory (memory, transcripts, skills) stays writable.
-_CLAUDE_SETTINGS = ("settings.json", "settings.local.json")
-# What a workspace session loads from the workspace besides .claude: its MCP servers.
-_WORKSPACE_FILES = (".claude", ".mcp.json")
-# What an unsandboxed ppl reads under PPL_HOME, and the guard's own facts.
-_PPL_FILES = ("config.toml", "harnesses", FACTS_FILE)
-EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
-_PATH_KEYS = ("file_path", "path", "notebook_path")
-_PROTECTED_WHY = "which a command outside the OS sandbox reads or runs"
-# How many files under the protected directories a multi-link target is compared with.
-_LINK_SCAN_LIMIT = 10000
-
-
-def _homes():
-    """The home directory HOME names and the one the passwd database records, which ssh
-    reads whatever HOME says."""
-    homes = [os.path.expanduser("~")]
-    if pwd is not None:
-        try:
-            homes.append(pwd.getpwuid(os.getuid()).pw_dir)
-        except (KeyError, OSError):
-            pass
-    return homes
-
-
-def _claude_config():
-    """Claude Code's settings files and its .claude.json: under each home, under an absolute
-    PPL_CLAUDE_HOME as ppl doctor reads it (.claude.json beside it), and under an absolute
-    CLAUDE_CONFIG_DIR as Claude Code reads it (.claude.json inside it)."""
-    entries = []
-    for user_home in _homes():
-        entries.extend(os.path.join(user_home, ".claude", name) for name in _CLAUDE_SETTINGS)
-        entries.append(os.path.join(user_home, ".claude.json"))
-    for variable, beside in (("PPL_CLAUDE_HOME", True), ("CLAUDE_CONFIG_DIR", False)):
-        value = os.environ.get(variable)
-        if value and os.path.isabs(value):
-            entries.extend(os.path.join(value, name) for name in _CLAUDE_SETTINGS)
-            entries.append(os.path.join(os.path.dirname(value.rstrip("/")) if beside else value,
-                                        ".claude.json"))
-    return entries
-
-
-def _ppl_code():
-    """ppl's own code: the package this module is part of, the one the guard imports, and
-    the assets directory, which holds the hook scripts. A PPL_ROOT that paths.root() refuses
-    is still listed."""
-    entries = [os.path.dirname(os.path.abspath(__file__))]
-    try:
-        entries.append(str(paths.root()))
-    except Exception:
-        configured = os.environ.get("PPL_ROOT")
-        if configured:
-            entries.append(configured)
-    return entries
-
-
-def protected_paths(home, facts):
-    """Every path an edit tool may not write in a pipeline session, `realpath`-ed: the git,
-    ssh and gh config under the home directory and wherever an absolute XDG_CONFIG_HOME,
-    XDG_DATA_HOME, GH_CONFIG_DIR or GIT_CONFIG_GLOBAL in this environment moves it, Claude
-    Code's settings and .claude.json (_claude_config), the workspace's .claude directory and
-    .mcp.json, ppl's config, harnesses and guard facts under `home`, ppl's own code
-    (_ppl_code), and each pin's path and realpath. With `facts` None, the workspace and the
-    pins are not known and not listed."""
-    entries = [os.path.join(user_home, rel) for user_home in _homes() for rel in _HOME_CONFIG]
-    for variable, rel in _MOVED_CONFIG:
-        value = os.environ.get(variable)
-        if value and os.path.isabs(value):
-            entries.append(os.path.join(value, rel) if rel else value)
-    entries.extend(_claude_config())
-    if facts:
-        entries.extend(os.path.join(facts["workspace"], name) for name in _WORKSPACE_FILES)
-    entries.extend(os.path.join(str(home), name) for name in _PPL_FILES)
-    entries.extend(_ppl_code())
-    if facts:
-        for name in PIN_NAMES:
-            pin = facts["pins"][name]
-            entries.extend((pin["path"], pin["realpath"]))
-    found = []
-    for entry in entries:
-        real = os.path.realpath(entry)
-        if real not in found:
-            found.append(real)
-    return found
-
-
-def _fold(path):
-    """`path` as a case-insensitive file system compares it, so a variant in letter case or
-    Unicode form is the same path."""
-    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", path).casefold())
-
-
-def _within(path, root):
-    return path == root or path.startswith(root.rstrip("/") + "/")
-
-
-def _target_forms(raw, cwd):
-    """Every absolute path an edit of `raw` may land on: `~` expanded or taken as written,
-    joined to the session cwd, `..` collapsed in the text or by the kernel after a link, and
-    through every link, a missing tail kept as spelled. None when `raw` is relative and the
-    call names no absolute cwd."""
-    forms = []
-    for spelling in (raw, os.path.expanduser(raw)):
-        if not os.path.isabs(spelling):
-            if not (isinstance(cwd, str) and os.path.isabs(cwd)):
-                return None
-            spelling = os.path.join(cwd, spelling)
-        for form in (os.path.normpath(spelling), os.path.realpath(spelling),
-                     os.path.realpath(os.path.normpath(spelling))):
-            if form not in forms:
-                forms.append(form)
-    return forms
-
-
-def _identity(path):
-    try:
-        info = os.stat(path)
-    except (OSError, ValueError):
-        return None
-    return (info.st_dev, info.st_ino)
-
-
-def _linked_into(path, protected):
-    """The protected directory holding another link of `path`, a regular file, or None.
-    The search stops at _LINK_SCAN_LIMIT files, and a search cut off counts as a hit."""
-    try:
-        info = os.stat(path)
-    except (OSError, ValueError):
-        return None
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink < 2:
-        return None
-    wanted = (info.st_dev, info.st_ino)
-    seen = 0
-    for root in protected:
-        if not os.path.isdir(root):
-            continue
-        for directory, _dirs, files in os.walk(root):
-            for name in files:
-                seen += 1
-                if seen > _LINK_SCAN_LIMIT:
-                    return "a directory too large to search for the file's other links"
-                if _identity(os.path.join(directory, name)) == wanted:
-                    return root
-    return None
-
-
-def _anchored(path):
-    """Each (device and inode, folded parts below it) for `path`, from the nearest existing
-    entry at or above it up to the root: the path as the file system knows it whatever name
-    reached it, with the part that does not exist yet kept as spelled."""
-    below = []
-    current = path
-    while True:
-        identity = _identity(current)
-        if identity is not None:
-            yield identity, tuple(reversed(below))
-        parent, name = os.path.split(current)
-        if parent == current:
-            return
-        below.append(_fold(name))
-        current = parent
-
-
-def _protected_hit(forms, protected):
-    """The protected path one of `forms` is or lies under, or None. Compared as text after
-    case folding, then by device and inode: a form lies under a protected path when an entry
-    above it is the protected path's nearest existing entry, and the parts below match. That
-    finds a hard link of a protected file, a case variant and another name of a directory
-    (a macOS firmlink) even when the protected path does not exist yet. Last, a hard link of
-    a file inside a protected directory."""
-    folded = [(entry, _fold(entry)) for entry in protected]
-    anchors = []
-    for entry in protected:
-        nearest = next(_anchored(entry), None)
-        if nearest:
-            anchors.append((entry,) + nearest)
-    for form in forms:
-        key = _fold(form)
-        for entry, entry_key in folded:
-            if _within(key, entry_key):
-                return entry
-        for identity, below in _anchored(form):
-            for entry, entry_identity, entry_below in anchors:
-                if identity == entry_identity and below[:len(entry_below)] == entry_below:
-                    return entry
-    for form in forms:
-        hit = _linked_into(form, protected)
-        if hit:
-            return hit
-    return None
-
-
 def edit_denial(payload, home, facts, active=False):
     """Why a pipeline session's Edit, Write, MultiEdit or NotebookEdit may not write its
-    target, or None. Edit tools run outside the OS sandbox, so what an unsandboxed gh, git or
-    ppl reads (protected_paths) is closed to roles and the orchestrator alike. Every path key
-    of the call is checked, resolved against the payload cwd with `~` expanded and through
-    links. In scope: a ppl-* role always, any session while `facts` is there, or while
-    `active` says a run is active or the facts file is there but unreadable, in which case
-    `facts` is None and only the paths known without it are protected."""
+    target, or None. Edit tools run outside the OS sandbox: escape_paths.target_denial says
+    why about each path key of the call, for roles and the orchestrator alike. In scope: a
+    ppl-* role always, any session while `facts` is there, and any session while `active`
+    says a run is active. Facts that cannot be read are the guard's to refuse before this."""
     if not isinstance(payload, dict) or payload.get("tool_name") not in EDIT_TOOLS:
         return None
     agent = payload.get("agent_type")
@@ -367,25 +160,16 @@ def edit_denial(payload, home, facts, active=False):
         return None
     tool = payload["tool_name"]
     who = agent if isinstance(agent, str) and agent else "a session with no role"
-    targets = [tool_input[key] for key in _PATH_KEYS if tool_input.get(key)]
     try:
-        protected = protected_paths(home, facts) if targets else []
-        for raw in targets:
-            if not isinstance(raw, str):
-                return ("%s's %s names a path that is not a string, %s, so the guard cannot "
-                        "tell whether it is one %s" % (who, tool, _short(raw), _PROTECTED_WHY))
-            forms = _target_forms(raw, payload.get("cwd"))
-            if forms is None:
-                return ("%s's %s names the relative path %s and no absolute cwd, so the guard "
-                        "cannot tell whether it is one %s" % (who, tool, _short(raw),
-                                                              _PROTECTED_WHY))
-            hit = _protected_hit(forms, protected)
-            if hit:
-                return ("%s may not %s %s while the pipeline is set up or running: it is or "
-                        "lies under %s, %s" % (who, tool, _short(raw), hit, _PROTECTED_WHY))
+        for key in escape_paths.PATH_KEYS:
+            if tool_input.get(key):
+                reason = escape_paths.target_denial(tool_input[key], payload.get("cwd"), home,
+                                                    facts, who, tool)
+                if reason:
+                    return reason
     except (OSError, ValueError, TypeError, KeyError) as err:
-        return ("%s's %s target cannot be checked against the paths %s: %s"
-                % (who, tool, _PROTECTED_WHY, type(err).__name__))
+        return ("%s's %s target cannot be checked against where an edit tool may write: %s"
+                % (who, tool, type(err).__name__))
     return None
 
 

@@ -904,15 +904,20 @@ def github_mcp_prefixes(task_id):
 
 
 def protected_edit_denial(payload, task_id):
-    """escape.edit_denial with the guard facts read here [R-OS-SANDBOX-PROTECTED-PATHS].
-    Facts that cannot be read still put every session in scope, with only the paths known
-    without them protected."""
+    """(code, reason) when an edit tool call may not write its target, else None: while the
+    guard facts exist it writes only inside the OS sandbox's write scope and Claude Code's
+    projects and plans directories, and never a protected path [R-OS-SANDBOX-PROTECTED-PATHS].
+    Facts that cannot be read put every session in scope with no write scope to check, so
+    every edit is refused until `ppl harness apply` repairs them."""
     home = paths.home()
     try:
         facts = escape.load_facts(home)
-    except ValueError:
-        return escape.edit_denial(payload, home, None, active=True)
-    return escape.edit_denial(payload, home, facts, active=bool(task_id))
+    except ValueError as err:
+        return ("OWNER_DECISION",
+                "the guard's OS sandbox facts are unusable (%s), so an edit tool's target cannot "
+                "be checked against the write scope: %s" % (err, escape.APPLY))
+    reason = escape.edit_denial(payload, home, facts, active=bool(task_id))
+    return ("BOUNDARY_VIOLATION", reason) if reason else None
 
 
 def denied_tools(task_id):
@@ -2352,14 +2357,14 @@ def _decide(payload):
                 return deny("BOUNDARY_VIOLATION",
                             _with_reading(_ROLE_TRACKER_WRITE % agent, why))
 
-    # R-OS-SANDBOX-PROTECTED-PATHS: an edit tool runs outside the OS sandbox too, so what an
-    # unsandboxed gh, git or ppl reads is closed to it, for roles and the orchestrator alike,
-    # before any run state is read. Every path key of the call is checked, not only the one
-    # target_path takes.
+    # R-OS-SANDBOX-PROTECTED-PATHS: an edit tool runs outside the OS sandbox too, so while the
+    # guard facts exist it writes only where sandboxed Bash may, and never what an unsandboxed
+    # gh, git or ppl reads, for roles and the orchestrator alike, before any run state is read.
+    # Every path key of the call is checked, not only the one target_path takes.
     if tool in WRITE_TOOLS:
-        reason = protected_edit_denial(payload, active)
-        if reason:
-            return deny("BOUNDARY_VIOLATION", reason)
+        refusal = protected_edit_denial(payload, active)
+        if refusal:
+            return deny(*refusal)
     path = target_path(tool_input) if tool in WRITE_TOOLS else None
     if path and structured_write_lands_in_runs(path, payload.get("cwd")):
         return deny("BOUNDARY_VIOLATION",

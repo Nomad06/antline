@@ -1111,6 +1111,19 @@ def run_os_sandbox_cases(cage):
                                     "new_string": "b"}, workspace),
         "BOUNDARY_VIOLATION", reason="a command outside the OS sandbox reads")
 
+    # While the facts exist an edit tool writes only where sandboxed Bash may.
+    cage.check(
+        "os-sandbox orchestrator edit of a claude hook script denied",
+        cage.payload(None, "Write", {"file_path": str(home.parent / ".claude" / "hooks" / "x.sh"),
+                                     "content": "id\n"}, workspace),
+        "BOUNDARY_VIOLATION", reason="writes only where sandboxed Bash may")
+
+    cage.check(
+        "os-sandbox orchestrator edit in the scratch dir allowed",
+        cage.payload(None, "Write", {"file_path": str(body.parent / "reply.md"),
+                                     "content": "text\n"}, workspace),
+        "allow")
+
     cage.check(
         "os-sandbox role github mcp tool denied",
         cage.payload("ppl-code-worker", "mcp__github__create_pull_request",

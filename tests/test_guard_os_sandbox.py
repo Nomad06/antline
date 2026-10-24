@@ -1300,6 +1300,10 @@ class GitShapes(OsSandboxCase):
 
 # What the guard says when an edit tool aims at a path an unsandboxed command reads.
 PROTECTED = "which a command outside the OS sandbox reads or runs"
+# What it says when an edit tool aims outside the OS sandbox's write scope.
+OUTSIDE_SCOPE = "writes only where sandboxed Bash may"
+# What it says for a .git directory or file inside the write scope.
+GIT_DIR = "a .git directory or the .git file of a worktree"
 EDIT_TOOLS = (("Edit", "file_path"), ("Write", "file_path"), ("MultiEdit", "file_path"),
               ("NotebookEdit", "notebook_path"))
 
@@ -1333,6 +1337,11 @@ class ProtectedPathCase(OsSandboxCase):
     def assert_protected(self, reason):
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn(PROTECTED, reason)
+
+    def assert_outside_scope(self, reason, target):
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn(OUTSIDE_SCOPE, reason)
+        self.assertIn(target, reason)
 
 
 class TestProtectedPaths(ProtectedPathCase):
@@ -1398,12 +1407,127 @@ class TestProtectedPaths(ProtectedPathCase):
                     self.assertIsNone(self.edit(self.at(".ssh/config"), agent=agent,
                                                 tool="Write"))
 
-    def test_an_ordinary_edit_in_scope_is_allowed(self):
-        for path in (os.path.join(self.outside, "notes.md"), self.at(".config/other/x.json"),
-                     self.at(".sshx/config"), self.at(".gitconfig-notes/x"), WS + "/README.md",
-                     WS + "/.claudex/x"):
+    def test_an_edit_inside_the_write_scope_is_allowed(self):
+        # the run's repo, the scratch directory and Claude Code's projects and plans
+        self.assertIsNone(self.edit(REPO + "/src/cart.py", agent="ppl-code-worker", cwd=REPO,
+                                    tool="Write"))
+        for path in (scratch_file("new-body.md"), self.at(".claude/projects/x/memory/m.md"),
+                     self.at(".claude/plans/p.md")):
             with self.subTest(path=path):
-                self.assertIsNone(self.edit(path))
+                self.assertIsNone(self.edit(path, tool="Write"))
+        claude_home = os.path.join(self.outside, "claude-home")
+        config_dir = os.path.join(self.outside, "claude-config")
+        with mock.patch.dict(os.environ, {"PPL_CLAUDE_HOME": claude_home,
+                                          "CLAUDE_CONFIG_DIR": config_dir}):
+            for path in (claude_home + "/projects/p/memory/m.md", config_dir + "/plans/p.md"):
+                with self.subTest(path=path):
+                    self.assertIsNone(self.edit(path, tool="Write"))
+
+    def test_an_edit_outside_the_write_scope_is_denied(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # hooks, plugins and hook scripts run outside the sandbox, wherever they sit
+        hook_script = os.path.join(self.outside, "hooks", "guard.sh")
+        for path in (self.at(".claude/hooks/x.sh"), self.at(".claude/plugins/p/hooks/hooks.json"),
+                     hook_script, self.at(".claude/CLAUDE.md"),
+                     self.at(".claude/settings.json.bak"), os.path.join(self.outside, "notes.md"),
+                     WS + "/README.md",
+                     self.at(".sshx/config")):
+            for agent in (None, "general-purpose", "ppl-code-worker"):
+                with self.subTest(path=path, agent=agent):
+                    reason = self.deny_reason(self.edit(path, agent=agent, tool="Write"))
+                    self.assert_outside_scope(reason, path)
+
+    def test_the_pinned_gits_system_config_and_helpers_are_denied(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # Homebrew's git reads <prefix>/etc/gitconfig and runs its exec-path helpers, files
+        # the operator owns, so a credential helper planted there would see the token
+        brew = os.path.join(self.outside, "brew")
+        cellar = os.path.join(brew, "Cellar", "git", "2.50.0")
+        for directory in ("bin", "libexec/git-core"):
+            os.makedirs(os.path.join(cellar, directory))
+        os.makedirs(os.path.join(brew, "bin"))
+        binary = os.path.join(cellar, "bin", "git")
+        with open(binary, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\n")
+        os.symlink(binary, os.path.join(brew, "bin", "git"))
+        pins = dict(facts_doc()["pins"], git={"path": brew + "/bin/git", "realpath": binary})
+        with self.facts_text(json.dumps(facts_doc(pins=pins))):
+            for path in (brew + "/etc/gitconfig", cellar + "/libexec/git-core/git-remote-https",
+                         cellar + "/libexec/git-core/git-credential-osxkeychain",
+                         brew + "/share/git-core/templates/hooks/pre-commit"):
+                with self.subTest(path=path):
+                    reason = self.deny_reason(self.edit(path, tool="Write"))
+                    self.assert_outside_scope(reason, path)
+
+    def test_a_path_with_edge_whitespace_or_a_control_character_is_denied(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # Claude Code trims JavaScript whitespace off a path before it resolves it, so a raw
+        # reading could differ: a BOM-led absolute path joined to a cwd in the run's repo
+        target = REPO + "/src/cart.py"
+        for raw in (" " + self.at(".gitconfig"), self.at(".gitconfig") + chr(0xA0),
+                    chr(0xFEFF) + target, target + chr(0x2028), chr(0x3000) + target,
+                    chr(0x1680) + target, target + "\t", REPO + "/src/a" + chr(1) + "b.py",
+                    target + chr(0x85)):
+            with self.subTest(raw=raw):
+                reason = self.deny_reason(self.edit(raw, agent="ppl-code-worker", cwd=REPO,
+                                                    tool="Write"))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn("starts or ends with whitespace or holds a control character",
+                              reason)
+
+    def test_a_git_directory_or_file_in_the_write_scope_is_denied(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # a planted hook fires on the orchestrator's git, and a repointed .git file changes
+        # what -C <run repo> means to the pinned push
+        worktree = REPO + "/.worktrees/r-" + TASK
+        for path in (worktree + "/.git", REPO + "/.git/config", REPO + "/.git/hooks/pre-commit",
+                     REPO + "/.git/worktrees/x/gitdir", REPO + "/.GIT/info/attributes",
+                     worktree + "/sub/.Git/hooks/post-checkout"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(path=path, agent=agent):
+                    reason = self.deny_reason(self.edit(path, agent=agent, cwd=REPO,
+                                                        tool="Write"))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn(GIT_DIR, reason)
+
+    def test_a_source_file_next_to_a_git_directory_is_allowed(self):
+        self.assertIsNone(self.edit(REPO + "/src/cart.py", agent="ppl-code-worker", cwd=REPO,
+                                    tool="Write"))
+        for path in (REPO + "/.gitignore", REPO + "/.github/workflows/ci.yml",
+                     REPO + "/.gitattributes", REPO + "/src/git/x.py"):
+            with self.subTest(path=path):
+                call = payload("ppl-code-worker", "Write", {"file_path": path}, REPO)
+                self.assertIsNone(escape.edit_denial(call, paths.home(), facts_doc()))
+
+    def test_without_guard_facts_only_the_protected_paths_are_closed(self):
+        # a GitLab or Jira harness writes no guard facts, so there is no write scope to hold
+        # an edit to: a role, or any session while a run is active, meets the protected paths
+        with self.facts_text(None):
+            self.assert_protected(self.deny_reason(self.edit(self.at(".gitconfig"))))
+            for path in (os.path.join(self.outside, "notes.md"), self.at(".claude/hooks/x.sh"),
+                         self.at(".config/other/x.json"), self.at(".sshx/config"),
+                         self.at(".gitconfig-notes/x"), WS + "/README.md", WS + "/.claudex/x"):
+                with self.subTest(path=path):
+                    self.assertIsNone(self.edit(path, tool="Write"))
+
+    def test_unreadable_facts_deny_every_edit(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        for text in ("{not json", "[]"):
+            with self.facts_text(text), self.no_active_run():
+                for path in (scratch_file("new-body.md"),
+                             self.at(".claude/projects/x/memory/m.md")):
+                    with self.subTest(text=text, path=path):
+                        reason = self.deny_reason(self.edit(path, tool="Write"))
+                        self.assertIn("OWNER_DECISION", reason)
+                        self.assertIn("ppl harness apply", reason)
+
+    def test_the_allowed_roots_are_the_write_scope_and_claude_projects_and_plans(self):
+        from ppl import escape_paths
+        roots = escape_paths.allowed_roots(facts_doc())
+        for path in facts_doc()["write_scope"] + [self.at(".claude/projects"),
+                                                  self.at(".claude/plans")]:
+            self.assertIn(path, roots)
+        self.assertNotIn(self.at(".claude"), roots)
 
     def test_the_workspace_claude_dir_the_pins_and_ppl_files_are_protected(self):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS
@@ -1452,7 +1576,6 @@ class TestProtectedPaths(ProtectedPathCase):
                          moved["GH_CONFIG_DIR"] + "/hosts.yml", moved["GIT_CONFIG_GLOBAL"]):
                 with self.subTest(path=path):
                     self.assert_protected(self.deny_reason(self.edit(path)))
-            self.assertIsNone(self.edit(moved["XDG_CONFIG_HOME"] + "/other/x.json"))
         # a relative value names no place the guard can protect, and moves nothing
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "rel"}):
             self.assert_protected(self.deny_reason(self.edit(self.at(".config/gh/hosts.yml"))))
@@ -1470,7 +1593,6 @@ class TestProtectedPaths(ProtectedPathCase):
                      data + self.at(".ssh/new_key"), data + self.at(".gitconfig")):
             with self.subTest(path=path):
                 self.assert_protected(self.deny_reason(self.edit(path)))
-        self.assertIsNone(self.edit(data + self.at(".config/other/x.json")))
 
     def test_claude_settings_mcp_config_and_ppl_code_are_protected(self):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS
@@ -1496,26 +1618,31 @@ class TestProtectedPaths(ProtectedPathCase):
                         result = self.edit(path, agent=agent, tool="Write")
                         self.assert_protected(self.deny_reason(result))
 
-    def test_the_rest_of_the_claude_home_stays_writable(self):
-        for path in (self.at(".claude/projects/x/memory/m.md"), self.at(".claude/CLAUDE.md"),
-                     self.at(".claude/settings.json.bak"), self.at(".claude.json.backup")):
-            with self.subTest(path=path):
-                self.assertIsNone(self.edit(path, tool="Write"))
-
     def test_a_hard_link_of_a_protected_file_is_denied(self):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        scratch = os.path.dirname(scratch_file("x"))
         for rel in (".gitconfig", ".ssh/config", ".config/gh/hosts.yml"):
-            alias = os.path.join(self.outside, rel.replace("/", "_"))
-            os.link(self.at(rel), alias)
+            name = rel.replace("/", "_")
+            outside = os.path.join(self.outside, name)
+            os.link(self.at(rel), outside)
+            inside = os.path.join(scratch, "link" + name)
+            os.link(self.at(rel), inside)
+            self.addCleanup(os.unlink, inside)
             with self.subTest(rel=rel):
-                self.assert_protected(self.deny_reason(self.edit(alias)))
+                # in the write scope, a file with another link may be another name of anything
+                reason = self.deny_reason(self.edit(inside))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertTrue(PROTECTED in reason or "more than one link" in reason, reason)
+                # with no guard facts, the protected directories are searched for the other link
+                with self.facts_text(None):
+                    self.assert_protected(self.deny_reason(self.edit(outside)))
 
     def test_every_path_key_of_the_call_is_checked(self):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS
-        harmless = os.path.join(self.outside, "notes.md")
         for key in ("path", "notebook_path"):
             with self.subTest(key=key):
-                result = self.edit(harmless, tool="NotebookEdit", **{key: self.at(".ssh/config")})
+                result = self.edit(scratch_file("notes2.ipynb"), tool="NotebookEdit",
+                                   **{key: self.at(".ssh/config")})
                 self.assert_protected(self.deny_reason(result))
 
     def test_a_path_the_guard_cannot_place_is_denied(self):
@@ -1525,14 +1652,7 @@ class TestProtectedPaths(ProtectedPathCase):
             with self.subTest(path=path, cwd=cwd):
                 reason = self.deny_reason(self.edit(path, cwd=cwd))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
-        self.assertIsNone(self.edit(os.path.join(self.outside, "notes.md"), cwd=None))
-
-    def test_corrupt_facts_still_protect_the_home_config(self):
-        # rule: R-OS-SANDBOX-PROTECTED-PATHS
-        with self.facts_text("{not json"), self.no_active_run():
-            self.assert_protected(self.deny_reason(self.edit(self.at(".gitconfig"))))
-            self.assert_protected(self.deny_reason(self.edit(str(paths.home() / "config.toml"))))
-            self.assertIsNone(self.edit(os.path.join(self.outside, "notes.md")))
+        self.assertIsNone(self.edit(scratch_file("new-body.md"), cwd=None))
 
     def test_protected_paths_lists_the_config_the_pins_and_ppl_files(self):
         home = paths.home()
