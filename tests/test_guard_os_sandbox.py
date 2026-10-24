@@ -848,7 +848,7 @@ class GitShapes(OsSandboxCase):
         return self.command(self.repo, "push", "--no-verify", *words)
 
     def fetch(self, *words):
-        return self.command(self.checkout, "fetch", *words)
+        return self.command(self.checkout, "fetch", "--no-recurse-submodules", *words)
 
     def test_push_of_the_run_branch_is_allowed(self):
         for words in (("origin", BRANCH), ("-u", "origin", BRANCH),
@@ -868,6 +868,31 @@ class GitShapes(OsSandboxCase):
         # a fetch reads the guard facts only, so it needs no run
         with self.no_active_run():
             self.assertIsNone(self.decide(self.fetch("origin", "main")))
+
+    def test_a_fetch_without_no_recurse_submodules_is_denied(self):
+        # rule: R-OS-SANDBOX-GIT-CONFIG
+        # a submodule the checkout holds would be fetched with its own config, which the
+        # guard does not read
+        for words in (("origin", "main"), ("origin", "main", "--no-recurse-submodules"),
+                      ("--recurse-submodules=no", "origin", "main"),
+                      ("--no-recurse-submodules", "--no-recurse-submodules", "origin", "main"),
+                      ("--no-recurse-submodules", "upstream", "main")):
+            with self.subTest(words=words):
+                command = self.command(self.checkout, "fetch", *words)
+                reason = self.deny_reason(self.decide(command))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn("--no-recurse-submodules origin main", reason)
+
+    def test_the_fetch_allow_entry_is_the_shape_the_guard_allows(self):
+        # the rendered allow entry and the guard's fetch shape are one string
+        harness = {"repo": {"path": self.checkout, "default_branch": "main"},
+                   "forge": {"kind": "github"}, "tracker": {"kind": "github-issues"}}
+        pins = dict(facts_doc()["pins"], git={"path": GIT_BIN, "realpath": real(GIT_BIN)})
+        entries = [entry[len("Bash("):-1]
+                   for entry in os_sandbox.profile(harness, WS, pins)["allow"]
+                   if entry.startswith("Bash(%s " % GIT_BIN)]
+        self.assertEqual(entries, [self.fetch("origin", "main")])
+        self.assertIsNone(self.decide(entries[0]))
 
     def test_core_hookspath_in_local_config_is_tolerated(self):
         # the -c on the command line wins over it

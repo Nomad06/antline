@@ -93,8 +93,8 @@ class TestProfile(Home):
             "Bash(/opt/x/gh pr checks *)",
             "Bash(/opt/x/gh api user --jq .login)",
             "Bash(/opt/x/gh auth status)",
-            "Bash(/usr/bin/git -c core.hooksPath=/dev/null -C %s fetch origin main)"
-            % os.path.realpath("/srv/repo"),
+            "Bash(/usr/bin/git -c core.hooksPath=/dev/null -C %s fetch --no-recurse-submodules "
+            "origin main)" % os.path.realpath("/srv/repo"),
             "Bash(/opt/y/bin/ppl tracker fetch --task *)",
             "Bash(/opt/y/bin/ppl review fetch --pr *)",
             "Bash(/opt/y/bin/ppl doctor --forge)"])

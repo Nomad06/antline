@@ -118,7 +118,8 @@ def _allow_entries(doc, pin_map):
     """The nine read-only commands, no GitHub write: those go through the permission prompt."""
     gh, git, ppl = (pin_map[name]["path"] for name in PIN_NAMES)
     checkout, _ = _repo(doc)
-    fetch = "%s -c core.hooksPath=/dev/null -C %s fetch origin %s" % (
+    # word for word the fetch escape_git.git_shape lets through
+    fetch = "%s -c core.hooksPath=/dev/null -C %s fetch --no-recurse-submodules origin %s" % (
         git, _real(checkout), doc["repo"]["default_branch"])
     return ["Bash(%s)" % entry for entry in (
         gh + " issue view *", gh + " pr view *", gh + " pr checks *",

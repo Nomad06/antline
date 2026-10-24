@@ -10,6 +10,7 @@ import re
 import subprocess
 
 HOOKS_OFF = ["-c", "core.hooksPath=/dev/null"]
+FETCH_FLAG = "--no-recurse-submodules"
 # Every git the guard runs gets this long: a hook that runs past its own timeout denies nothing.
 TIMEOUT_SECONDS = 0.2
 # Config keys known to run nothing and to send nothing elsewhere. core.hooksPath is here
@@ -34,8 +35,8 @@ _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _PSEUDO_REF = re.compile(r"(?:[A-Z_]*_)?HEAD", re.IGNORECASE)
 _UPSTREAM = ("-u", "--set-upstream")
 _SHAPE = ("git leaves the OS sandbox only as `git -c core.hooksPath=/dev/null -C <dir> fetch "
-          "<remote> <default branch>` or `... push --no-verify ...`, with one -c and no other "
-          "option, so no hook runs there")
+          "--no-recurse-submodules origin <default branch>` or `... push --no-verify ...`, with "
+          "one -c and no other option, so no hook runs there")
 _PUSH_SHAPE = ("git push takes only --no-verify [-u|--set-upstream] <remote> <branch> or "
                "--no-verify <remote> --delete <branch>")
 
@@ -73,15 +74,17 @@ def git_shape(argv, facts, state, run_git=subprocess.run):
 
 
 def _fetch_words(directory, rest, facts):
-    """(remote, None, None) for `fetch <remote> <default branch>` in the checkout, else
-    (None, None, why)."""
+    """("origin", None, None) for `fetch --no-recurse-submodules origin <default branch>` in
+    the checkout, the words of ppl's allow entry, else (None, None, why). A submodule the
+    checkout holds would be fetched with its own config, which the guard never reads."""
     if directory != facts["checkout"]:
         return None, None, ("git fetch runs only in the checkout %s, not %s"
                             % (facts["checkout"], _short(directory)))
-    if len(rest) != 2 or rest[1] != facts["default_branch"]:
-        return None, None, ("git fetch takes only <remote> %s, the default branch"
-                            % facts["default_branch"])
-    return rest[0], None, _remote_problem(rest[0])
+    expected = [FETCH_FLAG, "origin", facts["default_branch"]]
+    if rest != expected:
+        return None, None, ("git fetch takes only %s, the default branch with no submodule"
+                            % " ".join(expected))
+    return "origin", None, None
 
 
 def _push_words(directory, rest, facts, state):
