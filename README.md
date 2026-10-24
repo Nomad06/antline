@@ -350,7 +350,8 @@ checkout an ssh remote. If the guard cannot decide such a call it denies it
 [R-OS-SANDBOX-FAIL-CLOSED]. `ppl init` refuses
 to start a GitHub run in a session that is not sandboxed this way, unless you pass
 `--no-os-sandbox`, which the run records [R-OS-SANDBOX-INIT-REQUIRED]. `ppl doctor` shows
-`os_sandbox.state`.
+`os_sandbox.state`, which is `on` only when a probe through the session's proxy gets the deny
+list's own 403, not any 403.
 
 What this costs and leaves open:
 

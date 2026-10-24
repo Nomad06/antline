@@ -13,8 +13,9 @@ GH_TIMEOUT = github_issues.GH_TIMEOUT
 COMMAND = "ppl review fetch"
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _QUERY = ("query { repository(owner: \"%s\", name: \"%s\") { pullRequest(number: %d) { "
-          "reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { "
-          "databaseId } } } } } } }")
+          "reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved "
+          "comments(first: 1) { nodes { databaseId } } } } } } }")
+_PAGE = 100
 
 
 def _blocked(why):
@@ -53,10 +54,19 @@ def _login(person):
 
 
 def _resolved(text):
+    """{first comment id: resolved} of the pull request's review threads. A pull request with
+    more than one page of them is refused: a thread past the first page would read as
+    unresolved, and ppl does not page through them."""
     try:
-        nodes = json.loads(text)["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        threads = json.loads(text)["data"]["repository"]["pullRequest"]["reviewThreads"]
+        nodes = threads["nodes"]
+        more = threads["pageInfo"]["hasNextPage"]
     except (ValueError, KeyError, TypeError):
         raise _blocked("gh answered the review threads with an unexpected document")
+    if more is not False:
+        raise _blocked("the pull request has more than %d review threads, more than one page, "
+                       "and ppl review fetch reads only the first, so their states cannot all "
+                       "be known" % _PAGE)
     found = {}
     for node in nodes if isinstance(nodes, list) else []:
         try:

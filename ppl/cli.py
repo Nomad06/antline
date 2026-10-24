@@ -781,9 +781,10 @@ def cmd_merge(args):
 
 
 def _review_repo(task_id):
-    """The GitHub repository `ppl review fetch` reaches: the guard facts' forge_repo, and
-    the run's own snapshot (its github-issues repo, else its checkout's origin) must agree
-    with it when the facts exist."""
+    """The GitHub repository `ppl review fetch` reaches: the guard facts' forge_repo when the
+    facts exist, which a github-issues repo the run's snapshot names must agree with, else the
+    snapshot's github-issues repo or the checkout's origin. With the facts no git runs: the
+    run's repo is role-writable, and this command runs outside the OS sandbox."""
     snapshot = paths.run_dir(task_id) / "harness.json"
     try:
         doc = store.read_json(snapshot) if stat.S_ISREG(os.lstat(snapshot).st_mode) else None
@@ -797,6 +798,9 @@ def _review_repo(task_id):
     tracker = doc.get("tracker")
     repo = tracker.get("repo") if isinstance(tracker, dict) and \
         tracker.get("kind") == "github-issues" else None
+    facts = os_sandbox.load_facts()
+    if facts is not None and not repo:
+        repo = facts.get("forge_repo")
     if not repo:
         repo = setup._origin_repo(run.load(task_id).get("repo") or "")
     repo = os_sandbox.pinned_repo("forge_repo", repo)

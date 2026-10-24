@@ -1045,6 +1045,9 @@ class TestMcpServersWarning(unittest.TestCase):
         for name in ("serena", "jetbrains", "globalone", "fromuser", "fromlocal"):
             self.assertIn(name, warning)
         self.assertIn("outside the OS sandbox", warning)
+        # what the names cannot show: a plugin's servers and the claude.ai connectors
+        self.assertIn("plugin MCP servers", warning)
+        self.assertIn("claude.ai connectors", warning)
         for secret in (self.TOKEN, "uvx", "npx", "--token", "node"):
             self.assertNotIn(secret, warning)
         self.assertNotIn("\n", warning)
@@ -1380,11 +1383,18 @@ class TestOsSandboxFacts(unittest.TestCase):
 
         port = server.getsockname()[1]
         env = {"HTTPS_PROXY": "http://user:secret@127.0.0.1:%d" % port}
-        thread = threading.Thread(target=serve, args=(b"HTTP/1.1 403 Forbidden\r\n\r\n",),
-                                  daemon=True)
-        thread.start()
-        self.assertEqual(doctor.probe_github(env), "denied")
-        thread.join()
+        from ppl import os_sandbox
+        for status, verdict in (
+                (b"HTTP/1.1 403 host is on the deny list\r\n\r\n", "denied"),
+                (("HTTP/1.1 403 %s\r\n\r\n" % os_sandbox.DENY_REASON).encode(), "denied"),
+                (b"HTTP/1.1 403 Forbidden\r\n\r\n", "unknown"),
+                (b"HTTP/1.1 403 user denied\r\n\r\n", "unknown")):
+            thread = threading.Thread(target=serve, args=(status,), daemon=True)
+            thread.start()
+            with self.subTest(status=status[:40]):
+                # any 403 is not enough: only the deny list's own reason says GitHub is closed
+                self.assertEqual(doctor.probe_github(env), verdict)
+            thread.join()
         server.close()
         self.assertIn("CONNECT api.github.com:443 HTTP/1.1", seen[0])
         self.assertIn("Proxy-Authorization: Basic ", seen[0])

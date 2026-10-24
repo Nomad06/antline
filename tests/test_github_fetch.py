@@ -57,7 +57,10 @@ class FakeGh:
         elif route.endswith("/reviews"):
             text = json.dumps(self.reviews)
         else:
-            text = json.dumps(graphql(*self.threads))
+            doc = graphql(*self.threads)
+            threads = doc["data"]["repository"]["pullRequest"]["reviewThreads"]
+            threads["pageInfo"] = {"hasNextPage": getattr(self, "next_page", False)}
+            text = json.dumps(doc)
         return subprocess.CompletedProcess(argv, 0, text, "")
 
 
@@ -124,6 +127,19 @@ def call(*args):
     return code, out.getvalue(), err.getvalue()
 
 
+class TestReviewThreadPages(unittest.TestCase):
+    def test_more_than_one_page_of_review_threads_blocks(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # a thread past the first hundred would read as unresolved, so the fetch fails closed
+        gh = FakeGh(threads=[(101, True)])
+        gh.next_page = True
+        with self.assertRaises(PplError) as caught:
+            github_fetch.fetch("o/r", 5, runner=gh)
+        self.assertEqual(caught.exception.code, "EXTERNAL_BLOCKED")
+        self.assertIn("100", caught.exception.message)
+        self.assertIn("hasNextPage", gh.argvs[-1][-1])
+
+
 class TestReviewFetchCli(unittest.TestCase):
     def setUp(self):
         self.task = "GH-9"
@@ -188,6 +204,20 @@ class TestReviewFetchCli(unittest.TestCase):
         self.write_facts()
         code, _, err = call("review", "fetch", "--pr", "5")
         self.assertEqual(code, 0, err)
+        self.assertIn("repos/o/r/pulls/5/comments", self.gh.argvs[0])
+
+    def test_with_facts_the_forge_repo_is_taken_without_running_git(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # the run's repo is role-writable, and git run in it outside the sandbox loads its config
+        fixtures.install_variant("example-generic", "gh-jira", forge={"kind": "github"})
+        store.write_json(paths.run_dir(self.task) / "harness.json",
+                         harness.snapshot(harness.load("gh-jira")))
+        self.write_facts()
+        with mock.patch("ppl.setup._origin_repo",
+                        side_effect=AssertionError("git ran in the run's repo")):
+            code, _, err = call("review", "fetch", "--pr", "5")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("SCHEMA_INVALID", err)
         self.assertIn("repos/o/r/pulls/5/comments", self.gh.argvs[0])
 
     def test_a_non_github_forge_is_refused(self):

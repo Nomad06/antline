@@ -629,10 +629,14 @@ with no include, and give the remote one url, the forge repo on github.com
 [R-OS-SANDBOX-GIT-CONFIG]. Both gh and ppl run only from a `cwd` that is the workspace or
 lies under it, which the profile write-denies, and outside every write-scope entry, so
 neither loads a repo a role wrote: being outside the write scope alone is not enough, since a
-temp directory is sandbox-writable and in no entry [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. An allowed ppl command trusts no run file a role can
-write: `ppl tracker fetch` takes its repository from `os_sandbox.json` and refuses a run
-snapshot that names another, and refuses with `EXTERNAL_BLOCKED` to write or append through a
-run directory or a log that is a link [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A command the check
+temp directory is sandbox-writable and in no entry [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. An
+allowed ppl command trusts no run file a role can write: `ppl tracker fetch` and `ppl review
+fetch` take their repository from `os_sandbox.json`, with no git run in the run's repo, and
+refuse a run snapshot that names another, and refuse with `EXTERNAL_BLOCKED` to write or append
+through a run directory or a log that is a link or has a second hard link
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. `ppl review fetch` also refuses with `EXTERNAL_BLOCKED` a
+pull request with more than one page (100) of review threads, whose later threads would read
+as unresolved [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A command the check
 lets through still meets the tracker gate and the forge denials below it
 [R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-TRACKER-CLI-GATE]. Where the guard cannot decide a
 flagged call it denies it: an internal error, a non-string `agent_type`, an unreadable

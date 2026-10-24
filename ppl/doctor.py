@@ -916,7 +916,8 @@ def mcp_servers_warning(cwd=None, claude_json=None):
     if not names:
         return None
     return ("MCP servers run outside the OS sandbox and can write anywhere: %s. Register no "
-            "file-writing MCP server for the pipeline workspace." % ", ".join(names))
+            "file-writing MCP server for the pipeline workspace. The list leaves out plugin MCP "
+            "servers and claude.ai connectors, which run outside it as well." % ", ".join(names))
 
 
 # The variables gh and the GitHub tooling read a token from. Every sandboxed command, a role's
@@ -1090,9 +1091,15 @@ def managed_settings_path():
     return Path("/etc/claude-code/managed-settings.json")
 
 
+# The reason Claude Code's proxy gives for a host on its deny list when the settings give it
+# no other one.
+DENY_LIST_REASON = "host is on the deny list"
+
+
 def probe_github(env):
-    """"denied" on a 403 and "open" on a 200 from a CONNECT to api.github.com:443 through the
-    env's HTTPS_PROXY, else "unknown". The proxy URL is read here and never returned."""
+    """"denied" on a 403 whose reason is the deny list's and "open" on a 200 from a CONNECT to
+    api.github.com:443 through the env's HTTPS_PROXY, else "unknown". The proxy URL is read
+    here and never returned."""
     url = env.get("HTTPS_PROXY") or env.get("https_proxy")
     if not url:
         return "unknown"
@@ -1114,9 +1121,18 @@ def probe_github(env):
                 data += chunk
     except (OSError, ValueError):
         return "unknown"
-    words = data.split(b"\n", 1)[0].split()
-    status = words[1] if len(words) > 1 else b""
-    return {b"403": "denied", b"200": "open"}.get(status, "unknown")
+    from . import os_sandbox
+    line = data.split(b"\n", 1)[0].decode("ascii", "replace").strip()
+    words = line.split(None, 2)
+    status = words[1] if len(words) > 1 else ""
+    reason = words[2] if len(words) > 2 else ""
+    if status == "200":
+        return "open"
+    # any 403 is not enough: an unlisted host is refused with another reason, and only the
+    # deny list's reason, ppl's own or the default, says GitHub is closed
+    if status == "403" and (DENY_LIST_REASON in reason or os_sandbox.DENY_REASON in reason):
+        return "denied"
+    return "unknown"
 
 
 def _native_windows():
