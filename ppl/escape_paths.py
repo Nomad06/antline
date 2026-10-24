@@ -52,6 +52,12 @@ OUTSIDE_SCOPE = "writes only where sandboxed Bash may"
 GIT_DIR = "a .git directory or the .git file of a worktree"
 
 
+def home_dirs():
+    """The home directories, `realpath`-ed: what HOME names and what the passwd database
+    records."""
+    return _unique_real(_homes())
+
+
 def _homes():
     """The home directory HOME names and the one the passwd database records, which ssh
     reads whatever HOME says."""

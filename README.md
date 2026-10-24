@@ -354,9 +354,13 @@ to start a GitHub run in a session that is not sandboxed this way, unless you pa
 
 What this costs and leaves open:
 
-- While a GitHub harness is applied no guarded session can edit ppl's own source, `~/.claude`
-  outside `projects` and `plans`, or a file outside the sandbox write scope with an edit tool
-  [R-OS-SANDBOX-PROTECTED-PATHS].
+- While an OS sandbox profile is applied no guarded session can edit ppl's own source,
+  `~/.claude` outside `projects` and `plans`, or a file outside the sandbox write scope with an
+  edit tool [R-OS-SANDBOX-PROTECTED-PATHS]. The profile write-denies the same protected paths to
+  sandboxed Bash, and `ppl harness validate` refuses an `[os_sandbox] allow_write` entry that is
+  or holds the home directory or a protected path: list the narrower directories a build writes
+  [R-OS-SANDBOX-PROTECTED-PATHS]. `ppl doctor` lists another settings file's write grant over a
+  protected path, and any unix socket allowance, under `os_sandbox.undoing`.
 - MCP servers run outside the OS sandbox and are not checked, so register no file-writing MCP
   server for the pipeline workspace [R-OS-SANDBOX-PROTECTED-PATHS].
 - Use a fine-grained personal access token limited to the one repository the pipeline works on

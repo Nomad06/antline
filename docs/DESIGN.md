@@ -649,10 +649,16 @@ edit tool writes only inside the facts' `write_scope` and Claude Code's own `~/.
 and `~/.claude/plans`, and never under a `deny_write` entry even inside an allowed root
 (`ppl/escape_paths.py`) [R-OS-SANDBOX-PROTECTED-PATHS]. A path with leading or trailing
 JavaScript whitespace or a control character is denied, and the rest is resolved right before the
-call [R-OS-SANDBOX-PROTECTED-PATHS]. While a GitHub harness is applied no guarded session can
-therefore edit ppl's own source, `~/.claude` outside projects and plans, or a file outside the
-write scope with an edit tool [R-OS-SANDBOX-PROTECTED-PATHS]. Without the facts the allowlist
-stands aside and the older path rules apply. An MCP server runs outside the OS sandbox and is not
+call [R-OS-SANDBOX-PROTECTED-PATHS]. While an OS sandbox profile is applied no guarded session
+can therefore edit ppl's own source, `~/.claude` outside projects and plans, or a file outside the
+write scope with an edit tool [R-OS-SANDBOX-PROTECTED-PATHS]. The profile write-denies the same
+protected paths to sandboxed Bash, so the deny wins over a write grant from any settings source,
+though how Seatbelt holds an entry that names a file is unverified until the live rehearsal,
+and `ppl harness validate` refuses an `[os_sandbox] allow_write` entry that is or holds the
+home directory or a protected path [R-OS-SANDBOX-PROTECTED-PATHS]. `ppl doctor` lists another
+settings file's write grant over a protected path, and any unix socket allowance, under
+`os_sandbox.undoing`. Without the facts the allowlist stands aside and the older path rules
+apply. An MCP server runs outside the OS sandbox and is not
 checked here, so the pipeline workspace should register no file-writing one
 [R-OS-SANDBOX-PROTECTED-PATHS]. A role's call to a GitHub MCP tool is denied
 [R-FORGE-GH-MCP-NO-ROLE], and so is its WebFetch of a github.com URL [R-WEBFETCH-GITHUB-NO-ROLE].
@@ -1000,7 +1006,8 @@ older install left behind keeps running its own copy) [R-DOCTOR-HOOK-SHAPE].
 
 For a GitHub forge or tracker, `ppl harness apply` also writes the OS sandbox profile into
 `<workspace>/.claude/settings.local.json`, whatever the hooks mode: a `sandbox` block that denies
-github.com and every subdomain to each sandboxed Bash command, the write scope, and the
+github.com and every subdomain to each sandboxed Bash command, the write scope, a denyWrite of
+the workspace, the pins' directories and every path the edit allowlist protects, and the
 `permissions.allow` entries for nine read-only commands on the pinned `gh`, `git` and `ppl` paths
 [R-OS-SANDBOX-NETWORK]. It records the block and the entries it wrote, with the guard's facts
 (workspace, checkout, default branch, repositories, scratch root, pins, `write_scope`, the

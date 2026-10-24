@@ -110,6 +110,11 @@ def _inside(path, parent):
     return path == parent or path.startswith(parent.rstrip(os.sep) + os.sep)
 
 
+def is_within(path, parent):
+    """True when the `realpath`-ed `path` is `parent` or lies under it."""
+    return _inside(path, parent)
+
+
 def layout_problem(doc, workspace):
     """A refusal message when the checkout or the worktrees lie inside the workspace or contain
     it, else None. The profile write-denies the whole workspace, so such a layout would deny
@@ -212,7 +217,12 @@ def _allow_entries(doc, pin_map):
 
 def deny_write(workspace, pin_map):
     """The profile's filesystem.denyWrite: the workspace and the directory of each pin's path
-    and realpath, each as given and `realpath`-ed."""
+    and realpath, each as given and `realpath`-ed, then every path escape_paths protects from
+    edit tools (the git, ssh and gh config, Claude Code's settings, ppl's config, harnesses,
+    guard facts and code, the workspace's .claude and .mcp.json, the pins). A deny wins over an
+    allow from any settings source, so the boundary does not rest on no other source granting
+    a write there."""
+    from . import escape_paths
     entries = [_real(workspace)]
     for name in PIN_NAMES:
         for key in ("path", "realpath"):
@@ -220,6 +230,9 @@ def deny_write(workspace, pin_map):
             for entry in (directory, os.path.realpath(directory)):
                 if entry not in entries:
                     entries.append(entry)
+    protected = escape_paths.protected_paths(
+        paths.home(), {"workspace": _real(workspace), "pins": pin_map})
+    entries.extend(entry for entry in protected if entry not in entries)
     return entries
 
 

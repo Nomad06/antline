@@ -110,6 +110,21 @@ class TestProfile(Home):
         for write in ("pr create", "issue comment", "pr close", "api *", " push "):
             self.assertNotIn(write, text)
 
+    def test_protected_paths_are_write_denied_by_the_profile(self):
+        # deny beats any allow from any settings source, so the boundary does not rest on
+        # no other source granting a write there
+        from ppl import escape_paths
+        deny = self.profile()["sandbox"]["filesystem"]["denyWrite"]
+        protected = escape_paths.protected_paths(
+            paths.home(), {"workspace": os.path.realpath("/srv/ws"), "pins": PINS})
+        for entry in protected:
+            self.assertIn(entry, deny)
+        for entry in (os.path.expanduser("~/.gitconfig"), os.path.expanduser("~/.ssh"),
+                      str(paths.home() / "config.toml"), str(paths.home() / "os_sandbox.json"),
+                      os.path.join(os.path.realpath("/srv/ws"), ".claude")):
+            self.assertIn(os.path.realpath(entry), deny)
+        self.assertEqual(len(deny), len(set(deny)))
+
     def test_pin_dirs_are_write_denied_both_path_and_realpath(self):
         deny = self.profile()["sandbox"]["filesystem"]["denyWrite"]
         for entry in ("/opt/x", "/usr/bin", "/opt/y/bin", "/opt/y/lib"):

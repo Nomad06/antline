@@ -980,17 +980,66 @@ def _exposed(facts, env):
     return found
 
 
-def _undoing(cwd):
+def _protected(recorded):
+    """escape_paths.protected_paths with the recorded facts when they hold a workspace and
+    every pin, else without them."""
+    from . import escape_paths, paths
+    pins = recorded.get("pins")
+    usable = (isinstance(recorded.get("workspace"), str) and isinstance(pins, dict)
+              and all(isinstance(pins.get(name), dict)
+                      and isinstance(pins[name].get("path"), str)
+                      and isinstance(pins[name].get("realpath"), str)
+                      for name in escape_paths.PIN_NAMES))
+    return escape_paths.protected_paths(paths.home(), recorded if usable else None)
+
+
+def _settings_path(entry, base):
+    """A path from a settings file as Claude Code reads it: ~ expanded, // read as /, and a
+    relative one under the workspace, `realpath`-ed."""
+    text = os.path.expanduser(entry)
+    if text.startswith("//"):
+        text = text[1:]
+    return os.path.realpath(os.path.join(str(base), text))
+
+
+def _covers(entries, protected, base):
+    """The first of `entries` that is, holds or lies under a protected path, with that path."""
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, str) or not entry:
+            continue
+        real = _settings_path(entry, base)
+        for target in protected:
+            if _under(target, real) or _under(real, target):
+                return entry, target
+    return None
+
+
+def _undoing(cwd, recorded=None):
+    """What in a settings source undoes the profile: sandbox.excludedCommands, the sandbox or
+    the unsandboxed retry switched off, a write grant (sandbox.filesystem.allowWrite or
+    permissions.additionalDirectories) over a protected path, and any unix socket allowance.
+    ppl's own block in the local settings, the one apply recorded, is not another source."""
+    recorded = recorded or {}
     base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd())
-    sources = (global_settings_path(), base / ".claude" / "settings.json",
-               local_settings_path(cwd), managed_settings_path())
+    local = local_settings_path(cwd)
+    sources = (global_settings_path(), base / ".claude" / "settings.json", local,
+               managed_settings_path())
+    protected = _protected(recorded)
     found = []
     for path in sources:
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        block = doc.get("sandbox") if isinstance(doc, dict) else None
+        if not isinstance(doc, dict):
+            continue
+        permissions = doc.get("permissions")
+        if isinstance(permissions, dict):
+            hit = _covers(permissions.get("additionalDirectories"), protected, base)
+            if hit:
+                found.append("%s sets permissions.additionalDirectories %s, which covers %s"
+                             % ((path,) + hit))
+        block = doc.get("sandbox")
         if not isinstance(block, dict):
             continue
         if block.get("excludedCommands"):
@@ -999,6 +1048,19 @@ def _undoing(cwd):
             found.append("%s sets sandbox.enabled to false" % path)
         if block.get("allowUnsandboxedCommands") is False:
             found.append("%s sets sandbox.allowUnsandboxedCommands to false" % path)
+        network = block.get("network")
+        if isinstance(network, dict):
+            if network.get("allowUnixSockets"):
+                found.append("%s sets sandbox.network.allowUnixSockets" % path)
+            if network.get("allowAllUnixSockets") is True:
+                found.append("%s sets sandbox.network.allowAllUnixSockets" % path)
+        filesystem = block.get("filesystem")
+        if isinstance(filesystem, dict) and not (path == local
+                                                 and block == recorded.get("written_sandbox")):
+            hit = _covers(filesystem.get("allowWrite"), protected, base)
+            if hit:
+                found.append("%s sets sandbox.filesystem.allowWrite %s, which covers %s"
+                             % ((path,) + hit))
     return found
 
 
@@ -1024,7 +1086,7 @@ def os_sandbox_facts(cwd=None, env=None, probe=None):
     live = "unknown"
     if not windows:
         live = (probe or (lambda: probe_github(env)))()
-    undoing = _undoing(cwd)
+    undoing = _undoing(cwd, recorded)
     if windows:
         state = "unavailable"
     elif marker and profile and live == "denied" and not undoing:

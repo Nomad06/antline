@@ -1167,6 +1167,43 @@ class TestOsSandboxFacts(unittest.TestCase):
         self.assertIn("sandbox.allowUnsandboxedCommands", facts["undoing"][0])
         self.assertEqual(facts["state"], "off")
 
+    def test_another_sources_write_grant_over_a_protected_path_is_undoing(self):
+        self.set_profile()
+        self.write_settings(doctor.global_settings_path(),
+                            {"sandbox": {"filesystem": {"allowWrite": [str(self.claude),
+                                                                       "/var/cache/x"]}}})
+        self.write_settings(self.cwd / ".claude" / "settings.json",
+                            {"permissions": {"additionalDirectories": [str(self.home)]}})
+        facts = self.facts()
+        undoing = " ".join(facts["undoing"])
+        self.assertEqual(facts["state"], "off")
+        self.assertIn("sandbox.filesystem.allowWrite %s" % self.claude, undoing)
+        self.assertIn("permissions.additionalDirectories %s" % self.home, undoing)
+        self.assertNotIn("/var/cache/x", undoing)
+        self.assertEqual(len(facts["undoing"]), 2)
+
+    def test_a_write_grant_under_a_protected_path_is_undoing(self):
+        self.set_profile()
+        self.write_settings(self.managed, {"sandbox": {"filesystem": {
+            "allowWrite": [str(self.home / "harnesses" / "mine")]}}})
+        self.assertIn("allowWrite", " ".join(self.facts()["undoing"]))
+
+    def test_unix_socket_allowances_are_undoing(self):
+        self.set_profile()
+        self.write_settings(doctor.global_settings_path(), {"sandbox": {"network": {
+            "allowUnixSockets": ["/var/run/docker.sock"]}}})
+        self.write_settings(self.managed, {"sandbox": {"network": {"allowAllUnixSockets": True}}})
+        undoing = " ".join(self.facts()["undoing"])
+        self.assertIn("sandbox.network.allowUnixSockets", undoing)
+        self.assertIn("sandbox.network.allowAllUnixSockets", undoing)
+
+    def test_ppls_own_block_is_not_undoing(self):
+        block = dict(self.BLOCK, filesystem={"allowWrite": [str(self.home / "runs")],
+                                             "denyWrite": [str(self.cwd)]})
+        self.write_facts(written_sandbox=block)
+        self.write_settings(self.cwd / ".claude" / "settings.local.json", {"sandbox": block})
+        self.assertEqual(self.facts()["undoing"], [])
+
     def test_a_pin_inside_the_write_scope_is_exposed(self):
         scope = tmphome.mkdtemp(prefix="pplscope-")
         pin = os.path.join(scope, "bin", "gh")

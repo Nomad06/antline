@@ -1197,6 +1197,20 @@ class TestOsSandboxTable(HarnessTestCase):
         message = self.refused('allow_write = ["cache/x"]\n')
         self.assertIn("os_sandbox.allow_write[0]", message)
 
+    def test_allow_write_refuses_the_home_directory_or_a_protected_path(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # a harness that needs to write under the home directory lists narrower directories
+        home = os.path.expanduser("~")
+        for entry in ("~/", "/", os.path.dirname(home), "~/.ssh", "~/.ssh/keys", "~/.config",
+                      "~/.claude", str(paths.home()), str(paths.home() / "harnesses")):
+            with self.subTest(entry=entry):
+                name = self.install('allow_write = ["%s"]\n' % entry)
+                with self.assertRaises(PplError) as caught:
+                    harness.load(name)
+                self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+                self.assertIn("os_sandbox.allow_write[0]", caught.exception.message)
+                self.assertIn("narrower", caught.exception.message)
+
     def test_enabled_must_be_a_bool(self):
         self.assertIn("os_sandbox.enabled", self.refused('enabled = "yes"\n'))
 

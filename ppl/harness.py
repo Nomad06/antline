@@ -284,6 +284,22 @@ def _check_test_sources(doc, source):
             _fail(source, "tests.sources[%d] %r %s" % (index, glob, problem))
 
 
+def _allow_write_problem(entry):
+    """Why an [os_sandbox] allow_write entry would hand sandboxed Bash a write it must not have,
+    or None: it is or holds a home directory, or is, holds or lies under a path an unsandboxed
+    gh, git or ppl reads or runs (escape_paths.protected_paths)."""
+    from . import escape_paths
+    real = os.path.realpath(os.path.expanduser(entry))
+    for home in escape_paths.home_dirs():
+        if os_sandbox.is_within(home, real):
+            return "is or holds the home directory %s" % home
+    for protected in escape_paths.protected_paths(paths.home(), None):
+        if os_sandbox.is_within(protected, real) or os_sandbox.is_within(real, protected):
+            return "is, holds or lies under %s, which a command outside the OS sandbox reads" \
+                % protected
+    return None
+
+
 def _check_os_sandbox(doc, source):
     """A present [os_sandbox] table holds a bool, bare host names and absolute paths. A
     GitHub harness cannot switch the profile off, since the guard's github rules rest on it."""
@@ -312,6 +328,10 @@ def _check_os_sandbox(doc, source):
         if not (entry.startswith("/") or entry.startswith("~/")):
             _fail(source, "os_sandbox.allow_write[%d] %r must be an absolute path or start "
                   "with '~/'" % (index, entry))
+        problem = _allow_write_problem(entry)
+        if problem:
+            _fail(source, "os_sandbox.allow_write[%d] %r %s: list the narrower directories the "
+                  "build writes instead" % (index, entry, problem))
 
 
 def validate(doc, source):
