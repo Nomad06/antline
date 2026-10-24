@@ -1472,6 +1472,36 @@ class TestProtectedPaths(ProtectedPathCase):
                 self.assert_protected(self.deny_reason(self.edit(path)))
         self.assertIsNone(self.edit(data + self.at(".config/other/x.json")))
 
+    def test_claude_settings_mcp_config_and_ppl_code_are_protected(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        claude_home = os.path.join(self.outside, "claude-home")
+        config_dir = os.path.join(self.outside, "claude-config")
+        assets = os.path.join(self.outside, "assets")
+        os.makedirs(os.path.join(assets, "defaults"))
+        package = os.path.dirname(os.path.realpath(escape.__file__))
+        targets = (self.at(".claude/settings.json"), self.at(".claude/settings.local.json"),
+                   self.at(".claude.json"), WS + "/.mcp.json",
+                   claude_home + "/settings.json", claude_home + "/settings.local.json",
+                   self.outside + "/.claude.json", config_dir + "/settings.json",
+                   config_dir + "/settings.local.json", config_dir + "/.claude.json",
+                   os.path.join(package, "escape.py"), os.path.join(package, "new_module.py"),
+                   os.path.join(package, "_assets", "hooks", "ppl_guard.py"),
+                   os.path.join(assets, "hooks", "ppl_guard.py"))
+        moved = {"PPL_CLAUDE_HOME": claude_home, "CLAUDE_CONFIG_DIR": config_dir,
+                 "PPL_ROOT": assets}
+        with mock.patch.dict(os.environ, moved):
+            for agent in (None, "general-purpose"):
+                for path in targets:
+                    with self.subTest(agent=agent, path=path):
+                        result = self.edit(path, agent=agent, tool="Write")
+                        self.assert_protected(self.deny_reason(result))
+
+    def test_the_rest_of_the_claude_home_stays_writable(self):
+        for path in (self.at(".claude/projects/x/memory/m.md"), self.at(".claude/CLAUDE.md"),
+                     self.at(".claude/settings.json.bak"), self.at(".claude.json.backup")):
+            with self.subTest(path=path):
+                self.assertIsNone(self.edit(path, tool="Write"))
+
     def test_a_hard_link_of_a_protected_file_is_denied(self):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS
         for rel in (".gitconfig", ".ssh/config", ".config/gh/hosts.yml"):

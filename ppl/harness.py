@@ -14,7 +14,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from . import boundary, forges, os_sandbox, paths, routing, sequences, trackers
+from . import boundary, escape, forges, os_sandbox, paths, routing, sequences, trackers
 from .errors import PplError
 
 FORMAT = 1
@@ -148,8 +148,12 @@ def _check_granted_tools(doc, knowledge, source):
     and its tools line is a comma-joined list: an entry must be exactly one tool
     name, so one string cannot smuggle a second tool, a newline or a key past
     the write-tool check. A harness grants MCP tools only, never a built-in
-    one, and never a write tool of any known tracker."""
+    one, never a write tool of any known tracker, and no tool of a GitHub MCP
+    server, in extra_tools or among the tracker's read tools: those servers run
+    outside the OS sandbox, and the guard denies a role's call to them
+    [R-FORGE-GH-MCP-NO-ROLE]."""
     writes = trackers.role_write_patterns(doc["tracker"])
+    github = escape.forge_github_prefixes(doc.get("forge"))
     for index, tool in enumerate(knowledge.get("extra_tools", [])):
         if not _MCP_TOOL_RE.fullmatch(tool):
             _fail(source, "knowledge.extra_tools[%d] %r is not an MCP tool name "
@@ -158,6 +162,14 @@ def _check_granted_tools(doc, knowledge, source):
         if any(pattern.match(tool) for pattern in writes):
             _fail(source, "knowledge.extra_tools[%d] %r is a tracker write tool, "
                   "no role may hold one" % (index, tool))
+        if escape.github_mcp_tool(tool, github):
+            _fail(source, "knowledge.extra_tools[%d] %r is a tool of a GitHub MCP server, "
+                  "no role may hold one" % (index, tool))
+    # the forge adapter's own role tools meet the same check at render, routing.role_tools
+    for tool in trackers.get(doc["tracker"]["kind"]).mcp_read_tools(doc["tracker"]):
+        if escape.github_mcp_tool(tool, github):
+            _fail(source, "the tracker read tool %r is a tool of a GitHub MCP server, no role "
+                  "may hold one" % (tool,))
 
 
 def _nearest(word, known):

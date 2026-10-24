@@ -15,7 +15,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from . import boundary, forges, os_sandbox, paths, trackers
+from . import boundary, escape, forges, os_sandbox, paths, trackers
 from .errors import PplError
 
 REQUIRED_ROLES = ("ppl-briefer", "ppl-brief-challenger", "ppl-code-worker",
@@ -331,11 +331,16 @@ def role_tools(name, harness_doc):
         composed += (harness_doc.get("knowledge") or {}).get("extra_tools") or []
     composed += forges.get(forge["kind"]).role_tools(name, forge)
     writes = trackers.role_write_patterns(tracker)
+    github = escape.forge_github_prefixes(forge)
     tools = []
     for tool in composed:
         if any(pattern.match(tool) for pattern in writes):
             raise PplError("SCHEMA_INVALID", "role %r would hold tracker write tool %r"
                            % (name, tool))
+        # R-FORGE-GH-MCP-NO-ROLE: a GitHub MCP server runs outside the OS sandbox
+        if escape.github_mcp_tool(tool, github):
+            raise PplError("SCHEMA_INVALID", "role %r would hold %r, a tool of a GitHub MCP "
+                           "server, which no role may hold" % (name, tool))
         if not _TOOL_TOKEN.fullmatch(tool):
             raise PplError("SCHEMA_INVALID", "role %r tool %r is not a single tool name"
                            % (name, tool))

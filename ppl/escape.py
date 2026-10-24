@@ -156,6 +156,11 @@ _HOME_CONFIG = (".gitconfig", ".config/git", ".ssh", ".config/gh", ".local/share
 # the part under its value.
 _MOVED_CONFIG = (("XDG_CONFIG_HOME", "git"), ("XDG_CONFIG_HOME", "gh"), ("XDG_DATA_HOME", "gh"),
                  ("GH_CONFIG_DIR", ""), ("GIT_CONFIG_GLOBAL", ""))
+# Claude Code's settings, which hold the hooks, the permissions and the sandbox, in its
+# config directory. The rest of that directory (memory, transcripts, skills) stays writable.
+_CLAUDE_SETTINGS = ("settings.json", "settings.local.json")
+# What a workspace session loads from the workspace besides .claude: its MCP servers.
+_WORKSPACE_FILES = (".claude", ".mcp.json")
 # What an unsandboxed ppl reads under PPL_HOME, and the guard's own facts.
 _PPL_FILES = ("config.toml", "harnesses", FACTS_FILE)
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
@@ -177,21 +182,55 @@ def _homes():
     return homes
 
 
+def _claude_config():
+    """Claude Code's settings files and its .claude.json: under each home, under an absolute
+    PPL_CLAUDE_HOME as ppl doctor reads it (.claude.json beside it), and under an absolute
+    CLAUDE_CONFIG_DIR as Claude Code reads it (.claude.json inside it)."""
+    entries = []
+    for user_home in _homes():
+        entries.extend(os.path.join(user_home, ".claude", name) for name in _CLAUDE_SETTINGS)
+        entries.append(os.path.join(user_home, ".claude.json"))
+    for variable, beside in (("PPL_CLAUDE_HOME", True), ("CLAUDE_CONFIG_DIR", False)):
+        value = os.environ.get(variable)
+        if value and os.path.isabs(value):
+            entries.extend(os.path.join(value, name) for name in _CLAUDE_SETTINGS)
+            entries.append(os.path.join(os.path.dirname(value.rstrip("/")) if beside else value,
+                                        ".claude.json"))
+    return entries
+
+
+def _ppl_code():
+    """ppl's own code: the package this module is part of, the one the guard imports, and
+    the assets directory, which holds the hook scripts. A PPL_ROOT that paths.root() refuses
+    is still listed."""
+    entries = [os.path.dirname(os.path.abspath(__file__))]
+    try:
+        entries.append(str(paths.root()))
+    except Exception:
+        configured = os.environ.get("PPL_ROOT")
+        if configured:
+            entries.append(configured)
+    return entries
+
+
 def protected_paths(home, facts):
     """Every path an edit tool may not write in a pipeline session, `realpath`-ed: the git,
     ssh and gh config under the home directory and wherever an absolute XDG_CONFIG_HOME,
-    XDG_DATA_HOME, GH_CONFIG_DIR or GIT_CONFIG_GLOBAL in this environment moves it, the
-    workspace's .claude directory, ppl's config, harnesses and guard facts under `home`, and
-    each pin's path and realpath. With `facts` None, the workspace and the pins are not known
-    and not listed."""
+    XDG_DATA_HOME, GH_CONFIG_DIR or GIT_CONFIG_GLOBAL in this environment moves it, Claude
+    Code's settings and .claude.json (_claude_config), the workspace's .claude directory and
+    .mcp.json, ppl's config, harnesses and guard facts under `home`, ppl's own code
+    (_ppl_code), and each pin's path and realpath. With `facts` None, the workspace and the
+    pins are not known and not listed."""
     entries = [os.path.join(user_home, rel) for user_home in _homes() for rel in _HOME_CONFIG]
     for variable, rel in _MOVED_CONFIG:
         value = os.environ.get(variable)
         if value and os.path.isabs(value):
             entries.append(os.path.join(value, rel) if rel else value)
+    entries.extend(_claude_config())
     if facts:
-        entries.append(os.path.join(facts["workspace"], ".claude"))
+        entries.extend(os.path.join(facts["workspace"], name) for name in _WORKSPACE_FILES)
     entries.extend(os.path.join(str(home), name) for name in _PPL_FILES)
+    entries.extend(_ppl_code())
     if facts:
         for name in PIN_NAMES:
             pin = facts["pins"][name]
@@ -353,6 +392,15 @@ def edit_denial(payload, home, facts, active=False):
 # The GitHub MCP server under its usual name, in any case, or a numbered second
 # registration of it.
 _GITHUB_SERVER = re.compile(r"mcp__github(?:_[0-9]+)?__", re.IGNORECASE)
+
+
+def forge_github_prefixes(forge):
+    """The mcp__<server>__ prefix a github [forge] table names in mcp_server, as a list,
+    empty for another forge, no server name or a table that is not one."""
+    if not isinstance(forge, dict) or forge.get("kind") != "github":
+        return []
+    name = forge.get("mcp_server")
+    return ["mcp__%s__" % name] if isinstance(name, str) and name else []
 
 
 def github_mcp_tool(tool_name, snapshot_prefixes):

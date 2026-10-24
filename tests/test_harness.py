@@ -621,7 +621,7 @@ class TestMalformedInputIsRefusedNotATraceback(HarnessTestCase):
             self.assertIn(bad, caught.exception.message)
 
     def test_a_github_issues_harness_cannot_grant_a_github_mcp_issue_write(self):
-        knowledge = {"skills": [], "extra_tools": ["mcp__github__get_issue",
+        knowledge = {"skills": [], "extra_tools": ["mcp__corp__code_search",
                                                    "mcp__github__add_issue_comment"]}
         fixtures.install_variant("example-generic", "gh-mcp", knowledge=knowledge,
                                  **fixtures.GITHUB_ISSUES)
@@ -630,6 +630,35 @@ class TestMalformedInputIsRefusedNotATraceback(HarnessTestCase):
         self.assertEqual(caught.exception.code, "HARNESS_INVALID")
         self.assertIn("knowledge.extra_tools[1] 'mcp__github__add_issue_comment' is a tracker "
                       "write tool", caught.exception.message)
+
+    def test_a_role_cannot_be_granted_a_github_mcp_tool(self):
+        # rule: R-FORGE-GH-MCP-NO-ROLE
+        for bad in ("mcp__github__get_issue", "mcp__GitHub_2__get_pull_request",
+                    "mcp__claude_ai_GitHub__search_code"):
+            name = self.mutate("example-maven", "extra_tools = []",
+                               'extra_tools = ["mcp__corp__code_search", "%s"]' % bad)
+            with self.assertRaises(PplError) as caught:
+                harness.load(name)
+            self.assertEqual(caught.exception.code, "HARNESS_INVALID", bad)
+            self.assertIn("knowledge.extra_tools[1] %r is a tool of a GitHub MCP server" % bad,
+                          caught.exception.message)
+        # the server a github forge names, and a tracker's read tools under a GitHub prefix
+        knowledge = {"skills": [], "extra_tools": ["mcp__corp-gh__get_issue"]}
+        fixtures.install_variant("example-generic", "gh-corp-mcp", knowledge=knowledge,
+                                 forge={"kind": "github", "mcp_server": "corp-gh"})
+        with self.assertRaises(PplError) as caught:
+            harness.load("gh-corp-mcp")
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("'mcp__corp-gh__get_issue' is a tool of a GitHub MCP server",
+                      caught.exception.message)
+        name = self.mutate("example-maven", 'mcp_prefixes = ["mcp__atlassian__", ',
+                           'mcp_prefixes = ["mcp__github__", "mcp__atlassian__", ')
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("the tracker read tool 'mcp__github__getJiraIssue' is a tool of a GitHub "
+                      "MCP server",
+                      caught.exception.message)
 
     def test_a_jira_harness_cannot_grant_a_github_mcp_issue_write(self):
         # rule: R-JIRA-NO-ROLE-TOOL

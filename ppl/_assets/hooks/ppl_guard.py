@@ -900,11 +900,7 @@ def github_mcp_prefixes(task_id):
     """The mcp__<server>__ prefix of the GitHub MCP server the run's harness snapshot names
     in forge.mcp_server, as a list, empty when the snapshot names none or is not there.
     Never raises [R-FORGE-GH-MCP-NO-ROLE]."""
-    adapter, settings = forge_from_snapshot(task_id)
-    if adapter is None or settings.get("kind") != "github":
-        return []
-    name = settings.get("mcp_server")
-    return ["mcp__%s__" % name] if isinstance(name, str) and name else []
+    return escape.forge_github_prefixes(forge_from_snapshot(task_id)[1])
 
 
 def protected_edit_denial(payload, task_id):
