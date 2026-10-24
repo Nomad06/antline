@@ -300,7 +300,15 @@ def decide(payload, home, state):
                 "%s may not run a command outside the OS sandbox: GitHub is reached only by "
                 "the orchestrator's plain gh, git and ppl commands" % agent)
     if callable(state):
-        task_id, run_state = state()
+        try:
+            task_id, run_state = state()
+        except Exception as err:
+            # a run file that is no regular one or over the hook's cap: the call is still
+            # refused, with its reason, and never read as "no active run"
+            return ("OWNER_DECISION",
+                    "the active run's files cannot be read (%s), so a command outside the OS "
+                    "sandbox cannot be checked: remove or repair runs/ACTIVE and the run's "
+                    "state.json" % _short(getattr(err, "message", None) or type(err).__name__))
     else:
         run_state = state if isinstance(state, dict) else None
         task_id = (run_state or {}).get("task_id")

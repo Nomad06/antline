@@ -828,8 +828,7 @@ class TestNoBlockingRead(OsSandboxCase):
         for path in (paths.active_file(), run.state_path(TASK)):
             with self.subTest(path=path.name), self.fifo_at(path):
                 result = self.run_hook(flagged(None, pr_create()))
-                self.assertIn("BOUNDARY_VIOLATION" if path.name == "ACTIVE" else "OWNER_DECISION",
-                              self.deny_reason(result))
+                self.assertIn("OWNER_DECISION", self.deny_reason(result))
                 result = self.run_hook(flagged("general-purpose", "ls", OTHER))
                 self.assertIsNotNone(result)
 
@@ -894,11 +893,25 @@ class TestHugeRunFile(OsSandboxCase):
 
     def test_a_huge_active_file_denies_an_explore_flagged_call_within_a_second(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
-        # the refused read raises, and main() denies a flagged call that raises
+        # the refused read is a deny with its reason, never "no active run"
         with self.huge(paths.active_file()):
             result, took = self.main_decision(flagged("Explore", "ls", OTHER))
         self.assertLess(took, 1)
-        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+        self.assertIn("OWNER_DECISION", self.deny_reason(result))
+        self.assertIn("ACTIVE", self.deny_reason(result))
+
+    def test_a_flagged_call_against_a_huge_active_file_writes_nothing_to_stderr(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        env = dict(os.environ, PPL_HOME=str(paths.home()))
+        with self.huge(paths.active_file()):
+            for agent in (None, "Explore"):
+                with self.subTest(agent=agent):
+                    done = subprocess.run([sys.executable, str(GUARD)],
+                                          input=json.dumps(flagged(agent, pr_create())),
+                                          capture_output=True, text=True, env=env,
+                                          timeout=HOOK_BOUND_SECONDS)
+                    self.assertEqual(done.stderr, "")
+                    self.assertIn("OWNER_DECISION", self.deny_reason(json.loads(done.stdout)))
 
     def test_huge_run_files_deny_a_flagged_call_within_a_second(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
@@ -1651,8 +1664,9 @@ class TestPinnedGitConfigHolds(unittest.TestCase):
         self.assertIn("gpg", self.marks_left())
         self.clear_marks()
         self.assertEqual(self.fetch(pinned=False, local=True).returncode, 0)
-        for mark in ("alternate-refs", "fsmonitor", "hook-pre-auto-gc"):
-            self.assertIn(mark, self.marks_left())
+        # git 2.46 also runs the fsmonitor and the pre-auto-gc hook here, through its automatic
+        # maintenance, which other versions may time otherwise, so only this mark is required
+        self.assertIn("alternate-refs", self.marks_left())
         self.clear_marks()
         self.set_origin("ext::sh -c touch% " + os.path.join(self.marks, "ext"))
         self.assertNotEqual(self.push("origin", SPEC, pinned=False).returncode, 0)
