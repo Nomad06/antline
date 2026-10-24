@@ -42,11 +42,13 @@ class TestSurface(unittest.TestCase):
         self.assertEqual(gitlab.role_tools("ppl-briefer", GITLAB), [])
         self.assertEqual(gitlab.bash_shapes("ppl-review-responder"), [])
 
-    def test_github_review_responder_gets_bash_and_read_only_gh_shapes(self):
+    def test_github_review_responder_gets_bash_and_read_only_git_shapes(self):
         github = forges.get("github")
         self.assertEqual(github.role_tools("ppl-review-responder", GITHUB), ["Bash"])
         shapes = github.bash_shapes("ppl-review-responder")
-        self.assertTrue(all(row["argv0"] == "gh" for row in shapes))
+        self.assertEqual(len(shapes), 3)
+        self.assertTrue(all(row["argv0"] == "git" for row in shapes))
+        self.assertEqual([row["one_goal_of"] for row in shapes], [["diff"], ["show"], ["log"]])
         denied = github.denied_tools(GITHUB)
         self.assertIn("mcp__github__merge_pull_request", denied)
 

@@ -29,6 +29,9 @@ def payload(agent, tool, tool_input, cwd="/tmp/repo"):
             "tool_name": tool, "tool_input": tool_input, "cwd": cwd}
 
 
+RESPONDER_DIFF = "git -C /work/repo diff --no-ext-diff --no-textconv abc1234..def5678"
+
+
 class TestGuard(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -2772,12 +2775,12 @@ class TestGuard(unittest.TestCase):
         doc["forge"] = {"kind": "github"}
         snap.write_text(json.dumps(doc), encoding="utf-8")
         try:
-            for command in ("gh pr view 7 >| /tmp/x", "gh pr view 7 >|/tmp/x"):
+            for command in (RESPONDER_DIFF + " >| /tmp/x", RESPONDER_DIFF + " >|/tmp/x"):
                 result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
                                                   {"command": command}))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             self.assertIsNone(ppl_guard.decide(payload(
-                "ppl-review-responder", "Bash", {"command": "gh pr view 7 >| /dev/null"})))
+                "ppl-review-responder", "Bash", {"command": RESPONDER_DIFF + " >| /dev/null"})))
         finally:
             snap.write_text(saved, encoding="utf-8")
 
@@ -3020,32 +3023,76 @@ class TestGuard(unittest.TestCase):
             result = ppl_guard.decide(payload(None, "Bash", {"command": "gh pr merge 7"}, cwd=cwd))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), cwd)
 
-    def test_github_review_responder_bash_is_an_allowlist(self):
-        # rule: R-REVIEW-RESPONDER-BASH-SHAPES
+    def _responder_with_github_forge(self):
         snap = paths.run_dir("DEMO-700") / "harness.json"
         saved = snap.read_text(encoding="utf-8")
         doc = json.loads(saved)
         doc["forge"] = {"kind": "github"}
         snap.write_text(json.dumps(doc), encoding="utf-8")
-        try:
-            allowed = ("gh pr view 7 --json=reviews,headRefOid",
-                       "gh pr diff 7",
-                       "gh pr checks 7 --repo=acme/widgets",
-                       "gh api repos/acme/widgets/pulls/7/comments --paginate")
-            for command in allowed:
-                self.assertIsNone(ppl_guard.decide(payload("ppl-review-responder", "Bash",
-                                                           {"command": command})), command)
-            denied = ("cat src/main/java/Foo.java", "gh pr comment 7 -b hi",
-                      "gh pr close 7", "gh pr view 7 --json reviews",
-                      "gh api -X POST repos/acme/widgets/pulls/7/comments -f body=x",
-                      "gh api repos/acme/widgets/pulls/7/comments --method=POST",
-                      "gh pr view 7; rm -rf /tmp/x")
-            for command in denied:
-                result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
-                                                  {"command": command}))
-                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
-        finally:
-            snap.write_text(saved, encoding="utf-8")
+        self.addCleanup(snap.write_text, saved, encoding="utf-8")
+
+    def _responder_bash(self, command):
+        return ppl_guard.decide(payload("ppl-review-responder", "Bash", {"command": command}))
+
+    def test_the_responder_may_git_diff_two_shas(self):
+        # rule: R-REVIEW-RESPONDER-BASH-SHAPES
+        self._responder_with_github_forge()
+        for command in ("git -C /work/repo diff --no-ext-diff --no-textconv abc1234..def5678",
+                        "git -C /work/repo diff --no-ext-diff --no-textconv "
+                        "origin/main..0123456789abcdef0123456789abcdef01234567",
+                        "git -C /work/repo log --oneline abc1234..origin/feature-x"):
+            self.assertIsNone(self._responder_bash(command), command)
+
+    def test_the_responder_may_git_show_a_sha(self):
+        # rule: R-REVIEW-RESPONDER-BASH-SHAPES
+        self._responder_with_github_forge()
+        self.assertIsNone(self._responder_bash(
+            "git -C /work/repo show --no-ext-diff --no-textconv abc1234"))
+
+    def test_the_responder_may_not_run_gh_pr_view(self):
+        # rule: R-REVIEW-RESPONDER-BASH-SHAPES
+        self._responder_with_github_forge()
+        for command in ("gh pr view 7 --json=reviews,headRefOid", "gh pr diff 7",
+                        "gh pr checks 7 --repo=acme/widgets",
+                        "gh api repos/acme/widgets/pulls/7/comments --paginate"):
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self._responder_bash(command)),
+                          command)
+
+    def test_the_responder_may_not_git_push(self):
+        # rule: R-REVIEW-RESPONDER-BASH-SHAPES
+        self._responder_with_github_forge()
+        for command in ("git -C /work/repo push origin abc1234", "git push",
+                        "git -C /work/repo fetch origin", "git -C /work/repo checkout abc1234",
+                        "git -C /work/repo status", "git -C /work/repo diff abc1234..def5678"):
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self._responder_bash(command)),
+                          command)
+
+    def test_the_responder_may_not_pass_dash_c_to_git(self):
+        # rule: R-REVIEW-RESPONDER-BASH-SHAPES
+        self._responder_with_github_forge()
+        base = "-C /work/repo diff --no-ext-diff --no-textconv abc1234..def5678"
+        for command in ("git -c core.pager=x " + base, "git -c diff.external=x " + base,
+                        "git " + base + " --output=/tmp/x",
+                        "git " + base + " --ext-diff", "git " + base + " --textconv",
+                        "git -C /work/repo diff abc1234..def5678 --no-ext-diff",
+                        "git -C ../repo diff --no-ext-diff --no-textconv abc1234..def5678",
+                        "git -C /work/repo show --no-ext-diff --no-textconv abc123",
+                        "git -C /work/repo show --no-ext-diff --no-textconv --output=x abc1234",
+                        "git -C /work/repo show --no-ext-diff --no-textconv -O/tmp/x abc1234",
+                        "git -C /work/repo log --oneline -p abc1234..def5678",
+                        "git -C /work/repo log abc1234..def5678",
+                        "git -C /work/repo diff --no-ext-diff --no-textconv HEAD..main",
+                        "git -C /work/repo diff --no-ext-diff --no-textconv origin/-x..abc1234"):
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self._responder_bash(command)),
+                          command)
+
+    def test_github_review_responder_bash_is_an_allowlist(self):
+        # rule: R-REVIEW-RESPONDER-BASH-SHAPES
+        self._responder_with_github_forge()
+        for command in ("cat src/main/java/Foo.java", "gh pr comment 7 -b hi", "gh pr close 7",
+                        "git -C /work/repo show --no-ext-diff --no-textconv abc1234; rm -rf /tmp/x"):
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self._responder_bash(command)),
+                          command)
 
     def test_gitlab_review_responder_has_no_bash_at_all(self):
         # rule: R-REVIEW-RESPONDER-BASH-SHAPES
@@ -3065,70 +3112,41 @@ class TestGuard(unittest.TestCase):
         doc["forge"] = {"kind": "github"}
         snap.write_text(json.dumps(doc), encoding="utf-8")
         try:
-            for command in ("gh pr view 7 > /tmp/x", "gh pr view 7 >> ~/x",
-                            "gh pr view 7 2> /tmp/e", "gh pr view 7 1> /tmp/x",
-                            "gh pr view 7 &> /tmp/x", "gh pr view 7 >/tmp/x",
-                            "gh pr view 7 > /tmp/x 2>&1", "gh pr view 7 > /dev/null > /tmp/x"):
+            for command in (RESPONDER_DIFF + " > /tmp/x", RESPONDER_DIFF + " >> ~/x",
+                            RESPONDER_DIFF + " 2> /tmp/e", RESPONDER_DIFF + " 1> /tmp/x",
+                            RESPONDER_DIFF + " &> /tmp/x", RESPONDER_DIFF + " >/tmp/x",
+                            RESPONDER_DIFF + " > /tmp/x 2>&1", RESPONDER_DIFF + " > /dev/null > /tmp/x"):
                 result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
                                                   {"command": command}))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
-            for command in ("gh pr view 7 2>&1", "gh pr view 7 2>/dev/null",
-                            "gh pr view 7 > /dev/null 2>&1"):
+            for command in (RESPONDER_DIFF + " 2>&1", RESPONDER_DIFF + " 2>/dev/null",
+                            RESPONDER_DIFF + " > /dev/null 2>&1"):
                 self.assertIsNone(ppl_guard.decide(payload("ppl-review-responder", "Bash",
                                                            {"command": command})), command)
         finally:
             snap.write_text(saved, encoding="utf-8")
 
-    def test_review_responder_redirect_glued_inside_a_flag_value_is_denied(self):
+    def test_review_responder_redirect_glued_inside_a_rev_is_denied(self):
         # rule: R-REVIEW-RESPONDER-BASH-SHAPES
-        # shlex keeps each of these one token that --jq=\S+ or -q=\S+ accepts,
-        # bash splits it at the redirect and writes the file.
-        snap = paths.run_dir("DEMO-700") / "harness.json"
-        saved = snap.read_text(encoding="utf-8")
-        doc = json.loads(saved)
-        doc["forge"] = {"kind": "github"}
-        snap.write_text(json.dumps(doc), encoding="utf-8")
-        try:
-            for command in ("gh pr view 7 --jq=.title>/tmp/x",
-                            "gh pr view 7 --jq=.title>>~/.zshrc",
-                            "gh api repos/a/b/pulls/7 -q=.x>/tmp/x",
-                            "gh api repos/a/b/pulls/7 -q=.x</tmp/x"):
-                result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
-                                                  {"command": command}))
-                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
-            self.assertIsNone(ppl_guard.decide(payload(
-                "ppl-review-responder", "Bash", {"command": "gh pr view 7 --jq=.title"})))
-        finally:
-            snap.write_text(saved, encoding="utf-8")
+        # shlex keeps each of these one token, bash splits it at the redirect.
+        self._responder_with_github_forge()
+        for command in (RESPONDER_DIFF + ">/tmp/x", RESPONDER_DIFF + ">>~/.zshrc",
+                        RESPONDER_DIFF + "</tmp/x"):
+            result = self._responder_bash(command)
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
+        self.assertIsNone(self._responder_bash(RESPONDER_DIFF))
 
     def test_review_responder_substitution_inside_an_allowed_shape_is_denied(self):
         # rule: R-REVIEW-RESPONDER-BASH-SHAPES
-        # Each command is one allowed gh api shape token by token (--jq=\S+),
-        # and no forge pattern names gh api with a substitution, so the
-        # responder's pre-check stands in front of it. bash runs a process
-        # substitution mid-word, where shlex sees an ordinary token. The tracker
-        # check reads an expansion in gh api as a possible issue write and denies
-        # it first for every role [R-TRACKER-CLI-NO-ROLE], so the pre-check is
-        # asked directly as well.
-        snap = paths.run_dir("DEMO-700") / "harness.json"
-        saved = snap.read_text(encoding="utf-8")
-        doc = json.loads(saved)
-        doc["forge"] = {"kind": "github"}
-        snap.write_text(json.dumps(doc), encoding="utf-8")
-        try:
-            api = "gh api repos/acme/widgets/pulls/7 --jq="
-            for command in (api + "$(id)", api + "`id`", api + "<(id)", api + ">(id)"):
-                self.assertIsNone(ppl_guard.forge_bash_denial(command, "DEMO-700"), command)
-                self.assertTrue(ppl_guard.review_responder_bash_denied(command, "DEMO-700"),
-                                command)
-                result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
-                                                  {"command": command}))
-                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
-                self.assertIn("may not write the tracker", self.deny_reason(result), command)
-            self.assertIsNone(ppl_guard.decide(payload(
-                "ppl-review-responder", "Bash", {"command": api + ".title"})))
-        finally:
-            snap.write_text(saved, encoding="utf-8")
+        # bash runs a substitution mid-word, where shlex sees an ordinary token,
+        # so the responder's pre-check refuses the marker before any segment is read.
+        self._responder_with_github_forge()
+        show = "git -C /work/repo show --no-ext-diff --no-textconv "
+        for command in (show + "$(id)", show + "`id`", show + "<(id)", show + ">(id)"):
+            self.assertTrue(ppl_guard.review_responder_bash_denied(command, "DEMO-700"), command)
+            result = self._responder_bash(command)
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
+        self.assertIsNone(self._responder_bash(show + "abc1234"))
 
     def test_a_malformed_forge_table_falls_back_to_the_union_and_no_shapes(self):
         # rule: R-FORGE-DENIALS-FROM-ADAPTER
@@ -3146,7 +3164,7 @@ class TestGuard(unittest.TestCase):
                         result = ppl_guard.decide(payload(None, tool, {}))
                         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), tool)
                     result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
-                                                      {"command": "gh pr view 7"}))
+                                                      {"command": RESPONDER_DIFF}))
                     self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         finally:
             snap.write_text(saved, encoding="utf-8")
