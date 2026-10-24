@@ -1298,6 +1298,24 @@ class TestOsSandboxFacts(unittest.TestCase):
         self.assertEqual(result["github_token_env"], ["GH_TOKEN", "GITHUB_TOKEN"])
         self.assertNotIn("secretvalue", json.dumps(result))
 
+    def test_a_variable_holding_a_github_token_is_named_whatever_its_name(self):
+        value = "github_pat_11ABCDEFG0secretvalue"
+        env = {"FOO": value, "BAR": "ordinary", "GITHUB_ENTERPRISE_TOKEN": "x",
+               "BAZ": "ghs_secretvalue3", "QUX": "prefix ghp_notatstart", "PATH": "/usr/bin"}
+        self.assertEqual(doctor.github_token_names(env),
+                         ["GITHUB_ENTERPRISE_TOKEN", "BAZ", "FOO"])
+        warning = doctor.github_token_warning(env)
+        self.assertIn("FOO", warning)
+        self.assertNotIn("BAR", warning)
+        self.assertNotIn("QUX", warning)
+        for prefix in ("ghp_", "ghs_", "github_pat_", "secretvalue"):
+            self.assertNotIn(prefix, warning)
+        result = doctor.report(cwd=str(self.cwd), env=env, probe=lambda: "unknown")
+        self.assertIn("FOO", result["github_token_env"])
+        self.assertNotIn("secretvalue", json.dumps(result))
+        for prefix in ("ghu_", "gho_", "ghr_", "ghp_"):
+            self.assertEqual(doctor.github_token_names({"V": prefix + "abc"}), ["V"])
+
     def test_a_pin_inside_the_write_scope_is_exposed(self):
         scope = tmphome.mkdtemp(prefix="pplscope-")
         pin = os.path.join(scope, "bin", "gh")

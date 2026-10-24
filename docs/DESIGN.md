@@ -1016,8 +1016,10 @@ the workspace, the pins' directories and every path the edit allowlist protects,
 gh's config, git's credential store, `.netrc` and `~/.ssh` (`[os_sandbox] allow_ssh_read = true`
 keeps `~/.ssh` readable for a build that needs ssh), and the `permissions.allow` entries for
 nine read-only commands on the pinned `gh`, `git` and `ppl` paths [R-OS-SANDBOX-NETWORK]. A
-`GH_TOKEN`, `GITHUB_TOKEN` or `GH_ENTERPRISE_TOKEN` in the session's environment reaches every
-sandboxed command, so `ppl doctor` and `ppl init` name it, not its value. Content a role
+`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN` in the session's
+environment, or any variable whose value starts like a GitHub token (`ghp_`, `gho_`, `ghu_`,
+`ghs_`, `ghr_`, `github_pat_`), reaches every sandboxed command, so `ppl doctor` and `ppl init`
+name the variable, not its value. Content a role
 writes, commits and scratch bodies, is published by the orchestrator unread, and the macOS
 keychain stays readable from the sandbox unless the live rehearsal shows otherwise
 [R-OS-SANDBOX-NETWORK]. It records the block and the entries it wrote, with the guard's facts

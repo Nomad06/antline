@@ -4227,6 +4227,21 @@ class TestInitRequiresTheOsSandbox(unittest.TestCase):
         self.assertIn("warning: GITHUB_TOKEN", doctor_out)
         self.assertNotIn("secretvalue", doctor_out)
 
+    def test_init_names_a_variable_holding_a_github_token_never_its_value(self):
+        value = "github_pat_11ABCDEFG0secretvalue"
+        with mock.patch.dict(os.environ, {"FOO": value, "BAR": "ordinary"}):
+            task, code, out, err = self.start("on", "local")
+            _, doctor_out, doctor_err = call("doctor")
+        self.assertEqual(code, 0, err)
+        self.assertIn("FOO", err)
+        self.assertNotIn("BAR", err)
+        log = (paths.run_dir(task) / "log.jsonl")
+        logged = log.read_text(encoding="utf-8") if log.exists() else ""
+        for text in (err, out, doctor_out, doctor_err, logged):
+            self.assertNotIn("secretvalue", text)
+            self.assertNotIn("github_pat_", text)
+        self.assertIn("FOO", doctor_out)
+
     def test_init_warns_about_foreign_bash_hooks_and_still_starts(self):
         hooks = [{"source": "/home/u/.claude/settings.json", "hook": "sqz"}]
         with mock.patch.object(doctor, "foreign_bash_hooks", return_value=hooks):

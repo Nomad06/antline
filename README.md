@@ -370,9 +370,10 @@ What this costs and leaves open:
   pipeline sessions before a GitHub run.
 - The profile keeps sandboxed commands from reading gh's config, git's credential store,
   `.netrc` and `~/.ssh`; set `[os_sandbox] allow_ssh_read = true` for a build that needs ssh
-  [R-OS-SANDBOX-NETWORK]. Unset `GH_TOKEN`, `GITHUB_TOKEN` and `GH_ENTERPRISE_TOKEN` for
-  pipeline sessions: every sandboxed command inherits them, and `ppl doctor` and `ppl init`
-  name one that is set. What a role writes, commits and scratch bodies, the orchestrator
+  [R-OS-SANDBOX-NETWORK]. Unset `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
+  `GITHUB_ENTERPRISE_TOKEN` and any variable holding a GitHub token for pipeline sessions:
+  every sandboxed command inherits them, and `ppl doctor` and `ppl init` name each one, by
+  name alone. What a role writes, commits and scratch bodies, the orchestrator
   publishes unread, and the macOS keychain may stay readable from the sandbox.
 - Use a fine-grained personal access token limited to the one repository the pipeline works on
   for the pipeline's `gh` login. The orchestrator's `gh` holds that credential, so its reach

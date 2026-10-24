@@ -921,13 +921,21 @@ def mcp_servers_warning(cwd=None, claude_json=None):
 
 # The variables gh and the GitHub tooling read a token from. Every sandboxed command, a role's
 # included, inherits the session's environment, so a token there is one a role can read.
-TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
+TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+# How a GitHub token starts, whatever variable holds it.
+TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
 
 
 def github_token_names(env=None):
-    """The TOKEN_VARIABLES set in `env` (this process's environment by default), by name."""
+    """The names, never a value, of the variables in `env` (this process's environment by
+    default) that hold a GitHub token: TOKEN_VARIABLES when set, then any other whose value
+    starts with a TOKEN_PREFIXES prefix."""
     env = os.environ if env is None else env
-    return [name for name in TOKEN_VARIABLES if env.get(name)]
+    named = [name for name in TOKEN_VARIABLES if env.get(name)]
+    found = sorted(name for name, value in env.items()
+                   if name not in named and isinstance(value, str)
+                   and value.lstrip().startswith(TOKEN_PREFIXES))
+    return named + found
 
 
 def github_token_warning(env=None):
@@ -936,11 +944,11 @@ def github_token_warning(env=None):
     names = github_token_names(env)
     if not names:
         return None
-    return ("%s %s set in this session's environment, which every sandboxed command, a role's "
-            "included, inherits and can read: unset %s for pipeline sessions and let the "
-            "pinned gh read its own login" % (", ".join(names),
-                                              "is" if len(names) == 1 else "are",
-                                              "it" if len(names) == 1 else "them"))
+    return ("%s %s a GitHub token in this session's environment, which every sandboxed "
+            "command, a role's included, inherits and can read: unset %s for pipeline sessions "
+            "and let the pinned gh read its own login"
+            % (", ".join(names), "holds" if len(names) == 1 else "hold",
+               "it" if len(names) == 1 else "them"))
 
 
 # The interpreters whose script, not their own name, says which hook runs.
