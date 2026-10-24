@@ -174,7 +174,7 @@ class TestFacts(Home):
         got = os_sandbox.facts(d, "/srv/ws", PINS)
         self.assertEqual(set(got), {"version", "workspace", "checkout", "worktrees",
                                     "default_branch", "forge_repo", "tracker_repo", "scratch",
-                                    "write_scope", "pins"})
+                                    "write_scope", "deny_write", "pins"})
         self.assertEqual(got["version"], 1)
         self.assertEqual(got["forge_repo"], "acme/widgets")
         self.assertEqual(got["tracker_repo"], "acme/widgets")
@@ -182,6 +182,15 @@ class TestFacts(Home):
         self.assertEqual(got["scratch"], os.environ["PPL_HOME"] + "/scratch")
         self.assertEqual(got["pins"], PINS)
         self.assertEqual(got["write_scope"], os_sandbox.write_scope(d))
+
+    def test_facts_record_the_profiles_write_denials_realpathed(self):
+        got = os_sandbox.facts(doc(), "/srv/ws", PINS)["deny_write"]
+        denied = self.profile_deny()
+        self.assertEqual(got, list(dict.fromkeys(os.path.realpath(entry) for entry in denied)))
+        self.assertIn(os.path.realpath("/srv/ws"), got)
+
+    def profile_deny(self):
+        return os_sandbox.profile(doc(), "/srv/ws", PINS)["sandbox"]["filesystem"]["denyWrite"]
 
     def test_the_forge_repo_comes_from_the_checkout_origin_with_a_jira_tracker(self):
         with mock.patch("ppl.setup._origin_repo", return_value="o/n") as origin:

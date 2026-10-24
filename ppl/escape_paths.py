@@ -1,11 +1,11 @@
 """Where an edit tool may write in a pipeline session. Claude Code's Edit, Write, MultiEdit
 and NotebookEdit run outside the OS sandbox, so while the guard facts exist they write only
 where sandboxed Bash may (the facts' write_scope) and in Claude Code's own projects and plans
-directories, and never, even there, a .git directory or file or a file an unsandboxed gh, git
-or ppl reads or runs. Without the facts nothing here applies. escape.edit_denial
-decides whether a call is the pipeline's and asks this module about each path it names. The
-guard hook imports it, so it parses on Python 3.9, carries no annotations and reads JSON
-only."""
+directories, and never, even there, what the sandbox profile denies Bash to write
+(deny_write), a .git directory or file, or a file an unsandboxed gh, git or ppl reads or
+runs. Without the facts nothing here applies. escape.edit_denial decides whether a call is
+the pipeline's and asks this module about each path it names. The guard hook imports it, so
+it parses on Python 3.9, carries no annotations and reads JSON only."""
 import os
 import stat
 import unicodedata
@@ -47,6 +47,7 @@ _JS_TRIMMED = frozenset(chr(code) for code in (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x2
                                                0xFEFF))
 
 PROTECTED_WHY = "which a command outside the OS sandbox reads or runs"
+DENY_WRITE_WHY = "which the OS sandbox profile denies sandboxed Bash to write"
 OUTSIDE_SCOPE = "writes only where sandboxed Bash may"
 GIT_DIR = "a .git directory or the .git file of a worktree"
 
@@ -144,6 +145,20 @@ def allowed_roots(facts):
     entries = list(facts["write_scope"])
     entries.extend(os.path.join(directory, name) for directory in _claude_dirs()
                    for name in _CLAUDE_WRITABLE)
+    return _unique_real(entries)
+
+
+def deny_write(facts):
+    """The OS sandbox profile's denyWrite, `realpath`-ed: as the facts record it, or for facts
+    written before they did, the same set computed from the workspace and the directory of
+    each pin's path and realpath (os_sandbox.deny_write)."""
+    recorded = facts.get("deny_write")
+    if recorded is not None:
+        return _unique_real(recorded)
+    entries = [facts["workspace"]]
+    for name in PIN_NAMES:
+        for key in ("path", "realpath"):
+            entries.append(os.path.dirname(facts["pins"][name][key]))
     return _unique_real(entries)
 
 
@@ -294,9 +309,9 @@ def target_denial(raw, cwd, home, facts, who, tool):
     """Why `who`'s `tool` call may not write `raw`, or None. The check holds only under an OS
     sandbox profile, while `facts` is there: a harness without one keeps today's behaviour.
     A path is refused when it starts or ends with whitespace or holds a control character,
-    when it cannot be placed, when it is or lies under a protected path, outside the allowed
-    roots, in a .git directory or file, and as a file with more than one link, which may be
-    another name of a file outside them."""
+    when it cannot be placed, when it is or lies under a protected path or a denyWrite entry
+    of the profile, outside the allowed roots, in a .git directory or file, and as a file with
+    more than one link, which may be another name of a file outside them."""
     if facts is None:
         return None
     if not isinstance(raw, str):
@@ -315,6 +330,11 @@ def target_denial(raw, cwd, home, facts, who, tool):
     if hit:
         return ("%s may not %s %s while the pipeline is set up or running: it is or lies under "
                 "%s, %s" % (who, tool, _shown(raw), hit, PROTECTED_WHY))
+    # the profile's denyWrite wins over its allowWrite for Bash, so it does here too
+    hit = _protected_hit(forms, deny_write(facts))
+    if hit:
+        return ("%s may not %s %s while the pipeline is set up or running: it is or lies under "
+                "%s, %s" % (who, tool, _shown(raw), hit, DENY_WRITE_WHY))
     roots = allowed_roots(facts)
     outside = _outside(real_forms, roots)
     if outside:

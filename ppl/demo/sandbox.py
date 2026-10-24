@@ -28,7 +28,9 @@ class Sandbox:
         self.home = self.root / "home"
         self.ppl_home = self.root / "ppl"
         self.workspace = self.root / "workspace"
-        self.repo = self.workspace / "shop"
+        # beside the workspace, not in it: the OS sandbox profile denies every write under the
+        # workspace, to sandboxed Bash and to the guard's edit tools alike
+        self.repo = self.root / "shop"
         self.bin = self.root / "bin"
         self.env = self._env()
 

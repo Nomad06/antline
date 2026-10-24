@@ -289,7 +289,9 @@ class TestFailClosed(OsSandboxCase):
         del broken["pins"]
         for text in ("{not json", "[]", json.dumps(dict(facts_doc(), version=2)),
                      json.dumps(broken), json.dumps(facts_doc(write_scope="/tmp")),
-                     json.dumps(facts_doc(workspace="relative/ws"))):
+                     json.dumps(facts_doc(workspace="relative/ws")),
+                     json.dumps(facts_doc(deny_write="/tmp")),
+                     json.dumps(facts_doc(deny_write=["relative/dir"]))):
             with self.subTest(text=text[:40]), self.facts_text(text):
                 result = self.decide(pr_create())
                 self.assertIn("OWNER_DECISION", self.deny_reason(result))
@@ -1302,6 +1304,8 @@ class GitShapes(OsSandboxCase):
 PROTECTED = "which a command outside the OS sandbox reads or runs"
 # What it says when an edit tool aims outside the OS sandbox's write scope.
 OUTSIDE_SCOPE = "writes only where sandboxed Bash may"
+# What it says for a path under the sandbox profile's denyWrite.
+DENY_WRITE = "which the OS sandbox profile denies sandboxed Bash to write"
 # What it says for a .git directory or file inside the write scope.
 GIT_DIR = "a .git directory or the .git file of a worktree"
 EDIT_TOOLS = (("Edit", "file_path"), ("Write", "file_path"), ("MultiEdit", "file_path"),
@@ -1428,7 +1432,6 @@ class TestProtectedPaths(ProtectedPathCase):
         for path in (self.at(".claude/hooks/x.sh"), self.at(".claude/plugins/p/hooks/hooks.json"),
                      hook_script, self.at(".claude/CLAUDE.md"),
                      self.at(".claude/settings.json.bak"), os.path.join(self.outside, "notes.md"),
-                     WS + "/README.md",
                      self.at(".sshx/config")):
             for agent in (None, "general-purpose", "ppl-code-worker"):
                 with self.subTest(path=path, agent=agent):
@@ -1514,6 +1517,31 @@ class TestProtectedPaths(ProtectedPathCase):
             self.assertIn("may write only inside run %s's repo" % TASK, reason)
             reason = self.deny_reason(self.edit(str(paths.run_dir(TASK) / "state.json")))
             self.assertIn("run state is written only by ppl", reason)
+
+    def test_the_sandboxs_write_denials_hold_inside_the_write_scope(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # a pin whose directory lies in the write scope, and a workspace the harness's
+        # allow_write puts there: the profile's denyWrite wins for Bash, so it wins here too
+        pin_dir = os.path.join(os.path.dirname(scratch_file("x")), "bin")
+        os.makedirs(pin_dir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, pin_dir, True)
+        gh = os.path.join(pin_dir, "gh")
+        with open(gh, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\n")
+        pins = dict(facts_doc()["pins"], gh={"path": gh, "realpath": real(gh)})
+        scope = facts_doc()["write_scope"] + [real(WS)]
+        recorded = facts_doc(pins=pins, write_scope=scope,
+                             deny_write=[real(WS), real(pin_dir), real("/opt/pin")])
+        # facts written before apply recorded deny_write compute the same set
+        for label, doc in (("recorded", recorded), ("computed", facts_doc(pins=pins,
+                                                                          write_scope=scope))):
+            with self.facts_text(json.dumps(doc)):
+                for path in (os.path.join(pin_dir, "newtool"), WS + "/notes.md"):
+                    with self.subTest(facts=label, path=path):
+                        reason = self.deny_reason(self.edit(path, tool="Write"))
+                        self.assertIn("BOUNDARY_VIOLATION", reason)
+                        self.assertIn(DENY_WRITE, reason)
+                self.assertIsNone(self.edit(scratch_file("other.md"), tool="Write"))
 
     def test_unreadable_facts_deny_every_edit(self):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS

@@ -87,6 +87,11 @@ def _facts_problem(doc):
     scope = doc.get("write_scope")
     if not (isinstance(scope, list) and all(_absolute(entry) for entry in scope)):
         return "has a write_scope that is not a list of absolute paths"
+    # absent in facts written before apply recorded it, then computed (escape_paths)
+    denied = doc.get("deny_write")
+    if denied is not None and not (isinstance(denied, list)
+                                   and all(_absolute(entry) for entry in denied)):
+        return "has a deny_write that is not a list of absolute paths"
     pins = doc.get("pins")
     if not isinstance(pins, dict):
         return "has no pins"

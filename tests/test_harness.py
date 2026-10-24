@@ -1251,6 +1251,8 @@ class TestApplyOsSandbox(HarnessTestCase):
         self.assertEqual({k: v for k, v in facts.items() if k in expected}, expected)
         self.assertEqual(facts["written_sandbox"], doc["sandbox"])
         self.assertEqual(facts["written_allow"], doc["permissions"]["allow"])
+        self.assertEqual(facts["deny_write"], list(dict.fromkeys(
+            os.path.realpath(entry) for entry in doc["sandbox"]["filesystem"]["denyWrite"])))
 
     def test_apply_removes_both_when_the_harness_no_longer_needs_them(self):
         fixtures.install_harness("example-generic")

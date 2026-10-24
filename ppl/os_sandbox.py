@@ -93,7 +93,8 @@ def write_scope(doc):
 
 
 def facts(doc, workspace, pin_map):
-    """The slice the guard reads, the shape of PPL_HOME/os_sandbox.json."""
+    """The slice the guard reads, the shape of PPL_HOME/os_sandbox.json. deny_write is the
+    profile's denyWrite, `realpath`-ed, which the guard holds edit tools to as well."""
     from . import setup
     checkout, worktrees = _repo(doc)
     tracker_repo = None
@@ -111,6 +112,8 @@ def facts(doc, workspace, pin_map):
             "tracker_repo": tracker_repo,
             "scratch": _real(scratch_root()),
             "write_scope": write_scope(doc),
+            "deny_write": list(dict.fromkeys(os.path.realpath(entry)
+                                             for entry in deny_write(workspace, pin_map))),
             "pins": {name: dict(pin_map[name]) for name in PIN_NAMES}}
 
 
@@ -128,22 +131,29 @@ def _allow_entries(doc, pin_map):
         ppl + " doctor --forge")]
 
 
-def profile(doc, workspace, pin_map):
-    """The sandbox settings block and the permissions.allow entries ppl owns."""
-    deny_write = [_real(workspace)]
+def deny_write(workspace, pin_map):
+    """The profile's filesystem.denyWrite: the workspace and the directory of each pin's path
+    and realpath, each as given and `realpath`-ed."""
+    entries = [_real(workspace)]
     for name in PIN_NAMES:
         for key in ("path", "realpath"):
             directory = os.path.dirname(pin_map[name][key])
             for entry in (directory, os.path.realpath(directory)):
-                if entry not in deny_write:
-                    deny_write.append(entry)
+                if entry not in entries:
+                    entries.append(entry)
+    return entries
+
+
+def profile(doc, workspace, pin_map):
+    """The sandbox settings block and the permissions.allow entries ppl owns."""
+    denied = deny_write(workspace, pin_map)
     sandbox = {"enabled": True,
                "failIfUnavailable": True,
                "allowUnsandboxedCommands": True,
                "network": {"deniedDomains": list(DENIED_DOMAINS),
                            "deniedDomainReasons": {d: DENY_REASON for d in DENIED_DOMAINS},
                            "allowedDomains": list(_table(doc).get("allowed_domains") or [])},
-               "filesystem": {"allowWrite": write_scope(doc), "denyWrite": deny_write}}
+               "filesystem": {"allowWrite": write_scope(doc), "denyWrite": denied}}
     return {"sandbox": sandbox, "allow": _allow_entries(doc, pin_map)}
 
 
