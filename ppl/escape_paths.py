@@ -2,7 +2,7 @@
 and NotebookEdit run outside the OS sandbox, so while the guard facts exist they write only
 where sandboxed Bash may (the facts' write_scope) and in Claude Code's own projects and plans
 directories, and never, even there, a .git directory or file or a file an unsandboxed gh, git
-or ppl reads or runs. Without the facts only those files are closed. escape.edit_denial
+or ppl reads or runs. Without the facts nothing here applies. escape.edit_denial
 decides whether a call is the pipeline's and asks this module about each path it names. The
 guard hook imports it, so it parses on Python 3.9, carries no annotations and reads JSON
 only."""
@@ -41,8 +41,6 @@ _CLAUDE_WRITABLE = ("projects", "plans")
 _WORKSPACE_FILES = (".claude", ".mcp.json")
 # What an unsandboxed ppl reads under PPL_HOME, and the guard's own facts.
 _PPL_FILES = ("config.toml", "harnesses", FACTS_FILE)
-# How many files under the protected directories a multi-link target is compared with.
-_LINK_SCAN_LIMIT = 10000
 # What JavaScript's trim removes besides the Zs spaces: ECMAScript's other WhiteSpace and
 # its LineTerminators. Claude Code trims a path with it before it resolves it.
 _JS_TRIMMED = frozenset(chr(code) for code in (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x2028, 0x2029,
@@ -234,36 +232,12 @@ def _lies_under(form, anchors, fold):
     return None
 
 
-def _linked_into(path, protected):
-    """The protected directory holding another link of `path`, a regular file, or None.
-    The search stops at _LINK_SCAN_LIMIT files, and a search cut off counts as a hit."""
-    try:
-        info = os.stat(path)
-    except (OSError, ValueError):
-        return None
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink < 2:
-        return None
-    wanted = (info.st_dev, info.st_ino)
-    seen = 0
-    for root in protected:
-        if not os.path.isdir(root):
-            continue
-        for directory, _dirs, files in os.walk(root):
-            for name in files:
-                seen += 1
-                if seen > _LINK_SCAN_LIMIT:
-                    return "a directory too large to search for the file's other links"
-                if _identity(os.path.join(directory, name)) == wanted:
-                    return root
-    return None
-
-
-def _protected_hit(forms, protected, scan_links):
+def _protected_hit(forms, protected):
     """The protected path one of `forms` is or lies under, or None. Compared as text after
     case folding, then by device and inode, which finds a hard link of a protected file, a
     case variant and another name of a directory (a macOS firmlink) even when the protected
-    path does not exist yet. With `scan_links`, last a hard link of a file inside a protected
-    directory."""
+    path does not exist yet. A hard link of a file inside a protected directory is refused by
+    the link count instead (_multi_linked)."""
     folded = [(entry, _fold(entry)) for entry in protected]
     anchors = _anchors(protected, True)
     for form in forms:
@@ -274,11 +248,6 @@ def _protected_hit(forms, protected, scan_links):
         hit = _lies_under(form, anchors, True)
         if hit:
             return hit
-    if scan_links:
-        for form in forms:
-            hit = _linked_into(form, protected)
-            if hit:
-                return hit
     return None
 
 
@@ -322,11 +291,14 @@ def _shown(value):
 
 
 def target_denial(raw, cwd, home, facts, who, tool):
-    """Why `who`'s `tool` call may not write `raw`, or None. A path is refused when it starts
-    or ends with whitespace or holds a control character, when it cannot be placed, and when
-    it is or lies under a protected path. While `facts` is there it is also refused outside
-    the allowed roots, in a .git directory or file, and as a file with more than one link,
-    which may be another name of a file outside them."""
+    """Why `who`'s `tool` call may not write `raw`, or None. The check holds only under an OS
+    sandbox profile, while `facts` is there: a harness without one keeps today's behaviour.
+    A path is refused when it starts or ends with whitespace or holds a control character,
+    when it cannot be placed, when it is or lies under a protected path, outside the allowed
+    roots, in a .git directory or file, and as a file with more than one link, which may be
+    another name of a file outside them."""
+    if facts is None:
+        return None
     if not isinstance(raw, str):
         return ("%s's %s names a path that is not a string, %s, so the guard cannot tell where "
                 "it writes" % (who, tool, _shown(raw)))
@@ -339,12 +311,10 @@ def target_denial(raw, cwd, home, facts, who, tool):
         return ("%s's %s names the relative path %s and no absolute cwd, so the guard cannot "
                 "tell where it writes" % (who, tool, _shown(raw)))
     forms, real_forms = resolved
-    hit = _protected_hit(forms, protected_paths(home, facts), scan_links=facts is None)
+    hit = _protected_hit(forms, protected_paths(home, facts))
     if hit:
         return ("%s may not %s %s while the pipeline is set up or running: it is or lies under "
                 "%s, %s" % (who, tool, _shown(raw), hit, PROTECTED_WHY))
-    if facts is None:
-        return None
     roots = allowed_roots(facts)
     outside = _outside(real_forms, roots)
     if outside:

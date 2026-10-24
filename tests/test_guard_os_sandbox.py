@@ -1349,8 +1349,8 @@ class TestProtectedPaths(ProtectedPathCase):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS
         gitconfig = self.at(".gitconfig")
         self.assert_protected(self.deny_reason(self.edit(gitconfig, agent="ppl-code-worker")))
-        # a ppl-* role is the pipeline's with neither the guard facts nor a run
-        with self.facts_text(None), self.no_active_run():
+        # with no run active either, the facts alone put the role in scope
+        with self.no_active_run():
             self.assert_protected(self.deny_reason(self.edit(gitconfig, agent="ppl-code-worker")))
 
     def test_the_orchestrator_cannot_edit_the_gh_config(self):
@@ -1359,9 +1359,7 @@ class TestProtectedPaths(ProtectedPathCase):
         for tool, key in EDIT_TOOLS:
             with self.subTest(tool=tool):
                 self.assert_protected(self.deny_reason(self.edit(hosts, tool=tool, key=key)))
-        # the facts alone, or a run alone, put the session in scope
-        with self.subTest(facts=False), self.facts_text(None):
-            self.assert_protected(self.deny_reason(self.edit(hosts)))
+        # the facts alone put the session in scope, whatever the run
         with self.subTest(run=False), self.no_active_run():
             self.assert_protected(self.deny_reason(self.edit(hosts)))
 
@@ -1499,16 +1497,23 @@ class TestProtectedPaths(ProtectedPathCase):
                 call = payload("ppl-code-worker", "Write", {"file_path": path}, REPO)
                 self.assertIsNone(escape.edit_denial(call, paths.home(), facts_doc()))
 
-    def test_without_guard_facts_only_the_protected_paths_are_closed(self):
-        # a GitLab or Jira harness writes no guard facts, so there is no write scope to hold
-        # an edit to: a role, or any session while a run is active, meets the protected paths
+    def test_without_guard_facts_the_edit_check_stands_aside(self):
+        # a GitLab or Jira harness that has not opted in writes no guard facts, and keeps
+        # today's behaviour: the check denies nothing, for any session, run or no run
         with self.facts_text(None):
-            self.assert_protected(self.deny_reason(self.edit(self.at(".gitconfig"))))
-            for path in (os.path.join(self.outside, "notes.md"), self.at(".claude/hooks/x.sh"),
-                         self.at(".config/other/x.json"), self.at(".sshx/config"),
-                         self.at(".gitconfig-notes/x"), WS + "/README.md", WS + "/.claudex/x"):
-                with self.subTest(path=path):
-                    self.assertIsNone(self.edit(path, tool="Write"))
+            for path in (self.at(".gitconfig"), self.at(".ssh/config"),
+                         self.at(".claude/hooks/x.sh"), os.path.join(self.outside, "notes.md"),
+                         WS + "/.claude/settings.local.json", " " + self.at(".gitconfig")):
+                for agent in (None, "general-purpose"):
+                    with self.subTest(path=path, agent=agent):
+                        self.assertIsNone(self.edit(path, agent=agent, tool="Write"))
+            with self.no_active_run():
+                self.assertIsNone(self.edit(self.at(".gitconfig"), agent="ppl-code-worker"))
+            # the older rules still hold an edit tool: a role outside the run's repo, and run state
+            reason = self.deny_reason(self.edit(self.at(".gitconfig"), agent="ppl-code-worker"))
+            self.assertIn("may write only inside run %s's repo" % TASK, reason)
+            reason = self.deny_reason(self.edit(str(paths.run_dir(TASK) / "state.json")))
+            self.assertIn("run state is written only by ppl", reason)
 
     def test_unreadable_facts_deny_every_edit(self):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS
@@ -1633,9 +1638,9 @@ class TestProtectedPaths(ProtectedPathCase):
                 reason = self.deny_reason(self.edit(inside))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertTrue(PROTECTED in reason or "more than one link" in reason, reason)
-                # with no guard facts, the protected directories are searched for the other link
-                with self.facts_text(None):
-                    self.assert_protected(self.deny_reason(self.edit(outside)))
+                # outside it, the link is denied like any path there
+                reason = self.deny_reason(self.edit(outside))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
 
     def test_every_path_key_of_the_call_is_checked(self):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS

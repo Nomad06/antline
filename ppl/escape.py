@@ -147,9 +147,9 @@ def is_role(agent):
 def edit_denial(payload, home, facts, active=False):
     """Why a pipeline session's Edit, Write, MultiEdit or NotebookEdit may not write its
     target, or None. Edit tools run outside the OS sandbox: escape_paths.target_denial says
-    why about each path key of the call, for roles and the orchestrator alike. In scope: a
-    ppl-* role always, any session while `facts` is there, and any session while `active`
-    says a run is active. Facts that cannot be read are the guard's to refuse before this."""
+    why about each path key of the call, for roles and the orchestrator alike, and only while
+    `facts` is there: without an OS sandbox profile it stands aside. Facts that cannot be read
+    are the guard's to refuse before this. `active` says a run is active."""
     if not isinstance(payload, dict) or payload.get("tool_name") not in EDIT_TOOLS:
         return None
     agent = payload.get("agent_type")
