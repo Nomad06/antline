@@ -658,8 +658,10 @@ and `ppl harness validate` refuses an `[os_sandbox] allow_write` entry that is o
 home directory or a protected path [R-OS-SANDBOX-PROTECTED-PATHS]. `ppl doctor` lists another
 settings file's write grant over a protected path, and any unix socket allowance, under
 `os_sandbox.undoing`. It also lists, as `foreign_bash_hooks`, every other `PreToolUse` hook
-whose matcher passes Bash, from the user, project, local and managed settings and each enabled
-plugin's `hooks/hooks.json`, by the command's first word or script name: one that rewrites a
+whose matcher may pass Bash (a missing, empty or `*` matcher, one a search finds in `Bash`, and
+one that does not compile), from the user, project, local and managed settings and each
+enabled plugin's `hooks/hooks.json`, by the command's first word or script name, or the
+interpreter alone for inline code, never its arguments: one that rewrites a
 call with `updatedInput` may keep or drop `dangerouslyDisableSandbox`, which is unverified, so
 `ppl init` warns on a GitHub run that they should be removed or disabled for pipeline sessions
 [R-OS-SANDBOX-INIT-REQUIRED]. Without the facts the allowlist stands aside and the older path

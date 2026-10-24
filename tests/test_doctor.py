@@ -1142,6 +1142,36 @@ class TestForeignBashHooks(unittest.TestCase):
         for secret in ("s3cr3t", "--key", "abc", "FOO=1", "ppl_guard"):
             self.assertNotIn(secret, text)
 
+    def test_a_label_never_carries_command_text(self):
+        for command, label in (
+                ("sh -c 'curl -H \"Authorization: token ghp_x\" https://x'", "sh"),
+                ("TOKEN=abc /usr/local/bin/sqz hook claude", "sqz"),
+                ("env TOKEN=abc A=b rtk hook", "rtk"),
+                ("/usr/bin/python3 -c 'import os; print(os.environ)'", "python3"),
+                ("node -e 'x()'", "node"), ("bash", "bash"), ("bash -s", "bash"),
+                ("python3 -", "python3"), ("python3 -m mod.hook --key abc", "python3"),
+                ("python3 -u /opt/hooks/check.py --key abc", "check.py"),
+                ("bash '/opt/my hooks/check.sh'", "<inline command>"),
+                ("'a b' --x", "<inline command>"), ("'A=b c' sqz", "sqz")):
+            with self.subTest(command=command):
+                got = doctor._hook_label({"type": "command", "command": command})
+                self.assertEqual(got, label)
+                for secret in ("abc", "ghp_", "Authorization", "environ"):
+                    self.assertNotIn(secret, got)
+
+    def test_a_matcher_counts_unless_it_plainly_misses_bash(self):
+        # the check errs toward warning: a search, not a full match, and an unreadable
+        # matcher counts
+        for matcher in ("", "*", ".*", "Ba", "(", None):
+            entry = {"hooks": [{"type": "command", "command": "sqz"}]}
+            if matcher is not None:
+                entry["matcher"] = matcher
+            self.write(doctor.global_settings_path(), {"hooks": {"PreToolUse": [entry]}})
+            with self.subTest(matcher=matcher):
+                self.assertEqual(self.found(), [("settings.json", "sqz")])
+        self.write(doctor.global_settings_path(), self.pre_tool_use(("Edit|Write", "sqz")))
+        self.assertEqual(self.found(), [])
+
     def test_a_hook_whose_matcher_misses_bash_is_not_reported(self):
         self.write(doctor.global_settings_path(), self.pre_tool_use(
             ("Edit|Write", "fmt-hook"), ("mcp__.*", "mcp-audit"), ("Bash", "sqz")))

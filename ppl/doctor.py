@@ -954,11 +954,22 @@ def github_token_warning(env=None):
 # The interpreters whose script, not their own name, says which hook runs.
 _INTERPRETER = re.compile(r"(?:python[0-9.]*|node|nodejs|bash|sh|zsh|dash|ruby|perl|deno|bun"
                           r"|php)")
+# The interpreter options after which what runs is inline code, a module or stdin, never a
+# script file worth naming.
+_INLINE_OPTIONS = ("-c", "-e", "--eval", "-s", "-", "-m", "-p", "--print")
+INLINE_LABEL = "<inline command>"
+
+
+def _filename_like(word):
+    return (bool(word) and not any(char.isspace() for char in word)
+            and not any(char in word for char in "='\"`"))
 
 
 def _hook_label(hook):
     """A hook as doctor names it: the command's first word, or the script an interpreter runs,
-    by its base name alone. Its arguments, which may carry a token, are never kept."""
+    by its base name alone, past any NAME=value words with or without env. Inline code, a
+    module or stdin is named by the interpreter alone, and a word that does not look like a
+    file name by INLINE_LABEL, so no argument, which may carry a token, is ever kept."""
     if not isinstance(hook, dict):
         return "an unreadable hook"
     command = hook.get("command")
@@ -968,18 +979,42 @@ def _hook_label(hook):
     try:
         words = shlex.split(command)
     except ValueError:
-        words = command.split()
+        return INLINE_LABEL
     if words and os.path.basename(words[0]) == "env":
         first = _past_env(words)
         words = words[words.index(first):] if first else []
+    while words and _ENV_ASSIGNMENT_RE.match(words[0]):
+        words = words[1:]
     if not words:
         return "an empty command"
+    if not _filename_like(words[0]):
+        return INLINE_LABEL
     name = os.path.basename(words[0])
-    if _INTERPRETER.fullmatch(name):
-        script = next((word for word in words[1:] if not word.startswith("-")), None)
-        if script:
-            return os.path.basename(script)
+    if not _INTERPRETER.fullmatch(name):
+        return name
+    for word in words[1:]:
+        if word in _INLINE_OPTIONS or word.startswith(("-c", "-e")) and len(word) > 2 \
+                and not word.startswith("--"):
+            return name
+        if word.startswith("-"):
+            continue
+        return os.path.basename(word) if _filename_like(word) else INLINE_LABEL
+    # no script: the interpreter reads its code from stdin
     return name
+
+
+def _may_pass_bash(matcher):
+    """Whether a PreToolUse matcher may pass Bash, erring toward yes: a missing, empty or "*"
+    matcher, one a search finds in "Bash", and one that does not compile all count."""
+    if matcher is None:
+        return True
+    text = str(matcher).strip()
+    if text in ("", "*"):
+        return True
+    try:
+        return re.search(text, "Bash") is not None
+    except re.error:
+        return True
 
 
 def _enabled_plugins(documents):
@@ -1025,7 +1060,7 @@ def foreign_bash_hooks(cwd=None):
         hooks = doc.get("hooks") if isinstance(doc, dict) else None
         entries = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
         for entry in entries if isinstance(entries, list) else []:
-            if not isinstance(entry, dict) or not matcher_covers(entry.get("matcher"), "Bash"):
+            if not isinstance(entry, dict) or not _may_pass_bash(entry.get("matcher")):
                 continue
             inner = entry.get("hooks")
             for hook in inner if isinstance(inner, list) else []:
