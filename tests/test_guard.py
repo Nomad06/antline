@@ -3086,6 +3086,24 @@ class TestGuard(unittest.TestCase):
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self._responder_bash(command)),
                           command)
 
+    def test_a_redos_shaped_dash_c_value_is_denied_fast(self):
+        # rule: R-REVIEW-RESPONDER-BASH-SHAPES
+        self._responder_with_github_forge()
+        rest = " diff --no-ext-diff --no-textconv abc1234..def5678"
+        for value in ("/" + "a" * 4000 + "!", "/" + "a/" * 1500 + "!", "/" + "a" * 4000 + "/..",
+                      "/" + "a" * 30 + "!"):
+            start = time.monotonic()
+            result = self._responder_bash("git -C " + value + rest)
+            self.assertLess(time.monotonic() - start, 0.05)
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_normal_absolute_repo_path_is_still_allowed(self):
+        # rule: R-REVIEW-RESPONDER-BASH-SHAPES
+        self._responder_with_github_forge()
+        for path in ("/", "/work/repo", "/Users/a.b/my-repo_1/", "/w/.worktrees/x@1"):
+            self.assertIsNone(self._responder_bash(
+                "git -C %s diff --no-ext-diff --no-textconv abc1234..def5678" % path), path)
+
     def test_github_review_responder_bash_is_an_allowlist(self):
         # rule: R-REVIEW-RESPONDER-BASH-SHAPES
         self._responder_with_github_forge()

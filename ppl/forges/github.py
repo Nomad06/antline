@@ -67,7 +67,7 @@ _DENIED_BASH = (
 # `git show` may run an external diff or textconv driver the repo's config or
 # .gitattributes names, so both require `--no-ext-diff --no-textconv`. Any
 # other token, `-c` and `--output` among them, matches no regex and denies.
-_REPO = r"/(?:[A-Za-z0-9_.@+-]+/?)*"
+_REPO = r"/(?:[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)*)?/?"
 _REPO_NO_DOTDOT = r"(?!.*(?:^|/)\.\.(?:/|$))" + _REPO
 _REV = r"(?:[0-9a-fA-F]{7,40}|origin/[A-Za-z0-9_][A-Za-z0-9_/-]*(?:\.[A-Za-z0-9_/-]+)*)"
 _RANGE = r"^" + _REV + r"\.\." + _REV + r"$"
