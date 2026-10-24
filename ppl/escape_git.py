@@ -36,7 +36,7 @@ TIMEOUT_SECONDS = 0.2
 GIT_SAFE_KEYS = (
     r"core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase"
     r"|precomposeunicode|symlinks|hookspath)",
-    r"remote\.[^.]+\.(url|fetch)",
+    r"remote\.[^.]+\.(url|fetch|gh-resolved)",
     r"branch\.[^.]+\.(remote|merge)",
     r"extensions\.(worktreeconfig|objectformat)",
     r"user\.(name|email)",
@@ -60,6 +60,12 @@ _SHAPE = ("git leaves the OS sandbox only as `git %s -C <dir> fetch --no-recurse
 _PUSH_SHAPE = ("git push takes only --no-verify --no-follow-tags --no-recurse-submodules "
                "[-u|--set-upstream] origin refs/heads/<branch>:refs/heads/<branch>, or the same "
                "three words then origin --delete refs/heads/<branch>")
+
+
+def plain_branch(name):
+    """True for a branch name of the pipeline's <TASK-ID>-<slug> alphabet: letters, digits, '.',
+    '_' and '-', not starting with a punctuation mark, with no '/', ':' or '+'."""
+    return isinstance(name, str) and _BRANCH.fullmatch(name) is not None
 
 
 def _short(value):

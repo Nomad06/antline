@@ -229,6 +229,19 @@ class TestRoleEscape(OsSandboxCase):
                 self.assertIsNone(ppl_guard.decide(payload("ppl-code-worker", "Bash", tool_input)))
                 checked.assert_not_called()
 
+    def test_any_tool_carrying_the_flag_is_flagged(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        for tool in ("Write", "PowerShell", "mcp__shell__run", "BashOutput"):
+            call = payload("ppl-code-worker", tool, {"command": "ls", "file_path": REPO + "/x",
+                                                     "dangerouslyDisableSandbox": True}, REPO)
+            with self.subTest(tool=tool):
+                self.assertTrue(escape.flagged(call))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(ppl_guard.decide(call)))
+                orchestrator = dict(call, agent_type=None, cwd=WS)
+                self.assertIsNotNone(ppl_guard.decide(orchestrator))
+                del call["tool_input"]["dangerouslyDisableSandbox"]
+                self.assertFalse(escape.flagged(call))
+
     def test_a_truthy_flag_that_is_not_true_still_counts(self):
         # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
         for value in ("true", 1, "yes"):
@@ -282,6 +295,24 @@ class TestFailClosed(OsSandboxCase):
                     result = self.decide(pr_create(), agent=agent, cwd=cwd)
                     self.assertIn("OWNER_DECISION", self.deny_reason(result))
                     self.assertIn("ppl harness apply", self.deny_reason(result))
+
+    def test_missing_facts_on_a_run_without_the_profile_name_the_real_fix(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        # a run whose harness has no OS sandbox profile never needs to leave the sandbox
+        snapshot = paths.run_dir(TASK) / "harness.json"
+        saved = snapshot.read_text(encoding="utf-8")
+        fixtures.install_harness("example-maven")
+        store.write_json(snapshot, harness.snapshot(harness.load("example-maven")))
+        try:
+            with self.facts_text(None):
+                for agent in (None, "general-purpose"):
+                    with self.subTest(agent=agent):
+                        reason = self.deny_reason(self.decide("mvn -q verify", agent=agent))
+                        self.assertIn("OWNER_DECISION", reason)
+                        self.assertIn("without dangerouslyDisableSandbox", reason)
+                        self.assertIn("no OS sandbox profile", reason)
+        finally:
+            snapshot.write_text(saved, encoding="utf-8")
 
     def test_corrupt_facts_deny(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
@@ -551,6 +582,17 @@ class TestOrchestratorShape(OsSandboxCase):
         with self.run_state(branch="main"):
             command = pr_create().replace("--head " + BRANCH, "--head main")
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_a_head_that_is_not_a_plain_branch_name_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # the run's state is role-writable, so a branch it records as owner:branch, which gh
+        # reads as another fork's branch, is refused on its own spelling
+        for branch in ("evil:" + BRANCH, "o/" + BRANCH, "-x", "+" + BRANCH):
+            with self.subTest(branch=branch), self.run_state(branch=branch):
+                command = pr_create().replace("--head " + BRANCH, "--head=" + branch)
+                reason = self.deny_reason(self.decide(command))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn("plain branch name", reason)
 
     def test_issue_comment_needs_a_body_file_under_the_scratch_dir(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
@@ -1126,6 +1168,12 @@ class GitShapes(OsSandboxCase):
                    if entry.startswith("Bash(%s " % GIT_BIN)]
         self.assertEqual(entries, [self.fetch("origin", "main")])
         self.assertIsNone(self.decide(entries[0]))
+
+    def test_gh_resolved_in_local_config_is_tolerated(self):
+        # gh records the remote it resolved there, and it runs nothing
+        git(self.checkout, "config", "remote.origin.gh-resolved", "base")
+        self.assertIsNone(self.decide(self.push("origin", SPEC)))
+        self.assertIsNone(self.decide(self.fetch("origin", "main")))
 
     def test_core_hookspath_in_local_config_is_tolerated(self):
         # the -c on the command line wins over it

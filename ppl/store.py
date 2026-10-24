@@ -143,8 +143,8 @@ def write_text(path, text):
 
 def append_log(task_id, event):
     """Append one event. The log is opened through no link and without blocking, and only a
-    regular file is appended to: runs/ is sandbox-writable, so a link there could point an
-    unsandboxed ppl command's append anywhere."""
+    regular file with a single link is appended to: runs/ is sandbox-writable, so a link there
+    could point an unsandboxed ppl command's append anywhere."""
     record = dict(event)
     record["at"] = now()
     target = paths.run_dir(task_id) / "log.jsonl"
@@ -159,9 +159,14 @@ def append_log(task_id, event):
                            "will not append to it: %s" % (target, exc))
         raise
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
             raise PplError("EXTERNAL_BLOCKED", "%s is not a regular file, so ppl will not "
                            "append to it" % target)
+        if info.st_nlink != 1:
+            raise PplError("EXTERNAL_BLOCKED", "%s has %d links, and a second link may be "
+                           "another name of a file outside the run, so ppl will not append "
+                           "to it" % (target, info.st_nlink))
         with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             descriptor = None
             handle.write(json.dumps(record, sort_keys=True) + "\n")

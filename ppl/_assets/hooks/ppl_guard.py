@@ -2610,6 +2610,8 @@ def log_denial(payload, result):
         log = paths.run_dir(task_id) / "log.jsonl"
         if os.path.lexists(log) and not os.path.isfile(log):
             return
+        # runs/ is sandbox-writable: no append through a run directory a role made a link
+        store.checked_run_path(log)
         tool_input = payload.get("tool_input")
         if not isinstance(tool_input, dict):
             tool_input = {}

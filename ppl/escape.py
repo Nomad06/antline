@@ -54,9 +54,11 @@ _GH_TABLE = {
 
 
 def flagged(payload):
-    """True for a Bash call that asks to run outside the OS sandbox. Any value but an absent,
-    null or false flag counts, so a string "true" is not a way around the check."""
-    if not isinstance(payload, dict) or payload.get("tool_name") != "Bash":
+    """True for a call of any tool that asks to run outside the OS sandbox: a tool other than
+    Bash that carries the flag is refused the same way, never let through as unflagged. Any
+    value but an absent, null or false flag counts, so a string "true" is not a way around
+    the check."""
+    if not isinstance(payload, dict):
         return False
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -311,6 +313,11 @@ def decide(payload, home, state):
     if facts is None and not task_id:
         return None
     if facts is None:
+        if _run_needs_profile(task_id) is False:
+            return ("OWNER_DECISION",
+                    "run %s's harness has no OS sandbox profile, so its commands run without "
+                    "dangerouslyDisableSandbox: run this one again without it. A GitHub "
+                    "harness gets its profile and pins from `ppl harness apply`" % task_id)
         return ("OWNER_DECISION",
                 "%s is missing while run %s is active, so no gh, git or ppl is pinned for a "
                 "command outside the OS sandbox: %s" % (FACTS_FILE, task_id, APPLY))
@@ -334,6 +341,18 @@ def decide(payload, home, state):
     if reason:
         return ("BOUNDARY_VIOLATION", "outside the OS sandbox: " + reason)
     return None
+
+
+def _run_needs_profile(task_id):
+    """What the run's harness snapshot says of the OS sandbox profile: True or False, None when
+    it cannot be read. A role can write the snapshot, so this only picks the wording of a
+    refusal, never a decision."""
+    try:
+        doc = _read_json(os.path.join(str(paths.run_dir(task_id)), "harness.json"))
+    except (OSError, ValueError, Exception):
+        return None
+    needed = (doc.get("os_sandbox") or {}).get("needed") if isinstance(doc, dict) else None
+    return needed if isinstance(needed, bool) else None
 
 
 def _short(value):
@@ -510,6 +529,10 @@ def _value_problem(kind, flag, value, facts, state):
             return "the run has no branch of its own recorded for --head"
         if value != branch:
             return "--head %s is not the run's branch %s" % (_short(value), branch)
+        # the run's state is role-writable, and gh reads owner:branch as a fork's branch
+        if not escape_git.plain_branch(value):
+            return ("--head %s is not a plain branch name of letters, digits, '.', '_' and "
+                    "'-'" % _short(value))
     elif kind == "base" and value != facts["default_branch"]:
         return "--base %s is not the default branch %s" % (_short(value), facts["default_branch"])
     return None

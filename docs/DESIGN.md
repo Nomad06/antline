@@ -585,7 +585,9 @@ field, and `ppl metrics` warns `OS_SANDBOX_OFF` for a GitHub run that started wi
 sandbox, which takes `dangerouslyDisableSandbox: true` on the Bash call, so the guard decides
 who may set it (`ppl/escape.py`), first and before any other check
 [R-OS-SANDBOX-ROLE-NO-ESCAPE]. A ppl-* role is denied from the call and its `agent_type`
-alone, before any file is read, run or no run [R-OS-SANDBOX-ROLE-NO-ESCAPE]. While
+alone, before any file is read, run or no run [R-OS-SANDBOX-ROLE-NO-ESCAPE]. A call of any other
+tool whose input carries the flag is decided the same way, never passed as unflagged
+[R-OS-SANDBOX-ROLE-NO-ESCAPE]. While
 `PPL_HOME/os_sandbox.json` exists or a run is active, every flagged call is the pipeline's
 whatever its `cwd`, since a `cwd` and the run's recorded repo are both in a role's reach: any
 other subagent, or a call carrying an `agent_id`, is denied, and the unroled session always
@@ -635,7 +637,8 @@ lets through still meets the tracker gate and the forge denials below it
 [R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-TRACKER-CLI-GATE]. Where the guard cannot decide a
 flagged call it denies it: an internal error, a non-string `agent_type`, an unreadable
 `os_sandbox.json` or run state, or a missing `os_sandbox.json` while a run is active, the
-facts cases naming `ppl harness apply` [R-OS-SANDBOX-FAIL-CLOSED]. Run files are opened
+facts cases naming `ppl harness apply`, or, for a run whose harness snapshot needs no profile,
+telling the orchestrator to run the command without the flag [R-OS-SANDBOX-FAIL-CLOSED]. Run files are opened
 without blocking and read only when regular, so a FIFO a role leaves in `runs/` is refused
 rather than holding the hook past its timeout, which would deny nothing
 [R-OS-SANDBOX-FAIL-CLOSED]. The hook and `ppl/escape.py` also read no run file or facts file
