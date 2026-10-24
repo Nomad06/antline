@@ -1035,14 +1035,17 @@ def run_cases(cage):
 
 def run_os_sandbox_cases(cage):
     """Who may leave the OS sandbox, on the python cage's GitHub Issues run: the guard facts
-    `ppl harness apply` writes, pins that need not exist, and the unrelated directory as the
-    workspace, which no sandboxed command can write [R-OS-SANDBOX-ROLE-NO-ESCAPE]
-    [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]."""
+    `ppl harness apply` writes, gh and ppl pins that need not exist, the git on PATH, and the
+    unrelated directory as the workspace, which no sandboxed command can write
+    [R-OS-SANDBOX-ROLE-NO-ESCAPE] [R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-OS-SANDBOX-GIT-CONFIG]."""
     real = os.path.realpath
     home = cage.ppl_home
     workspace = str(cage.unrelated)
     pins = {name: {"path": "/opt/pin/" + name, "realpath": real("/opt/pin/" + name)}
             for name in ("gh", "git", "ppl")}
+    # the guard runs the pinned git on the run's repo, so this one must exist
+    git_bin = shutil.which("git")
+    pins["git"] = {"path": git_bin, "realpath": real(git_bin)}
     facts = {"version": 1, "workspace": real(workspace), "checkout": real(str(cage.worktree)),
              "worktrees": real(str(cage.worktree) + "/.worktrees"), "default_branch": "main",
              "forge_repo": "o/r", "tracker_repo": "o/r", "scratch": real(str(home / "scratch")),
@@ -1077,6 +1080,27 @@ def run_os_sandbox_cases(cage):
         "os-sandbox orchestrator compound denied",
         flagged(None, gh + " auth status; id", workspace),
         "BOUNDARY_VIOLATION", reason="one plain command")
+
+    # The run's repo on its own branch with origin on the forge repo. -C spells the repo as
+    # ppl init recorded it [R-OS-SANDBOX-GIT-CONFIG].
+    repo = str(cage.worktree)
+    for args in (("remote", "add", "origin", "https://github.com/o/r.git"),
+                 ("checkout", "-q", "-b", "cage-branch")):
+        subprocess.run([git_bin, "-C", repo] + list(args), check=True, capture_output=True)
+    push = "%s -c core.hooksPath=/dev/null -C %s push --no-verify origin cage-branch" % (
+        git_bin, repo)
+
+    cage.check(
+        "os-sandbox push run branch allowed",
+        flagged(None, push, workspace),
+        "allow")
+
+    subprocess.run([git_bin, "-C", repo, "config", "core.sshCommand", "ssh -i /tmp/cage-key"],
+                   check=True, capture_output=True)
+    cage.check(
+        "os-sandbox push with sshCommand denied",
+        flagged(None, push, workspace),
+        "BOUNDARY_VIOLATION", reason="core.sshcommand")
 
 
 if __name__ == "__main__":

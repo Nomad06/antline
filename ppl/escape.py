@@ -2,15 +2,15 @@
 command reaches GitHub. The guard asks this first for a Bash call that sets
 dangerouslyDisableSandbox: a ppl-* role never may, and while the guard facts exist or a run
 is active no other subagent may and the unroled orchestrator may only for one plain command
-on a pinned gh or ppl in the shapes below. The guard hook imports this module, so it parses on Python
-3.9, carries no annotations and reads JSON only."""
+on a pinned gh, git or ppl in the shapes below and in escape_git. The guard hook imports this
+module, so it parses on Python 3.9, carries no annotations and reads JSON only."""
 import json
 import os
 import re
 import shlex
 import stat
 
-from . import boundary, paths, store
+from . import boundary, escape_git, paths, store
 
 # Its own copy of os_sandbox.FACTS_FILE, so the hook never imports that module.
 FACTS_FILE = "os_sandbox.json"
@@ -71,7 +71,7 @@ def _facts_problem(doc):
         return "is not a JSON object"
     if doc.get("version") != 1:
         return "has version %r, not 1" % (doc.get("version"),)
-    for key in ("workspace", "scratch"):
+    for key in ("workspace", "checkout", "scratch"):
         if not _absolute(doc.get(key)):
             return "has no absolute %s" % key
     if not (isinstance(doc.get("default_branch"), str) and doc["default_branch"]):
@@ -287,7 +287,8 @@ def orchestrator_shape(argv, cwd, facts, state):
             return ("the pinned %s %s no longer resolves to %s, the binary the profile protects: "
                     "%s" % (name, pin["path"], pin["realpath"], APPLY))
         if name == "git":
-            return "git has no allowed shape outside the OS sandbox yet"
+            # -C names the repository, so the cwd plays no part
+            return escape_git.git_shape(argv, facts, state)
         problem = _cwd_problem(name, cwd, facts)
         if problem:
             return problem

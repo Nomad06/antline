@@ -594,8 +594,16 @@ apply` pinned in `PPL_HOME/os_sandbox.json`, in a shape from the guard's table
 `pr create`, `pr view`, `pr checks` and `pr close`, `api user`, a review reply and `auth
 status`, each naming the harness's own repository, with any body file a plain file directly
 in the run's scratch directory [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For ppl it holds `tracker
-fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`, and git has
-no shape yet [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. Both gh and ppl run only from a `cwd` outside
+fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For git (`ppl/escape_git.py`) it holds `-c
+core.hooksPath=/dev/null -C <checkout> fetch <remote> <default branch>` and, in the run's
+repo, `-c core.hooksPath=/dev/null -C <repo> push --no-verify [-u] <remote> <branch>` or
+`push --no-verify <remote> --delete <branch>`, the branch being the one git reports HEAD on,
+never the default branch, and a plain name with no `/`, `:` or `+` [R-OS-SANDBOX-GIT-CONFIG].
+Before it lets one through the guard runs the pinned git on that repository, each call held
+to 0.2 s, and denies unless its local and worktree config set only keys that run nothing,
+with no include, and give the remote one url, the forge repo on github.com
+[R-OS-SANDBOX-GIT-CONFIG]. Both gh and ppl run only from a `cwd` outside
 every path a sandboxed command can write, so neither loads a repo a role wrote
 [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. An allowed ppl command trusts no run file a role can
 write: `ppl tracker fetch` takes its repository from `os_sandbox.json` and refuses a run
@@ -761,7 +769,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 184 rows: 137 `blocking`, 20 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 185 rows: 138 `blocking`, 20 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
