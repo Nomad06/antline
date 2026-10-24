@@ -9,6 +9,7 @@ from . import (__version__, boundary, budget, config, control, doctor, evidence,
                harness, metrics, models, os_sandbox, paths, recover, refusals, review, routing, run, schema,
                setup, status, store, trackers, trail, usage, verdict, watchdog)
 from .errors import PplError, role_output
+from .forges import github_fetch
 
 
 def resolve_task(args):
@@ -108,7 +109,8 @@ def parse_json_doc(text, path, what, kind):
     if kind is not None and not isinstance(doc, kind):
         raise PplError("SCHEMA_INVALID",
                        "%s file %s must contain a JSON %s"
-                       % (what, path, "array" if kind is list else "object"))
+                       % (what, path, "array" if kind is list else
+                          "array or object" if isinstance(kind, tuple) else "object"))
     return doc
 
 
@@ -765,7 +767,60 @@ def cmd_merge(args):
     return 0
 
 
+def _review_repo(task_id):
+    """The GitHub repository `ppl review fetch` reaches: the guard facts' forge_repo, and
+    the run's own snapshot (its github-issues repo, else its checkout's origin) must agree
+    with it when the facts exist."""
+    snapshot = paths.run_dir(task_id) / "harness.json"
+    try:
+        doc = store.read_json(snapshot) if stat.S_ISREG(os.lstat(snapshot).st_mode) else None
+    except (OSError, PplError):
+        doc = None
+    forge = doc.get("forge") if isinstance(doc, dict) else None
+    if not (isinstance(forge, dict) and forge.get("kind") == "github"):
+        raise PplError("SCHEMA_INVALID",
+                       "ppl review fetch reads GitHub pull requests, and the harness snapshot "
+                       "of %s does not name the github forge" % task_id)
+    tracker = doc.get("tracker")
+    repo = tracker.get("repo") if isinstance(tracker, dict) and \
+        tracker.get("kind") == "github-issues" else None
+    if not repo:
+        repo = setup._origin_repo(run.load(task_id).get("repo") or "")
+    repo = os_sandbox.pinned_repo("forge_repo", repo)
+    if not repo:
+        raise PplError("SCHEMA_INVALID",
+                       "no GitHub repository is known for %s: its checkout has no github.com "
+                       "origin" % task_id)
+    return repo
+
+
+def cmd_review_fetch(args):
+    # Like cmd_tracker it runs outside the OS sandbox with gh's credentials: the repository
+    # comes from the guard facts and the run directory is checked, before the network calls
+    # and again right before the write, as a role may swap a directory for a link meanwhile.
+    task_id = resolve_task(args)
+    target = paths.run_dir(task_id) / "review-threads.json"
+    store.checked_run_path(paths.run_dir(task_id))
+    store.checked_run_path(target.parent)
+    control.enforce(task_id)
+    if args.pr is None or args.pr < 1:
+        raise PplError("SCHEMA_INVALID", "review fetch requires --pr <number>")
+    repo = _review_repo(task_id)
+    doc = github_fetch.fetch(repo, args.pr)
+    store.checked_run_path(paths.run_dir(task_id))
+    store.checked_run_path(target.parent)
+    store.checked_run_path(target)
+    store.write_json(target, doc)
+    print("threads: %s" % target)
+    print("%d threads" % len(doc["threads"]))
+    return 0
+
+
 def cmd_review(args):
+    if args.action == "fetch":
+        return cmd_review_fetch(args)
+    if not args.sha:
+        raise PplError("SCHEMA_INVALID", "review %s requires --sha" % args.action)
     task_id = resolve_task(args)
     if args.action == "answered":
         # refresh=False: require_current_generation below is a second gate
@@ -782,7 +837,12 @@ def cmd_review(args):
     elif args.action == "pending":
         if not args.threads:
             raise PplError("SCHEMA_INVALID", "review pending requires --threads")
-        threads = load_json_arg(args.threads, "threads", kind=list)
+        threads = load_json_arg(args.threads, "threads", kind=(list, dict))
+        if isinstance(threads, dict):
+            threads = threads.get("threads")
+            if not isinstance(threads, list):
+                raise PplError("SCHEMA_INVALID", "threads file %s has no threads list"
+                               % args.threads)
         # Three states, not two: omitted (args.author is None) falls through
         # to review.pending's own stored-identity/nothing-configured
         # resolution. An explicit empty string is a deliberate "no filter,
@@ -1304,10 +1364,11 @@ def build_parser():
     p.add_argument("--task")
 
     p = sub.add_parser("review")
-    p.add_argument("action", choices=["answered", "approved", "pending"])
+    p.add_argument("action", choices=["answered", "approved", "pending", "fetch"])
     p.add_argument("--thread")
     p.add_argument("--threads")
-    p.add_argument("--sha", required=True)
+    p.add_argument("--sha")
+    p.add_argument("--pr", type=int)
     p.add_argument("--classification", choices=list(review.CLASSIFICATIONS))
     p.add_argument("--last-note-id", dest="last_note_id")
     p.add_argument("--author")

@@ -1,3 +1,4 @@
+import os
 import random
 import re
 import subprocess
@@ -241,6 +242,33 @@ class FakeGh:
             raise answer
         code, out, err = answer
         return subprocess.CompletedProcess(argv, code, out, err)
+
+
+class TestGithubIssuesFetchGh(GithubIssuesCase):
+    def fetch(self, gh):
+        import tempfile
+        from ppl import store
+        with mock.patch.object(store, "checked_run_path", side_effect=lambda p: p):
+            return self.adapter.fetch({"repo": "o/r"}, "GH-7", tempfile.mkdtemp(), runner=gh)
+
+    def test_gh_runs_by_the_pinned_path(self):
+        from ppl import os_sandbox
+        gh = FakeGh((1, "", "boom"))
+        with mock.patch.object(os_sandbox, "gh_path", return_value="/pin/gh"):
+            with self.assertRaises(PplError):
+                self.fetch(gh)
+        self.assertEqual(gh.calls[0][0][0], "/pin/gh")
+
+    def test_inside_the_sandbox_the_block_names_the_flag(self):
+        with mock.patch.dict(os.environ, {"SANDBOX_RUNTIME": "1"}):
+            with self.assertRaises(PplError) as ctx:
+                self.fetch(FakeGh((1, "", "boom")))
+        self.assertIn("this command reaches GitHub, run it with dangerouslyDisableSandbox",
+                      str(ctx.exception))
+        with mock.patch.dict(os.environ, {"SANDBOX_RUNTIME": ""}):
+            with self.assertRaises(PplError) as ctx:
+                self.fetch(FakeGh((1, "", "boom")))
+        self.assertNotIn("dangerouslyDisableSandbox", str(ctx.exception))
 
 
 class TestTrackerChoice(GithubIssuesCase):
