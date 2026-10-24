@@ -38,8 +38,10 @@ def state_path(task_id):
 
 
 def active():
+    """The active run's task id, or None. A pointer that is not a regular file is refused
+    SCHEMA_INVALID without blocking (store.read_regular_text)."""
     try:
-        return paths.active_file().read_text(encoding="utf-8").strip() or None
+        return store.read_regular_text(paths.active_file()).strip() or None
     except FileNotFoundError:
         return None
 

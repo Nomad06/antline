@@ -3430,6 +3430,120 @@ class TestTrackerFetch(unittest.TestCase):
         self.assertEqual(self.argvs(), [GH_VIEW.split(" "), GH_PARENT.split(" "),
                                         GH_SUBS.split(" ")])
 
+    def write_guard_facts(self, **repos):
+        """A guard facts file in the data root, gone again after the test."""
+        from ppl import os_sandbox, store
+        path = paths.home() / os_sandbox.FACTS_FILE
+        store.write_json(path, dict({"version": 1, "forge_repo": "o/r", "tracker_repo": "o/r"},
+                                    **repos))
+        self.addCleanup(lambda: path.unlink() if path.exists() else None)
+
+    def outside_dir(self):
+        outside = Path(tmphome.mkdtemp(prefix="ghoutside-"))
+        self.addCleanup(shutil.rmtree, str(outside), True)
+        return outside
+
+    def test_the_repository_comes_from_the_guard_facts(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # the run snapshot sits in role-writable runs/, the guard facts do not
+        from ppl import run
+        task = self.run_with("GH-7")
+        self.write_guard_facts(tracker_repo="o/other")
+        code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertIn("o/other", json.loads(err)["message"])
+        self.assertEqual(self.argvs(), [])
+        self.assertFalse(self.tracker_dir(task).exists())
+        self.assertIsNone(run.load(task).get("tracker_revision"))
+        self.write_guard_facts(tracker_repo=None)
+        self.assertEqual(json.loads(call("tracker", "fetch", "--task", task)[2])["error_code"],
+                         "SCHEMA_INVALID")
+        self.write_guard_facts(tracker_repo="o/r")
+        code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.argvs()[0], GH_VIEW.split(" "))
+
+    def test_a_tracker_dir_linked_outside_the_run_is_refused_and_nothing_is_written(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        from ppl import run
+        task = self.run_with("GH-7")
+        outside = self.outside_dir()
+        os.symlink(str(outside), str(self.tracker_dir(task)))
+        code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "EXTERNAL_BLOCKED")
+        self.assertIn(str(self.tracker_dir(task)), error["message"])
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(self.argvs(), [])
+        self.assertIsNone(run.load(task).get("tracker_revision"))
+
+    def test_a_run_dir_linked_elsewhere_is_refused_and_nothing_is_written(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        task = self.run_with("GH-7")
+        moved = self.outside_dir() / "GH-7"
+        shutil.move(str(paths.run_dir(task)), str(moved))
+        os.symlink(str(moved), str(paths.run_dir(task)))
+        self.addCleanup(lambda: os.unlink(str(paths.run_dir(task))))
+        before = sorted(item.name for item in moved.iterdir())
+        state_before = (moved / "state.json").read_text(encoding="utf-8")
+        code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "EXTERNAL_BLOCKED")
+        self.assertIn(str(paths.run_dir(task)), error["message"])
+        self.assertEqual(sorted(item.name for item in moved.iterdir()), before)
+        self.assertEqual((moved / "state.json").read_text(encoding="utf-8"), state_before)
+        self.assertEqual(self.argvs(), [])
+
+    def test_a_tracker_dir_swapped_for_a_link_while_gh_answers_is_refused(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # the check runs again right before the write, after the network calls
+        from ppl.trackers import github_issues
+        task = self.run_with("GH-7")
+        dest = self.tracker_dir(task)
+        dest.mkdir()
+        outside = self.outside_dir()
+        epic = {"number": 3, "title": "Epic", "url": "https://github.com/o/r/issues/3"}
+        answers = {GH_VIEW: json.dumps(GH_ISSUE), GH_PARENT: json.dumps(epic), GH_SUBS: "[]"}
+
+        def runner(argv, **kwargs):
+            if dest.is_dir() and not dest.is_symlink():
+                dest.rmdir()
+                os.symlink(str(outside), str(dest))
+            return subprocess.CompletedProcess(argv, 0, stdout=answers[" ".join(argv[1:])],
+                                               stderr="")
+
+        with self.assertRaises(PplError) as caught:
+            github_issues.fetch({"repo": "o/r", "kind": "github-issues"}, task, dest,
+                                runner=runner)
+        self.assertEqual(caught.exception.code, "EXTERNAL_BLOCKED")
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_a_log_linked_outside_the_run_is_not_appended_through(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        task = self.run_with("GH-7")
+        target = self.outside_dir() / "rc"
+        target.write_text("untouched\n", encoding="utf-8")
+        log = paths.run_dir(task) / "log.jsonl"
+        log.unlink()
+        os.symlink(str(target), str(log))
+        code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "EXTERNAL_BLOCKED")
+        self.assertEqual(target.read_text(encoding="utf-8"), "untouched\n")
+
+    def test_a_write_path_outside_the_runs_dir_is_refused(self):
+        from ppl import store
+        self.run_with("GH-7")
+        for path in (Path(self.outside_dir()) / "x", paths.runs_dir() / "GH-7" / ".." / ".." / "x"):
+            with self.subTest(path=path), self.assertRaises(PplError) as caught:
+                store.checked_run_path(path)
+            self.assertEqual(caught.exception.code, "EXTERNAL_BLOCKED")
+        self.assertEqual(store.checked_run_path(paths.run_dir("GH-7") / "tracker"),
+                         paths.run_dir("GH-7") / "tracker")
+
     def test_a_404_on_the_link_endpoints_records_unavailable(self):
         task = self.run_with("GH-7")
         missing = {"rc": 1, "err": "gh: Not Found (HTTP 404)"}

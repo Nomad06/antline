@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,20 +24,65 @@ def deadline_in(seconds):
         timespec="seconds")
 
 
+def read_regular_text(path):
+    """The text of the regular file at `path`. It is opened without blocking and read only
+    when it is a regular file: runs/ is sandbox-writable, and a FIFO left where a run file
+    belongs would hold every reader, the guard hook past its timeout among them, and a hook
+    that times out denies nothing. FileNotFoundError when absent, SCHEMA_INVALID when not a
+    regular file."""
+    descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise PplError("SCHEMA_INVALID", "%s is not a regular file" % path)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = None
+            return handle.read()
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def read_json(path, default=None):
     """Every JSON reader in this codebase goes through here, so a document a
     session left half-written (or one mangled by hand) is a routable error
     everywhere at once, not a raw json.JSONDecodeError - exit 1, past the
     documented 0/2/1 contract - at whichever call site happens to read it
-    first [R-STORE-CORRUPT-JSON].
+    first [R-STORE-CORRUPT-JSON]. It never blocks on a file that is not a
+    regular one (read_regular_text).
     """
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
+        text = read_regular_text(path)
     except FileNotFoundError:
         return default
+    try:
+        return json.loads(text)
     except json.JSONDecodeError as exc:
         raise PplError("SCHEMA_INVALID", "%s is not valid JSON: %s" % (path, exc))
+
+
+def checked_run_path(path):
+    """`path` when it lies under the real runs directory and no part of it below runs/ is a
+    link or resolves anywhere else, else EXTERNAL_BLOCKED naming the part. A role can write
+    runs/, so a ppl command that runs outside the OS sandbox calls this right before it
+    writes there, and writes nothing through a link a role planted."""
+    path = Path(path)
+    runs = paths.runs_dir()
+    real_runs = os.path.realpath(str(runs))
+    try:
+        parts = path.relative_to(runs).parts
+    except ValueError:
+        parts = None
+    if not parts or any(part in (".", "..") for part in parts):
+        raise PplError("EXTERNAL_BLOCKED", "%s is not a path under %s, so ppl will not write "
+                       "it" % (path, runs))
+    current, expected = runs, real_runs
+    for part in parts:
+        current, expected = current / part, os.path.join(expected, part)
+        if os.path.islink(str(current)) or os.path.realpath(str(current)) != expected:
+            raise PplError("EXTERNAL_BLOCKED", "%s is a link or resolves outside %s, so ppl "
+                           "will not write through it: remove it and run the command again"
+                           % (current, real_runs))
+    return path
 
 
 def write_json(path, obj):
@@ -74,12 +120,32 @@ def write_text(path, text):
 
 
 def append_log(task_id, event):
+    """Append one event. The log is opened through no link and without blocking, and only a
+    regular file is appended to: runs/ is sandbox-writable, so a link there could point an
+    unsandboxed ppl command's append anywhere."""
     record = dict(event)
     record["at"] = now()
     target = paths.run_dir(task_id) / "log.jsonl"
     target.parent.mkdir(parents=True, exist_ok=True)
-    with open(target, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
+    flags = (os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0))
+    try:
+        descriptor = os.open(str(target), flags, 0o644)
+    except OSError as exc:
+        if os.path.islink(str(target)) or os.path.lexists(str(target)):
+            raise PplError("EXTERNAL_BLOCKED", "%s is a link or not a regular file, so ppl "
+                           "will not append to it: %s" % (target, exc))
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise PplError("EXTERNAL_BLOCKED", "%s is not a regular file, so ppl will not "
+                           "append to it" % target)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def read_log_at(directory):

@@ -3,6 +3,8 @@ import io
 import json
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import time
 import unittest
@@ -182,12 +184,38 @@ class TestRoleEscape(OsSandboxCase):
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_a_subagent_elsewhere_is_left_alone(self):
+        # with neither the guard facts nor an active run, nothing is the pipeline's
         with self.facts_text(None), self.no_active_run():
             self.assertIsNone(self.decide("ls", agent="general-purpose", cwd=OTHER))
             self.assertIsNone(self.decide("ls", cwd=OTHER))
-        # with the facts and the run in place, a cwd outside both is not pipeline-scoped
-        self.assertIsNone(self.decide("ls", agent="general-purpose", cwd=OTHER))
-        self.assertIsNone(self.decide("ls", cwd=OTHER))
+            call = flagged(None, "ls", OTHER)
+            call["agent_id"] = "a1"
+            self.assertIsNone(ppl_guard.decide(call))
+
+    def test_a_subagent_anywhere_is_denied_while_facts_or_a_run_exist(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        # the cwd and the run's recorded repo are both in a role's reach, so neither scopes
+        with self.subTest(facts=True, run=True):
+            result = self.decide("ls", agent="general-purpose", cwd=OTHER)
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+        with self.subTest(facts=True, run=False), self.no_active_run():
+            result = self.decide("ls", agent="Explore", cwd=OTHER)
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+        with self.subTest(facts=False, run=True), self.facts_text(None):
+            result = self.decide("ls", agent="general-purpose", cwd=OTHER)
+            self.assertIsNotNone(ppl_guard.decide(flagged("general-purpose", "ls", OTHER)))
+            self.assertIn("ppl harness apply", self.deny_reason(result))
+        with self.subTest(repo="elsewhere"), self.run_state(repo=OTHER):
+            result = self.decide(pr_create(), agent="general-purpose", cwd=WS)
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_payload_carrying_an_agent_id_is_denied(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        for agent_id in ("a1", 7):
+            call = flagged(None, pr_create())
+            call["agent_id"] = agent_id
+            with self.subTest(agent_id=agent_id):
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(ppl_guard.decide(call)))
 
     def test_an_unflagged_role_call_is_not_touched_by_escape(self):
         for flag in (None, False):
@@ -304,6 +332,19 @@ class TestFailClosed(OsSandboxCase):
 
 
 class TestOrchestratorShape(OsSandboxCase):
+    def test_the_orchestrator_anywhere_meets_the_shape_check(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide("ls", cwd=OTHER)))
+        with self.no_active_run():
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide("ls", cwd=OTHER)))
+            self.assertIsNone(self.decide(GH + " auth status", cwd=OTHER))
+        with self.facts_text(None):
+            result = self.decide("ls", cwd=OTHER)
+            self.assertIn("ppl harness apply", self.deny_reason(result))
+        # the run's recorded repo no longer widens or narrows anything
+        with self.run_state(repo=OTHER):
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide("ls", cwd=WS)))
+
     def test_a_bare_gh_is_denied(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
         result = self.decide("gh pr view 12 -R o/r")
@@ -648,6 +689,89 @@ class TestOrchestratorShape(OsSandboxCase):
         result = self.decide(command)
         self.assertIn("OWNER_DECISION", self.deny_reason(result))
         self.assertIn("merge", self.deny_reason(result))
+
+
+GUARD = Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks" / "ppl_guard.py"
+HOOK_BOUND_SECONDS = 10
+
+
+@contextlib.contextmanager
+def within(seconds):
+    """Raises TimeoutError in the block once `seconds` pass, so a blocking open fails the
+    test instead of hanging the suite."""
+    def expired(signum, frame):
+        raise TimeoutError("still blocked after %d s" % seconds)
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+class TestNoBlockingRead(OsSandboxCase):
+    """runs/ is sandbox-writable, and a hook that blocks past its timeout denies nothing,
+    so a FIFO a role leaves where a run file belongs is refused, never waited on."""
+
+    @contextlib.contextmanager
+    def fifo_at(self, path):
+        saved = path.read_bytes() if path.exists() else None
+        if os.path.lexists(str(path)):
+            path.unlink()
+        os.mkfifo(str(path))
+        try:
+            yield
+        finally:
+            path.unlink()
+            if saved is not None:
+                path.write_bytes(saved)
+
+    def run_hook(self, call):
+        """main() in its own process, as Claude Code runs it, held to a bound."""
+        env = dict(os.environ, PPL_HOME=str(paths.home()))
+        try:
+            done = subprocess.run([sys.executable, str(GUARD)], input=json.dumps(call),
+                                  capture_output=True, text=True, env=env,
+                                  timeout=HOOK_BOUND_SECONDS)
+        except subprocess.TimeoutExpired:
+            self.fail("the hook was still running after %d s" % HOOK_BOUND_SECONDS)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout) if done.stdout.strip() else None
+
+    def test_a_fifo_at_active_does_not_hold_a_role_escape_deny(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        with self.fifo_at(paths.active_file()):
+            result = self.run_hook(flagged("ppl-code-worker", "ls"))
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_fifo_at_the_run_state_does_not_hold_a_role_escape_deny(self):
+        # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
+        with self.fifo_at(run.state_path(TASK)):
+            result = self.run_hook(flagged("ppl-test-worker", "ls"))
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_fifo_run_file_denies_the_orchestrator_without_blocking(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        for path in (paths.active_file(), run.state_path(TASK)):
+            with self.subTest(path=path.name), self.fifo_at(path):
+                result = self.run_hook(flagged(None, pr_create()))
+                self.assertIn("BOUNDARY_VIOLATION" if path.name == "ACTIVE" else "OWNER_DECISION",
+                              self.deny_reason(result))
+                result = self.run_hook(flagged("general-purpose", "ls", OTHER))
+                self.assertIsNotNone(result)
+
+    def test_run_files_that_are_not_regular_are_refused_without_blocking(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        from ppl.errors import PplError
+        with self.fifo_at(paths.active_file()), within(5):
+            with self.assertRaises(PplError):
+                run.active()
+        with self.fifo_at(run.state_path(TASK)), within(5):
+            with self.assertRaises(PplError):
+                store.read_json(run.state_path(TASK))
+        self.assertEqual(run.active(), TASK)
+        self.assertEqual(run.load(TASK)["task_id"], TASK)
 
 
 class TestPlainArgv(unittest.TestCase):

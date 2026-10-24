@@ -580,24 +580,34 @@ field, and `ppl metrics` warns `OS_SANDBOX_OFF` for a GitHub run that started wi
 sandbox, which takes `dangerouslyDisableSandbox: true` on the Bash call, so the guard decides
 who may set it (`ppl/escape.py`), first and before any other check
 [R-OS-SANDBOX-ROLE-NO-ESCAPE]. A ppl-* role is denied from the call and its `agent_type`
-alone, before any file is read, run or no run [R-OS-SANDBOX-ROLE-NO-ESCAPE]. Any other
-subagent is denied when its `cwd` is inside the workspace or the active run's repo, and left
-alone elsewhere [R-OS-SANDBOX-ROLE-NO-ESCAPE]. The unroled orchestrator leaves the sandbox
-only for one plain command, with no separator, redirect, subshell, group, glob, expansion,
-comment, newline or leading assignment outside single quotes and nothing zsh reads otherwise
-than a POSIX shell, whose `argv0` is spelled exactly as a binary `ppl harness apply` pinned in
-`PPL_HOME/os_sandbox.json`, in a shape from the guard's table [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For gh that table holds `issue view` and
-`issue comment`, `pr create`, `pr view`, `pr checks` and `pr close`, `api user`, a review reply
-and `auth status`, each naming the harness's own repository, with any body file a plain file
-directly in the run's scratch directory [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For ppl it holds
-`tracker fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`, and
-git has no shape yet [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. Both gh and ppl run only from a
-`cwd` outside every path a sandboxed command can write, so neither loads a repo a role wrote
-[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A command the check lets through still meets the tracker
-gate and the forge denials below it [R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-TRACKER-CLI-GATE].
-Where the guard cannot decide a flagged call it denies it: an internal error, a non-string
-`agent_type`, an unreadable `os_sandbox.json` or run state, or a missing `os_sandbox.json`
-while a GitHub run is active, the facts cases naming `ppl harness apply`
+alone, before any file is read, run or no run [R-OS-SANDBOX-ROLE-NO-ESCAPE]. While
+`PPL_HOME/os_sandbox.json` exists or a run is active, every flagged call is the pipeline's
+whatever its `cwd`, since a `cwd` and the run's recorded repo are both in a role's reach: any
+other subagent, or a call carrying an `agent_id`, is denied, and the unroled session always
+meets the shape check [R-OS-SANDBOX-ROLE-NO-ESCAPE] [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. With
+neither, a flagged call goes on to the guard's other checks. The unroled orchestrator leaves
+the sandbox only for one plain command, with no separator, redirect, subshell, group, glob,
+expansion, comment, newline or leading assignment outside single quotes and nothing zsh reads
+otherwise than a POSIX shell, whose `argv0` is spelled exactly as a binary `ppl harness
+apply` pinned in `PPL_HOME/os_sandbox.json`, in a shape from the guard's table
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For gh that table holds `issue view` and `issue comment`,
+`pr create`, `pr view`, `pr checks` and `pr close`, `api user`, a review reply and `auth
+status`, each naming the harness's own repository, with any body file a plain file directly
+in the run's scratch directory [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For ppl it holds `tracker
+fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`, and git has
+no shape yet [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. Both gh and ppl run only from a `cwd` outside
+every path a sandboxed command can write, so neither loads a repo a role wrote
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. An allowed ppl command trusts no run file a role can
+write: `ppl tracker fetch` takes its repository from `os_sandbox.json` and refuses a run
+snapshot that names another, and refuses with `EXTERNAL_BLOCKED` to write or append through a
+run directory or a log that is a link [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A command the check
+lets through still meets the tracker gate and the forge denials below it
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-TRACKER-CLI-GATE]. Where the guard cannot decide a
+flagged call it denies it: an internal error, a non-string `agent_type`, an unreadable
+`os_sandbox.json` or run state, or a missing `os_sandbox.json` while a run is active, the
+facts cases naming `ppl harness apply` [R-OS-SANDBOX-FAIL-CLOSED]. Run files are opened
+without blocking and read only when regular, so a FIFO a role leaves in `runs/` is refused
+rather than holding the hook past its timeout, which would deny nothing
 [R-OS-SANDBOX-FAIL-CLOSED].
 
 **Checked, not just trusted.** `ppl` cannot see how the guard hook is registered

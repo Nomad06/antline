@@ -25,7 +25,7 @@ NOT_A_ROLE = frozenset({
     "panel", "hook registration", "active run, session with no agent_type",
     "docs/DESIGN.md, README.md, every rendered file of both example skills and this table",
     "this table and ppl/_assets/hooks/ppl_guard.py",
-    "the unroled session, from the workspace or the active run's repo",
+    "the unroled session, while PPL_HOME/os_sandbox.json exists or a run is active",
 })
 
 

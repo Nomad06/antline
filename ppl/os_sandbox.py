@@ -166,6 +166,23 @@ def load_facts():
     return doc
 
 
+def pinned_repo(key, snapshot_repo):
+    """The repository a ppl command run outside the OS sandbox reaches. With the guard facts
+    present it is their `key` (tracker_repo or forge_repo), and a run snapshot naming another
+    one is refused SCHEMA_INVALID, since a role can write the snapshot but not the facts.
+    Without the facts, the snapshot's."""
+    doc = load_facts()
+    if doc is None:
+        return snapshot_repo
+    repo = doc.get(key)
+    if not (isinstance(repo, str) and repo) or repo != snapshot_repo:
+        raise PplError("SCHEMA_INVALID",
+                       "the run's harness snapshot names %r as its repository and %s names %r "
+                       "as %s, so this command reaches neither: run ppl harness apply, or "
+                       "restore the run's harness.json" % (snapshot_repo, FACTS_FILE, repo, key))
+    return repo
+
+
 def gh_path():
     """The pinned gh when the facts exist, else a bare gh."""
     try:

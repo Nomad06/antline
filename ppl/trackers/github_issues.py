@@ -1151,8 +1151,9 @@ def _link(runner, route, what):
 
 def fetch(table, task_id, dest_dir, runner=None):
     """Read the task's issue and its parent and sub-issues with gh, then write issue.json and
-    issue.md under dest_dir. Returns {"revision": updatedAt, "url": the issue url}. A 404 on a
-    link endpoint records "unavailable", any other failure raises EXTERNAL_BLOCKED before a
+    issue.md under dest_dir, a directory under runs/ reached through no link
+    (store.checked_run_path). Returns {"revision": updatedAt, "url": the issue url}. A 404 on
+    a link endpoint records "unavailable", any other failure raises EXTERNAL_BLOCKED before a
     write."""
     import subprocess
     from .. import store
@@ -1172,7 +1173,9 @@ def fetch(table, task_id, dest_dir, runner=None):
              "sub_issues": _link(runner, base + "/sub_issues", "the sub-issues")}
     doc = {"issue": issue, "links": links}
     text = render_issue(doc)
-    dest = Path(dest_dir)
+    # again after the network calls, right before the write, as a role may have swapped a
+    # directory for a link meanwhile
+    dest = store.checked_run_path(dest_dir)
     store.write_json(dest / "issue.json", doc)
     store.write_text(dest / "issue.md", text)
     return {"revision": issue["updatedAt"], "url": issue.get("url")}

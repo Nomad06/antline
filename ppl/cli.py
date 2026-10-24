@@ -370,15 +370,21 @@ def require_tracker_fetched(task_id):
 
 
 def cmd_tracker(args):
+    # It runs outside the OS sandbox with gh's credentials, so it trusts no file a role can
+    # write for where it reaches or where it writes: the run directory is checked before
+    # anything is written there, the repository comes from the guard facts.
     task_id = resolve_task(args)
+    dest = store.checked_run_path(paths.run_dir(task_id) / "tracker")
     control.enforce(task_id)
     adapter, table = _run_tracker(task_id)
     if adapter.TRANSPORT != "cli":
         raise PplError("SCHEMA_INVALID",
                        "the %s tracker of %s is read through MCP tools, ppl tracker fetch is "
                        "for a CLI tracker" % (adapter.KIND, task_id))
-    dest = paths.run_dir(task_id) / "tracker"
+    if adapter.KIND == "github-issues":
+        table = dict(table, repo=os_sandbox.pinned_repo("tracker_repo", table.get("repo")))
     result = adapter.fetch(table, task_id, dest)
+    store.checked_run_path(paths.run_dir(task_id))
     run.record_tracker_fetch(task_id, result["revision"])
     print("issue: %s" % (dest / "issue.md"))
     print("revision: %s" % result["revision"])

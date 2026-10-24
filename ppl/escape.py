@@ -1,8 +1,8 @@
 """Who may run a Bash command outside Claude Code's OS sandbox, the one way a pipeline
 command reaches GitHub. The guard asks this first for a Bash call that sets
-dangerouslyDisableSandbox: a ppl-* role never may, another subagent may not inside the
-pipeline's scope, and the unroled orchestrator may only for one plain command on a pinned
-gh or ppl in the shapes below. The guard hook imports this module, so it parses on Python
+dangerouslyDisableSandbox: a ppl-* role never may, and while the guard facts exist or a run
+is active no other subagent may and the unroled orchestrator may only for one plain command
+on a pinned gh or ppl in the shapes below. The guard hook imports this module, so it parses on Python
 3.9, carries no annotations and reads JSON only."""
 import json
 import os
@@ -10,7 +10,7 @@ import re
 import shlex
 import stat
 
-from . import boundary, paths
+from . import boundary, paths, store
 
 # Its own copy of os_sandbox.FACTS_FILE, so the hook never imports that module.
 FACTS_FILE = "os_sandbox.json"
@@ -95,27 +95,18 @@ def _facts_problem(doc):
 
 def _read_json(path):
     """The JSON document at `path`. FileNotFoundError when it is absent, ValueError for
-    anything else. Opened without blocking and read only when it is a regular file, since a
-    FIFO would hold the hook past its timeout and a hook that times out denies nothing."""
+    anything else, a file that is not a regular one included, which is never waited on."""
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        text = store.read_regular_text(path)
     except FileNotFoundError:
         raise
-    except OSError as err:
-        raise ValueError("%s cannot be read: %s" % (path, type(err).__name__))
+    except Exception as err:
+        raise ValueError("%s cannot be read: %s" % (path, getattr(err, "message", None)
+                                                       or type(err).__name__))
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError("%s is not a regular file" % path)
-        with os.fdopen(descriptor, encoding="utf-8") as handle:
-            descriptor = None
-            return json.loads(handle.read())
-    except ValueError:
-        raise
+        return json.loads(text)
     except Exception as err:
         raise ValueError("%s cannot be read: %s" % (path, type(err).__name__))
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
 
 
 def load_facts(home):
@@ -143,36 +134,16 @@ def _is_role(agent):
     return agent in boundary.ROLE_RULES or agent.startswith("ppl-")
 
 
-def _github_run(home, task_id, run_state):
-    """True when the active run reaches GitHub, or when its snapshot cannot tell."""
-    if run_state.get("os_sandboxed") is True:
-        return True
-    try:
-        snapshot = _read_json(os.path.join(str(home), "runs", task_id, "harness.json"))
-        return ((snapshot.get("os_sandbox") or {}).get("needed") is True
-                or (snapshot.get("forge") or {}).get("kind") == "github"
-                or (snapshot.get("tracker") or {}).get("kind") == "github-issues")
-    except Exception:
-        return True
-
-
-def _scoped(cwd, facts, run_state):
-    """Decision 9: a cwd inside the workspace or the active run's repo. A call that names no
-    cwd cannot be placed, so it counts as scoped."""
-    if not (isinstance(cwd, str) and cwd):
-        return True
-    roots = [facts["workspace"]] if facts else []
-    repo = (run_state or {}).get("repo")
-    if isinstance(repo, str) and repo:
-        roots.append(repo)
-    return any(_inside(cwd, root) for root in roots)
-
-
 def decide(payload, home, state):
     """None to let a flagged call go on to the guard's other checks, else (code, reason).
     `state` is the guard's active_state, a callable answering (task_id, run state or None),
     called only past the role checks so a ppl-* role is refused before any file is read. A
-    run state already read, or None, is taken as well."""
+    run state already read, or None, is taken as well.
+
+    While the guard facts exist or a run is active, every flagged call is the pipeline's
+    whatever its cwd, since a cwd and the run's recorded repo are both in a role's reach: any
+    other subagent is denied and the unroled session meets the shape check. With neither, the
+    call goes on."""
     agent = payload.get("agent_type")
     if agent is not None and not (isinstance(agent, str) and agent):
         return ("BOUNDARY_VIOLATION",
@@ -193,23 +164,22 @@ def decide(payload, home, state):
         return ("OWNER_DECISION",
                 "the guard's OS sandbox facts are unusable (%s), so a command outside the OS "
                 "sandbox cannot be checked: %s" % (err, APPLY))
+    if facts is None and not task_id:
+        return None
+    if facts is None:
+        return ("OWNER_DECISION",
+                "%s is missing while run %s is active, so no gh, git or ppl is pinned for a "
+                "command outside the OS sandbox: %s" % (FACTS_FILE, task_id, APPLY))
+    agent_id = payload.get("agent_id")
+    if agent is not None or agent_id is not None:
+        return ("BOUNDARY_VIOLATION",
+                "subagent %s may not run a command outside the OS sandbox while the pipeline "
+                "is set up or running: GitHub is reached only by the orchestrator"
+                % (agent or "with agent_id %s" % _short(agent_id)))
     if task_id and (run_state is None or run_state.get("task_id") != task_id):
         return ("OWNER_DECISION",
                 "run %s state is unreadable, so a command outside the OS sandbox cannot be "
-                "scoped. Repair or restore state.json to continue." % task_id)
-    if facts is None:
-        if not task_id:
-            return None
-        if _github_run(home, task_id, run_state):
-            return ("OWNER_DECISION",
-                    "%s is missing while GitHub run %s is active, so a command outside the OS "
-                    "sandbox cannot be checked: %s" % (FACTS_FILE, task_id, APPLY))
-    if not _scoped(payload.get("cwd"), facts, run_state):
-        return None
-    if agent is not None:
-        return ("BOUNDARY_VIOLATION",
-                "subagent %s may not run a command outside the OS sandbox from the pipeline's "
-                "workspace or run repo: GitHub is reached only by the orchestrator" % agent)
+                "checked. Repair or restore state.json to continue." % task_id)
     command = (payload.get("tool_input") or {}).get("command")
     argv, problem = _plain(command)
     if problem:
