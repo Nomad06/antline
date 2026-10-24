@@ -24,34 +24,56 @@ def deadline_in(seconds):
         timespec="seconds")
 
 
-def read_regular_text(path):
+# The most the guard hook and escape read of one run file. runs/ is sandbox-writable, and a
+# sparse file of any size a role leaves there would take the hook past its timeout to read,
+# and a hook that times out denies nothing. A CLI read and the log readers keep no cap.
+HOOK_READ_LIMIT = 1024 * 1024
+
+
+def _over_limit(path, size, limit):
+    return PplError("SCHEMA_INVALID", "%s holds %d bytes or more, over the %d a run file may "
+                    "hold, so it is not read" % (path, size, limit))
+
+
+def read_regular_text(path, limit=None):
     """The text of the regular file at `path`. It is opened without blocking and read only
     when it is a regular file: runs/ is sandbox-writable, and a FIFO left where a run file
     belongs would hold every reader, the guard hook past its timeout among them, and a hook
-    that times out denies nothing. FileNotFoundError when absent, SCHEMA_INVALID when not a
-    regular file."""
+    that times out denies nothing. With `limit`, a file of more than `limit` bytes is refused
+    unread, and no more than that is read of one that grows meanwhile. FileNotFoundError when
+    absent, SCHEMA_INVALID when not a regular file or over the limit."""
     descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
             raise PplError("SCHEMA_INVALID", "%s is not a regular file" % path)
-        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+        if limit is None:
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                descriptor = None
+                return handle.read()
+        if info.st_size > limit:
+            raise _over_limit(path, info.st_size, limit)
+        with os.fdopen(descriptor, "rb") as handle:
             descriptor = None
-            return handle.read()
+            data = handle.read(limit + 1)
+        if len(data) > limit:
+            raise _over_limit(path, len(data), limit)
+        return data.decode("utf-8")
     finally:
         if descriptor is not None:
             os.close(descriptor)
 
 
-def read_json(path, default=None):
+def read_json(path, default=None, limit=None):
     """Every JSON reader in this codebase goes through here, so a document a
     session left half-written (or one mangled by hand) is a routable error
     everywhere at once, not a raw json.JSONDecodeError - exit 1, past the
     documented 0/2/1 contract - at whichever call site happens to read it
     first [R-STORE-CORRUPT-JSON]. It never blocks on a file that is not a
-    regular one (read_regular_text).
+    regular one, and with `limit` reads none over that many bytes (read_regular_text).
     """
     try:
-        text = read_regular_text(path)
+        text = read_regular_text(path, limit)
     except FileNotFoundError:
         return default
     try:

@@ -105,9 +105,10 @@ def _facts_problem(doc):
 
 def _read_json(path):
     """The JSON document at `path`. FileNotFoundError when it is absent, ValueError for
-    anything else, a file that is not a regular one included, which is never waited on."""
+    anything else, a file that is not a regular one or is over store.HOOK_READ_LIMIT bytes
+    included, which is never waited on or read."""
     try:
-        text = store.read_regular_text(path)
+        text = store.read_regular_text(path, store.HOOK_READ_LIMIT)
     except FileNotFoundError:
         raise
     except Exception as err:
@@ -149,17 +150,17 @@ def is_role(agent):
     return isinstance(agent, str) and bool(agent) and _is_role(agent)
 
 
-def edit_denial(payload, home, facts, active=False):
+def edit_denial(payload, home, facts):
     """Why a pipeline session's Edit, Write, MultiEdit or NotebookEdit may not write its
     target, or None. Edit tools run outside the OS sandbox: escape_paths.target_denial says
     why about each path key of the call, for roles and the orchestrator alike, and only while
-    `facts` is there: without an OS sandbox profile it stands aside. Facts that cannot be read
-    are the guard's to refuse before this. `active` says a run is active."""
+    `facts` is there: without an OS sandbox profile it stands aside, run or no run. Facts that
+    cannot be read are the guard's to refuse before this."""
     if not isinstance(payload, dict) or payload.get("tool_name") not in EDIT_TOOLS:
         return None
-    agent = payload.get("agent_type")
-    if not (is_role(agent) or facts is not None or active):
+    if facts is None:
         return None
+    agent = payload.get("agent_type")
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         return None

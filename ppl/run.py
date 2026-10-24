@@ -37,11 +37,12 @@ def state_path(task_id):
     return paths.run_dir(task_id) / "state.json"
 
 
-def active():
-    """The active run's task id, or None. A pointer that is not a regular file is refused
-    SCHEMA_INVALID without blocking (store.read_regular_text)."""
+def active(limit=None):
+    """The active run's task id, or None. A pointer that is not a regular file, or with
+    `limit` one over that many bytes, is refused SCHEMA_INVALID without blocking
+    (store.read_regular_text)."""
     try:
-        return store.read_regular_text(paths.active_file()).strip() or None
+        return store.read_regular_text(paths.active_file(), limit).strip() or None
     except FileNotFoundError:
         return None
 
@@ -51,8 +52,8 @@ def set_active(task_id):
     paths.active_file().write_text(paths.check_task_id(task_id) + "\n", encoding="utf-8")
 
 
-def load(task_id):
-    state = store.read_json(state_path(task_id))
+def load(task_id, limit=None):
+    state = store.read_json(state_path(task_id), limit=limit)
     if state is None:
         raise PplError("SCHEMA_INVALID", "no run for %s. Run ppl init first." % task_id)
     return state

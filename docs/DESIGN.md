@@ -634,7 +634,10 @@ flagged call it denies it: an internal error, a non-string `agent_type`, an unre
 facts cases naming `ppl harness apply` [R-OS-SANDBOX-FAIL-CLOSED]. Run files are opened
 without blocking and read only when regular, so a FIFO a role leaves in `runs/` is refused
 rather than holding the hook past its timeout, which would deny nothing
-[R-OS-SANDBOX-FAIL-CLOSED].
+[R-OS-SANDBOX-FAIL-CLOSED]. The hook and `ppl/escape.py` also read no run file or facts file
+over 1 MiB (`store.HOOK_READ_LIMIT`), so a huge sparse file a role leaves there is refused
+unread, and the role's GitHub MCP, WebFetch and edit-tool checks are decided before any run
+file is read [R-OS-SANDBOX-FAIL-CLOSED] [R-OS-SANDBOX-PROTECTED-PATHS].
 
 **The edit allowlist.** Edit tools run outside the OS sandbox, so the profile does not confine
 them. While `PPL_HOME/os_sandbox.json` exists every session the guard sees is in scope, and an

@@ -782,6 +782,114 @@ class TestNoBlockingRead(OsSandboxCase):
         self.assertEqual(run.load(TASK)["task_id"], TASK)
 
 
+# What a role can leave where a run file belongs: a sparse file of this size reads in about
+# 19 s, past the hook's 5 s timeout, after which the hook decides nothing.
+HUGE_BYTES = 2 * 1024 ** 3
+
+
+class TestHugeRunFile(OsSandboxCase):
+    """A run file a role made huge is refused unread, so every decision still comes in time."""
+
+    @contextlib.contextmanager
+    def huge(self, path):
+        saved = path.read_bytes() if path.exists() else None
+        with open(str(path), "wb") as handle:
+            handle.truncate(HUGE_BYTES)
+        try:
+            yield
+        finally:
+            path.unlink()
+            if saved is not None:
+                path.write_bytes(saved)
+
+    def main_decision(self, call):
+        """main() in this process, as the hook runs it, with how long it took."""
+        stdout = io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(call))), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            started = time.monotonic()
+            self.assertEqual(ppl_guard.main(), 0)
+            took = time.monotonic() - started
+        return (json.loads(stdout.getvalue()) if stdout.getvalue() else None), took
+
+    def test_a_huge_active_file_leaves_a_role_write_decided_within_a_second(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        call = payload("ppl-code-worker", "Write", {"file_path": OTHER + "/x.txt",
+                                                    "content": "x"}, REPO)
+        with self.huge(paths.active_file()):
+            result, took = self.main_decision(call)
+        self.assertLess(took, 1)
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_huge_active_file_leaves_a_role_flagged_call_decided_within_a_second(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        with self.huge(paths.active_file()):
+            result, took = self.main_decision(flagged("ppl-code-worker", "ls", REPO))
+        self.assertLess(took, 1)
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_huge_active_file_denies_an_explore_flagged_call_within_a_second(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        # the refused read raises, and main() denies a flagged call that raises
+        with self.huge(paths.active_file()):
+            result, took = self.main_decision(flagged("Explore", "ls", OTHER))
+        self.assertLess(took, 1)
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_huge_run_files_deny_a_flagged_call_within_a_second(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        for path in (run.state_path(TASK), paths.run_dir(TASK) / "harness.json",
+                     paths.run_dir(TASK) / "control.json", facts_path()):
+            for agent in (None, "Explore"):
+                with self.subTest(path=path.name, agent=agent), self.huge(path):
+                    result, took = self.main_decision(flagged(agent, pr_create()))
+                    self.assertLess(took, 1)
+                    if agent is None and path.name == "harness.json":
+                        # the orchestrator's pr create reads no snapshot, and stays allowed
+                        self.assertIsNone(result)
+                        continue
+                    self.assertIn(self.deny_reason(result).split(" ", 1)[0],
+                                  ("BOUNDARY_VIOLATION", "OWNER_DECISION"))
+
+    def test_a_run_file_over_the_cap_is_refused_unread(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        from ppl.errors import PplError
+        with self.huge(run.state_path(TASK)), within(5):
+            with self.assertRaises(PplError) as caught:
+                run.load(TASK, limit=store.HOOK_READ_LIMIT)
+            self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        with self.huge(paths.active_file()), within(5):
+            with self.assertRaises(PplError):
+                run.active(limit=store.HOOK_READ_LIMIT)
+        self.assertEqual(store.HOOK_READ_LIMIT, 1024 * 1024)
+
+    def test_the_cap_is_the_hooks_alone(self):
+        # a CLI read of a document past the cap and a long log stay readable
+        big = paths.run_dir(TASK) / "big.json"
+        big.write_text(json.dumps({"x": "y" * (2 * 1024 * 1024)}), encoding="utf-8")
+        self.addCleanup(big.unlink)
+        self.assertEqual(len(store.read_json(big)["x"]), 2 * 1024 * 1024)
+        log = paths.run_dir(TASK) / "log.jsonl"
+        saved = log.read_bytes() if log.exists() else None
+        self.addCleanup(lambda: log.write_bytes(saved) if saved is not None else log.unlink())
+        line = json.dumps({"event": "x", "pad": "p" * 1000}) + "\n"
+        log.write_text(line * 1500, encoding="utf-8")
+        self.assertEqual(len(store.read_log(TASK)), 1500)
+
+    def test_the_role_mcp_webfetch_and_edit_checks_read_no_run_file(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        calls = (payload("ppl-code-worker", "mcp__github__create_pull_request", {}, REPO),
+                 payload("ppl-verifier", "WebFetch", {"url": "https://github.com/o/r",
+                                                       "prompt": "x"}, REPO),
+                 payload("ppl-code-worker", "Write", {"file_path": OTHER + "/x.txt",
+                                                      "content": "x"}, REPO))
+        for call in calls:
+            with self.subTest(tool=call["tool_name"]), \
+                    mock.patch.object(ppl_guard.run, "active", return_value=TASK) as active:
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(ppl_guard._decide(call)))
+                self.assertFalse(active.called, "ACTIVE was read first")
+
+
 class TestPlainArgv(unittest.TestCase):
     def test_a_plain_command_splits_like_the_shell(self):
         self.assertEqual(escape.plain_argv("/opt/pin/gh pr view 12 --title 'a $b `c`' \"c d\""),
