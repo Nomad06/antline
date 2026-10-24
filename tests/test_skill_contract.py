@@ -783,8 +783,9 @@ GITHUB_COMMAND_KINDS = {
     "gh pr create": r"gh pr create ", "gh pr view": r"gh pr view ",
     "gh pr checks": r"gh pr checks ", "gh pr close": r"gh pr close ",
     "gh api user": r"gh api user ", "gh api replies": r"gh api repos/\S+/replies ",
-    "git fetch": r"git -c \S+ -C \S+ fetch ", "git push": r"git -c \S+ -C \S+ push .* -u ",
-    "git push --delete": r"git -c \S+ -C \S+ push .* --delete ",
+    "git fetch": r"git (?:-c \S+ )+-C \S+ fetch ",
+    "git push": r"git (?:-c \S+ )+-C \S+ push .* -u ",
+    "git push --delete": r"git (?:-c \S+ )+-C \S+ push .* --delete ",
     "gh pr view for the merge": r"gh pr view \S+ -R \S+ --json=state,mergeCommit$",
 }
 # The run-time placeholders of those commands, as the orchestrator fills them.
@@ -903,8 +904,10 @@ class TestGithubCommandsLeaveTheSandbox(unittest.TestCase):
                     entry.endswith(" api user --jq .login)"):
                 self.assertIn(entry[len("Bash("):-1], commands, entry)
         fetch = [c for c in commands if " fetch --no-recurse-submodules " in c]
-        self.assertEqual(fetch, ["%s -c core.hooksPath=/dev/null -C %s fetch "
-                                 "--no-recurse-submodules origin main"
+        self.assertEqual(fetch, ["%s -c core.hooksPath=/dev/null -c core.sshCommand=ssh "
+                                 "-c credential.helper= -c core.askPass= "
+                                 "-c protocol.ext.allow=never -c protocol.file.allow=never "
+                                 "-C %s fetch --no-recurse-submodules origin main"
                                  % (self.pins["git"]["path"], self.facts["checkout"])])
 
 

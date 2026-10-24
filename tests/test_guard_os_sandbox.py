@@ -814,6 +814,12 @@ SPEC = "refs/heads/%s:refs/heads/%s" % (BRANCH, BRANCH)
 HEAD_REF = "refs/heads/" + BRANCH
 # The words every push carries first: hooks, tags and submodules off whatever the config says.
 PUSH_FLAGS = ("--no-verify", "--no-follow-tags", "--no-recurse-submodules")
+# The -c words every fetch and push outside the OS sandbox carries first, in this order and
+# alone: no hook, no ssh command, credential helper or askpass program of the repository's
+# own, and no ext:: or local-path transport, whatever its config says by the time git runs.
+PINNED_CONFIG = ("-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=ssh",
+                 "-c", "credential.helper=", "-c", "core.askPass=",
+                 "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never")
 
 
 def spec(name):
@@ -864,8 +870,7 @@ class GitShapes(OsSandboxCase):
         store.write_json(facts_path(), facts_doc(checkout=self.checkout, pins=pins, **overrides))
 
     def command(self, directory, *words, git_path=GIT_BIN):
-        return " ".join([git_path, "-c", "core.hooksPath=/dev/null", "-C", directory]
-                        + list(words))
+        return " ".join([git_path] + list(PINNED_CONFIG) + ["-C", directory] + list(words))
 
     def push(self, *words):
         return self.command(self.repo, "push", *(PUSH_FLAGS + words))
@@ -944,7 +949,10 @@ class GitShapes(OsSandboxCase):
         argv = escape.plain_argv(self.push("origin", SPEC))
         self.assertIsNone(escape_git.git_shape(argv, escape.load_facts(paths.home()),
                                                run.load(TASK)))
-        env = dict(os.environ, GIT_CONFIG_GLOBAL=global_config, GIT_CONFIG_NOSYSTEM="1")
+        # the stand-in is a local path, which the pinned words refuse, so the file transport
+        # is let through here as the network one is for the real forge
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=global_config, GIT_CONFIG_NOSYSTEM="1",
+                   GIT_ALLOW_PROTOCOL="file")
         done = subprocess.run(argv, capture_output=True, text=True, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(git(forge, "for-each-ref", "--format=%(refname)"), HEAD_REF)
@@ -1091,19 +1099,52 @@ class GitShapes(OsSandboxCase):
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn(part, reason)
 
-    def test_a_second_dash_c_is_denied(self):
+    def test_another_dash_c_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
         tail = " push %s origin %s" % (" ".join(PUSH_FLAGS), SPEC)
         for middle in ("-c core.sshCommand=/tmp/evil -C " + self.repo,
                        "-c core.hooksPath=/dev/null -C " + self.repo,
+                       "-c protocol.ext.allow=always -C " + self.repo,
                        "-C %s -c core.sshCommand=/tmp/evil" % self.repo,
                        "--config-env=core.sshCommand=HOME -C " + self.repo,
                        "-C %s -C %s" % (self.repo, self.repo)):
-            command = GIT_BIN + " -c core.hooksPath=/dev/null " + middle + tail
+            command = " ".join((GIT_BIN,) + PINNED_CONFIG) + " " + middle + tail
             with self.subTest(middle=middle):
                 reason = self.deny_reason(self.decide(command))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
-                self.assertIn("one -c", reason)
+                self.assertIn("those -c words first", reason)
+
+    def test_a_shape_missing_any_pinned_config_word_is_denied(self):
+        # rule: R-OS-SANDBOX-GIT-CONFIG
+        # each -c pair keeps one key of the repository's config, which a role can rewrite
+        # between the guard's check and the call, from running a program with the credential
+        pairs = [PINNED_CONFIG[index:index + 2] for index in range(0, len(PINNED_CONFIG), 2)]
+        variants = [sum(pairs[:index] + pairs[index + 1:], ()) for index in range(len(pairs))]
+        variants.append(sum([pairs[1], pairs[0]] + pairs[2:], ()))
+        variants.append(sum(pairs[:-1], ()) + ("-c", "protocol.file.allow=always"))
+        variants.append(sum(pairs[:2], ()) + ("-c", "credential.helper=/tmp/evil")
+                        + sum(pairs[3:], ()))
+        for config in variants:
+            for directory, words in ((self.repo, ("push",) + PUSH_FLAGS + ("origin", SPEC)),
+                                     (self.checkout, ("fetch", "--no-recurse-submodules",
+                                                      "origin", "main"))):
+                command = " ".join((GIT_BIN,) + config + ("-C", directory) + words)
+                with self.subTest(command=command):
+                    reason = self.deny_reason(self.decide(command))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("those -c words first", reason)
+
+    def test_the_shapes_carry_the_pinned_config_word_for_word(self):
+        from ppl import escape_git
+        self.assertEqual(list(PINNED_CONFIG), escape_git.PINNED_CONFIG)
+        pins = dict(facts_doc()["pins"], git={"path": GIT_BIN, "realpath": real(GIT_BIN)})
+        prefix = " ".join((GIT_BIN,) + PINNED_CONFIG) + " -C "
+        harness = {"repo": {"path": self.checkout, "default_branch": "main"},
+                   "forge": {"kind": "github"}, "tracker": {"kind": "github-issues"}}
+        for command in (os_sandbox.fetch_command(harness, pins), os_sandbox.push_command(pins),
+                        os_sandbox.push_command(pins, delete=True)):
+            with self.subTest(command=command):
+                self.assertTrue(command.startswith(prefix), command)
 
     def test_push_and_fetch_options_outside_the_shape_are_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
@@ -1307,6 +1348,111 @@ class GitShapes(OsSandboxCase):
                               capture_output=True, text=True, env=env, timeout=HOOK_BOUND_SECONDS)
         self.assertEqual(done.stderr, "")
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(json.loads(done.stdout)))
+
+
+class TestPinnedGitConfigHolds(unittest.TestCase):
+    """What git itself does with the pinned -c words when a role rewrote the repository's
+    local config after the guard read it: a real git, a throwaway bare remote and markers a
+    program touches when it runs. The environment is scrubbed, since GIT_SSH_COMMAND,
+    GIT_ASKPASS and GIT_ALLOW_PROTOCOL outrank -c and the operator's own config is not the
+    test's."""
+
+    def setUp(self):
+        if not shutil.which("git"):
+            self.skipTest("no git on PATH")
+        self.root = real(tempfile.mkdtemp(prefix="ppl-pinned-config-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.marks = os.path.join(self.root, "marks")
+        os.mkdir(self.marks)
+        self.bin = os.path.join(self.root, "bin")
+        os.mkdir(self.bin)
+        # the ssh the operator's PATH holds: it only says it ran
+        self.script("ssh", "touch %s/operator-ssh\nexit 255\n" % self.marks)
+        askpass = self.script("askpass", "touch %s/askpass\necho x\n" % self.marks)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("GIT_", "SSH_"))}
+        self.env.update(HOME=self.root, GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0",
+                        GIT_CONFIG_GLOBAL=os.path.join(self.root, "global.gitconfig"),
+                        PATH=self.bin + os.pathsep + os.environ.get("PATH", ""))
+        with open(self.env["GIT_CONFIG_GLOBAL"], "w", encoding="utf-8") as handle:
+            handle.write("[user]\n\tname = t\n\temail = t@example.com\n")
+        self.forge = os.path.join(self.root, "forge.git")
+        self.git(self.root, "init", "-q", "--bare", "--template=", self.forge)
+        self.work = os.path.join(self.root, "work")
+        self.git(self.root, "init", "-q", "--template=", "-b", BRANCH, self.work)
+        self.git(self.work, "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty",
+                 "-m", "work")
+        hooks = os.path.join(self.root, "hooks")
+        os.mkdir(hooks)
+        self.script(os.path.join(hooks, "pre-push"), "touch %s/hook\n" % self.marks)
+        # what a role's detached process writes once the guard has read the config
+        for key, value in (("core.hooksPath", hooks),
+                           ("core.sshCommand", "touch %s/ssh-command #" % self.marks),
+                           ("credential.helper", "!touch %s/credential-helper" % self.marks),
+                           ("core.askPass", askpass),
+                           ("protocol.ext.allow", "always"),
+                           ("protocol.file.allow", "always")):
+            self.git(self.work, "config", key, value)
+
+    def script(self, name, body):
+        path = name if os.path.isabs(name) else os.path.join(self.bin, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\n" + body)
+        os.chmod(path, 0o755)
+        return path
+
+    def git(self, directory, *args, pinned=False, stdin=None, check=True):
+        from ppl import escape_git
+        argv = (["git"] + (escape_git.PINNED_CONFIG if pinned else [])
+                + ["-C", directory] + list(args))
+        done = subprocess.run(argv, input=stdin, capture_output=True, text=True,
+                              env=self.env, timeout=30)
+        if check and done.returncode != 0:
+            raise AssertionError("git %s failed: %s" % (" ".join(args), done.stderr.strip()))
+        return done
+
+    def push(self, url, pinned=True):
+        from ppl import escape_git
+        self.git(self.work, "remote", "remove", "origin", check=False)
+        self.git(self.work, "remote", "add", "origin", url)
+        return self.git(self.work, *(["push"] + escape_git.PUSH_FLAGS + ["origin", SPEC]),
+                        pinned=pinned, check=False)
+
+    def marks_left(self):
+        return sorted(os.listdir(self.marks))
+
+    def test_the_raced_config_runs_its_programs_without_the_pinned_words(self):
+        # the control: the same config, the same push, no pinned words
+        done = self.push("ext::sh -c touch% " + os.path.join(self.marks, "ext"), pinned=False)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("ext", self.marks_left())
+        self.git(self.work, "credential", "fill", stdin="protocol=https\nhost=example.invalid\n\n",
+                 check=False)
+        self.assertIn("credential-helper", self.marks_left())
+        self.assertIn("askpass", self.marks_left())
+
+    def test_the_pinned_words_refuse_the_ext_and_local_transports(self):
+        # rule: R-OS-SANDBOX-GIT-CONFIG
+        done = self.push("ext::sh -c touch% " + os.path.join(self.marks, "ext"))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("transport 'ext' not allowed", done.stderr)
+        done = self.push(self.forge)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("transport 'file' not allowed", done.stderr)
+        self.assertEqual(self.git(self.forge, "for-each-ref").stdout, "")
+        self.assertFalse(self.marks_left())
+
+    def test_the_pinned_words_run_no_helper_askpass_or_ssh_command(self):
+        # rule: R-OS-SANDBOX-GIT-CONFIG
+        done = self.git(self.work, "credential", "fill", pinned=True, check=False,
+                        stdin="protocol=https\nhost=example.invalid\n\n")
+        self.assertNotEqual(done.returncode, 0)
+        done = self.push("ssh://git@127.0.0.1:1/o/r.git")
+        self.assertNotEqual(done.returncode, 0)
+        # the ssh on the operator's PATH ran, the repository's own programs did not
+        self.assertEqual(self.marks_left(), ["operator-ssh"])
+        for mark in ("ssh-command", "credential-helper", "askpass"):
+            self.assertNotIn(mark, self.marks_left())
 
 
 # What the guard says when an edit tool aims at a path an unsandboxed command reads.

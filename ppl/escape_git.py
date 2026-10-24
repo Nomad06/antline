@@ -1,15 +1,23 @@
 """The orchestrator's git outside Claude Code's OS sandbox: a fetch of the default branch into
 the checkout, and a push or a remote delete of the run's own branch from the run's repo, each
-with hooks off. Both repositories are ones a role can write, so before allowing a command the
-guard asks git itself, never a run file: the repository's local and worktree config may set
-only keys that run nothing and point the remote at the forge repo alone, and the pushed branch
-is the one HEAD is on. The guard hook imports this module, so it parses on Python 3.9 and
-carries no annotations."""
+with the fixed -c words of PINNED_CONFIG. Both repositories are ones a role can write, so
+before allowing a command the guard asks git itself, never a run file: the repository's local
+and worktree config may set only keys that run nothing and point the remote at the forge repo
+alone, and the pushed branch is the one HEAD is on. The guard hook imports this module, so it
+parses on Python 3.9 and carries no annotations."""
 import os
 import re
 import subprocess
 
-HOOKS_OFF = ["-c", "core.hooksPath=/dev/null"]
+# The -c words every fetch and push outside the OS sandbox carries first, in this order, as its
+# only -c words. They turn off a hook, the repository's own ssh command, credential helper and
+# askpass program, and the ext:: and local-path transports, since the command line wins over the
+# repository's config, which a role can rewrite between the guard's check and the call.
+# core.gitProxy and core.alternateRefsCommand are not among them, see the residual of
+# R-OS-SANDBOX-GIT-CONFIG. os_sandbox renders the commands and the fetch allow entry from it.
+PINNED_CONFIG = ["-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=ssh",
+                 "-c", "credential.helper=", "-c", "core.askPass=",
+                 "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never"]
 FETCH_FLAG = "--no-recurse-submodules"
 # A push's first words. The command line wins over a global push.followTags or
 # push.recurseSubmodules the guard cannot read, so no tag a role made and no submodule goes too.
@@ -17,7 +25,7 @@ PUSH_FLAGS = ["--no-verify", "--no-follow-tags", "--no-recurse-submodules"]
 # Every git the guard runs gets this long: a hook that runs past its own timeout denies nothing.
 TIMEOUT_SECONDS = 0.2
 # Config keys known to run nothing and to send nothing elsewhere. core.hooksPath is here
-# because the -c above wins over it.
+# because PINNED_CONFIG wins over it.
 GIT_SAFE_KEYS = (
     r"core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase"
     r"|precomposeunicode|symlinks|hookspath)",
@@ -37,10 +45,10 @@ _HEADS = "refs/heads/"
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _PSEUDO_REF = re.compile(r"(?:[A-Z_]*_)?HEAD", re.IGNORECASE)
 _UPSTREAM = ("-u", "--set-upstream")
-_SHAPE = ("git leaves the OS sandbox only as `git -c core.hooksPath=/dev/null -C <dir> fetch "
-          "--no-recurse-submodules origin <default branch>` or `... push --no-verify "
-          "--no-follow-tags --no-recurse-submodules ...`, with one -c and no other option, so no "
-          "hook runs there")
+_SHAPE = ("git leaves the OS sandbox only as `git %s -C <dir> fetch --no-recurse-submodules "
+          "origin <default branch>` or `... push --no-verify --no-follow-tags "
+          "--no-recurse-submodules ...`, those -c words first, in that order, and no other "
+          "option, so no hook, helper or local transport runs there" % " ".join(PINNED_CONFIG))
 _PUSH_SHAPE = ("git push takes only --no-verify --no-follow-tags --no-recurse-submodules "
                "[-u|--set-upstream] origin refs/heads/<branch>:refs/heads/<branch>, or the same "
                "three words then origin --delete refs/heads/<branch>")
@@ -57,14 +65,16 @@ def git_shape(argv, facts, state, run_git=subprocess.run):
     matched before git runs on anything, so the guard's own git only ever reads the checkout
     or the run's repo."""
     args = list(argv[1:])
-    if args[:2] != HOOKS_OFF:
-        return "%s: %s comes first" % (_SHAPE, " ".join(_short(word) for word in args[:2]))
-    if args[2:3] != ["-C"] or len(args) < 5 or args[4] not in ("fetch", "push"):
-        return "%s: %s" % (_SHAPE, " ".join(_short(word) for word in args[2:5]))
+    count = len(PINNED_CONFIG)
+    if args[:count] != PINNED_CONFIG:
+        return "%s: %s comes first" % (_SHAPE, " ".join(_short(word) for word in args[:count]))
+    if (args[count:count + 1] != ["-C"] or len(args) < count + 3
+            or args[count + 2] not in ("fetch", "push")):
+        return "%s: %s" % (_SHAPE, " ".join(_short(word) for word in args[count:count + 3]))
     if not facts.get("forge_repo"):
         return ("the harness names no GitHub forge repo, so git has nothing to reach outside "
                 "the OS sandbox")
-    directory, verb, rest = args[3], args[4], args[5:]
+    directory, verb, rest = args[count + 1], args[count + 2], args[count + 3:]
     if verb == "fetch":
         remote, branch, problem = _fetch_words(directory, rest, facts)
     else:

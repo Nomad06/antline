@@ -600,16 +600,24 @@ apply` pinned in `PPL_HOME/os_sandbox.json`, in a shape from the guard's table
 status`, each naming the harness's own repository, with any body file a plain file directly
 in the run's scratch directory [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For ppl it holds `tracker
 fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`
-[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For git (`ppl/escape_git.py`) it holds `-c
-core.hooksPath=/dev/null -C <checkout> fetch --no-recurse-submodules origin <default branch>`,
-word for word ppl's allow entry, so no submodule is fetched with its own config, and, in the
-run's repo, `-c core.hooksPath=/dev/null -C <repo> push --no-verify --no-follow-tags
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For git (`ppl/escape_git.py`) every shape starts with
+the fixed `-c` words of `escape_git.PINNED_CONFIG`, in this order and as its only `-c` words:
+`-c core.hooksPath=/dev/null -c core.sshCommand=ssh -c credential.helper= -c core.askPass= -c
+protocol.ext.allow=never -c protocol.file.allow=never` (`<pinned -c>` below)
+[R-OS-SANDBOX-GIT-CONFIG]. It holds `<pinned -c> -C <checkout> fetch --no-recurse-submodules
+origin <default branch>`, word for word ppl's allow entry, so no submodule is fetched with its
+own config, and, in the run's repo, `<pinned -c> -C <repo> push --no-verify --no-follow-tags
 --no-recurse-submodules [-u] origin refs/heads/<branch>:refs/heads/<branch>` or the same
 three words then `origin --delete refs/heads/<branch>`, the branch being the one git reports
 HEAD on, never the default branch, and a plain name with no `/`, `:` or `+`
 [R-OS-SANDBOX-GIT-CONFIG]. The qualified refspec pins the destination ref, and the command line
 switches tags and submodules off whatever the operator's global config, which the guard cannot
-read, says [R-OS-SANDBOX-GIT-CONFIG].
+read, says [R-OS-SANDBOX-GIT-CONFIG]. The pinned `-c` words win over a local config a role
+rewrites between the guard's check and the call for a hook, the ssh command, a credential
+helper, an askpass program and the ext and local-path transports, so an https remote has no
+credential under the profile and its push fails: give the checkout an ssh remote
+[R-OS-SANDBOX-GIT-CONFIG]. They leave `core.gitProxy` behind a `git://` redirect and
+`core.alternateRefsCommand` on a fetch open, as the rule's residual says.
 Before it lets one through the guard runs the pinned git on that repository, each call held
 to 0.2 s, and denies unless its local and worktree config set only keys that run nothing,
 with no include, and give the remote one url, the forge repo on github.com

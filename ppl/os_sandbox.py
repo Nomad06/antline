@@ -174,11 +174,11 @@ def facts(doc, workspace, pin_map):
 
 
 def _git_outside(pin_map, directory, verb):
-    """The pinned git with hooks off in `directory`, then `verb` and the flags escape_git asks
-    of it."""
+    """The pinned git with escape_git.PINNED_CONFIG in `directory`, then `verb` and the flags
+    escape_git asks of it."""
     from . import escape_git
     flags = [escape_git.FETCH_FLAG] if verb == "fetch" else escape_git.PUSH_FLAGS
-    return " ".join([pin_map["git"]["path"]] + escape_git.HOOKS_OFF
+    return " ".join([pin_map["git"]["path"]] + escape_git.PINNED_CONFIG
                     + ["-C", directory, verb] + flags)
 
 

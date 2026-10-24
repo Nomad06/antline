@@ -342,11 +342,14 @@ with `github.com` and every subdomain denied, which Claude Code enforces on macO
 Only the unroled orchestrator leaves the sandbox, and only for one plain command on a `gh`, `git`
 or `ppl` that apply pinned, in a shape the guard lists, against the harness's own repository
 [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A fetch, push or branch delete also needs a repository whose
-local git config runs nothing and points the remote at the forge repo
-[R-OS-SANDBOX-GIT-CONFIG]. If the guard cannot decide such a call it denies it
-[R-OS-SANDBOX-FAIL-CLOSED]. `ppl init` refuses to start a GitHub run in a session that is not
-sandboxed this way, unless you pass `--no-os-sandbox`, which the run records
-[R-OS-SANDBOX-INIT-REQUIRED]. `ppl doctor` shows `os_sandbox.state`.
+local git config runs nothing and points the remote at the forge repo, and carries fixed `-c`
+words that turn off hooks, the repository's own ssh command, credential helper and askpass
+program, and the ext and local-path transports [R-OS-SANDBOX-GIT-CONFIG]. With no credential
+helper an https remote has nothing to push with there, so give the checkout an ssh remote. If
+the guard cannot decide such a call it denies it [R-OS-SANDBOX-FAIL-CLOSED]. `ppl init` refuses
+to start a GitHub run in a session that is not sandboxed this way, unless you pass
+`--no-os-sandbox`, which the run records [R-OS-SANDBOX-INIT-REQUIRED]. `ppl doctor` shows
+`os_sandbox.state`.
 
 What this costs and leaves open:
 

@@ -1038,6 +1038,7 @@ def run_os_sandbox_cases(cage):
     `ppl harness apply` writes, gh and ppl pins that need not exist, the git on PATH, and the
     unrelated directory as the workspace, which no sandboxed command can write
     [R-OS-SANDBOX-ROLE-NO-ESCAPE] [R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-OS-SANDBOX-GIT-CONFIG]."""
+    from ppl import escape_git  # noqa: E402
     real = os.path.realpath
     home = cage.ppl_home
     workspace = str(cage.unrelated)
@@ -1087,9 +1088,9 @@ def run_os_sandbox_cases(cage):
     for args in (("remote", "add", "origin", "https://github.com/o/r.git"),
                  ("checkout", "-q", "-b", "cage-branch")):
         subprocess.run([git_bin, "-C", repo] + list(args), check=True, capture_output=True)
-    push = ("%s -c core.hooksPath=/dev/null -C %s push --no-verify --no-follow-tags "
-            "--no-recurse-submodules origin refs/heads/cage-branch:refs/heads/cage-branch"
-            % (git_bin, repo))
+    push = ("%s %s -C %s push --no-verify --no-follow-tags --no-recurse-submodules origin "
+            "refs/heads/cage-branch:refs/heads/cage-branch"
+            % (git_bin, " ".join(escape_git.PINNED_CONFIG), repo))
 
     cage.check(
         "os-sandbox push run branch allowed",

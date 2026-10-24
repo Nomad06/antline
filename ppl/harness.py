@@ -669,7 +669,8 @@ def _os_values(doc, pins, workspace):
         ("os", "stage1-note"): "\n\n%s %s" % (OS_FLAG_NOTE, note),
         ("os", "push"): os_sandbox.push_command(pins),
         ("os", "destroy"): (" The two GitHub commands are `%s pr close <number> -R %s` and `%s`, "
-                            "`<branch>` the run's branch and `<worktree>` its worktree. %s"
+                            "`<branch>` the run's branch and `<worktree>` its worktree "
+                            "[R-OS-SANDBOX-GIT-CONFIG]. %s"
                             % (gh, forge_repo, delete, OS_FLAG_NOTE)),
         ("os", "merge-watch"): (" Read its state with `%s pr view <number> -R %s "
                                 "--json=state,mergeCommit`. %s" % (gh, forge_repo, OS_FLAG_NOTE)),

@@ -1760,7 +1760,9 @@ class TestRenderSkill(HarnessTestCase):
                       maven["references/stage-2-briefing.md"])
         generic = self.render("example-generic")
         # a GitHub harness fetches outside the OS sandbox, on the pinned git
-        self.assertIn("\n/usr/bin/git -c core.hooksPath=/dev/null -C %s fetch "
+        self.assertIn("\n/usr/bin/git -c core.hooksPath=/dev/null -c core.sshCommand=ssh "
+                      "-c credential.helper= -c core.askPass= -c protocol.ext.allow=never "
+                      "-c protocol.file.allow=never -C %s fetch "
                       "--no-recurse-submodules origin main\n"
                       % os.path.realpath("/home/dev/src/project"),
                       generic["references/stage-1-baseline.md"])
@@ -1896,7 +1898,9 @@ class TestRenderOsSandbox(HarnessTestCase):
         # the checkout as the facts hold it, which ppl's allow entry for the fetch spells, and no
         # cd into it: the session stays in the workspace its gh and ppl calls run from
         checkout = os.path.realpath("/home/dev/src/project")
-        self.assertIn("```bash\n/usr/bin/git -c core.hooksPath=/dev/null -C %s fetch "
+        self.assertIn("```bash\n/usr/bin/git -c core.hooksPath=/dev/null "
+                      "-c core.sshCommand=ssh -c credential.helper= -c core.askPass= "
+                      "-c protocol.ext.allow=never -c protocol.file.allow=never -C %s fetch "
                       "--no-recurse-submodules origin main\ngit -C %s worktree add "
                       % (checkout, checkout),
                       rendered["references/stage-1-baseline.md"])
