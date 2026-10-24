@@ -1059,6 +1059,17 @@ class TestMcpServersWarning(unittest.TestCase):
         self.write(self.user_json, {"projects": {"/elsewhere": {"mcpServers": {"x": {}}}}})
         self.assertIsNone(self.warning())
 
+    def test_the_scan_follows_the_configured_workspace_not_the_process_cwd(self):
+        self.facts()
+        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {"command": "uvx"}}})
+        elsewhere = Path(tmphome.mkdtemp(prefix="pplelsewhere-"))
+        env = {key: value for key, value in os.environ.items()
+               if key != "PPL_LOCAL_SETTINGS_DIR"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(doctor, "workspace", lambda: str(self.cwd)), \
+                mock.patch("os.getcwd", lambda: str(elsewhere)):
+            self.assertIn("serena", doctor.mcp_servers_warning(claude_json=self.user_json))
+
     def test_doctor_report_carries_mcp_server_names(self):
         self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {"args": [self.TOKEN]}}})
         result = doctor.report(cwd=str(self.cwd), env={"PATH": "/usr/bin"},

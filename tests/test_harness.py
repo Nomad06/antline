@@ -1382,6 +1382,7 @@ class TestApplyRefusesSandboxLayouts(HarnessTestCase):
         self.settings_path.write_text(self.SETTINGS, encoding="utf-8")
         self.facts_path = paths.home() / os_sandbox.FACTS_FILE
         self.facts_path.write_text(self.FACTS, encoding="utf-8")
+        self.config_bytes = paths.config_file().read_bytes()
 
     def install(self, name="layout", **tables):
         fixtures.install_variant("example-generic", name, **tables)
@@ -1393,6 +1394,7 @@ class TestApplyRefusesSandboxLayouts(HarnessTestCase):
         self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
         self.assertEqual(self.settings_path.read_text(encoding="utf-8"), self.SETTINGS)
         self.assertEqual(self.facts_path.read_text(encoding="utf-8"), self.FACTS)
+        self.assertEqual(paths.config_file().read_bytes(), self.config_bytes)
         return caught.exception.message
 
     def repo(self, path, worktrees):

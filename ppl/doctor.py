@@ -883,7 +883,8 @@ def mcp_server_names(cwd=None, claude_json=None):
     """The names, never a command, args or env, of every MCP server a session launched in the
     workspace sees: its .mcp.json, ~/.claude.json (top level and the workspace's project
     entry) and the mcpServers of the user, project and local settings files."""
-    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd())
+    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
+    cwd = str(base)
     claude_json = Path(claude_json) if claude_json else claude_home().parent / ".claude.json"
     names = []
     for doc in (_json_object(base / ".mcp.json"),
