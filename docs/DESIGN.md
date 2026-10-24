@@ -263,8 +263,12 @@ hook past its own timeout lets the call through [R-TRACKER-CLI-GATE] [R-TRACKER-
 denied a tracker write through a CLI before and after the merge, run or no run, since the
 tracker is the orchestrator's [R-TRACKER-CLI-NO-ROLE], and a call to any known tracker's MCP
 write tool the same way, the defaults of every adapter and the run's own prefixes alike
-(`any_tracker_write_tool`) [R-JIRA-NO-ROLE-TOOL]. The check reads the command's words, so
-a renamed `gh` binary, an API host held in a variable, an interpreter or a script file are not
+(`any_tracker_write_tool`) [R-JIRA-NO-ROLE-TOOL]. On a run in the OS sandbox a
+role reaches GitHub through none of a renamed `gh` binary, an API host held in a variable, an
+interpreter or a script file: its Bash cannot reach github.com [R-OS-SANDBOX-NETWORK] and
+cannot leave the sandbox [R-OS-SANDBOX-ROLE-NO-ESCAPE], and what stays lexical is the
+orchestrator's own stage gate [R-TRACKER-CLI-GATE]. A run started with `--no-os-sandbox`, or on
+Windows, keeps the old residual: the check reads the command's words, so those shapes are not
 seen, and the boundary that would close them is a GitHub credential the role sessions never
 hold [R-TRACKER-CLI-GATE]. The hook reads `agent_type` from the stdin
 payload (present when the hook fires inside a subagent), loads `runs/<active>/boundary.json`,
