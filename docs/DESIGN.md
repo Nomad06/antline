@@ -220,17 +220,18 @@ denial the hook never sees, and a denial the hook never sees cannot fire, howeve
 code behind it reads [R-GUARD-MATCHER]. So `ppl doctor` judges whatever matcher is registered:
 every tool name the cage acts on (`ppl/_assets/hooks/ppl_guard.py:GUARDED_TOOL_NAMES` - the four editing
 tools, the three read tools, Bash, the forge adapters' denied tools, the tracker write tools
-under every default prefix) must be a full regex match of some registered guard entry's
-matcher, the names left uncovered are reported per settings file as `uncovered` under a
-top-level `matcher` verdict of `ok` or `incomplete`, and `ppl init` refuses `SCHEMA_INVALID` to
-create a run while a confirmed registration leaves any of them uncovered, `--no-isolated` or
-not [R-GUARD-MATCHER]. That list holds the default tracker prefixes and the default forge server names only, so an
-operator who keeps an explicit matcher and names a custom tracker prefix or `forge.mcp_server`
-in the harness covers those names by hand. The GitHub MCP server's issue writes are not on it:
-the tracker gate and the role ban match them under any server name, and many installs have
-no GitHub MCP server, so `ppl doctor` and `ppl init` only warn, and refuse nothing, when a
-registration's matchers cannot pass `mcp__github__add_issue_comment` (`matcher_warning`)
-[R-GUARD-MATCHER]. The `.*` that `ppl setup` registers passes every one of them.
+under every default prefix, the agent tools and WebFetch) must be a full regex match of some
+registered guard entry's matcher, the names left uncovered are reported per settings file as
+`uncovered` under a top-level `matcher` verdict of `ok` or `incomplete`, and `ppl init` refuses
+`SCHEMA_INVALID` to create a run while a confirmed registration leaves any of them uncovered,
+`--no-isolated` or not [R-GUARD-MATCHER]. That list holds the default tracker prefixes and the
+default forge server names only, so an operator who keeps an explicit matcher and names a
+custom tracker prefix or `forge.mcp_server` in the harness covers those names by hand. The
+GitHub MCP server's issue writes are not on it: the tracker gate and the role ban match them
+under any server name, and many installs have no GitHub MCP server, so `ppl doctor` and
+`ppl init` only warn, and refuse nothing, when a registration's matchers cannot pass
+`mcp__github__add_issue_comment` (`matcher_warning`) [R-GUARD-MATCHER]. The `.*` that
+`ppl setup` registers passes every one of them.
 
 The tracker gate reads its MCP prefixes and write operations from the run's harness snapshot
 (5.6). The defaults are the Atlassian server's two registration names, `mcp__atlassian__`
@@ -774,7 +775,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 185 rows: 138 `blocking`, 20 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 188 rows: 141 `blocking`, 20 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the

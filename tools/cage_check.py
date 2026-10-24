@@ -1103,6 +1103,32 @@ def run_os_sandbox_cases(cage):
         flagged(None, push, workspace),
         "BOUNDARY_VIOLATION", reason="core.sshcommand")
 
+    # The routes that run outside the sandbox anyway. HOME is the cage's own, so `~` lands
+    # in it [R-OS-SANDBOX-PROTECTED-PATHS] [R-FORGE-GH-MCP-NO-ROLE] [R-WEBFETCH-GITHUB-NO-ROLE].
+    cage.check(
+        "os-sandbox orchestrator edit of the gitconfig denied",
+        cage.payload(None, "Edit", {"file_path": "~/.gitconfig", "old_string": "a",
+                                    "new_string": "b"}, workspace),
+        "BOUNDARY_VIOLATION", reason="a command outside the OS sandbox reads")
+
+    cage.check(
+        "os-sandbox role github mcp tool denied",
+        cage.payload("ppl-code-worker", "mcp__github__create_pull_request",
+                     {"owner": "o", "repo": "r"}, repo),
+        "BOUNDARY_VIOLATION", reason="GitHub MCP")
+
+    cage.check(
+        "os-sandbox orchestrator github mcp read allowed",
+        cage.payload(None, "mcp__github__get_pull_request", {"owner": "o", "repo": "r"},
+                     workspace),
+        "allow")
+
+    cage.check(
+        "os-sandbox role webfetch of github denied",
+        cage.payload("ppl-verifier", "WebFetch", {"url": "https://API.GitHub.com./repos",
+                                                  "prompt": "list"}, repo),
+        "BOUNDARY_VIOLATION", reason="WebFetch")
+
 
 if __name__ == "__main__":
     sys.exit(main())

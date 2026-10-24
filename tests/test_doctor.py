@@ -187,7 +187,7 @@ class TestMatcher(unittest.TestCase):
 
     def test_the_guarded_names_are_the_cage_surface(self):
         names = doctor.guarded_tool_names()
-        for name in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash",
+        for name in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "WebFetch",
                      "mcp__GitLab-MCP__merge_merge_request",
                      "mcp__atlassian__addCommentToJiraIssue",
                      "mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue",
@@ -241,7 +241,7 @@ class TestMatcher(unittest.TestCase):
                     if name.startswith("mcp__claude_ai_Atlassian_Rovo")
                     or name.startswith("mcp__atlassian_2__")
                     or name.startswith("mcp__github__")
-                    or name in ("Read", "Grep", "Glob", "Agent", "Task")]
+                    or name in ("Read", "Grep", "Glob", "Agent", "Task", "WebFetch")]
         self.assertGreater(len(expected), 3)
         self.assertEqual(result["local"]["uncovered"], expected)
         for name in ("Read", "Grep", "Glob"):
@@ -280,7 +280,8 @@ class TestMatcher(unittest.TestCase):
         # the editing tools): the hook fires when any one of them matches, so
         # together they cover.
         write_settings(self.local_path,
-                       matchers=(EDITING_TOOLS_ONLY, "Bash|Read|Grep|Glob|Agent|Task|mcp__.*"))
+                       matchers=(EDITING_TOOLS_ONLY,
+                                 "Bash|Read|Grep|Glob|Agent|Task|WebFetch|mcp__.*"))
         result = self.inspect()
         self.assertEqual(result["matcher"], "ok")
         self.assertEqual(result["local"]["uncovered"], [])

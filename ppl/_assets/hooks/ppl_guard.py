@@ -224,6 +224,10 @@ READ_TOOLS = ("Read", "Grep", "Glob")
 # subagent exists, and a deny stops the spawn (R-TEST-WORKER-DISPATCH-LEAK).
 AGENT_TOOLS = ("Agent", "Task")
 
+# The tool that fetches a URL. It runs outside the OS sandbox, so a role's fetch of
+# GitHub is denied here [R-WEBFETCH-GITHUB-NO-ROLE].
+FETCH_TOOLS = ("WebFetch",)
+
 # Every tool name this cage acts on. `ppl doctor` judges the registered PreToolUse
 # matcher against this list: a name the matcher never passes to the hook is a denial
 # that cannot fire, however correct the code behind it reads [R-GUARD-MATCHER]. The
@@ -241,6 +245,7 @@ GUARDED_TOOL_NAMES = (
             for operation in JIRA_WRITE_OPERATIONS)
     + READ_TOOLS
     + AGENT_TOOLS
+    + FETCH_TOOLS
 )
 
 # Global git flags (-C <dir>, --git-dir=<x>, -c k=v, ...) sit between "git" and the
@@ -889,6 +894,29 @@ def forge_from_snapshot(task_id):
         return _forges.get(settings["kind"]), settings
     except Exception:
         return None, None
+
+
+def github_mcp_prefixes(task_id):
+    """The mcp__<server>__ prefix of the GitHub MCP server the run's harness snapshot names
+    in forge.mcp_server, as a list, empty when the snapshot names none or is not there.
+    Never raises [R-FORGE-GH-MCP-NO-ROLE]."""
+    adapter, settings = forge_from_snapshot(task_id)
+    if adapter is None or settings.get("kind") != "github":
+        return []
+    name = settings.get("mcp_server")
+    return ["mcp__%s__" % name] if isinstance(name, str) and name else []
+
+
+def protected_edit_denial(payload, task_id):
+    """escape.edit_denial with the guard facts read here [R-OS-SANDBOX-PROTECTED-PATHS].
+    Facts that cannot be read still put every session in scope, with only the paths known
+    without them protected."""
+    home = paths.home()
+    try:
+        facts = escape.load_facts(home)
+    except ValueError:
+        return escape.edit_denial(payload, home, None, active=True)
+    return escape.edit_denial(payload, home, facts, active=bool(task_id))
 
 
 def denied_tools(task_id):
@@ -2273,6 +2301,22 @@ def _decide(payload):
             and any_tracker_write_tool(tool, active)):
         return deny("BOUNDARY_VIOLATION", _ROLE_TRACKER_WRITE % agent)
 
+    # R-FORGE-GH-MCP-NO-ROLE, R-WEBFETCH-GITHUB-NO-ROLE: an MCP server and WebFetch run
+    # outside the OS sandbox, so no role reaches GitHub through either, run or no run. The
+    # orchestrator's GitHub MCP reads stay open. The snapshot is read only for an mcp__
+    # tool the default names do not match.
+    if escape.is_role(agent):
+        if (isinstance(tool, str) and tool.startswith("mcp__")
+                and (escape.github_mcp_tool(tool, ())
+                     or escape.github_mcp_tool(tool, github_mcp_prefixes(active)))):
+            return deny("BOUNDARY_VIOLATION",
+                        "%s may not call %s: no role reaches a GitHub MCP server, which runs "
+                        "outside the OS sandbox" % (agent, tool))
+        if tool in FETCH_TOOLS and escape.webfetch_github(tool_input):
+            return deny("BOUNDARY_VIOLATION",
+                        "%s may not WebFetch %s: no role reaches GitHub, and WebFetch runs "
+                        "outside the OS sandbox" % (agent, str(tool_input.get("url"))[:200]))
+
     runs_root = str(paths.runs_dir())
 
     if tool == "Bash":
@@ -2312,6 +2356,14 @@ def _decide(payload):
                 return deny("BOUNDARY_VIOLATION",
                             _with_reading(_ROLE_TRACKER_WRITE % agent, why))
 
+    # R-OS-SANDBOX-PROTECTED-PATHS: an edit tool runs outside the OS sandbox too, so what an
+    # unsandboxed gh, git or ppl reads is closed to it, for roles and the orchestrator alike,
+    # before any run state is read. Every path key of the call is checked, not only the one
+    # target_path takes.
+    if tool in WRITE_TOOLS:
+        reason = protected_edit_denial(payload, active)
+        if reason:
+            return deny("BOUNDARY_VIOLATION", reason)
     path = target_path(tool_input) if tool in WRITE_TOOLS else None
     if path and structured_write_lands_in_runs(path, payload.get("cwd")):
         return deny("BOUNDARY_VIOLATION",

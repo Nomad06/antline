@@ -2,15 +2,26 @@
 command reaches GitHub. The guard asks this first for a Bash call that sets
 dangerouslyDisableSandbox: a ppl-* role never may, and while the guard facts exist or a run
 is active no other subagent may and the unroled orchestrator may only for one plain command
-on a pinned gh, git or ppl in the shapes below and in escape_git. The guard hook imports this
-module, so it parses on Python 3.9, carries no annotations and reads JSON only."""
+on a pinned gh, git or ppl in the shapes below and in escape_git. It also closes the routes
+that run outside the sandbox anyway: an edit tool writing what those commands read, and a
+role's GitHub MCP call or WebFetch of GitHub. The guard hook imports this module, so it
+parses on Python 3.9, carries no annotations and reads JSON only."""
 import json
 import os
 import re
 import shlex
 import stat
+import stringprep
+import unicodedata
+import urllib.parse
 
 from . import boundary, escape_git, paths, store
+
+try:
+    import pwd
+except ImportError:
+    # no passwd database off POSIX, where HOME is the only home there is
+    pwd = None
 
 # Its own copy of os_sandbox.FACTS_FILE, so the hook never imports that module.
 FACTS_FILE = "os_sandbox.json"
@@ -132,6 +143,301 @@ def _inside(path, root):
 
 def _is_role(agent):
     return agent in boundary.ROLE_RULES or agent.startswith("ppl-")
+
+
+def is_role(agent):
+    """True for a ppl-* role, one the boundary table names or any other ppl- name."""
+    return isinstance(agent, str) and bool(agent) and _is_role(agent)
+
+
+# What an unsandboxed git, ssh or gh reads under a home directory, gh's extensions included.
+_HOME_CONFIG = (".gitconfig", ".config/git", ".ssh", ".config/gh", ".local/share/gh")
+# Where git and gh read the same instead when the environment moves it: the variable, and
+# the part under its value.
+_MOVED_CONFIG = (("XDG_CONFIG_HOME", "git"), ("XDG_CONFIG_HOME", "gh"), ("XDG_DATA_HOME", "gh"),
+                 ("GH_CONFIG_DIR", ""), ("GIT_CONFIG_GLOBAL", ""))
+# What an unsandboxed ppl reads under PPL_HOME, and the guard's own facts.
+_PPL_FILES = ("config.toml", "harnesses", FACTS_FILE)
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+_PATH_KEYS = ("file_path", "path", "notebook_path")
+_PROTECTED_WHY = "which a command outside the OS sandbox reads or runs"
+# How many files under the protected directories a multi-link target is compared with.
+_LINK_SCAN_LIMIT = 10000
+
+
+def _homes():
+    """The home directory HOME names and the one the passwd database records, which ssh
+    reads whatever HOME says."""
+    homes = [os.path.expanduser("~")]
+    if pwd is not None:
+        try:
+            homes.append(pwd.getpwuid(os.getuid()).pw_dir)
+        except (KeyError, OSError):
+            pass
+    return homes
+
+
+def protected_paths(home, facts):
+    """Every path an edit tool may not write in a pipeline session, `realpath`-ed: the git,
+    ssh and gh config under the home directory and wherever an absolute XDG_CONFIG_HOME,
+    XDG_DATA_HOME, GH_CONFIG_DIR or GIT_CONFIG_GLOBAL in this environment moves it, the
+    workspace's .claude directory, ppl's config, harnesses and guard facts under `home`, and
+    each pin's path and realpath. With `facts` None, the workspace and the pins are not known
+    and not listed."""
+    entries = [os.path.join(user_home, rel) for user_home in _homes() for rel in _HOME_CONFIG]
+    for variable, rel in _MOVED_CONFIG:
+        value = os.environ.get(variable)
+        if value and os.path.isabs(value):
+            entries.append(os.path.join(value, rel) if rel else value)
+    if facts:
+        entries.append(os.path.join(facts["workspace"], ".claude"))
+    entries.extend(os.path.join(str(home), name) for name in _PPL_FILES)
+    if facts:
+        for name in PIN_NAMES:
+            pin = facts["pins"][name]
+            entries.extend((pin["path"], pin["realpath"]))
+    found = []
+    for entry in entries:
+        real = os.path.realpath(entry)
+        if real not in found:
+            found.append(real)
+    return found
+
+
+def _fold(path):
+    """`path` as a case-insensitive file system compares it, so a variant in letter case or
+    Unicode form is the same path."""
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", path).casefold())
+
+
+def _within(path, root):
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _target_forms(raw, cwd):
+    """Every absolute path an edit of `raw` may land on: `~` expanded or taken as written,
+    joined to the session cwd, `..` collapsed in the text or by the kernel after a link, and
+    through every link, a missing tail kept as spelled. None when `raw` is relative and the
+    call names no absolute cwd."""
+    forms = []
+    for spelling in (raw, os.path.expanduser(raw)):
+        if not os.path.isabs(spelling):
+            if not (isinstance(cwd, str) and os.path.isabs(cwd)):
+                return None
+            spelling = os.path.join(cwd, spelling)
+        for form in (os.path.normpath(spelling), os.path.realpath(spelling),
+                     os.path.realpath(os.path.normpath(spelling))):
+            if form not in forms:
+                forms.append(form)
+    return forms
+
+
+def _identity(path):
+    try:
+        info = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _linked_into(path, protected):
+    """The protected directory holding another link of `path`, a regular file, or None.
+    The search stops at _LINK_SCAN_LIMIT files, and a search cut off counts as a hit."""
+    try:
+        info = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink < 2:
+        return None
+    wanted = (info.st_dev, info.st_ino)
+    seen = 0
+    for root in protected:
+        if not os.path.isdir(root):
+            continue
+        for directory, _dirs, files in os.walk(root):
+            for name in files:
+                seen += 1
+                if seen > _LINK_SCAN_LIMIT:
+                    return "a directory too large to search for the file's other links"
+                if _identity(os.path.join(directory, name)) == wanted:
+                    return root
+    return None
+
+
+def _anchored(path):
+    """Each (device and inode, folded parts below it) for `path`, from the nearest existing
+    entry at or above it up to the root: the path as the file system knows it whatever name
+    reached it, with the part that does not exist yet kept as spelled."""
+    below = []
+    current = path
+    while True:
+        identity = _identity(current)
+        if identity is not None:
+            yield identity, tuple(reversed(below))
+        parent, name = os.path.split(current)
+        if parent == current:
+            return
+        below.append(_fold(name))
+        current = parent
+
+
+def _protected_hit(forms, protected):
+    """The protected path one of `forms` is or lies under, or None. Compared as text after
+    case folding, then by device and inode: a form lies under a protected path when an entry
+    above it is the protected path's nearest existing entry, and the parts below match. That
+    finds a hard link of a protected file, a case variant and another name of a directory
+    (a macOS firmlink) even when the protected path does not exist yet. Last, a hard link of
+    a file inside a protected directory."""
+    folded = [(entry, _fold(entry)) for entry in protected]
+    anchors = []
+    for entry in protected:
+        nearest = next(_anchored(entry), None)
+        if nearest:
+            anchors.append((entry,) + nearest)
+    for form in forms:
+        key = _fold(form)
+        for entry, entry_key in folded:
+            if _within(key, entry_key):
+                return entry
+        for identity, below in _anchored(form):
+            for entry, entry_identity, entry_below in anchors:
+                if identity == entry_identity and below[:len(entry_below)] == entry_below:
+                    return entry
+    for form in forms:
+        hit = _linked_into(form, protected)
+        if hit:
+            return hit
+    return None
+
+
+def edit_denial(payload, home, facts, active=False):
+    """Why a pipeline session's Edit, Write, MultiEdit or NotebookEdit may not write its
+    target, or None. Edit tools run outside the OS sandbox, so what an unsandboxed gh, git or
+    ppl reads (protected_paths) is closed to roles and the orchestrator alike. Every path key
+    of the call is checked, resolved against the payload cwd with `~` expanded and through
+    links. In scope: a ppl-* role always, any session while `facts` is there, or while
+    `active` says a run is active or the facts file is there but unreadable, in which case
+    `facts` is None and only the paths known without it are protected."""
+    if not isinstance(payload, dict) or payload.get("tool_name") not in EDIT_TOOLS:
+        return None
+    agent = payload.get("agent_type")
+    if not (is_role(agent) or facts is not None or active):
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    tool = payload["tool_name"]
+    who = agent if isinstance(agent, str) and agent else "a session with no role"
+    targets = [tool_input[key] for key in _PATH_KEYS if tool_input.get(key)]
+    try:
+        protected = protected_paths(home, facts) if targets else []
+        for raw in targets:
+            if not isinstance(raw, str):
+                return ("%s's %s names a path that is not a string, %s, so the guard cannot "
+                        "tell whether it is one %s" % (who, tool, _short(raw), _PROTECTED_WHY))
+            forms = _target_forms(raw, payload.get("cwd"))
+            if forms is None:
+                return ("%s's %s names the relative path %s and no absolute cwd, so the guard "
+                        "cannot tell whether it is one %s" % (who, tool, _short(raw),
+                                                              _PROTECTED_WHY))
+            hit = _protected_hit(forms, protected)
+            if hit:
+                return ("%s may not %s %s while the pipeline is set up or running: it is or "
+                        "lies under %s, %s" % (who, tool, _short(raw), hit, _PROTECTED_WHY))
+    except (OSError, ValueError, TypeError, KeyError) as err:
+        return ("%s's %s target cannot be checked against the paths %s: %s"
+                % (who, tool, _PROTECTED_WHY, type(err).__name__))
+    return None
+
+
+# The GitHub MCP server under its usual name, in any case, or a numbered second
+# registration of it.
+_GITHUB_SERVER = re.compile(r"mcp__github(?:_[0-9]+)?__", re.IGNORECASE)
+
+
+def github_mcp_tool(tool_name, snapshot_prefixes):
+    """True for a tool of a GitHub MCP server: under mcp__github__ or a numbered duplicate,
+    under any server whose name holds "github" in any case (the claude.ai connector, a
+    plugin's server), and under each mcp__<server>__ prefix in `snapshot_prefixes`."""
+    if not isinstance(tool_name, str) or not tool_name.startswith("mcp__"):
+        return False
+    if _GITHUB_SERVER.match(tool_name):
+        return True
+    if "github" in tool_name[len("mcp__"):].rpartition("__")[0].casefold():
+        return True
+    folded = tool_name.casefold()
+    for prefix in snapshot_prefixes or ():
+        if (isinstance(prefix, str) and len(prefix) > len("mcp____")
+                and prefix.startswith("mcp__") and prefix.endswith("__")
+                and folded.startswith(prefix.casefold())):
+            return True
+    return False
+
+
+# Schemes a URL parser reads an authority after with or without the slashes.
+_SPECIAL_SCHEMES = ("http", "https", "ws", "wss", "ftp")
+_URL_SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):")
+# What a URL parser drops from a URL: leading and trailing C0 controls and spaces, and a
+# tab or newline anywhere.
+_URL_EDGE = "".join(chr(code) for code in range(0x21))
+_URL_DROPPED = re.compile("[\t\n\r]")
+# Full stops IDNA reads as the label separator.
+_IDN_DOTS = ("\u3002", "\uff0e", "\uff61")
+
+
+def _url_hosts(url):
+    """Every host a URL parser may read `url` to name: as written, with a backslash read as
+    a slash, with a special scheme's missing slashes put back, and as a URL with no scheme.
+    Raises ValueError for a URL urlsplit cannot read."""
+    text = _URL_DROPPED.sub("", url.strip(_URL_EDGE))
+    slashed = text.replace("\\", "/")
+    readings = [text, slashed, "//" + slashed]
+    match = _URL_SCHEME.match(slashed)
+    if match and match.group(1).lower() in _SPECIAL_SCHEMES:
+        readings.append("//" + slashed[match.end():].lstrip("/"))
+    return [urllib.parse.urlsplit(reading).hostname for reading in readings]
+
+
+def _mapped_host(text):
+    """`text` as IDNA maps a host: compatibility forms (fullwidth letters and dots) composed,
+    the characters mapped to nothing (a soft hyphen, a zero-width or format character, a
+    variation selector) dropped, every full stop a dot, and case folded."""
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(char for char in text
+                   if not (stringprep.in_table_b1(char) or unicodedata.category(char) == "Cf"))
+    for dot in _IDN_DOTS:
+        text = text.replace(dot, ".")
+    return unicodedata.normalize("NFKC", text.casefold())
+
+
+def _is_github_host(host):
+    """True for github.com or a host under it, after percent-decoding, the IDNA mapping,
+    Punycode labels and trailing dots."""
+    if not host:
+        return False
+    labels = []
+    for label in _mapped_host(urllib.parse.unquote(host)).split("."):
+        if label.startswith("xn--"):
+            try:
+                label = label[len("xn--"):].encode("ascii").decode("punycode")
+            except (UnicodeError, ValueError):
+                pass
+        labels.append(label)
+    host = _mapped_host(".".join(labels)).rstrip(".")
+    return host == "github.com" or host.endswith(".github.com")
+
+
+def webfetch_github(tool_input):
+    """True when a WebFetch call's URL host is github.com or ends in .github.com, under any
+    reading a URL parser may give it. A URL urlsplit cannot read counts as GitHub."""
+    url = tool_input.get("url") if isinstance(tool_input, dict) else None
+    if not isinstance(url, str):
+        return False
+    try:
+        hosts = _url_hosts(url)
+    except ValueError:
+        return True
+    return any(_is_github_host(host) for host in hosts)
 
 
 def decide(payload, home, state):

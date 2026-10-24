@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import pwd
 import shutil
 import signal
 import subprocess
@@ -1295,6 +1296,357 @@ class GitShapes(OsSandboxCase):
                               capture_output=True, text=True, env=env, timeout=HOOK_BOUND_SECONDS)
         self.assertEqual(done.stderr, "")
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(json.loads(done.stdout)))
+
+
+# What the guard says when an edit tool aims at a path an unsandboxed command reads.
+PROTECTED = "which a command outside the OS sandbox reads or runs"
+EDIT_TOOLS = (("Edit", "file_path"), ("Write", "file_path"), ("MultiEdit", "file_path"),
+              ("NotebookEdit", "notebook_path"))
+
+
+class ProtectedPathCase(OsSandboxCase):
+    """Edit tools against a temporary HOME that holds the git, ssh and gh config, so the
+    operator's own files are never the ones in play."""
+
+    def setUp(self):
+        super().setUp()
+        self.home_dir = real(tempfile.mkdtemp(prefix="ppl-protected-home-"))
+        self.addCleanup(shutil.rmtree, self.home_dir, True)
+        patcher = mock.patch.dict(os.environ, {"HOME": self.home_dir})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for rel in (".ssh", ".config/git", ".config/gh", ".local/share/gh"):
+            os.makedirs(self.at(rel))
+        for rel in (".gitconfig", ".ssh/config", ".config/gh/hosts.yml"):
+            with open(self.at(rel), "w", encoding="utf-8") as handle:
+                handle.write("x\n")
+        self.outside = real(tempfile.mkdtemp(prefix="ppl-protected-outside-"))
+        self.addCleanup(shutil.rmtree, self.outside, True)
+
+    def at(self, rel):
+        return os.path.join(self.home_dir, rel)
+
+    def edit(self, target, agent=None, tool="Edit", key="file_path", cwd=OTHER, **extra):
+        tool_input = dict({key: target, "old_string": "a", "new_string": "b"}, **extra)
+        return ppl_guard.decide(payload(agent, tool, tool_input, cwd))
+
+    def assert_protected(self, reason):
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn(PROTECTED, reason)
+
+
+class TestProtectedPaths(ProtectedPathCase):
+    def test_a_role_cannot_edit_the_gitconfig(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        gitconfig = self.at(".gitconfig")
+        self.assert_protected(self.deny_reason(self.edit(gitconfig, agent="ppl-code-worker")))
+        # a ppl-* role is the pipeline's with neither the guard facts nor a run
+        with self.facts_text(None), self.no_active_run():
+            self.assert_protected(self.deny_reason(self.edit(gitconfig, agent="ppl-code-worker")))
+
+    def test_the_orchestrator_cannot_edit_the_gh_config(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        hosts = self.at(".config/gh/hosts.yml")
+        for tool, key in EDIT_TOOLS:
+            with self.subTest(tool=tool):
+                self.assert_protected(self.deny_reason(self.edit(hosts, tool=tool, key=key)))
+        # the facts alone, or a run alone, put the session in scope
+        with self.subTest(facts=False), self.facts_text(None):
+            self.assert_protected(self.deny_reason(self.edit(hosts)))
+        with self.subTest(run=False), self.no_active_run():
+            self.assert_protected(self.deny_reason(self.edit(hosts)))
+
+    def test_a_symlink_into_ssh_is_denied(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        keys = os.path.join(self.outside, "keys")
+        os.symlink(self.at(".ssh"), keys)
+        config = os.path.join(self.outside, "config")
+        os.symlink(self.at(".ssh/config"), config)
+        dangling = os.path.join(self.outside, "dangling")
+        os.symlink(self.at(".ssh/authorized_keys"), dangling)
+        chained = os.path.join(self.outside, "chained")
+        os.symlink(keys, chained)
+        for path in (keys + "/config", keys + "/id_new", keys + "/new/dir/file", config,
+                     dangling, chained + "/config"):
+            with self.subTest(path=path):
+                self.assert_protected(self.deny_reason(self.edit(path)))
+
+    def test_tilde_and_dotdot_are_resolved(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        os.makedirs(self.at("work/sub"))
+        gh_link = os.path.join(self.outside, "ghlink")
+        os.symlink(self.at(".config/gh"), gh_link)
+        user = pwd.getpwuid(os.getuid()).pw_name
+        for path, cwd in (("~/.gitconfig", OTHER),
+                          ("~/work/../.ssh/config", OTHER),
+                          (self.at("work/sub/../../.ssh/config"), OTHER),
+                          ("../../.ssh/config", self.at("work/sub")),
+                          (".gitconfig", self.home_dir),
+                          ("./.config/./gh//hosts.yml", self.home_dir),
+                          # the kernel climbs from the link's target, not from the link
+                          (gh_link + "/../gh/hosts.yml", OTHER),
+                          # ~user is the passwd home, which ssh reads whatever HOME says
+                          ("~%s/.ssh/config" % user, OTHER)):
+            with self.subTest(path=path, cwd=cwd):
+                self.assert_protected(self.deny_reason(self.edit(path, cwd=cwd)))
+
+    def test_an_edit_outside_the_pipeline_scope_is_left_alone(self):
+        with self.facts_text(None), self.no_active_run():
+            for agent in (None, "general-purpose"):
+                with self.subTest(agent=agent):
+                    self.assertIsNone(self.edit(self.at(".gitconfig"), agent=agent))
+                    self.assertIsNone(self.edit(self.at(".ssh/config"), agent=agent,
+                                                tool="Write"))
+
+    def test_an_ordinary_edit_in_scope_is_allowed(self):
+        for path in (os.path.join(self.outside, "notes.md"), self.at(".config/other/x.json"),
+                     self.at(".sshx/config"), self.at(".gitconfig-notes/x"), WS + "/README.md",
+                     WS + "/.claudex/x"):
+            with self.subTest(path=path):
+                self.assertIsNone(self.edit(path))
+
+    def test_the_workspace_claude_dir_the_pins_and_ppl_files_are_protected(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        home = paths.home()
+        for path in (WS + "/.claude/settings.local.json", WS + "/.claude/new/x", GH, GIT, PPL,
+                     str(home / "config.toml"), str(home / "harnesses" / "gh-issues" /
+                                                    "harness.toml"),
+                     str(home / os_sandbox.FACTS_FILE), self.at(".config/git/config"),
+                     self.at(".local/share/gh/extensions/gh-x/gh-x")):
+            with self.subTest(path=path):
+                self.assert_protected(self.deny_reason(self.edit(path, tool="Write")))
+
+    def test_a_pin_reached_through_its_link_is_denied(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        binary = os.path.join(self.outside, "cellar", "gh")
+        os.makedirs(os.path.dirname(binary))
+        with open(binary, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\n")
+        link = os.path.join(self.outside, "bin-gh")
+        os.symlink(binary, link)
+        pins = dict(facts_doc()["pins"], gh={"path": link, "realpath": binary})
+        with self.facts_text(json.dumps(facts_doc(pins=pins))):
+            for path in (link, binary):
+                with self.subTest(path=path):
+                    self.assert_protected(self.deny_reason(self.edit(path, tool="Write")))
+
+    def test_a_case_variant_of_a_protected_path_is_denied(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # macOS file systems ignore case, so .SSH is .ssh there
+        for path in (self.at(".SSH/config"), self.at(".Config/GH/hosts.yml"),
+                     self.at(".GitConfig"), self.at(".config/GH/new.yml"),
+                     WS.upper() + "/.Claude/settings.local.json"):
+            with self.subTest(path=path):
+                self.assert_protected(self.deny_reason(self.edit(path)))
+
+    def test_config_the_environment_moves_is_protected(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        moved = {"XDG_CONFIG_HOME": os.path.join(self.outside, "xdg-config"),
+                 "XDG_DATA_HOME": os.path.join(self.outside, "xdg-data"),
+                 "GH_CONFIG_DIR": os.path.join(self.outside, "gh-config"),
+                 "GIT_CONFIG_GLOBAL": os.path.join(self.outside, "global.gitconfig")}
+        with mock.patch.dict(os.environ, moved):
+            for path in (moved["XDG_CONFIG_HOME"] + "/git/config",
+                         moved["XDG_CONFIG_HOME"] + "/gh/hosts.yml",
+                         moved["XDG_DATA_HOME"] + "/gh/extensions/gh-x/gh-x",
+                         moved["GH_CONFIG_DIR"] + "/hosts.yml", moved["GIT_CONFIG_GLOBAL"]):
+                with self.subTest(path=path):
+                    self.assert_protected(self.deny_reason(self.edit(path)))
+            self.assertIsNone(self.edit(moved["XDG_CONFIG_HOME"] + "/other/x.json"))
+        # a relative value names no place the guard can protect, and moves nothing
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "rel"}):
+            self.assert_protected(self.deny_reason(self.edit(self.at(".config/gh/hosts.yml"))))
+
+    @unittest.skipUnless(os.path.isdir("/System/Volumes/Data"), "macOS firmlinks only")
+    def test_a_firmlink_name_of_a_protected_path_is_denied(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # /System/Volumes/Data<path> is <path> under another name that realpath keeps, and a
+        # protected directory that does not exist yet has no inode of its own to compare
+        data = "/System/Volumes/Data"
+        if not os.path.isdir(data + self.home_dir):
+            self.skipTest("the temporary directory is not on the data volume")
+        shutil.rmtree(self.at(".config/gh"))
+        for path in (data + self.at(".config/gh/hosts.yml"), data + self.at(".ssh/config"),
+                     data + self.at(".ssh/new_key"), data + self.at(".gitconfig")):
+            with self.subTest(path=path):
+                self.assert_protected(self.deny_reason(self.edit(path)))
+        self.assertIsNone(self.edit(data + self.at(".config/other/x.json")))
+
+    def test_a_hard_link_of_a_protected_file_is_denied(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        for rel in (".gitconfig", ".ssh/config", ".config/gh/hosts.yml"):
+            alias = os.path.join(self.outside, rel.replace("/", "_"))
+            os.link(self.at(rel), alias)
+            with self.subTest(rel=rel):
+                self.assert_protected(self.deny_reason(self.edit(alias)))
+
+    def test_every_path_key_of_the_call_is_checked(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        harmless = os.path.join(self.outside, "notes.md")
+        for key in ("path", "notebook_path"):
+            with self.subTest(key=key):
+                result = self.edit(harmless, tool="NotebookEdit", **{key: self.at(".ssh/config")})
+                self.assert_protected(self.deny_reason(result))
+
+    def test_a_path_the_guard_cannot_place_is_denied(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        for path, cwd in ((".gitconfig", None), (".gitconfig", ""), (".gitconfig", "rel/dir"),
+                          (["~/.gitconfig"], OTHER), ("/tmp/a\x00b", OTHER)):
+            with self.subTest(path=path, cwd=cwd):
+                reason = self.deny_reason(self.edit(path, cwd=cwd))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIsNone(self.edit(os.path.join(self.outside, "notes.md"), cwd=None))
+
+    def test_corrupt_facts_still_protect_the_home_config(self):
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        with self.facts_text("{not json"), self.no_active_run():
+            self.assert_protected(self.deny_reason(self.edit(self.at(".gitconfig"))))
+            self.assert_protected(self.deny_reason(self.edit(str(paths.home() / "config.toml"))))
+            self.assertIsNone(self.edit(os.path.join(self.outside, "notes.md")))
+
+    def test_protected_paths_lists_the_config_the_pins_and_ppl_files(self):
+        home = paths.home()
+        found = escape.protected_paths(home, facts_doc())
+        for path in (self.at(".gitconfig"), self.at(".config/git"), self.at(".ssh"),
+                     self.at(".config/gh"), self.at(".local/share/gh"), real(WS + "/.claude"),
+                     real(home / "config.toml"), real(home / "harnesses"),
+                     real(home / os_sandbox.FACTS_FILE), real(GH), real(GIT), real(PPL)):
+            self.assertIn(path, found)
+        self.assertEqual(found, [real(path) for path in found])
+        without = escape.protected_paths(home, None)
+        self.assertIn(self.at(".ssh"), without)
+        self.assertNotIn(real(WS + "/.claude"), without)
+
+
+class TestGithubMcp(OsSandboxCase):
+    def call(self, tool, agent="ppl-code-worker", cwd=REPO):
+        return ppl_guard.decide(payload(agent, tool, {"owner": "o", "repo": "r"}, cwd))
+
+    def assert_github_mcp_denied(self, reason):
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("GitHub MCP", reason)
+
+    @contextlib.contextmanager
+    def snapshot_forge(self, forge):
+        """The run's harness snapshot with its forge table replaced, or the snapshot gone
+        when `forge` is None."""
+        snapshot = paths.run_dir(TASK) / "harness.json"
+        saved = snapshot.read_text(encoding="utf-8")
+        if forge is None:
+            snapshot.unlink()
+        else:
+            store.write_json(snapshot, dict(json.loads(saved), forge=forge))
+        try:
+            yield
+        finally:
+            snapshot.write_text(saved, encoding="utf-8")
+
+    def test_a_role_cannot_call_a_github_mcp_pull_request_tool(self):
+        # rule: R-FORGE-GH-MCP-NO-ROLE
+        for agent in ("ppl-code-worker", "ppl-review-responder", "ppl-briefer", "ppl-future-role"):
+            with self.subTest(agent=agent):
+                result = self.call("mcp__github__create_pull_request", agent)
+                self.assert_github_mcp_denied(self.deny_reason(result))
+        # global: no run, no facts and any cwd
+        with self.facts_text(None), self.no_active_run():
+            result = self.call("mcp__github__get_file_contents", cwd=OTHER)
+            self.assert_github_mcp_denied(self.deny_reason(result))
+
+    def test_a_numbered_github_server_is_matched(self):
+        # rule: R-FORGE-GH-MCP-NO-ROLE
+        for tool in ("mcp__github_2__create_pull_request", "mcp__github_10__get_me",
+                     "mcp__GitHub__push_files", "mcp__GITHUB_3__create_branch",
+                     "mcp__claude_ai_GitHub__create_pull_request",
+                     "mcp__plugin_github_github__get_pull_request", "mcp__github-enterprise__x"):
+            with self.subTest(tool=tool):
+                self.assert_github_mcp_denied(self.deny_reason(self.call(tool)))
+
+    def test_the_snapshot_server_name_is_matched(self):
+        # rule: R-FORGE-GH-MCP-NO-ROLE
+        with self.snapshot_forge({"kind": "github", "mcp_server": "corp-gh"}):
+            result = self.call("mcp__corp-gh__create_pull_request")
+            self.assert_github_mcp_denied(self.deny_reason(result))
+            self.assertIsNone(self.call("mcp__corp-ghx__create_pull_request"))
+        # a GitLab server name is no GitHub prefix, and a snapshot without one is tolerated
+        with self.snapshot_forge({"kind": "gitlab", "mcp_server": "corp-gh"}):
+            self.assertIsNone(self.call("mcp__corp-gh__create_pull_request"))
+        for forge in (None, {"kind": "github"}, {"kind": "github", "mcp_server": 7}, "github"):
+            with self.subTest(forge=forge), self.snapshot_forge(forge):
+                result = self.call("mcp__github__create_pull_request")
+                self.assert_github_mcp_denied(self.deny_reason(result))
+                self.assertIsNone(self.call("mcp__corp-gh__create_pull_request"))
+
+    def test_the_orchestrator_may_read_through_github_mcp(self):
+        for tool in ("mcp__github__get_pull_request", "mcp__github__list_pull_requests",
+                     "mcp__github_2__get_me"):
+            with self.subTest(tool=tool):
+                self.assertIsNone(self.call(tool, agent=None, cwd=WS))
+
+    def test_a_role_keeps_the_other_mcp_servers(self):
+        for tool in ("mcp__atlassian__getJiraIssue", "mcp__GitLab-MCP__get_merge_request",
+                     "mcp__gitea__get_pull_request", "mcp__notes__github_style_summary"):
+            with self.subTest(tool=tool):
+                self.assertIsNone(self.call(tool, agent="ppl-briefer"))
+
+    def test_the_tracker_write_reason_still_names_the_tracker(self):
+        reason = self.deny_reason(self.call("mcp__github__add_issue_comment"))
+        self.assertIn("may not write the tracker", reason)
+
+
+class TestWebFetchGithub(OsSandboxCase):
+    def fetch(self, url, agent="ppl-verifier"):
+        return ppl_guard.decide(payload(agent, "WebFetch", {"url": url, "prompt": "summarize"},
+                                        REPO))
+
+    def assert_webfetch_denied(self, reason):
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("WebFetch", reason)
+
+    def test_a_role_cannot_webfetch_github(self):
+        # rule: R-WEBFETCH-GITHUB-NO-ROLE
+        for url in ("https://API.GitHub.com./repos", "https://github.com/o/r/pull/1",
+                    "http://gist.github.com/x"):
+            with self.subTest(url=url):
+                self.assert_webfetch_denied(self.deny_reason(self.fetch(url)))
+        with self.facts_text(None), self.no_active_run():
+            result = self.fetch("https://github.com/o/r", agent="ppl-briefer")
+            self.assert_webfetch_denied(self.deny_reason(result))
+
+    def test_a_disguised_github_url_is_denied(self):
+        # rule: R-WEBFETCH-GITHUB-NO-ROLE
+        for url in ("https://user:pw@github.com/o/r", "https://evil.com@github.com/",
+                    "https://github.com:443/o/r", "HTTPS://GITHUB.COM/", "https://github.com../x",
+                    "https://\uff47\uff49\uff54\uff48\uff55\uff42.com/o/r",
+                    "https://github\u3002com/o", "https://github\uff0ecom/o",
+                    "https://%67ithub.com/o", "https://github.com\\@evil.com/",
+                    "https:github.com/o", "https:/github.com/o", "https:\\\\github.com/o",
+                    "github.com/o/r", "//github.com/o", " https://github.com/o",
+                    "https://git\thub.com/", "https://git\nhub.com/", "https://xn--github-.com/x",
+                    "https://[github.com/x",
+                    # a URL parser maps these to nothing in a host
+                    "https://git\u00adhub.com/o", "https://git\u200bhub.com/o",
+                    "https://github\u2060.com/o", "https://\ufeffgithub.com/o"):
+            with self.subTest(url=url):
+                self.assert_webfetch_denied(self.deny_reason(self.fetch(url)))
+
+    def test_a_role_may_webfetch_another_host(self):
+        for url in ("https://docs.python.org/3/", "https://github.com.evil.com/x",
+                    "https://notgithub.com/", "https://github.com@evil.com/",
+                    "https://example.com/github.com", "https://evil.com/?u=https://github.com"):
+            with self.subTest(url=url):
+                self.assertIsNone(self.fetch(url))
+
+    def test_the_orchestrator_may_webfetch_github(self):
+        self.assertIsNone(ppl_guard.decide(payload(None, "WebFetch",
+                                                   {"url": "https://github.com/o/r",
+                                                    "prompt": "summarize"}, WS)))
+
+    def test_webfetch_is_a_guarded_tool_name(self):
+        from ppl import doctor
+        self.assertIn("WebFetch", ppl_guard.GUARDED_TOOL_NAMES)
+        self.assertIn("WebFetch", doctor.guarded_tool_names())
+        self.assertTrue(doctor.matcher_covers(doctor.RECOMMENDED_MATCHER, "WebFetch"))
+        self.assertIn("WebFetch", doctor.uncovered_by(["Edit|Write|MultiEdit|NotebookEdit|Bash"]))
 
 
 if __name__ == "__main__":

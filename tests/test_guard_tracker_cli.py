@@ -475,8 +475,9 @@ class TestTrackerMcpNoRole(GhRunCase):
                 self.assertIn("%s may not write the tracker" % role, reason)
 
     def test_a_role_keeps_the_tracker_read_tools(self):
-        for tool in ("mcp__atlassian__getJiraIssue", "mcp__claude_ai_Atlassian_Rovo__getJiraIssue",
-                     "mcp__github__get_issue"):
+        # a GitHub MCP read is no longer one: no role calls a GitHub MCP server at all
+        # (R-FORGE-GH-MCP-NO-ROLE, tests/test_guard_os_sandbox.py TestGithubMcp)
+        for tool in ("mcp__atlassian__getJiraIssue", "mcp__claude_ai_Atlassian_Rovo__getJiraIssue"):
             self.assertIsNone(ppl_guard.decide(payload("ppl-briefer", tool, {"issueKey": "X-1"})),
                               tool)
 
