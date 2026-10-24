@@ -45,8 +45,9 @@ would pile up duplicate blockers instead of the one real finding closing once it
 actually fixed. That is why you list open findings before dispatch and hand them to the
 verifier: only add what it reports as genuinely new.
 
-Record the verdict with `ppl verdict record <file> --generation $GENERATION --from
-ppl-verifier`. It refuses a verdict produced for a different SHA than the current head
+Save the verifier's verdict to `<!-- include: harness/scratch -->/<TASK-ID>/verdict.json` and record it with
+`ppl verdict record <!-- include: harness/scratch -->/<TASK-ID>/verdict.json --generation $GENERATION --from ppl-verifier`.
+It refuses a verdict produced for a different SHA than the current head
 [R-DONE-SHA-BINDING].
 
 The verdict's own `verdict` field (`PASS | REWORK | BLOCKED | OWNER_DECISION | INCONCLUSIVE

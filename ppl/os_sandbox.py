@@ -92,17 +92,25 @@ def write_scope(doc):
     return [_real(entry) for entry in scope]
 
 
-def facts(doc, workspace, pin_map):
-    """The slice the guard reads, the shape of PPL_HOME/os_sandbox.json. deny_write is the
-    profile's denyWrite, `realpath`-ed, which the guard holds edit tools to as well."""
+def repos(doc):
+    """(forge_repo, tracker_repo), each "owner/name" or None: the GitHub Issues repo of the
+    tracker, and the forge's, which is that repo or else the checkout's github.com origin."""
     from . import setup
-    checkout, worktrees = _repo(doc)
+    checkout, _ = _repo(doc)
     tracker_repo = None
     if (doc.get("tracker") or {}).get("kind") == "github-issues":
         tracker_repo = doc["tracker"].get("repo") or None
     forge_repo = None
     if (doc.get("forge") or {}).get("kind") == "github":
         forge_repo = tracker_repo or setup._origin_repo(_real(checkout))
+    return forge_repo, tracker_repo
+
+
+def facts(doc, workspace, pin_map):
+    """The slice the guard reads, the shape of PPL_HOME/os_sandbox.json. deny_write is the
+    profile's denyWrite, `realpath`-ed, which the guard holds edit tools to as well."""
+    checkout, worktrees = _repo(doc)
+    forge_repo, tracker_repo = repos(doc)
     return {"version": 1,
             "workspace": _real(workspace),
             "checkout": _real(checkout),
@@ -117,16 +125,40 @@ def facts(doc, workspace, pin_map):
             "pins": {name: dict(pin_map[name]) for name in PIN_NAMES}}
 
 
+def _git_outside(pin_map, directory, verb):
+    """The pinned git with hooks off in `directory`, then `verb` and the flags escape_git asks
+    of it."""
+    from . import escape_git
+    flags = [escape_git.FETCH_FLAG] if verb == "fetch" else escape_git.PUSH_FLAGS
+    return " ".join([pin_map["git"]["path"]] + escape_git.HOOKS_OFF
+                    + ["-C", directory, verb] + flags)
+
+
+def fetch_command(doc, pin_map):
+    """The orchestrator's fetch of the default branch into the checkout, outside the OS
+    sandbox: word for word the shape escape_git.git_shape lets through and ppl's allow entry,
+    the checkout `realpath`-ed as the facts hold it."""
+    checkout, _ = _repo(doc)
+    return "%s origin %s" % (_git_outside(pin_map, _real(checkout), "fetch"),
+                             doc["repo"]["default_branch"])
+
+
+def push_command(pin_map, delete=False):
+    """The orchestrator's push, or remote delete, of the run's branch from its worktree,
+    outside the OS sandbox, `<worktree>` and `<branch>` left for the orchestrator to fill.
+    Both name the ref in full, as escape_git.git_shape asks."""
+    push = _git_outside(pin_map, "<worktree>", "push")
+    if delete:
+        return "%s origin --delete refs/heads/<branch>" % push
+    return "%s -u origin refs/heads/<branch>:refs/heads/<branch>" % push
+
+
 def _allow_entries(doc, pin_map):
     """The nine read-only commands, no GitHub write: those go through the permission prompt."""
-    gh, git, ppl = (pin_map[name]["path"] for name in PIN_NAMES)
-    checkout, _ = _repo(doc)
-    # word for word the fetch escape_git.git_shape lets through
-    fetch = "%s -c core.hooksPath=/dev/null -C %s fetch --no-recurse-submodules origin %s" % (
-        git, _real(checkout), doc["repo"]["default_branch"])
+    gh, ppl = pin_map["gh"]["path"], pin_map["ppl"]["path"]
     return ["Bash(%s)" % entry for entry in (
         gh + " issue view *", gh + " pr view *", gh + " pr checks *",
-        gh + " api user --jq .login", gh + " auth status", fetch,
+        gh + " api user --jq .login", gh + " auth status", fetch_command(doc, pin_map),
         ppl + " tracker fetch --task *", ppl + " review fetch --pr *",
         ppl + " doctor --forge")]
 

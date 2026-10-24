@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -339,6 +340,10 @@ class TestVerify(HarnessTestCase):
                                                "PPL_SKILLS_DIR": str(self.skills)})
         patcher.start()
         self.addCleanup(patcher.stop)
+        # apply renders a GitHub harness on pinned binaries, none looked up on PATH here
+        patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: PINS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.claude_skills = Path(claude_home) / "skills"
 
     def overlay(self, name, role, size):
@@ -361,7 +366,7 @@ class TestVerify(HarnessTestCase):
         for name in ("example-generic", "example-maven"):
             fixtures.install_harness(name)
             doc = harness.load(name)
-            rendered = harness.render_skill(doc)
+            rendered = harness.render_skill(doc, pins=PINS)
             largest_skill = max(largest_skill, len(rendered["SKILL.md"].encode("utf-8")))
             largest_reference = max(largest_reference, *(len(text.encode("utf-8"))
                                                          for path, text in rendered.items()
@@ -1465,6 +1470,13 @@ class TestSnapshotAndApplied(HarnessTestCase):
 
 
 class TestRenderSkill(HarnessTestCase):
+    def setUp(self):
+        super().setUp()
+        # a GitHub harness renders on the pinned binaries, none looked up on PATH here
+        patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: PINS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def render(self, name, installed=None):
         fixtures.install_harness(name, as_name=installed)
         return harness.render_skill(harness.load(installed or name))
@@ -1638,7 +1650,11 @@ class TestRenderSkill(HarnessTestCase):
         self.assertIn("(no knowledge skills are configured for this harness)",
                       maven["references/stage-2-briefing.md"])
         generic = self.render("example-generic")
-        self.assertIn("git fetch origin main\n", generic["references/stage-1-baseline.md"])
+        # a GitHub harness fetches outside the OS sandbox, on the pinned git
+        self.assertIn("\n/usr/bin/git -c core.hooksPath=/dev/null -C %s fetch "
+                      "--no-recurse-submodules origin main\n"
+                      % os.path.realpath("/home/dev/src/project"),
+                      generic["references/stage-1-baseline.md"])
         self.assertIn("diff origin/main...HEAD", generic["references/gates.md"])
         self.assertIn("make test TEST=<test_class> > %s/<TASK-ID>/focused-tests.log 2>&1"
                       % os_sandbox.scratch_root(), generic["references/gates.md"])
@@ -1662,11 +1678,12 @@ class TestRenderSkill(HarnessTestCase):
         text = harness.render_skill(harness.load("example-maven"))["references/stage-2-briefing.md"]
         self.assertIn("(`kb-core`, `kb-build`)", text)
 
-    def test_every_include_value_is_used_by_a_skeleton_or_a_forge_fragment(self):
+    def test_every_include_value_is_used_by_a_skeleton_or_a_fragment(self):
         fixtures.install_harness("example-maven")
         offered = set(harness._values(harness.load("example-maven")))
         sources = list((fixtures.SOURCE / "skill").rglob("*.skeleton"))
         sources += list((fixtures.SOURCE.parent / "forges" / "fragments").rglob("*.md"))
+        sources += list((fixtures.SOURCE.parent / "trackers" / "fragments").rglob("*.md"))
         used = set()
         for path in sources:
             used.update(harness._INCLUDE_RE.findall(path.read_text(encoding="utf-8")))
@@ -1743,6 +1760,71 @@ class TestRenderSkill(HarnessTestCase):
             harness.apply("example-maven", agents_dir=tmphome.mkdtemp(prefix="pplagents-"),
                           skills_dir=tmphome.mkdtemp(prefix="pplskills-"))
             self.assertEqual(os.environ["PPL_AGENTS_DIR"], "/nonexistent/keep")
+
+
+class TestRenderOsSandbox(HarnessTestCase):
+    """A GitHub harness's skill names the pinned binaries and asks for the flag that runs
+    them outside the OS sandbox, and a harness without the profile keeps today's commands."""
+
+    def render(self, name, **tables):
+        if tables:
+            fixtures.install_variant(name, name, **tables)
+        else:
+            fixtures.install_harness(name)
+        with mock.patch.object(os_sandbox, "pins", lambda which=None: PINS):
+            return harness.render_skill(harness.load(name))
+
+    def test_a_github_harness_renders_pinned_flagged_commands(self):
+        rendered = self.render("example-generic", **fixtures.GITHUB_ISSUES)
+        stage6 = rendered["references/stage-6-mr.md"]
+        self.assertIn("`/opt/x/gh pr create -R o/r --head <branch> --base main ", stage6)
+        self.assertIn("dangerouslyDisableSandbox", stage6)
+        self.assertIn("/opt/y/bin/ppl tracker fetch --task <TASK-ID>",
+                      rendered["references/stage-0-admission.md"])
+        self.assertIn("/opt/x/gh issue comment <number> -R o/r --body-file",
+                      rendered["references/stage-8-after-merge.md"])
+        self.assertIn("/opt/x/gh pr close <number> -R o/r", rendered["SKILL.md"])
+        # the checkout as the facts hold it, which ppl's allow entry for the fetch spells
+        self.assertIn("\ncd /home/dev/src/project\n/usr/bin/git -c core.hooksPath=/dev/null -C %s "
+                      "fetch --no-recurse-submodules origin main\n"
+                      % os.path.realpath("/home/dev/src/project"),
+                      rendered["references/stage-1-baseline.md"])
+        for relative in ("references/stage-0-admission.md", "references/stage-6-mr.md",
+                         "references/stage-7-review.md", "references/review-loop.md",
+                         "references/stage-8-after-merge.md"):
+            text = rendered[relative]
+            bare = [line for line in text.splitlines()
+                    if re.match(r"\s*(?:[0-9]+\.\s+|-\s+)?`?gh ", line)]
+            self.assertEqual(bare, [], relative)
+        # the forge fragments name no gh command but a pinned one, stage 8's `gh issue` is prose
+        for relative in ("references/stage-6-mr.md", "references/stage-7-review.md",
+                         "references/review-loop.md"):
+            self.assertNotIn("`gh ", rendered[relative], relative)
+
+    def test_a_gitlab_harness_renders_todays_commands(self):
+        rendered = self.render("example-maven")
+        self.assertIn("```bash\ncd /home/dev/src/project\ngit fetch origin master\n"
+                      "git worktree add ", rendered["references/stage-1-baseline.md"])
+        self.assertIn("close the merge request,\ndelete the remote branch, then run "
+                      "`ppl destroy --scope local`. That is the only outward", rendered["SKILL.md"])
+        for relative, text in rendered.items():
+            self.assertNotIn("dangerouslyDisableSandbox", text, relative)
+            self.assertNotIn("/opt/x/gh", text, relative)
+            self.assertNotIn("core.hooksPath", text, relative)
+
+    def test_a_check_renders_a_github_harness_without_its_binaries_on_path(self):
+        # apply looks the pins up again and refuses a missing one, a check only measures
+        fixtures.install_harness("example-generic")
+        missing = PplError("SETUP_INCOMPLETE", "no gh is on PATH")
+        with mock.patch.object(os_sandbox, "pins", side_effect=missing):
+            result = harness.verify("example-generic", "example-generic")
+        self.assertEqual(result["errors"], [])
+
+    def test_render_takes_the_pins_apply_found(self):
+        fixtures.install_variant("example-generic", "example-generic", **fixtures.GITHUB_ISSUES)
+        with mock.patch.object(os_sandbox, "pins", side_effect=AssertionError("looked up")):
+            rendered = harness.render_skill(harness.load("example-generic"), pins=PINS)
+        self.assertIn("`/opt/x/gh pr create -R o/r ", rendered["references/stage-6-mr.md"])
 
 
 if __name__ == "__main__":

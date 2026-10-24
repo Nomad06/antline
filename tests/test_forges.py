@@ -159,19 +159,24 @@ class TestSurface(unittest.TestCase):
         for name in ("stage6", "stage7", "review-loop"):
             self.assertNotIn("--json ", github.fragment(name), name)
 
-    def test_github_fragments_send_thread_ids_as_json_strings(self):
+    def test_github_fragments_fetch_the_threads_through_ppl(self):
+        # ppl review fetch writes the thread ids as JSON strings, the model builds no JSON
         github = forges.get("github")
         for name in ("stage7", "review-loop"):
-            self.assertIn('written as a JSON string such as "123456"',
-                          " ".join(github.fragment(name).split()), name)
+            text = " ".join(github.fragment(name).split())
+            self.assertIn("`<!-- include: os/ppl --> review fetch --pr <number>`", text, name)
+            self.assertNotIn("graphql", text, name)
 
-    def test_github_fragment_commands_are_not_denied_except_the_ones_they_forbid(self):
+    def test_github_fragment_commands_are_not_denied(self):
         github = forges.get("github")
-        forbidden = {"gh pr review --approve", "gh pr merge"}
-        for name in ("stage6", "stage7", "review-loop"):
-            for span in re.findall(r"`(gh [^`]+)`", github.fragment(name)):
-                hit = any(p.search(span) for p, _ in github.denied_bash())
-                self.assertEqual(hit, span in forbidden, "%s: %s" % (name, span))
+        spans = [span for name in ("stage6", "stage7", "review-loop")
+                 for span in re.findall(r"`<!-- include: os/gh --> ([^`]+)`",
+                                        github.fragment(name))]
+        self.assertTrue(spans)
+        for span in spans:
+            command = "/opt/pin/bin/gh " + span
+            hit = [why for p, why in github.denied_bash() if p.search(command)]
+            self.assertEqual(hit, [], command)
 
     def test_union_of_denied_tools(self):
         union = forges.all_denied_tools()

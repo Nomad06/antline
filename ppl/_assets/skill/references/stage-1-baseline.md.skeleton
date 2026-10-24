@@ -11,15 +11,16 @@ convention `<TASK-ID>-<short-slug>`:
 
 ```bash
 cd <!-- include: harness/repo -->
-git fetch origin <!-- include: harness/default-branch -->
+<!-- include: os/fetch -->
 git worktree add <!-- include: harness/worktrees -->/<repo-name>-<TASK-ID> -b <TASK-ID>-<short-slug> origin/<!-- include: harness/default-branch -->
 ```
 
-This is where every gate and every dispatched worker runs from now on.
+<!-- include: os/fetch-note -->This is where every gate and every dispatched worker runs from now on.
 
 Then record the baseline. <!-- include: harness/baseline -->
-Commands are in `references/gates.md`. Then `ppl baseline record <file>`, with `base_sha`
-set to the worktree's HEAD before any of your own commits. `references/baseline.md` says exactly which field of that document is checked
+Commands are in `references/gates.md`. Then save it to
+`<!-- include: harness/scratch -->/<TASK-ID>/baseline.json`, with `base_sha` set to the worktree's HEAD before any of
+your own commits, and run `ppl baseline record <!-- include: harness/scratch -->/<TASK-ID>/baseline.json`. `references/baseline.md` says exactly which field of that document is checked
 (only `base_sha`) and which are a durable note by convention only - read it before assuming
 the rest of the document is validated the way a brief or a verdict is.
 

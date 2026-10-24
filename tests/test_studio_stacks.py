@@ -140,6 +140,10 @@ class TestOsSandboxPresets(unittest.TestCase):
                 self.assertEqual(harness.validate(doc, "demo"), [], stack)
 
 
+PINS = {name: {"path": "/opt/pin/bin/" + name, "realpath": "/opt/pin/bin/" + name}
+        for name in ("gh", "git", "ppl")}
+
+
 def install_draft_validated(draft):
     return harness.validate(install_draft(draft), "demo")
 
@@ -152,7 +156,8 @@ class TestDrafts(unittest.TestCase):
             doc = install_draft(stacks.draft(stack, project(empty_dir("pplrepo-"))))
             warnings = harness.validate(doc, "demo")
             self.assertEqual(warnings, [], stack)
-            rendered = harness.render_skill(doc)
+            # a GitHub draft renders on pinned binaries, none looked up on PATH here
+            rendered = harness.render_skill(doc, pins=PINS)
             self.assertFalse(any("<!-- include:" in text for text in rendered.values()), stack)
 
     def test_every_stack_focused_test_command_is_allowed_for_the_test_worker(self):

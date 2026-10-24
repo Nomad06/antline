@@ -581,6 +581,13 @@ _DEFAULT_BRANCH_PLACEHOLDER = "<default-branch>"
 _SCRATCH_PLACEHOLDER = "<scratch>"
 _FRONTMATTER = "---\n"
 _FRONTMATTER_END = "\n---\n"
+# The sentence after each command the skill runs outside the OS sandbox: escape.decide lets the
+# orchestrator out only for one plain command on a pin, and gh and ppl only from a directory
+# no sandboxed command writes.
+OS_FLAG_NOTE = ("Run each command here that starts with an absolute path exactly as written, "
+                "alone in a Bash call with `dangerouslyDisableSandbox: true`, and from the "
+                "workspace when it runs gh or ppl [R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
+_UNKNOWN_REPO = "<owner/name>"
 
 
 def _gate_recipes(doc):
@@ -608,22 +615,62 @@ def _fragment_file(doc, name):
             .replace(_SCRATCH_PLACEHOLDER, str(os_sandbox.scratch_root())))
 
 
-def _values(doc):
+def _os_values(doc, pins):
+    """The os/* includes. With the OS sandbox profile the GitHub commands run on the pinned
+    binaries, word for word in the shapes the guard lets out of the sandbox, each followed by
+    OS_FLAG_NOTE. The repositories and the fetch come from the os_sandbox functions the facts
+    and the allow entries are made with, since apply renders before it writes the facts.
+    Without the profile every include is today's bare command, and the notes are empty."""
+    default_branch = doc["repo"]["default_branch"]
+    values = {("os", "gh"): "gh", ("os", "ppl"): "ppl", ("os", "flag-note"): "",
+              ("os", "fetch"): "git fetch origin %s" % default_branch, ("os", "fetch-note"): "",
+              ("os", "push"): "git push -u origin <branch>", ("os", "destroy"): "",
+              ("os", "forge-repo"): _UNKNOWN_REPO, ("os", "tracker-repo"): _UNKNOWN_REPO}
+    if not os_sandbox.needed(doc):
+        return values
+    pins = pins if pins is not None else os_sandbox.pins()
+    forge_repo, tracker_repo = os_sandbox.repos(doc)
+    forge_repo = forge_repo or _UNKNOWN_REPO
+    gh = pins["gh"]["path"]
+    values.update({("os", "gh"): gh, ("os", "ppl"): pins["ppl"]["path"],
+                   ("os", "flag-note"): OS_FLAG_NOTE, ("os", "forge-repo"): forge_repo,
+                   ("os", "tracker-repo"): tracker_repo or _UNKNOWN_REPO})
+    if doc["forge"]["kind"] != "github":
+        # git reaches another forge from inside the sandbox
+        return values
+    values.update({
+        ("os", "fetch"): os_sandbox.fetch_command(doc, pins),
+        ("os", "fetch-note"): OS_FLAG_NOTE + "\n\n",
+        ("os", "push"): os_sandbox.push_command(pins),
+        ("os", "destroy"): (" The two GitHub commands are `%s pr close <number> -R %s` and `%s`, "
+                            "`<branch>` the run's branch and `<worktree>` its worktree. %s"
+                            % (gh, forge_repo, os_sandbox.push_command(pins, delete=True),
+                               OS_FLAG_NOTE)),
+    })
+    return values
+
+
+def _values(doc, pins=None):
     forge = forges.get(doc["forge"]["kind"])
     skills = (doc.get("knowledge") or {}).get("skills") or []
     repo = doc["repo"]
     sequence_values = {("sequence", name): sequences.render(sequence[1])
                        for name, sequence in sequences.SEQUENCES.items()}
     sequence_values[("harness", "scratch")] = str(os_sandbox.scratch_root())
+    os_values = _os_values(doc, pins)
+    fragment_values = dict(sequence_values)
+    fragment_values[("harness", "default-branch")] = repo["default_branch"]
+    fragment_values.update(os_values)
 
-    # A forge fragment may include a sequence, so stage 7 and the review loop
-    # state the one close-out. Any other marker in it is refused.
+    # A forge fragment may include a sequence, so stage 7 and the review loop state the one
+    # close-out, and the os/* commands it runs on GitHub with the default branch and the
+    # scratch path they name. Any other marker in it is refused.
     def fragment(name):
-        return _render_text(forge.fragment(name).strip(), sequence_values, "forge/%s" % name)
+        return _render_text(forge.fragment(name).strip(), fragment_values, "forge/%s" % name)
 
     tracker = trackers.get(doc["tracker"]["kind"])
     # A tracker fragment may also name the read tools the harness lists, as it lists them.
-    tracker_values = dict(sequence_values)
+    tracker_values = dict(fragment_values)
     tracker_values[("tracker", "read-tools")] = ", ".join(
         "`%s`" % tool for tool in doc["tracker"].get("read_tools") or [])
 
@@ -632,6 +679,7 @@ def _values(doc):
 
     return {
         **sequence_values,
+        **os_values,
         ("tracker", "admission"): tracker_fragment("admission"),
         ("tracker", "close"): tracker_fragment("close"),
         ("vocab", "noun"): forge.VOCABULARY["noun"],
@@ -680,13 +728,14 @@ def _with_frontmatter(text, skill_name):
     return head + sep + SKILL_NOTICE + "\n" + tail
 
 
-def render_skill(doc, skill_name="pipeline"):
+def render_skill(doc, skill_name="pipeline", pins=None):
     """relative path -> text of every file of the skill, nothing written.
     Refuses SCHEMA_INVALID on an include marker it cannot resolve, so a
-    marker never reaches the disk."""
+    marker never reaches the disk. `pins` are the binaries apply pinned, looked
+    up on PATH when it is None and the harness needs the OS sandbox profile."""
     if not _NAME_RE.match(skill_name or ""):
         raise PplError("SCHEMA_INVALID", "skill name %r is not a plain directory name" % skill_name)
-    values = _values(doc)
+    values = _values(doc, pins)
     root = paths.root() / "skill"
     rendered = {}
     for path in sorted(root.rglob("*")):
@@ -734,7 +783,8 @@ def apply(name, agents_dir=None, skills_dir=None):
         _fail(name, "%s is not an installed harness, add it with `ppl harness add` and apply it "
               "by name" % doc["_dir"])
     config.active_harness()
-    skill_files = render_skill(doc)
+    pin_map = os_sandbox.pins() if os_sandbox.needed(doc) else None
+    skill_files = render_skill(doc, pins=pin_map)
     _size_warnings(skill_files, {role: routing.render(role, doc) for role in routing.REQUIRED_ROLES})
     workspace = config.section("claude").get("workspace") or ""
     try:
@@ -749,7 +799,6 @@ def apply(name, agents_dir=None, skills_dir=None):
             raise PplError("SETUP_INCOMPLETE", "the OS sandbox profile is written to the "
                            "workspace's local settings and no [claude] workspace is configured. "
                            "Run ppl setup claude, then ppl harness apply again.")
-        pin_map = os_sandbox.pins()
         sandbox_facts = os_sandbox.facts(doc, workspace, pin_map)
         prof = os_sandbox.profile(doc, workspace, pin_map)
         sandbox_facts["written_sandbox"] = prof["sandbox"]
@@ -875,6 +924,18 @@ def _missing_skills(doc):
     return warnings
 
 
+def _check_pins(doc):
+    """The pins a check renders the skill with: the binaries apply would pin, or their bare
+    names when one is not on PATH. A check measures the rendered text, and apply looks every
+    pin up again and refuses a missing one."""
+    if not os_sandbox.needed(doc):
+        return None
+    try:
+        return os_sandbox.pins()
+    except PplError:
+        return {name: {"path": name, "realpath": name} for name in os_sandbox.PIN_NAMES}
+
+
 def verify(name_or_path, source):
     """{"errors": [...], "warnings": [...]} for the harness at `name_or_path`,
     what `ppl harness validate` prints and the studio shows for a draft or a
@@ -885,7 +946,7 @@ def verify(name_or_path, source):
         doc = load(str(name_or_path))
         warnings = validate(doc, source)
         require_absolute_repo(doc)
-        warnings += _size_warnings(render_skill(doc), agent_texts(doc))
+        warnings += _size_warnings(render_skill(doc, pins=_check_pins(doc)), agent_texts(doc))
         warnings += unrunnable_focused_tests(doc)
         warnings += _missing_skills(doc)
     except PplError as exc:

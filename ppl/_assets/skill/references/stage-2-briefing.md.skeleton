@@ -3,8 +3,9 @@
 `ppl stage enter briefing`, then dispatch `ppl-briefer` with the task content Stage 0 read, the linked
 specs and the relevant knowledge skill (<!-- include: knowledge/skills -->).
 It has no write tool and no shell of its own: it returns the brief as the JSON body of its
-final message and nothing else. Save that message to a scratch file yourself, then run
-`ppl brief set <file> --from ppl-briefer`, which validates the schema, derives the boundary, and binds `spec_revision` to a fingerprint of `name_contract`,
+final message and nothing else. Save that message to
+`<!-- include: harness/scratch -->/<TASK-ID>/brief.json` yourself, then run
+`ppl brief set <!-- include: harness/scratch -->/<TASK-ID>/brief.json --from ppl-briefer`, which validates the schema, derives the boundary, and binds `spec_revision` to a fingerprint of `name_contract`,
 `acceptance` and the write/forbid boundary together
 [R-BRIEF-SPEC-REVISION-STALE] - the printed value is the exact string you
 must hand the verifier verbatim in Stage 5. Note it down.
@@ -20,8 +21,9 @@ The brief is then challenged before anything is implemented. Spend `ppl budget s
 and dispatch `ppl-brief-challenger` with the spec text (the task content, tech analysis), the accepted
 brief and its `spec_revision`; it answers three fixed questions and nothing else: which new
 classes in `name_contract` duplicate an existing owner, which wire shapes differ from the
-spec's own wording, and what each open decision costs to close now. Save its JSON to a
-scratch file and run `ppl brief challenge <file> --generation <n> --from ppl-brief-challenger`.
+spec's own wording, and what each open decision costs to close now. Save its JSON to
+`<!-- include: harness/scratch -->/<TASK-ID>/challenge.json` and run
+`ppl brief challenge <!-- include: harness/scratch -->/<TASK-ID>/challenge.json --generation <n> --from ppl-brief-challenger`.
 An `ACCEPTED` report
 bound to the current `spec_revision` is what lets `ppl stage enter implementation` proceed,
 and `ppl transition done` re-reads the same binding, so a re-brief after the challenge means

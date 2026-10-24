@@ -805,15 +805,17 @@ class TestGithubIssuesWriteDenials(GithubIssuesCase):
         # The review loop runs before the merge is observed, so a denial here
         # would stop it.
         github = forges.get("github")
-        spans = [span for name in ("stage6", "stage7", "review-loop")
-                 for span in re.findall(r"`(gh [^`]+)`", github.fragment(name))]
+        # the include markers filled as a render fills them, the pinned gh as it is named
+        markers = {"os/gh": "/opt/pin/bin/gh", "os/forge-repo": "o/r",
+                   "harness/scratch": "/tmp/s", "harness/default-branch": "main"}
+        spans = [re.sub(r"<!-- include: ([a-z/-]+) -->", lambda m: markers[m.group(1)], span)
+                 for name in ("stage6", "stage7", "review-loop")
+                 for span in re.findall(r"`(<!-- include: os/gh -->[^`]+)`", github.fragment(name))]
         self.assertTrue(spans)
-        forbidden = {"gh pr review --approve", "gh pr merge"}
-        values = {"<owner>": "o", "<repo>": "r", "<number>": "7", "<id>": "123",
-                  "<text>": "'Fixed in abc123, see the issue: done; thanks'",
-                  "<TASK-ID>": "GH-12", "<summary>": "fix the issue view", "<file>": "/tmp/b.md"}
+        values = {"<number>": "7", "<id>": "123", "<branch>": "GH-12-fix",
+                  "<TASK-ID>": "GH-12", "<summary>": "fix the issue view"}
         filled = [re.sub(r"<[A-Za-z-]+>", lambda m: values[m.group(0)], span) for span in spans]
-        self.assert_allowed(spans + [span for span in filled if span not in forbidden])
+        self.assert_allowed(spans + filled)
 
     def test_prose_naming_gh_issue_is_not_a_write(self):
         self.assert_allowed(
