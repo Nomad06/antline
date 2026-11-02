@@ -2102,7 +2102,8 @@ Per tick:
    (`threads.json`, section 6.6) already answered on this exact `last_note_id`. On GitHub the
    fetched document also keeps each thread's `notes` (`id`, `author`, `path`, `body`), the
    oldest 20 by id with each body cut to 4000 characters, while `note_count` still counts all
-   of them. Only what it returns is classified by `ppl-review-responder` (tier `average`), into exactly one class:
+   of them. Only what it returns is classified by `ppl-review-responder` (tier `average`),
+   into exactly one class:
    - `NEEDS_CODE_CHANGE` - re-enter stage 3 with the remark as an additional constraint.
      Full loop: worker -> test-worker -> gates -> verifier. New SHA invalidates approvals.
    - `NEEDS_REPLY_ONLY` - a factual answer exists in the code or the evidence. Drafts a

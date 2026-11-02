@@ -116,6 +116,12 @@ class TestGithubFetch(unittest.TestCase):
         notes = github_fetch.fetch("o/r", 5, FakeGh(comments=comments))["threads"][0]["notes"]
         self.assertEqual([note["body"] for note in notes], ["", ""])
 
+    def test_a_note_with_a_non_string_path_keeps_none(self):
+        comments = [{"id": 5, "user": {"login": "a"}, "path": 7, "body": "x",
+                     "in_reply_to_id": None}]
+        notes = github_fetch.fetch("o/r", 5, FakeGh(comments=comments))["threads"][0]["notes"]
+        self.assertIsNone(notes[0]["path"])
+
     def test_resolution_comes_from_graphql_by_database_id(self):
         doc = github_fetch.fetch("o/r", 5, FakeGh(threads=[(101, True), (201, False)]))
         self.assertEqual([t["resolved"] for t in doc["threads"]], [True, False])
