@@ -46,3 +46,10 @@ usd_max = 0
 # and 6, format_refusals 2.0 and 5, cage_hits_high 5.0 and 5.
 # [metrics]
 # verifier_never_reworks_min_sample = 20
+
+# Reflection: after ppl merge observed, ppl lessons bundle writes the run's evidence bundle and
+# the orchestrator dispatches ppl-reflector to propose lessons for the owner to review. It is on
+# by default. reflect = false turns it off, and ppl lessons bundle then writes nothing. reflect
+# is the only key here, ppl refuses any other.
+# [lessons]
+# reflect = false

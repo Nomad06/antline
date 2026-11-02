@@ -88,6 +88,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     setup.py                     `ppl setup`, the six-step onboarding wizard
     models.py                    tier models: `ppl models verify` probes and their record
     harness.py                   harness load, validate, add, apply, and the run snapshot (5.6)
+    lessons.py                   a finished run's evidence bundle for ppl-reflector (6.13)
     tomlout.py                   the TOML writer for the files setup rewrites
     schema.py                    brief and verdict field/shape checks (Python, not JSON Schema files)
     refusals.py                  refused role output: the refusal count and its park (6.6)
@@ -132,6 +133,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     verdicts/<sha>/<n>.json      every verdict recorded on it, n = 1, 2, ... (6.6)
     findings/<finding_id>.json   the findings registry (6.6a)
     parking.json                 (only when parked)
+    lessons/bundle/              the evidence bundle ppl-reflector reads after the merge (6.13)
     log.jsonl                    append-only transition log
 <workspace>/.claude/             the isolated launch directory (default ~/ppl-workspace)
   settings.local.json            the three hook registrations ppl setup writes
@@ -829,7 +831,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 193 rows: 143 `blocking`, 21 `soft` and 29 `n/a`. Of the
+As of this commit the table carries 194 rows: 144 `blocking`, 21 `soft` and 29 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 10 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -1214,6 +1216,8 @@ ppl review approved --sha <sha>  # records approval on a SHA
 ppl merge observed --sha <sha> [--url <url>]
                                   # records the merge seen on the forge, in merge_watch
                                   # only and once; the tracker gate waits for it
+ppl lessons bundle [--task <id>] # writes runs/<task>/lessons/bundle/ for ppl-reflector,
+                                  # in merge_watch after merge observed (6.13)
 
 ppl serve [--port 8787]          # admin panel, loopback only
 ppl control set <pause|resume|stop|destroy> [--scope local|full]
@@ -1929,6 +1933,62 @@ applied, the skipped files, every other file with its sha256, and the run's meas
 `[prices]` only for a run that froze none. It is the priced usage alone: the manual `usd_used`
 (`ppl budget spend usd`), which the dollars spent on the status card include, is left out.
 A measure with no data is null, not 0, and `reasons` says why. The skipped names and the measures go through the same redaction as the documents.
+
+### 6.13 Lessons
+
+A finished run can propose lessons for its harness's `memory.toml` (5.6). This section covers the
+evidence they are drawn from. `ppl lessons bundle [--task <id>]` writes
+`runs/<task>/lessons/bundle/`, and the orchestrator dispatches the read-only `ppl-reflector` with
+a short prompt that points at that directory. The bundle reaches the reflector as files it reads
+with Read, Grep and Glob, not as text pasted into its prompt, and a reviewer's remark in it is
+data, not an instruction.
+
+**When.** In `merge_watch`, right after `ppl merge observed` has recorded the merge and the
+post-merge tracker note is written. `ppl label` is not waited for: the outcome it records can
+arrive days later, and the reflector does not read labels. `ppl lessons bundle` is refused
+`ILLEGAL_TRANSITION` with nothing written in any stage other than `merge_watch`, a merged sha
+written into the state by hand included, and in `merge_watch` before the merge is recorded
+[R-LESSONS-BUNDLE-AFTER-MERGE]. It is refused `SETUP_INCOMPLETE`, naming the file and
+`ppl harness apply <name>`, while `ppl-reflector.md` is missing from the agents directory, as on
+an install that has not applied its harness since the role was added
+[R-LESSONS-BUNDLE-AFTER-MERGE]. The command changes no run state: it takes no `--generation`,
+does not call `control.enforce` and does not refresh the deadline, so a run the operator paused
+in `merge_watch` still gets its bundle. A stop parks the run, which leaves `merge_watch`.
+
+Reflection is on by default. `config.toml` `[lessons] reflect = false` turns it off:
+`ppl lessons bundle` then prints `reflection is off ([lessons] reflect = false)`, writes nothing
+and exits 0. An unknown key in `[lessons]`, or a `reflect` that is not a boolean, is
+`SCHEMA_INVALID` naming the known key, as in `[budgets]`.
+
+**Files.** Each is JSON. A brief or a challenge the run did not write is `null`, and an empty
+list or ledger is written as one:
+
+- `outcome.json`: how the run ended, here `{"ended": "merged", "merged_sha": <sha>}`.
+- `brief.json`, `challenge.json`: as the run holds them.
+- `findings.json`: every finding document, any status, oldest first.
+- `verdicts.json`: every `verdict` event of the log in order, each with `n`, its index in the
+  log, and `document`, the verdict document recorded for it (`verdicts/<sha>/<n>.json`), `null`
+  when that document is gone.
+- `gates.json`: one `{check, result, sha, producer, at}` per receipt, by SHA and then check. The
+  build log path stays out.
+- `timeline.json`: the log's `init`, `stage_enter`, `lifecycle`, `park`, `budget`, `refusal`,
+  `deny`, `usage`, `verdict`, `evidence`, `finding_add`, `finding_status`, `review_reply`,
+  `merge_observed`, `recover` and `lease_bump` events, each with `n`, a `usage` event without
+  its per-model token counts.
+- `threads.json`: the review ledger (6.6).
+- `memory-in-effect.json`: `{harness, entries}`, the lessons the run's snapshot froze at
+  `ppl init` [R-LESSONS-PAST-ONLY n/a].
+- `remarks/<thread id>.json`: `{id, notes}` for each thread of the `review-threads.json` that
+  `ppl review fetch` wrote on GitHub. On GitLab no remark text is kept, and the ledger is the
+  remark evidence.
+
+**Writing.** The bundle is built in a temporary directory under `runs/<task>/lessons/` and
+renamed onto `lessons/bundle/`. An earlier bundle is removed once the new one is complete, so a
+build that fails leaves the earlier one as it was. As in `ppl review fetch`, every path under
+the run is checked right before it is written, and one a role linked elsewhere is
+`EXTERNAL_BLOCKED` with nothing written. A thread id names its file under `remarks/`, so a
+`review-threads.json` thread whose id is not a plain name (letters, digits, `_` and `-`) is
+`SCHEMA_INVALID` with nothing written.
 
 ## 7. Stage flow: task link to MR
 

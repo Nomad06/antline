@@ -6,8 +6,8 @@ import stat
 import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
-               harness, metrics, models, os_sandbox, paths, recover, refusals, review, routing, run, schema,
-               setup, status, store, trackers, trail, usage, verdict, watchdog)
+               harness, lessons, metrics, models, os_sandbox, paths, recover, refusals, review, routing,
+               run, schema, setup, status, store, trackers, trail, usage, verdict, watchdog)
 from .errors import PplError, role_output
 from .forges import github_fetch
 
@@ -1176,6 +1176,20 @@ def cmd_label(args):
     return 0
 
 
+def cmd_lessons(args):
+    # No control.enforce, by design: the bundle changes no run state, and a destroy with
+    # reflection builds it after control.set_command recorded that destroy, so an enforce
+    # would refuse its own caller. lessons.bundle holds the stage gate
+    # [R-LESSONS-BUNDLE-AFTER-MERGE].
+    task_id = resolve_task(args)
+    target = lessons.bundle(task_id)
+    if target is None:
+        print("reflection is off ([lessons] reflect = false)")
+    else:
+        print("bundle: %s" % target)
+    return 0
+
+
 def cmd_apply_patch(args):
     task_id = resolve_task(args)
     require_current_generation(task_id, args.generation)
@@ -1206,7 +1220,7 @@ COMMANDS = {
     "apply-patch": cmd_apply_patch, "destroy": cmd_destroy,
     "mr": cmd_mr, "merge": cmd_merge, "review": cmd_review, "doctor": cmd_doctor,
     "watchdog": cmd_watchdog, "metrics": cmd_metrics, "label": cmd_label,
-    "setup": cmd_setup, "tracker": cmd_tracker, "trail": cmd_trail,
+    "setup": cmd_setup, "tracker": cmd_tracker, "trail": cmd_trail, "lessons": cmd_lessons,
 }
 
 
@@ -1504,6 +1518,10 @@ def build_parser():
     p.add_argument("--sha", required=True)
     p.add_argument("--actual", required=True, choices=list(metrics.LABEL_VALUES))
     p.add_argument("--by")
+    p.add_argument("--task")
+
+    p = sub.add_parser("lessons")
+    p.add_argument("action", choices=["bundle"])
     p.add_argument("--task")
     return parser
 

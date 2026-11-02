@@ -2230,6 +2230,18 @@ owner = "ppl"
 residual = "PROPERTY: memory is prompt text, the guard reads boundary.json and the harness.json shapes, tracker, forge, os_sandbox and tests keys only, never memory"
 
 [[rule]]
+id = "R-LESSONS-BUNDLE-AFTER-MERGE"
+statement = "ppl lessons bundle writes the run's evidence bundle, runs/<task>/lessons/bundle/, only while the run is in stage merge_watch and ppl merge observed has recorded the merge (state.mr.merged_sha): in any other stage, a merged sha included, or before the merge is recorded, it is refused with ILLEGAL_TRANSITION and writes nothing. It is refused SETUP_INCOMPLETE, naming the file, while the reflector's agent file ppl-reflector.md is missing from the agents directory, and with config.toml [lessons] reflect = false it writes nothing and exits 0."
+scope = "ppl CLI"
+event = "ppl lessons bundle"
+enforcement = "blocking"
+hook_or_check = "ppl/lessons.py:bundle, ppl/cli.py:cmd_lessons"
+deny_test = "tests/test_lessons.py::TestBundle::test_bundle_before_the_merge_is_recorded_is_refused, tests/test_lessons.py::TestBundle::test_bundle_outside_merge_watch_is_refused"
+allow_test = "tests/test_lessons.py::TestBundle::test_bundle_holds_every_file_with_the_runs_evidence, tests/test_lessons.py::TestBundle::test_a_second_bundle_replaces_the_first, tests/test_lessons.py::TestBundle::test_bundle_is_skipped_when_reflection_is_off"
+owner = "ppl"
+residual = "the merge is the sha the orchestrator recorded off the forge (R-MERGE-OBSERVED-ONCE), not checked here. Neither the command nor lessons.build_bundle, the builder behind it, calls control.enforce, so a run the operator paused in merge_watch still gets its bundle (a stop parks the run, which leaves merge_watch), and build_bundle checks no stage, so any other caller of it holds its own gate. The bundle copies what the run's documents hold, unjudged, and a review-threads.json thread whose id is not a plain name is refused SCHEMA_INVALID with nothing written. A pipeline role is denied the command by R-GUARD-PPL-CLI-DENIED like every ppl call that is not read-only"
+
+[[rule]]
 id = "R-DOCTOR-HOOK-SHAPE"
 statement = "ppl doctor reports per settings file dispatch_hook and usage_hook (registered or missing) and hook_shape (ok or the problems of the guard, dispatch and usage entries, read from the file and never run: type not command, no timeout, an interpreter that is not an absolute path to an executable file, a hook script that is not an absolute path to a file). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook or the SubagentStop usage hook is not, or has such a problem, and when a registered hook script is not under this install's assets hooks directory. The interpreter version is asked only where ppl doctor already runs the guard (hook_runs), which reports one older than Python 3.11."
 scope = "hook registration"

@@ -70,6 +70,32 @@ class TestConfig(unittest.TestCase):
             config.load()
         self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
 
+    def test_lessons_reflect_defaults_to_true(self):
+        self.assertIs(config.lessons_reflect(), True)
+        self.write("[lessons]\n")
+        self.assertIs(config.lessons_reflect(), True)
+        self.write("[lessons]\nreflect = true\n")
+        self.assertIs(config.lessons_reflect(), True)
+        self.write("[lessons]\nreflect = false\n")
+        self.assertIs(config.lessons_reflect(), False)
+
+    def test_an_unknown_lessons_key_is_refused(self):
+        self.write("[lessons]\nreflekt = false\n")
+        with self.assertRaises(PplError) as caught:
+            config.lessons_reflect()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("unknown key reflekt", caught.exception.message)
+        self.assertIn("the known key is reflect", caught.exception.message)
+
+    def test_a_non_boolean_reflect_is_refused(self):
+        for value in ('"false"', "0", "1", "[]"):
+            with self.subTest(value=value):
+                self.write("[lessons]\nreflect = %s\n" % value)
+                with self.assertRaises(PplError) as caught:
+                    config.lessons_reflect()
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                self.assertIn("lessons.reflect", caught.exception.message)
+
 
 
 class TestWrite(unittest.TestCase):
