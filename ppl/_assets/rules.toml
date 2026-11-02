@@ -55,24 +55,24 @@ residual = "inert until the hook is registered, see R-GUARD-NOT-ARMED. The Bash 
 
 [[rule]]
 id = "R-ROLE-READONLY-NO-WRITE"
-statement = "ppl-briefer, ppl-brief-challenger, ppl-verifier and ppl-review-responder may write no path at all."
+statement = "ppl-briefer, ppl-brief-challenger, ppl-verifier, ppl-review-responder and ppl-reflector may write no path at all."
 scope = "active run, read-only roles"
 event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit"
 enforcement = "blocking"
 hook_or_check = "ppl/boundary.py:ROLE_RULES, ppl/boundary.py:check_path"
-deny_test = "tests/test_guard.py::TestGuard::test_verifier_may_not_write_anything, tests/test_guard.py::TestGuard::test_brief_challenger_may_not_write_anything, tests/test_boundary.py::TestReadOnlyRoles::test_verifier_may_write_nothing, tests/test_boundary.py::TestReadOnlyRoles::test_every_read_only_role_may_write_nothing"
+deny_test = "tests/test_guard.py::TestGuard::test_verifier_may_not_write_anything, tests/test_guard.py::TestGuard::test_brief_challenger_may_not_write_anything, tests/test_boundary.py::TestReadOnlyRoles::test_verifier_may_write_nothing, tests/test_boundary.py::TestReadOnlyRoles::test_every_read_only_role_may_write_nothing, tests/test_guard.py::TestGuard::test_the_reflector_may_not_write_anything, tests/test_boundary.py::TestReadOnlyRoles::test_reflector_may_write_nothing"
 allow_test = ""
 owner = "guard-hook"
 residual = "inert until the hook is registered, see R-GUARD-NOT-ARMED"
 
 [[rule]]
 id = "R-ROLE-TOOLS-READONLY"
-statement = "The generated agent file for a read-only role grants no Edit, Write or Bash tool. The one exception is Bash for ppl-review-responder under a forge whose adapter grants it (github), where the hook caps it to the forge's read shapes, see R-REVIEW-RESPONDER-BASH-SHAPES."
+statement = "The generated agent file for a read-only role (ppl-reflector among them) grants no Edit, Write or Bash tool. The one exception is Bash for ppl-review-responder under a forge whose adapter grants it (github), where the hook caps it to the forge's read shapes, see R-REVIEW-RESPONDER-BASH-SHAPES."
 scope = "global, every dispatch of that role"
 event = "ppl routing apply"
 enforcement = "blocking"
 hook_or_check = "ppl/routing.py:BASE_TOOLS, ppl/routing.py:role_tools, ppl/routing.py:render"
-deny_test = "tests/test_routing.py::TestRouting::test_read_only_roles_get_no_write_tools, tests/test_routing.py::TestRouting::test_verifier_gets_no_bash, tests/test_routing.py::TestRouting::test_only_the_review_responder_may_hold_bash_and_only_under_a_granting_forge, tests/test_harness.py::TestMalformedInputIsRefusedNotATraceback::test_a_built_in_tool_cannot_be_granted_through_extra_tools"
+deny_test = "tests/test_routing.py::TestRouting::test_read_only_roles_get_no_write_tools, tests/test_routing.py::TestRouting::test_verifier_gets_no_bash, tests/test_routing.py::TestRouting::test_only_the_review_responder_may_hold_bash_and_only_under_a_granting_forge, tests/test_routing.py::TestRouting::test_the_reflector_holds_only_read_tools, tests/test_harness.py::TestMalformedInputIsRefusedNotATraceback::test_a_built_in_tool_cannot_be_granted_through_extra_tools"
 allow_test = "tests/test_routing.py::TestRouting::test_code_worker_gets_edit_tools"
 owner = "ppl"
 residual = "the allow-list is real only after ppl routing apply has been run against the live agents directory"

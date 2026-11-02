@@ -201,6 +201,7 @@ issue write tools match its `mcp_write_regex`).
 | ppl-test-worker | average | high | test paths only [R-ROLE-TEST-WORKER-MAIN] | main sources for writes [R-ROLE-TEST-WORKER-MAIN]; its own Read/Grep/Glob and Bash reads of them are denied by the guard hook [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS] |
 | ppl-verifier | good | xhigh | nothing | Edit, Write, MultiEdit, Bash, all git mutations |
 | ppl-review-responder | average | high | nothing | posting directly; it drafts, orchestrator posts |
+| ppl-reflector | the briefer's | the briefer's | nothing - it returns lesson proposals as JSON | every path, it has no write tool [R-ROLE-READONLY-NO-WRITE]; a `routing.toml` without `[roles.ppl-reflector]` routes it as a copy of the briefer's entry without `by_risk` |
 
 Rationale for routing: chapter 8. The stronger tier is used where the solution space is wide
 (briefing, verification). The `average` tier executes on rails. The subscription window is
@@ -923,7 +924,7 @@ receipt under that name [R-HARNESS-FOCUSED-TESTS-REQUIRED]. It also refuses a ta
 placeholder other than `<test_class>`, `<worktree>`, `<TASK-ID>`, `<SHA>` and `<GENERATION>`
 that neither `skill/gates.md` nor `skill/extra-gates.md` names outside a verbatim copy of a gate
 command (example-maven's `<module>` is named in its `gates.md`, an echo of the command such as the
-studio's generated `gates.md` vouches for nothing), and a `templates/*.part` for a role that is not one of the six
+studio's generated `gates.md` vouches for nothing), and a `templates/*.part` for a role that is not one of the seven
 [R-HARNESS-UNKNOWN-KEY]. Any other file under `skill/` or `templates/` is a warning, as is a
 `knowledge.skills` name found neither under the configured skills directory nor under
 `~/.claude/skills`, and a focused-tests command no `[[guard.shape]]` lets the test worker run.
@@ -1004,7 +1005,7 @@ forge, as an allowlist of the adapter's read shapes, and under GitLab every Bash
 is denied [R-REVIEW-RESPONDER-BASH-SHAPES].
 
 The hook's own failure modes are decided the same way. When `decide()` raises, the call is
-denied for any role in `boundary.ROLE_RULES` (all six generated roles) and allowed for an
+denied for any role in `boundary.ROLE_RULES` (all seven generated roles) and allowed for an
 unroled session, so a hook defect cannot lock
 the operator out of unrelated work [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A call that asks to
 run outside the OS sandbox is the exception: it is denied whoever makes it
@@ -1265,7 +1266,7 @@ ppl doctor [--task <TASK-ID>]    # reports where the guard hook is registered - 
    structured edit tool or a write-shaped Bash construct [R-ROLE-CODE-WORKER-TESTS], an
    unroled session may not write inside the repo at all [R-UNROLED-REPO-WRITE], and every
    other role either may not write anywhere (`ppl-briefer`, `ppl-verifier`,
-   `ppl-review-responder` [R-ROLE-READONLY-NO-WRITE]) or may write test paths only
+   `ppl-review-responder`, `ppl-reflector` [R-ROLE-READONLY-NO-WRITE]) or may write test paths only
    (`ppl-test-worker` [R-ROLE-TEST-WORKER-MAIN]) - modulo the interpreter-invocation
    residual both R-ROLE-CODE-WORKER-TESTS and R-GUARD-BASH-WRITE-BOUNDARY already disclose:
    a `python3 -c` (or perl/ruby/node) write reaches the same path uncaught, so "only that
@@ -2323,7 +2324,7 @@ third-party file is `vendor/htm-preact.mjs`, the htm 3.1.1 standalone bundle wit
 beside it and run the suite.
 
 **Saves.** The studio names a file by a key, `routing` or `harness:<installed
-name>:<file>` with the file one of `harness.toml`, the four `skill/` fragments and the six
+name>:<file>` with the file one of `harness.toml`, the four `skill/` fragments and the seven
 `templates/<role>.part` overlays, and a history version by its timestamp. No studio file route
 reaches any other path [R-STUDIO-NO-RAW-PATHS]. The project path, the harness source and the
 playground's value and repo path that a request sends are read, never written

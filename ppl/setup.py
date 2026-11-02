@@ -284,7 +284,7 @@ def _step_claude(p):
 
 def _step_models(p, probe):
     config.ensure()
-    doc = routing.load()
+    doc = routing.load(unfilled=True)
     tiers = routing.tiers(doc)
     unknown = sorted(key[len(TIER_PREFIX):] for key in p.answers
                      if key.startswith(TIER_PREFIX) and key[len(TIER_PREFIX):] not in tiers)

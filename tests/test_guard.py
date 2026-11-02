@@ -70,6 +70,12 @@ class TestGuard(unittest.TestCase):
             "ppl-verifier", "Write", {"file_path": "/tmp/repo/notes.txt"}))
         self.assertIsNotNone(result)
 
+    def test_the_reflector_may_not_write_anything(self):
+        # rule: R-ROLE-READONLY-NO-WRITE
+        result = ppl_guard.decide(payload(
+            "ppl-reflector", "Write", {"file_path": "/tmp/repo/notes.txt"}))
+        self.assertIn("may not write any path", self.deny_reason(result))
+
     def test_brief_challenger_may_not_write_anything(self):
         # rule: R-ROLE-READONLY-NO-WRITE
         inside = ppl_guard.decide(payload(

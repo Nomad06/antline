@@ -155,7 +155,7 @@ the test writer tries to `cat` product code and the hook denies it
   consistency checks catch drift and omissions, but a model that is wrong in a
   self-consistent way passes. Real independence needs CI or a verifier on separate
   credentials.
-- More tokens than one agent. Six roles, high effort on the brief and the verification,
+- More tokens than one agent. Seven roles, high effort on the brief and the verification,
   and long runs can hit subscription rate limits and park.
 - It ends at approval and a human merges. That is deliberate, and it is not hands-off.
 - The cage is proven at hook level. An end-to-end run against your own tracker, forge and

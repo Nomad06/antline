@@ -9,6 +9,7 @@ for a subagent provider that means "use the Agent tool", since a Claude
 Code subagent is invoked by the orchestrator, not by this process.
 """
 
+import copy
 import hashlib
 import json
 import re
@@ -19,7 +20,11 @@ from . import boundary, escape, forges, memory, os_sandbox, paths, trackers
 from .errors import PplError
 
 REQUIRED_ROLES = ("ppl-briefer", "ppl-brief-challenger", "ppl-code-worker",
-                  "ppl-test-worker", "ppl-verifier", "ppl-review-responder")
+                  "ppl-test-worker", "ppl-verifier", "ppl-review-responder", "ppl-reflector")
+
+# A routing.toml without [roles.ppl-reflector] routes it as a copy of this role's entry
+# without by_risk: the same tier and effort, so no model not already verified for the install.
+REFLECTOR_FALLBACK = "ppl-briefer"
 
 # The roles a memory.toml entry may name: the pipeline's agents and the orchestrator.
 LESSON_ROLES = REQUIRED_ROLES + ("orchestrator",)
@@ -61,6 +66,11 @@ BASE_TOOLS = {
         "description": "Classifies reviewer remarks and drafts replies. Never posts and never resolves.",
         "max_turns": 30,
     },
+    "ppl-reflector": {
+        "tools": ["Read", "Grep", "Glob"],
+        "description": "Reads a finished run's evidence bundle and proposes sourced lessons for the owner. Read-only.",
+        "max_turns": 30,
+    },
 }
 
 _TOOL_TOKEN = re.compile(r"[A-Za-z0-9_.-]+")
@@ -78,7 +88,10 @@ def agents_dir():
     return config_toml.agents_dir()
 
 
-def load():
+def load(unfilled=False):
+    """The routing document of routing.toml. With unfilled=True the reflector
+    fallback is checked but not left in the document, for a caller that writes
+    the document back: a copied entry would freeze the briefer's tier into the file."""
     path = paths.routing_file()
     try:
         with open(path, "rb") as handle:
@@ -87,7 +100,11 @@ def load():
         raise PplError("SCHEMA_INVALID", "no routing.toml at %s" % path)
     except tomllib.TOMLDecodeError as exc:
         raise PplError("SCHEMA_INVALID", "routing.toml at %s is not valid TOML: %s" % (path, exc))
-    return _require_roles(config)
+    had = "ppl-reflector" in (config.get("roles") or {})
+    config = _require_roles(config)
+    if unfilled and not had:
+        config["roles"].pop("ppl-reflector", None)
+    return config
 
 
 def loads(text):
@@ -100,7 +117,21 @@ def loads(text):
     return _require_roles(config)
 
 
+def _fill_reflector(config):
+    """Give a routing document without [roles.ppl-reflector] a copy of the briefer's
+    entry minus by_risk. The briefer's own entry is not touched, and a document
+    without a briefer gets nothing filled."""
+    roles = config.get("roles")
+    if (isinstance(roles, dict) and "ppl-reflector" not in roles
+            and isinstance(roles.get(REFLECTOR_FALLBACK), dict)):
+        entry = copy.deepcopy(roles[REFLECTOR_FALLBACK])
+        entry.pop("by_risk", None)
+        roles["ppl-reflector"] = entry
+    return config
+
+
 def _require_roles(config):
+    _fill_reflector(config)
     missing = [r for r in REQUIRED_ROLES if r not in config.get("roles", {})]
     if missing:
         raise PplError("SCHEMA_INVALID", "routing.toml is missing roles: %s" % ", ".join(missing))
@@ -254,6 +285,7 @@ def validate_config(config):
     """Refuse a routing document ppl cannot route with: a missing role, an
     unknown tier or provider, a by_risk tier that is not declared, params that
     are not a table, or an effort Claude Code does not accept."""
+    _fill_reflector(config)
     missing = [r for r in REQUIRED_ROLES if r not in (config.get("roles") or {})]
     if missing:
         raise PplError("SCHEMA_INVALID", "routing.toml is missing roles: %s" % ", ".join(missing))
@@ -274,7 +306,7 @@ def preset_document(name):
     if name not in presets.PRESETS:
         raise PplError("SCHEMA_INVALID", "unknown preset %r (presets: %s)"
                        % (name, ", ".join(presets.PRESETS)))
-    config = load()
+    config = load(unfilled=True)
     table = tiers(config)
     for role_name, spec in presets.PRESETS[name].items():
         needed = [spec["tier"]] + list(spec.get("by_risk", {}).values())
@@ -291,7 +323,7 @@ def preset_document(name):
             entry["by_risk"] = dict(spec["by_risk"])
         else:
             entry.pop("by_risk", None)
-    validate_config(config)
+    validate_config(copy.deepcopy(config))  # the copy takes the reflector fallback, the file does not
     return config
 
 
@@ -306,7 +338,7 @@ def apply_preset(name):
 def summary(config=None):
     """One row per role: its tier, the model the tier resolves to, effort and
     by_risk, for the wizard and the Agents page."""
-    config = config if config is not None else load()
+    config = _fill_reflector(config if config is not None else load())
     rows = []
     for name in REQUIRED_ROLES:
         raw = config["roles"][name]
