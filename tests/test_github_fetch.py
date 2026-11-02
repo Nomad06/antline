@@ -70,12 +70,51 @@ class TestGithubFetch(unittest.TestCase):
         self.assertEqual(doc["pr"], 5)
         self.assertEqual(doc["threads"], [
             {"id": "101", "author": "alice", "resolved": False, "last_note_id": "103",
-             "last_author": "alice", "note_count": 3},
+             "last_author": "alice", "note_count": 3,
+             "notes": [{"id": "101", "author": "alice", "path": None, "body": "first"},
+                       {"id": "102", "author": "hubot", "path": None, "body": "reply"},
+                       {"id": "103", "author": "alice", "path": None, "body": "again"}]},
             {"id": "201", "author": "bob", "resolved": False, "last_note_id": "201",
-             "last_author": "bob", "note_count": 1}])
+             "last_author": "bob", "note_count": 1,
+             "notes": [{"id": "201", "author": "bob", "path": None, "body": "other"}]}])
         self.assertIn("fetched_at", doc)
         self.assertEqual(doc["reviews"][0]["state"], "APPROVED")
         self.assertEqual(doc["reviews"][0]["author"], "alice")
+
+    def test_threads_carry_their_note_bodies_oldest_first(self):
+        comments = [
+            {"id": 12, "user": {"login": "hubot"}, "body": "second", "path": "a.py",
+             "in_reply_to_id": 10},
+            {"id": 10, "user": {"login": "alice"}, "body": "first", "path": "a.py",
+             "in_reply_to_id": None},
+            {"id": 11, "user": {"login": "bob"}, "body": "no path", "in_reply_to_id": 10}]
+        doc = github_fetch.fetch("o/r", 5, FakeGh(comments=comments))
+        self.assertEqual(doc["threads"][0]["notes"], [
+            {"id": "10", "author": "alice", "path": "a.py", "body": "first"},
+            {"id": "11", "author": "bob", "path": None, "body": "no path"},
+            {"id": "12", "author": "hubot", "path": "a.py", "body": "second"}])
+
+    def test_note_bodies_and_counts_are_capped(self):
+        comments = [{"id": 1, "user": {"login": "a"}, "body": "x" * 50000,
+                     "in_reply_to_id": None}]
+        comments += [{"id": 1000 - n, "user": {"login": "a"}, "body": "n%d" % n,
+                      "in_reply_to_id": 1} for n in range(299)]
+        thread = github_fetch.fetch("o/r", 5, FakeGh(comments=comments))["threads"][0]
+        self.assertEqual(thread["note_count"], 300)
+        self.assertEqual(len(thread["notes"]), github_fetch.NOTES_MAX)
+        self.assertEqual(github_fetch.NOTES_MAX, 20)
+        ids = [int(note["id"]) for note in thread["notes"]]
+        self.assertEqual(ids, sorted(ids))
+        self.assertEqual(ids[0], 1)
+        self.assertEqual(ids[1], 702)
+        self.assertEqual(len(thread["notes"][0]["body"]), github_fetch.NOTE_BODY_MAX)
+        self.assertEqual(github_fetch.NOTE_BODY_MAX, 4000)
+
+    def test_a_note_without_a_body_keeps_an_empty_one(self):
+        comments = [{"id": 5, "user": {"login": "a"}, "in_reply_to_id": None},
+                    {"id": 6, "user": {"login": "a"}, "body": 7, "in_reply_to_id": 5}]
+        notes = github_fetch.fetch("o/r", 5, FakeGh(comments=comments))["threads"][0]["notes"]
+        self.assertEqual([note["body"] for note in notes], ["", ""])
 
     def test_resolution_comes_from_graphql_by_database_id(self):
         doc = github_fetch.fetch("o/r", 5, FakeGh(threads=[(101, True), (201, False)]))

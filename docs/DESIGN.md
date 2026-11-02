@@ -2099,8 +2099,10 @@ Per tick:
 3. `ppl review pending --threads <fetched threads> --sha <head>` is the dispatch filter: it
    drops resolved threads, threads authored by the pipeline's own recorded MR author
    (`ppl mr set --author`, sticky across MR updates), and threads the review ledger
-   (`threads.json`, section 6.6) already answered on this exact `last_note_id`. Only what it
-   returns is classified by `ppl-review-responder` (tier `average`), into exactly one class:
+   (`threads.json`, section 6.6) already answered on this exact `last_note_id`. On GitHub the
+   fetched document also keeps each thread's `notes` (`id`, `author`, `path`, `body`), the
+   oldest 20 by id with each body cut to 4000 characters, while `note_count` still counts all
+   of them. Only what it returns is classified by `ppl-review-responder` (tier `average`), into exactly one class:
    - `NEEDS_CODE_CHANGE` - re-enter stage 3 with the remark as an additional constraint.
      Full loop: worker -> test-worker -> gates -> verifier. New SHA invalidates approvals.
    - `NEEDS_REPLY_ONLY` - a factual answer exists in the code or the evidence. Drafts a

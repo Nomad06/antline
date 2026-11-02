@@ -16,6 +16,8 @@ _QUERY = ("query { repository(owner: \"%s\", name: \"%s\") { pullRequest(number:
           "reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved "
           "comments(first: 1) { nodes { databaseId } } } } } } }")
 _PAGE = 100
+NOTES_MAX = 20
+NOTE_BODY_MAX = 4000
 
 
 def is_repo(text):
@@ -83,6 +85,14 @@ def _resolved(text):
     return found
 
 
+def _note(comment):
+    body = comment.get("body")
+    path = comment.get("path")
+    return {"id": str(comment["id"]), "author": _login(comment.get("user")),
+            "path": path if isinstance(path, str) else None,
+            "body": body[:NOTE_BODY_MAX] if isinstance(body, str) else ""}
+
+
 def _threads(comments, resolved):
     groups = {}
     for comment in comments:
@@ -97,7 +107,9 @@ def _threads(comments, resolved):
         last = max(notes, key=lambda note: note["id"])
         threads.append({"id": str(root), "author": _login(notes[0].get("user")),
                         "resolved": resolved.get(root, False), "last_note_id": str(last["id"]),
-                        "last_author": _login(last.get("user")), "note_count": len(notes)})
+                        "last_author": _login(last.get("user")), "note_count": len(notes),
+                        "notes": [_note(note) for note in
+                                  sorted(notes, key=lambda note: note["id"])[:NOTES_MAX]]})
     return threads
 
 
