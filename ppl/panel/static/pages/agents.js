@@ -96,6 +96,112 @@ function RoleDetail({ role, routingDoc, mode, onDirty }) {
   </div>`;
 }
 
+function EvidenceRefs({ items }) {
+  return html`<span class="muted">${(items || []).map((e) => e.kind + " " + e.ref).join(", ")}</span>`;
+}
+
+function Proposal({ item, onWrite, busy }) {
+  const [cue, setCue] = useState(item.cue);
+  const [lesson, setLesson] = useState(item.lesson);
+  const [reason, setReason] = useState("");
+  const changes = () => {
+    const body = {};
+    if (cue !== item.cue) { body.cue = cue; }
+    if (lesson !== item.lesson) { body.lesson = lesson; }
+    return body;
+  };
+  const base = "/api/lessons/" + encodeURIComponent(item.id);
+  return html`<article class="step">
+    <h3>${item.role.replace("ppl-", "")} <span class="muted">from ${item.task}</span></h3>
+    <p class="help">Evidence: <${EvidenceRefs} items=${item.evidence} /></p>
+    <${Field} label="When"><input type="text" value=${cue} onInput=${(e) => setCue(e.target.value)} /><//>
+    <${Field} label="Lesson"><textarea value=${lesson} onInput=${(e) => setLesson(e.target.value)}></textarea><//>
+    <${Button} primary disabled=${busy} onClick=${() => onWrite(base + "/accept", changes())}>Accept<//>
+    <${Field} label="Reason to reject"><input type="text" value=${reason} onInput=${(e) => setReason(e.target.value)} /><//>
+    <${Button} disabled=${busy || !reason.trim()} onClick=${() => onWrite(base + "/reject", { reason })}>Reject<//>
+  </article>`;
+}
+
+function MemoryEntry({ entry, onWrite, busy }) {
+  const [editing, setEditing] = useState(false);
+  const [cue, setCue] = useState(entry.cue);
+  const [lesson, setLesson] = useState(entry.lesson);
+  const base = "/api/memory/" + encodeURIComponent(entry.id);
+  const save = async () => {
+    const body = {};
+    if (cue !== entry.cue) { body.cue = cue; }
+    if (lesson !== entry.lesson) { body.lesson = lesson; }
+    if (await onWrite(base + "/edit", body)) { setEditing(false); }
+  };
+  return html`<li>
+    <strong>${entry.id}</strong> ${entry.status === "retired" ? html`<${Badge} kind="skipped">retired<//>` : null}
+    <span class="muted">seen ${entry.seen}</span>
+    ${editing ? html`<div>
+      <${Field} label="When"><input type="text" value=${cue} onInput=${(e) => setCue(e.target.value)} /><//>
+      <${Field} label="Lesson"><textarea value=${lesson} onInput=${(e) => setLesson(e.target.value)}></textarea><//>
+      <${Button} primary disabled=${busy} onClick=${save}>Save<//>
+      <${Button} disabled=${busy} onClick=${() => { setEditing(false); setCue(entry.cue); setLesson(entry.lesson); }}>Cancel<//>
+    </div>` : html`<div>When ${entry.cue}: ${entry.lesson}</div>
+      ${entry.status === "active" ? html`<${Button} disabled=${busy} onClick=${() => setEditing(true)}>Edit<//>
+        <${Button} disabled=${busy} onClick=${() => onWrite(base + "/retire", {})}>Retire<//>` : null}`}
+  </li>`;
+}
+
+function LessonsSection() {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [problem, setProblem] = useState(null);
+  const [message, setMessage] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = () => get("/api/lessons").then((d) => {
+    setError(null);
+    setData(d);
+  }, (e) => setError(e.message));
+  useEffect(() => { load(); }, []);
+  const write = async (path, body) => {
+    setBusy(true);
+    setProblem(null);
+    let ok = false;
+    try {
+      const r = await post(path, body);
+      setMessage(r.apply);
+      ok = true;
+      await load();
+    } catch (e) {
+      setMessage(null);
+      setProblem(e.message);
+    }
+    setBusy(false);
+    return ok;
+  };
+  if (error) {
+    return html`<${Notice} kind="error">${error}<//>`;
+  }
+  if (!data) {
+    return html`<p class="muted">Loading...</p>`;
+  }
+  if (!data.harness) {
+    return html`<${Notice} kind="warn">Lessons live in the active harness. Set one up on the Harness page first.<//>`;
+  }
+  const roles = [];
+  data.memory.forEach((entry) => {
+    if (!roles.includes(entry.role)) { roles.push(entry.role); }
+  });
+  return html`<section>
+    <h2>Lessons</h2>
+    <p class="muted">Finished runs propose lessons. A lesson reaches the agents only when you accept it here and then apply.</p>
+    ${message ? html`<${Notice} kind="ok">${message}<//>` : null}
+    ${problem ? html`<${Notice} kind="error">${problem}<//>` : null}
+    <h3>To review (${data.proposals.length})</h3>
+    ${data.proposals.length ? data.proposals.map((item) => html`<${Proposal} key=${item.id} item=${item} onWrite=${write} busy=${busy} />`)
+      : html`<p class="muted">No proposals wait for you.</p>`}
+    <h3>In memory</h3>
+    ${roles.length ? null : html`<p class="muted">No lessons yet.</p>`}
+    ${roles.map((role) => html`<div><h4>${role.replace("ppl-", "")}</h4>
+      <ul>${data.memory.filter((entry) => entry.role === role).map((entry) => html`<${MemoryEntry} key=${entry.id + entry.cue + entry.lesson} entry=${entry} onWrite=${write} busy=${busy} />`)}</ul></div>`)}
+  </section>`;
+}
+
 export function AgentsPage({ mode }) {
   const [data, setData] = useState(null);
   const [doc, setDoc] = useState(null);
@@ -236,6 +342,7 @@ export function AgentsPage({ mode }) {
     ${message ? html`<${Notice} kind="ok">${message}<//>` : null}
     ${problem ? html`<${Notice} kind="error">${problem}<//>` : null}
     <${Log} lines=${log} />
+    <${LessonsSection} />
     ${mode === "expert" ? html`<h3>History of routing.toml</h3><${History} fileKey="routing" stamp=${data.routing_hash} onRestored=${load} />` : null}
   </section>`;
 }

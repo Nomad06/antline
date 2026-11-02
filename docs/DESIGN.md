@@ -2423,6 +2423,14 @@ writes it, and only after the check ppl makes of it, `routing.validate_config` f
 and, for a harness file or a role's notes, `harness.verify` of the harness with that content
 laid in, any other file of the harness's `skill/` and `templates/` laid in by name.
 
+**Lessons.** The Agents page ends with a Lessons section for the active harness: the pending
+proposals of finished runs, each with its role, cue, lesson and evidence refs, and the entries of
+`memory.toml` grouped by role. Accept (the cue and the lesson editable first), reject (with a
+reason), retire and edit call the functions `ppl lessons` calls, so the studio writes memory only
+when the owner clicks [R-LESSONS-OWNER-ACCEPTS]. Each write answers with the line
+`run ppl harness apply <name> to render it`, which the page shows, and the page shows a short
+notice instead when no harness is active.
+
 **Slow actions are jobs.** A model probe, the extraction or an apply runs in a worker
 thread: the route returns a job id and the page polls `/api/jobs/<id>`. One job of a kind runs
 at a time, and jobs live in memory only.
