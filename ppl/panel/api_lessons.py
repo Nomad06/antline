@@ -48,6 +48,7 @@ def reject(params, body, query):
 
 
 def retire(params, body, query):
+    _body(body)
     name = lessons.harness_name()
     lessons.retire(name, params["id"])
     return _answer(name)

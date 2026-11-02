@@ -99,6 +99,21 @@ class TestLessonsApi(LessonsApiCase):
             self.assertEqual(status, 403, path)
         self.assertEqual(self.memory_path.read_bytes(), before)
 
+    def test_a_malformed_body_or_an_unknown_proposal_is_refused_and_writes_nothing(self):
+        proposals = lessons.proposals_path("demo", "DEMO-9")
+        before = (self.memory_path.read_bytes(), proposals.read_bytes())
+        cases = [("/api/lessons/DEMO-9.1/accept", []), ("/api/lessons/DEMO-9.1/accept", {"cue": 5}),
+                 ("/api/lessons/DEMO-9.1/accept", {"lesson": 5}),
+                 ("/api/lessons/DEMO-9.1/reject", []), ("/api/lessons/DEMO-9.1/reject", {"reason": 5}),
+                 ("/api/memory/M-1/retire", []), ("/api/memory/M-1/edit", []),
+                 ("/api/memory/M-1/edit", {"cue": 5}),
+                 ("/api/lessons/DEMO-9.7/accept", {}), ("/api/lessons/nonsense/accept", {}),
+                 ("/api/lessons/DEMO-8.1/reject", {"reason": "x"})]
+        for path, body in cases:
+            status, data, _ = panel_client.call("POST", path, body=body)
+            self.assertEqual((status, data.get("error_code")), (400, "SCHEMA_INVALID"), (path, body))
+        self.assertEqual((self.memory_path.read_bytes(), proposals.read_bytes()), before)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -134,16 +134,16 @@ function MemoryEntry({ entry, onWrite, busy }) {
     if (await onWrite(base + "/edit", body)) { setEditing(false); }
   };
   return html`<li>
-    <strong>${entry.id}</strong> ${entry.status === "retired" ? html`<${Badge} kind="skipped">retired<//>` : null}
+    <strong>${entry.id}</strong>
     <span class="muted">seen ${entry.seen}</span>
     ${editing ? html`<div>
       <${Field} label="When"><input type="text" value=${cue} onInput=${(e) => setCue(e.target.value)} /><//>
       <${Field} label="Lesson"><textarea value=${lesson} onInput=${(e) => setLesson(e.target.value)}></textarea><//>
-      <${Button} primary disabled=${busy} onClick=${save}>Save<//>
+      <${Button} primary disabled=${busy || (cue === entry.cue && lesson === entry.lesson)} onClick=${save}>Save<//>
       <${Button} disabled=${busy} onClick=${() => { setEditing(false); setCue(entry.cue); setLesson(entry.lesson); }}>Cancel<//>
     </div>` : html`<div>When ${entry.cue}: ${entry.lesson}</div>
-      ${entry.status === "active" ? html`<${Button} disabled=${busy} onClick=${() => setEditing(true)}>Edit<//>
-        <${Button} disabled=${busy} onClick=${() => onWrite(base + "/retire", {})}>Retire<//>` : null}`}
+      <${Button} disabled=${busy} onClick=${() => setEditing(true)}>Edit<//>
+      <${Button} disabled=${busy} onClick=${() => onWrite(base + "/retire", {})}>Retire<//>`}
   </li>`;
 }
 
@@ -170,6 +170,7 @@ function LessonsSection() {
     } catch (e) {
       setMessage(null);
       setProblem(e.message);
+      await load();
     }
     setBusy(false);
     return ok;
@@ -184,7 +185,8 @@ function LessonsSection() {
     return html`<${Notice} kind="warn">Lessons live in the active harness. Set one up on the Harness page first.<//>`;
   }
   const roles = [];
-  data.memory.forEach((entry) => {
+  const live = data.memory.filter((entry) => entry.status === "active");
+  live.forEach((entry) => {
     if (!roles.includes(entry.role)) { roles.push(entry.role); }
   });
   return html`<section>
@@ -198,7 +200,7 @@ function LessonsSection() {
     <h3>In memory</h3>
     ${roles.length ? null : html`<p class="muted">No lessons yet.</p>`}
     ${roles.map((role) => html`<div><h4>${role.replace("ppl-", "")}</h4>
-      <ul>${data.memory.filter((entry) => entry.role === role).map((entry) => html`<${MemoryEntry} key=${entry.id + entry.cue + entry.lesson} entry=${entry} onWrite=${write} busy=${busy} />`)}</ul></div>`)}
+      <ul>${live.filter((entry) => entry.role === role).map((entry) => html`<${MemoryEntry} key=${entry.id + entry.cue + entry.lesson} entry=${entry} onWrite=${write} busy=${busy} />`)}</ul></div>`)}
   </section>`;
 }
 
