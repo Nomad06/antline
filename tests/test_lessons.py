@@ -709,6 +709,78 @@ class TestRecord(LessonsTestCase):
         self.assertIn("pending", self.refused("SCHEMA_INVALID", built, self.doc(built)))
         self.assertTrue(marker.is_file())
 
+    def test_a_reference_that_is_not_ascii_or_not_a_string_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9220")
+        self.assertFalse(lessons.resolve(built["bundle"], "park", "\u00b2"))
+        self.assertFalse(lessons.resolve(built["bundle"], "timeline", "\u0663"))
+        for kind, ref in (("park", "\u00b2"), ("timeline", "\u0663"),
+                          ("verdict", built["passed"][:6] + "\uff11"),
+                          ("gate", "\uff11" * 7 + "/focused-tests"),
+                          ("finding", ["F-1"]), ("remark", {"a": 1}), ("park", True)):
+            doc = self.doc(built)
+            doc["proposals"][0]["evidence"] = [{"kind": kind, "ref": ref}]
+            self.refused("SCHEMA_INVALID", built, doc)
+        doc = self.doc(built)
+        doc["proposals"][0]["evidence"] = [{"kind": ["finding"], "ref": "1"}]
+        self.refused("SCHEMA_INVALID", built, doc)
+
+    def test_a_memory_id_that_is_not_a_string_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9221")
+        for bad in (["M-1"], {"a": 1}, 1, None):
+            doc = self.doc(built)
+            doc["assessments"][0]["memory_id"] = bad
+            self.refused("SCHEMA_INVALID", built, doc)
+        file = built["bundle"] / "memory-in-effect.json"
+        for planted in ([{"id": ["M-1"]}], [{"id": 1}], ["M-1"], {"M-1": 1}):
+            store.write_json(file, {"harness": "example-maven", "entries": planted})
+            self.refused("SCHEMA_INVALID", built, self.doc(built))
+
+    def test_a_bundle_file_that_is_not_utf8_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9222")
+        (built["bundle"] / "findings.json").write_bytes(b"\xff\xfe[]")
+        self.refused("SCHEMA_INVALID", built, self.doc(built))
+        path = Path(tmphome.mkdtemp(prefix="pplreflect-")) / "bad.json"
+        path.write_bytes(b"\xff\xfe{}")
+        code, _, err = call("lessons", "record", "--task", "DEMO-9222", "--file", str(path))
+        self.assertEqual((code, json.loads(err)["error_code"]), (2, "SCHEMA_INVALID"))
+
+    def test_a_gate_receipt_rerun_for_the_same_sha_and_check_still_resolves(self):
+        built = self.bundled("DEMO-9223")
+        file = built["bundle"] / "gates.json"
+        gates = json.loads(file.read_text(encoding="utf-8"))
+        store.write_json(file, gates + [dict(gates[0], at="later")])
+        self.assertTrue(lessons.resolve(built["bundle"], "gate",
+                                        built["passed"][:7] + "/focused-tests"))
+        # a second sha with the same prefix and check is ambiguous
+        store.write_json(file, gates + [dict(gates[0], sha=built["passed"][:7] + "f" * 33)])
+        doc = self.doc(built)
+        doc["proposals"][0]["evidence"] = [{"kind": "gate",
+                                            "ref": built["passed"][:7] + "/focused-tests"}]
+        self.refused("SCHEMA_INVALID", built, doc)
+
+    def test_a_marker_whose_bundle_is_not_lessons_bundle_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9224")
+        other = paths.runs_dir() / "_archive" / "DEMO-9224-1" / "elsewhere"
+        other.mkdir(parents=True)
+        marker = self.marker("DEMO-9224", other)
+        self.assertIn("lessons/bundle", self.refused("SCHEMA_INVALID", built, self.doc(built)))
+        self.assertTrue(marker.is_file())
+        store.write_json(marker, {"task": "DEMO-9224", "bundle": str(built["directory"])})
+        self.assertIn("lessons/bundle", self.refused("SCHEMA_INVALID", built, self.doc(built)))
+
+    def test_an_empty_answer_without_no_entry_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9225")
+        marker = self.marker("DEMO-9225", built["bundle"])
+        for empty in ({"task": "DEMO-9225"}, {"task": "DEMO-9225", "no_entry": False,
+                                              "proposals": [], "assessments": []}):
+            self.assertIn("no_entry", self.refused("SCHEMA_INVALID", built, empty))
+        self.assertTrue(marker.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

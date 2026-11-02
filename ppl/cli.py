@@ -1184,7 +1184,7 @@ def _lessons_record(args):
         raise PplError("SCHEMA_INVALID", "ppl lessons record needs --task <id> and --file <json>")
     try:
         doc = store.read_json(args.file, None, lessons.BUNDLE_READ_LIMIT)
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError, RecursionError) as exc:
         raise PplError("SCHEMA_INVALID", "cannot read %s: %s" % (args.file, exc))
     if doc is None:
         raise PplError("SCHEMA_INVALID", "%s is not there" % args.file)
