@@ -102,10 +102,14 @@ def agents_dir():
     return _dir_setting("agents_dir", "PPL_AGENTS_DIR", Path.home() / ".claude" / "agents")
 
 
-def set_active_harness(name):
+def set_active_harness(name, memory_sha256=None):
     doc = load()
     _section(doc, "harness")
     doc.setdefault("harness", {})["active"] = name
+    if memory_sha256 is None:
+        doc["harness"].pop("memory_sha256", None)
+    else:
+        doc["harness"]["memory_sha256"] = memory_sha256
     save(doc)
 
 

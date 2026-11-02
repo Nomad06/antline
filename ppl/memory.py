@@ -191,3 +191,32 @@ def dumps(entries):
 def next_id(entries):
     numbers = [int(e["id"][2:]) for e in entries]
     return "M-%d" % (max(numbers) + 1 if numbers else 1)
+
+
+def in_effect(entries):
+    """The active entries as the run snapshot and the reflector's bundle hold them."""
+    return [{"id": e["id"], "role": e["role"], "cue": e["cue"], "lesson": e["lesson"],
+             "seen": e["seen"]} for e in active(entries)]
+
+
+def _task_ids(sources):
+    ids = []
+    for source in sources:
+        task = clean(str(source).split(":", 1)[0])
+        if task and task not in ids:
+            ids.append(task)
+    return ids
+
+
+def section(entries, role):
+    """The "Lessons from earlier runs" section of a role's agent file, or of the
+    skill for the orchestrator: "" when the role has no active entry. A hand-edited
+    file is not trusted, so cue and lesson are cleaned again here."""
+    lines = []
+    for entry in active(entries, role):
+        lines.append("- When %s: %s (from %s)."
+                     % (clean_cue(entry["cue"]), clean(entry["lesson"]),
+                        ", ".join(_task_ids(entry["sources"]))))
+    if not lines:
+        return ""
+    return "\n\n## Lessons from earlier runs\n\n" + "\n".join(lines) + "\n"

@@ -15,7 +15,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from . import boundary, escape, forges, os_sandbox, paths, trackers
+from . import boundary, escape, forges, memory, os_sandbox, paths, trackers
 from .errors import PplError
 
 REQUIRED_ROLES = ("ppl-briefer", "ppl-brief-challenger", "ppl-code-worker",
@@ -397,7 +397,8 @@ def render(name, harness_doc, config=None):
         lines.append("effort: %s" % effort)
     lines += ["maxTurns: %d" % meta["max_turns"],
               "permissionMode: default",
-              "---", "", body.rstrip() + _overlay(name, harness_doc), ""]
+              "---", "", body.rstrip() + _overlay(name, harness_doc)
+              + memory.section(harness_doc.get("_memory") or [], name), ""]
     return "\n".join(lines)
 
 

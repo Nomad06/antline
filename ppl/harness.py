@@ -557,7 +557,23 @@ def snapshot(doc):
             "os_sandbox": {"needed": os_sandbox.needed(doc)},
             "shapes": shape_rows(doc),
             "tests": {"sources": list((doc.get("tests") or {}).get("sources")
-                                      or boundary.TEST_PATTERNS)}}
+                                      or boundary.TEST_PATTERNS)},
+            "memory": memory.in_effect(doc.get("_memory") or [])}
+
+
+def memory_problem(doc):
+    """None when the memory.toml on disk is the one the last apply rendered, else
+    what to do. Compared by content: a missing record passes only when there is
+    no memory at all, so an install from before memory existed need not re-apply."""
+    from . import config
+    current = memory.digest(memory.read(doc["_dir"], routing.LESSON_ROLES)[1])
+    recorded = config.section("harness").get("memory_sha256")
+    if recorded == current:
+        return None
+    if recorded is None and current == memory.digest(b""):
+        return None
+    return ("memory.toml changed since the last apply: run `ppl harness apply %s`"
+            % installed_name(doc))
 
 
 def require_applied(doc):
@@ -767,6 +783,7 @@ def _values(doc, pins=None, workspace=None):
         # One line: it ends a sentence of the closing section.
         ("harness", "tracker-close"): (" ".join(_fragment_file(doc, "tracker-close").split())
                                        or DEFAULT_TRACKER_CLOSE),
+        ("harness", "lessons"): memory.section(doc.get("_memory") or [], "orchestrator"),
         ("knowledge", "skills"): (", ".join("`%s`" % s for s in skills) if skills
                                   else "no knowledge skills are configured for this harness"),
     }
@@ -884,7 +901,8 @@ def apply(name, agents_dir=None, skills_dir=None):
     agents = routing.apply(doc, agents_dir)
     skill = _write_files(skill_files, skill_target)
     active = installed_name(doc)
-    config.set_active_harness(active)
+    config.set_active_harness(
+        active, memory_sha256=memory.digest(memory.read(doc["_dir"], routing.LESSON_ROLES)[1]))
     return {"agents": agents, "skill": skill, "active": active}
 
 

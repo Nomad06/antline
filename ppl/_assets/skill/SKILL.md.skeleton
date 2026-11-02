@@ -177,3 +177,4 @@ armed, which catches an accident, not a determined attempt to route around this 
   to another model to route around the limit. `ppl stage enter` and `ppl transition`
   themselves refuse past the hard cap regardless of the guard hook [R-BUDGET-DISPATCH-CAP]
   [R-BUDGET-RETRY] - it is the state machine, not the hook, that owns the budget.
+<!-- include: harness/lessons -->

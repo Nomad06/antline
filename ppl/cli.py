@@ -186,6 +186,9 @@ def cmd_init(args):
         model_check = "verified"
     doc = harness.load(args.harness)
     harness.require_applied(doc)
+    problem = harness.memory_problem(doc)
+    if problem:
+        raise PplError("SETUP_INCOMPLETE", problem)
     os_sandboxed = False
     if os_sandbox.needed(doc) and args.os_sandbox:
         problem = os_sandbox_problem(inspected)

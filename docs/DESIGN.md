@@ -828,8 +828,8 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 189 rows: 142 `blocking`, 20 `soft` and 27 `n/a`. Of the
-`n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
+As of this commit the table carries 193 rows: 143 `blocking`, 21 `soft` and 29 `n/a`. Of the
+`n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 10 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
 stage 6 preconditions being unchecked before the push, the four isolation-check blind spots of
@@ -903,6 +903,16 @@ reaches another harness only when the owner copies it by hand. A harness holds 1
 `harness.load` reads the file, so a harness whose `memory.toml` is invalid is invalid
 [R-MEMORY-CAP]. Cue and lesson are stored as the clean one-line text `memory.clean` returns, not
 as markdown, because lesson text is data and not instructions.
+
+`ppl harness apply` renders the active entries of a role as a "Lessons from earlier runs" section
+after that role's project notes, and the orchestrator's as the same section at the end of the
+skill. Cue and lesson are cleaned again at render, so a hand-edited file puts no heading, comment
+or include marker into a prompt [R-MEMORY-TEXT-CLEANED]. `ppl init` freezes the entries active at
+that moment into `harness.json` as `memory`, so an entry accepted later is not in that run's
+snapshot [R-LESSONS-PAST-ONLY n/a]. The apply records the sha256 of the `memory.toml` bytes in
+`config.toml` `[harness] memory_sha256`, and `ppl init` refuses `SETUP_INCOMPLETE` while the file
+on disk has another digest [R-MEMORY-APPLIED]. A lesson is prompt text and grants nothing, the
+guard never reads it [R-MEMORY-NEVER-GRANTS n/a].
 
 `ppl harness validate [--json]` runs `harness.verify`, the check the studio runs on a draft or a
 saved harness file, and prints its `{errors, warnings}` [R-STUDIO-SAME-VALIDATION]. Every load of

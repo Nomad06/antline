@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
-from ppl import boundary, config, harness, models, paths, routing, rules, tomlout
+from ppl import boundary, config, harness, memory, models, paths, routing, rules, tomlout
 from ppl.errors import PplError
 from ppl.studio import drafts, enforced, files
 
@@ -246,6 +246,17 @@ class TestAgentsApi(AgentsTestCase):
         self.assertIn("effort: max", data["rendered"])
         self.assertEqual(files.read("harness:demo:templates/ppl-code-worker.part"), before)
         self.assertNotIn('effort = "max"', paths.routing_file().read_text(encoding="utf-8"))
+
+    def test_the_preview_shows_the_roles_lessons(self):
+        (paths.harness_dir("demo") / "memory.toml").write_text(memory.dumps([{
+            "id": "M-1", "role": "ppl-code-worker", "cue": "a changelog changes",
+            "lesson": "run the migration gate", "sources": ["KEY-1:finding:F-1"],
+            "accepted_at": "2026-10-28T00:00:00Z", "seen": 1, "status": "active"}]), encoding="utf-8")
+        status, data, _ = panel_client.call("POST", "/api/agents/ppl-code-worker/preview",
+                                            body={"overlay": "- Use pnpm.\n"})
+        self.assertEqual(status, 200)
+        self.assertIn("- When a changelog changes: run the migration gate (from KEY-1).",
+                      data["rendered"])
 
     def test_preview_of_the_routing_alone_keeps_the_notes_on_disk(self):
         doc = routing.load()
