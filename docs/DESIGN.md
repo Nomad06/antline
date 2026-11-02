@@ -2351,7 +2351,8 @@ markers with `ppl lessons pending` and reflects on each. An empty line in the di
 reflection. `--reflect` takes `--why`, and the two are only valid for scope `local`:
 `--reflect` with scope `full` exits `SCHEMA_INVALID` ("reflect at the local destroy that
 archives the run"), as does `--why` without `--reflect` and an empty line. A failed bundle build
-ends the command before anything is archived. With `[lessons] reflect = false` the run
+ends the command before anything is archived. From the panel the destroy command is already recorded by then, so the run stays
+halted under it, and the owner archives it with a destroy that gives no reason. With `[lessons] reflect = false` the run
 is destroyed without a bundle. When the marker write fails after the archive, the report says
 the run is archived and gives the bundle path, for reflecting by hand.
 

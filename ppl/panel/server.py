@@ -162,7 +162,14 @@ def handle_control(task_id, body):
     record = control.set_command(task_id, command, scope, by="panel")
     if command == "destroy":
         if scope == "local" and why and why.strip():
-            record["result"] = lessons.destroy_with_reflection(task_id, why)
+            try:
+                record["result"] = lessons.destroy_with_reflection(task_id, why)
+            except PplError as err:
+                if not paths.run_dir(task_id).is_dir():
+                    raise  # already archived: the error says where the bundle is
+                raise PplError(err.code, "%s. Nothing was archived: the run stays halted under "
+                               "the recorded destroy, and a destroy without a reason archives "
+                               "it" % err.message.rstrip("."))
         else:
             record["result"] = run.destroy(task_id, scope)
     return record

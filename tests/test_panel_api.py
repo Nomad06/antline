@@ -145,6 +145,40 @@ class TestPanelApi(unittest.TestCase):
         spy.assert_called_once_with(self.task, "spec was wrong")
         self.assertEqual(result["result"]["reflection"], "pending")
 
+    def test_the_panel_destroy_with_a_why_bundles_a_bare_run_after_the_command(self):
+        # Unmocked: control.set_command has recorded the destroy before the bundle is built.
+        from ppl import lessons
+        result = server.handle_control(self.task, {"command": "destroy", "scope": "local",
+                                                   "why": " gave up "})["result"]
+        self.assertEqual(result["reflection"], "pending")
+        bundle = Path(result["archive"]) / "lessons" / "bundle"
+        outcome = json.loads((bundle / "outcome.json").read_text(encoding="utf-8"))
+        self.assertEqual(outcome["ended"], "destroyed")
+        self.assertIsNone(outcome["blocker"])
+        self.assertEqual(outcome["why"], "gave up")
+        self.assertEqual(lessons.find_bundle(self.task), bundle)
+        self.assertTrue(lessons.pending_path(self.task).is_file())
+        self.assertEqual(json.loads((Path(result["archive"]) / "control.json")
+                                    .read_text(encoding="utf-8"))["command"], "destroy")
+
+    def test_a_failed_bundle_leaves_the_run_halted_and_says_so(self):
+        from ppl import lessons
+        with mock.patch.object(lessons, "build_bundle",
+                               side_effect=PplError("SCHEMA_INVALID", "no bundle")):
+            with self.assertRaises(PplError) as caught:
+                server.handle_control(self.task, {"command": "destroy", "scope": "local",
+                                                  "why": "gave up"})
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        message = caught.exception.message
+        self.assertIn("no bundle", message)
+        self.assertIn("Nothing was archived", message)
+        self.assertIn("destroy without a reason", message)
+        self.assertEqual(control.read(self.task)["command"], "destroy")
+        self.assertTrue(paths.run_dir(self.task).is_dir())
+        result = server.handle_control(self.task, {"command": "destroy", "scope": "local"})
+        self.assertEqual(result["result"]["status"], "archived")
+        self.assertFalse(paths.run_dir(self.task).exists())
+
     def test_the_panel_destroy_without_a_why_does_not(self):
         with mock.patch("ppl.lessons.destroy_with_reflection") as spy:
             for why in (None, ""):

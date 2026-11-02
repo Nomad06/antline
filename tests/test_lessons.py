@@ -1054,10 +1054,6 @@ class TestOwnerReview(LessonsTestCase):
         self.assertEqual(json.loads(call("lessons", "list", "--json")[1])["proposals"], [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestAbandonedRun(LessonsTestCase):
     """`ppl destroy --scope local --reflect --why`: a run that ends without a merge."""
 
@@ -1209,3 +1205,7 @@ class TestAbandonedRun(LessonsTestCase):
         self.assertEqual([line.split()[0] for line in out.splitlines()], ["DEMO-9330"])
         self.assertEqual(len(err.strip().splitlines()), 2)
         self.assertIn("DEMO-9331", err)
+
+
+if __name__ == "__main__":
+    unittest.main()
