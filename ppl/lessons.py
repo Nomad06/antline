@@ -13,7 +13,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from . import config, paths, run, store, trail
+from . import config, harness, memory, paths, routing, run, store, trail
 from .errors import PplError
 
 BUNDLE_FILES = ("outcome.json", "brief.json", "challenge.json", "findings.json",
@@ -29,6 +29,14 @@ TIMELINE_EVENTS = ("init", "stage_enter", "lifecycle", "park", "budget", "refusa
 KINDS = ("finding", "remark", "verdict", "gate", "park", "deny", "timeline")
 
 REFLECTOR_AGENT = "ppl-reflector.md"
+
+# What an assessment may say of a lesson that was in effect, and how many lessons one record
+# may propose.
+VERDICTS = ("helped", "hurt", "no observed effect", "confounded")
+MAX_PROPOSALS = 5
+
+# The most of one bundle file `record` reads. A run's timeline is the largest of them.
+BUNDLE_READ_LIMIT = 16 * 1024 * 1024
 
 # The name start of a build directory and of an earlier bundle set aside, both in lessons/.
 TEMP_PREFIX = ".bundle-"
@@ -242,6 +250,249 @@ def build_bundle(task_id, outcome):
         shutil.rmtree(building, ignore_errors=True)
         raise
     return target
+
+
+def lessons_home():
+    """Where the owner's lessons live, outside runs/: `PPL_HOME/lessons`."""
+    return paths.home() / "lessons"
+
+
+def proposals_path(harness_name, task_id):
+    """The proposals `ppl lessons record` stored for a task, per harness."""
+    return lessons_home() / harness_name / "proposals" / ("%s.json" % task_id)
+
+
+def pending_path(task_id):
+    """The marker a destroyed run leaves while its reflection is not recorded."""
+    return lessons_home() / "pending" / ("%s.json" % task_id)
+
+
+def _refuse(message):
+    raise PplError("SCHEMA_INVALID", message)
+
+
+def _checked_bundle(candidate, source):
+    """`candidate` when it is a real directory under runs/, live or archived, with no link
+    on the way below runs/, else SCHEMA_INVALID naming `source`."""
+    candidate = Path(candidate)
+    runs = paths.runs_dir()
+    try:
+        parts = candidate.relative_to(runs).parts
+    except ValueError:
+        parts = None
+    if not parts or any(part in (".", "..") for part in parts):
+        _refuse("%s names %s, which is not a path under %s" % (source, candidate, runs))
+    current = runs
+    for part in parts:
+        current = current / part
+        if os.path.islink(str(current)):
+            _refuse("%s names %s, and %s is a link" % (source, candidate, current))
+    if not candidate.is_dir():
+        _refuse("%s names %s, which is not a directory" % (source, candidate))
+    return candidate
+
+
+def find_bundle(task_id):
+    """The bundle `record` reads: the one a pending marker names, else the run's own, live
+    or archived. A marker wins, since a destroyed run's bundle sits in the archive. A marker
+    that names no real directory inside runs/ is SCHEMA_INVALID, and so is no bundle at
+    all."""
+    paths.check_task_id(task_id)
+    marker = pending_path(task_id)
+    named = store.read_json(marker, None, BUNDLE_READ_LIMIT)
+    if named is not None:
+        where = "the pending marker %s" % marker
+        if not isinstance(named, dict) or named.get("task") != task_id \
+                or not isinstance(named.get("bundle"), str):
+            _refuse("%s is not {\"task\": %s, \"bundle\": <path>}" % (where, task_id))
+        return _checked_bundle(named["bundle"], where)
+    target = bundle_dir(trail.find_run(task_id))
+    if not os.path.lexists(str(target)):
+        _refuse("%s has no bundle at %s: run ppl lessons bundle first" % (task_id, target))
+    return _checked_bundle(target, "the run's bundle")
+
+
+def _read(bundle, name, cache):
+    """A bundle file's JSON. A link, a file that is not a regular one or a missing one is
+    SCHEMA_INVALID, and nothing is read through a link."""
+    if name not in cache:
+        path = Path(bundle) / name
+        if os.path.islink(str(path)):
+            _refuse("%s is a link, so it is not read" % path)
+        if not os.path.lexists(str(path)):
+            _refuse("%s is missing: run ppl lessons bundle first" % path)
+        cache[name] = store.read_json(path, None, BUNDLE_READ_LIMIT)
+    return cache[name]
+
+
+def _entries(bundle, name, cache):
+    """The dict entries of a bundle file that holds a list."""
+    data = _read(bundle, name, cache)
+    return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
+
+
+_HEX_PREFIX = re.compile(r"[0-9a-f]{7,40}")
+
+
+def resolve(bundle, kind, ref, cache=None):
+    """True when `ref` names something in the bundle's own files [R-LESSONS-EVIDENCE-RESOLVES]:
+    a finding id of findings.json, a thread id with a remarks/ file or a key of threads.json,
+    a sha prefix (7 hex digits or more, exactly one sha) of verdicts.json, `<sha prefix>/<check>`
+    of one gates.json entry, the `n` of a timeline.json event named park or deny, or the `n` of
+    any timeline event. `n` is the log index the bundle recorded, never the live log's."""
+    cache = {} if cache is None else cache
+    if not isinstance(ref, str) or not ref:
+        return False
+    if kind == "finding":
+        return any(e.get("finding_id") == ref for e in _entries(bundle, "findings.json", cache))
+    if kind == "remark":
+        if _PLAIN_ID.fullmatch(ref):
+            path = Path(bundle) / "remarks" / ("%s.json" % ref)
+            if os.path.isfile(str(path)) and not os.path.islink(str(path)) \
+                    and not os.path.islink(str(path.parent)):
+                return True
+        ledger = _read(bundle, "threads.json", cache)
+        return isinstance(ledger, dict) and ref in ledger
+    if kind == "verdict":
+        if not _HEX_PREFIX.fullmatch(ref):
+            return False
+        shas = {e.get("sha") for e in _entries(bundle, "verdicts.json", cache)
+                if isinstance(e.get("sha"), str) and e["sha"].startswith(ref)}
+        return len(shas) == 1
+    if kind == "gate":
+        prefix, slash, check = ref.partition("/")
+        if not slash or not check or not _HEX_PREFIX.fullmatch(prefix):
+            return False
+        found = [e for e in _entries(bundle, "gates.json", cache)
+                 if isinstance(e.get("sha"), str) and e["sha"].startswith(prefix)
+                 and e.get("check") == check]
+        return len(found) == 1
+    if kind in ("park", "deny", "timeline"):
+        if not ref.isdigit() or str(int(ref)) != ref:
+            return False
+        return any(e.get("n") == int(ref) and (kind == "timeline" or e.get("event") == kind)
+                   for e in _entries(bundle, "timeline.json", cache))
+    return False
+
+
+def _check_evidence(bundle, where, items, cache, required):
+    """The evidence list as stored, [{"kind", "ref"}], each reference resolved."""
+    if not isinstance(items, list) or (required and not items):
+        _refuse("%s evidence must be a %slist of {kind, ref}"
+                % (where, "non-empty " if required else ""))
+    stored = []
+    for item in items:
+        if not isinstance(item, dict) or set(item) != {"kind", "ref"}:
+            _refuse("%s evidence entry %r must be {kind, ref}" % (where, item))
+        kind, ref = item["kind"], item["ref"]
+        if kind not in KINDS:
+            _refuse("%s evidence kind %r must be one of %s" % (where, kind, ", ".join(KINDS)))
+        if isinstance(ref, int) and not isinstance(ref, bool):
+            ref = str(ref)
+        if not resolve(bundle, kind, ref, cache):
+            _refuse("evidence %s:%s does not resolve in the bundle" % (kind, ref))
+        stored.append({"kind": kind, "ref": ref})
+    return stored
+
+
+def _check_text(where, key, value, cleaner):
+    if not isinstance(value, str):
+        _refuse("%s %s must be a string" % (where, key))
+    cleaned = cleaner(value)
+    if not cleaned:
+        _refuse("%s %s is empty" % (where, key))
+    if len(cleaned) > memory.MAX_TEXT:
+        _refuse("%s %s is %d characters, at most %d"
+                % (where, key, len(cleaned), memory.MAX_TEXT))
+    return cleaned
+
+
+def _check_proposal(bundle, number, item, cache):
+    where = "proposal %d" % number
+    if not isinstance(item, dict) or set(item) != {"role", "cue", "lesson", "evidence"}:
+        _refuse("%s must be {role, cue, lesson, evidence}" % where)
+    if item["role"] not in routing.LESSON_ROLES:
+        _refuse("%s role %r must be one of %s" % (where, item["role"],
+                                                   ", ".join(routing.LESSON_ROLES)))
+    return {"role": item["role"],
+            "cue": _check_text(where, "cue", item["cue"], memory.clean_cue),
+            "lesson": _check_text(where, "lesson", item["lesson"], memory.clean),
+            "evidence": _check_evidence(bundle, where, item["evidence"], cache, True)}
+
+
+def _check_assessment(bundle, number, item, cache, in_effect):
+    where = "assessment %d" % number
+    if not isinstance(item, dict) or not {"memory_id", "verdict"} <= set(item) \
+            or set(item) - {"memory_id", "verdict", "evidence"}:
+        _refuse("%s must be {memory_id, verdict, evidence}" % where)
+    if item["memory_id"] not in in_effect:
+        _refuse("%s names memory %r, which was not in effect for the run"
+                % (where, item["memory_id"]))
+    if item["verdict"] not in VERDICTS:
+        _refuse("%s verdict %r must be one of %s" % (where, item["verdict"],
+                                                      ", ".join(VERDICTS)))
+    return {"memory_id": item["memory_id"], "verdict": item["verdict"],
+            "evidence": _check_evidence(bundle, where, item.get("evidence", []), cache,
+                                        False)}
+
+
+def record(task_id, doc):
+    """`ppl lessons record`: check the reflector's answer against the run's bundle and store
+    its proposals, pending, for the owner's review. Every reference must resolve in the bundle,
+    or the whole record is refused SCHEMA_INVALID and nothing is written
+    [R-LESSONS-EVIDENCE-RESOLVES]. A second record for the task is ILLEGAL_TRANSITION. Memory is
+    never written here: the owner's accept does that. The pending marker of a destroyed run is
+    removed by a record that succeeds, and left by one that is refused."""
+    bundle = find_bundle(task_id)
+    cache = {}
+    in_effect = _read(bundle, "memory-in-effect.json", cache)
+    name = in_effect.get("harness") if isinstance(in_effect, dict) else None
+    try:
+        harness.check_name(name)
+    except PplError as exc:
+        _refuse("memory-in-effect.json names a harness that is not a plain name: %s"
+                % exc.message)
+    entries = in_effect.get("entries")
+    ids = {e.get("id") for e in entries if isinstance(e, dict)} \
+        if isinstance(entries, list) else set()
+    target = proposals_path(name, task_id)
+    if target.exists():
+        raise PplError("ILLEGAL_TRANSITION", "proposals for %s are already recorded at %s"
+                       % (task_id, target))
+    if not isinstance(doc, dict):
+        _refuse("the reflector's answer must be a JSON object")
+    unknown = sorted(set(doc) - {"task", "no_entry", "proposals", "assessments"})
+    if unknown:
+        _refuse("the reflector's answer has the key %r, which is not one of task, no_entry, "
+                "proposals, assessments" % unknown[0])
+    if doc.get("task") != task_id:
+        _refuse("the answer's task %r is not %s" % (doc.get("task"), task_id))
+    no_entry = doc.get("no_entry", False)
+    proposals = doc.get("proposals", [])
+    assessments = doc.get("assessments", [])
+    if not isinstance(no_entry, bool):
+        _refuse("no_entry must be true or false")
+    if not isinstance(proposals, list) or not isinstance(assessments, list):
+        _refuse("proposals and assessments must be lists")
+    if no_entry and proposals:
+        _refuse("no_entry is true and the answer still carries proposals")
+    if len(proposals) > MAX_PROPOSALS:
+        _refuse("%d proposals, at most %d" % (len(proposals), MAX_PROPOSALS))
+    stored = []
+    for number, item in enumerate(proposals, 1):
+        checked = _check_proposal(bundle, number, item, cache)
+        stored.append(dict(checked, id="%s.%d" % (task_id, number), status="pending"))
+    judged = [_check_assessment(bundle, number, item, cache, ids)
+              for number, item in enumerate(assessments, 1)]
+    result = {"task": task_id, "harness": name, "recorded_at": store.now(),
+              "no_entry": no_entry, "proposals": stored, "assessments": judged}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    store.write_json(target, result)
+    try:
+        pending_path(task_id).unlink()
+    except FileNotFoundError:
+        pass
+    return result
 
 
 def _harness_name(state):

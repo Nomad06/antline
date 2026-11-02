@@ -401,5 +401,314 @@ class TestBuildBundle(LessonsTestCase):
         self.assertEqual(os.listdir(elsewhere), ["keep.json"])
 
 
+class TestRecord(LessonsTestCase):
+    """`ppl lessons record`: the reflector's JSON, checked against the bundle."""
+
+    def bundled(self, task):
+        built = self.build_run(task)
+        self.merge(built)
+        code, _, err = call("lessons", "bundle", "--task", task)
+        self.assertEqual(code, 0, err)
+        built["bundle"] = lessons.bundle_dir(built["directory"])
+        timeline = read_bundle(built["bundle"], "timeline.json")
+        built["park_n"] = [e["n"] for e in timeline if e["event"] == "park"][0]
+        built["deny_n"] = [e["n"] for e in timeline if e["event"] == "deny"][0]
+        built["usage_n"] = [e["n"] for e in timeline if e["event"] == "usage"][0]
+        return built
+
+    def doc(self, built, **over):
+        task = built["task"]
+        doc = {"task": task, "no_entry": False,
+               "proposals": [{"role": "ppl-code-worker",
+                              "cue": "when a change touches the cart",
+                              "lesson": "round once, in the cart total",
+                              "evidence": [{"kind": "finding", "ref": built["finding"]},
+                                           {"kind": "remark", "ref": "1001"},
+                                           {"kind": "verdict", "ref": built["passed"][:7]},
+                                           {"kind": "gate",
+                                            "ref": built["passed"][:7] + "/focused-tests"},
+                                           {"kind": "park", "ref": str(built["park_n"])},
+                                           {"kind": "deny", "ref": str(built["deny_n"])},
+                                           {"kind": "timeline",
+                                            "ref": str(built["usage_n"])}]}],
+               "assessments": [{"memory_id": "M-1", "verdict": "helped",
+                                "evidence": [{"kind": "verdict",
+                                              "ref": built["rework"][:7]}]}]}
+        doc.update(over)
+        return doc
+
+    def record(self, built, doc, tag="doc"):
+        path = Path(tmphome.mkdtemp(prefix="pplreflect-")) / (tag + ".json")
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return call("lessons", "record", "--task", built["task"], "--file", str(path))
+
+    def refused(self, code, built, doc):
+        """The record is refused with `code`, nothing is stored and the marker stays."""
+        exit_code, out, err = self.record(built, doc)
+        self.assertEqual(exit_code, 2, out)
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], code)
+        self.assertEqual(out, "")
+        self.assertFalse(lessons.proposals_path("example-maven", built["task"]).exists())
+        return payload["message"]
+
+    def test_record_stores_cleaned_proposals_as_pending(self):
+        built = self.bundled("DEMO-9201")
+        doc = self.doc(built)
+        doc["proposals"][0]["cue"] = "When  a change\ntouches the cart "
+        doc["proposals"][0]["lesson"] = "## round once,\x07 in the cart total <!-- x -->"
+        code, out, err = self.record(built, doc)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "recorded 1 proposals for DEMO-9201")
+        target = lessons.proposals_path("example-maven", "DEMO-9201")
+        self.assertEqual(target, paths.home() / "lessons" / "example-maven" / "proposals"
+                         / "DEMO-9201.json")
+        stored = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(stored), ["assessments", "harness", "no_entry", "proposals",
+                                          "recorded_at", "task"])
+        self.assertEqual((stored["task"], stored["harness"], stored["no_entry"]),
+                         ("DEMO-9201", "example-maven", False))
+        proposal = stored["proposals"][0]
+        self.assertEqual(sorted(proposal), ["cue", "evidence", "id", "lesson", "role", "status"])
+        self.assertEqual((proposal["id"], proposal["status"], proposal["role"]),
+                         ("DEMO-9201.1", "pending", "ppl-code-worker"))
+        self.assertEqual(proposal["cue"], memory.clean_cue(doc["proposals"][0]["cue"]))
+        self.assertEqual(proposal["cue"], "a change touches the cart")
+        self.assertEqual(proposal["lesson"], "round once, in the cart total")
+        self.assertEqual(len(proposal["evidence"]), 7)
+        self.assertEqual(proposal["evidence"][0], {"kind": "finding", "ref": built["finding"]})
+        self.assertEqual(stored["assessments"][0]["memory_id"], "M-1")
+
+    def test_an_unresolved_reference_refuses_the_whole_record(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9202")
+        doc = self.doc(built)
+        doc["proposals"][0]["evidence"].append({"kind": "finding", "ref": "F-99"})
+        message = self.refused("SCHEMA_INVALID", built, doc)
+        self.assertIn("evidence finding:F-99 does not resolve in the bundle", message)
+        for kind, ref in (("remark", "9999"), ("verdict", "deadbee"), ("gate", "abc1234/x"),
+                          ("park", "9999"), ("timeline", "9999")):
+            doc = self.doc(built)
+            doc["proposals"][0]["evidence"] = [{"kind": kind, "ref": ref}]
+            self.assertIn("%s:%s does not resolve" % (kind, ref), self.refused("SCHEMA_INVALID", built, doc))
+        doc = self.doc(built)
+        doc["assessments"][0]["evidence"] = [{"kind": "finding", "ref": "F-99"}]
+        self.assertIn("F-99", self.refused("SCHEMA_INVALID", built, doc))
+        self.assertFalse((paths.home() / "lessons").exists())
+
+    def test_each_evidence_kind_resolves_only_against_its_own_file(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9203")
+        for kind, ref in (("park", built["deny_n"]), ("deny", built["park_n"]),
+                          ("finding", "1001"), ("remark", built["finding"]),
+                          ("verdict", built["finding"]), ("park", built["usage_n"])):
+            doc = self.doc(built)
+            doc["proposals"][0]["evidence"] = [{"kind": kind, "ref": str(ref)}]
+            self.assertIn("%s:%s does not resolve" % (kind, ref), self.refused("SCHEMA_INVALID", built, doc))
+        # the same event under the kind that names it, and under timeline, resolves
+        self.assertTrue(lessons.resolve(built["bundle"], "park", str(built["park_n"])))
+        self.assertTrue(lessons.resolve(built["bundle"], "timeline", str(built["deny_n"])))
+        self.assertFalse(lessons.resolve(built["bundle"], "park", "%d" % (built["park_n"] + 900)))
+        self.assertFalse(lessons.resolve(built["bundle"], "deny", "0%d" % built["deny_n"]))
+        self.assertFalse(lessons.resolve(built["bundle"], "nonsense", "1"))
+
+    def test_an_ambiguous_verdict_prefix_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9204")
+        file = built["bundle"] / "verdicts.json"
+        entries = json.loads(file.read_text(encoding="utf-8"))
+        first = dict(entries[0], sha="abcdef1" + "0" * 33)
+        second = dict(entries[0], sha="abcdef1" + "1" * 33)
+        store.write_json(file, [first, second])
+        for ref in ("abcdef1", "abcdef", "abc"):
+            doc = self.doc(built)
+            doc["proposals"][0]["evidence"] = [{"kind": "verdict", "ref": ref}]
+            self.assertIn("does not resolve", self.refused("SCHEMA_INVALID", built, doc))
+        doc = self.doc(built)
+        doc["proposals"][0]["evidence"] = [{"kind": "verdict", "ref": "abcdef10"}]
+        doc["assessments"] = []
+        code, _, err = self.record(built, doc)
+        self.assertEqual(code, 0, err)
+
+    def test_an_unknown_role_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9205")
+        doc = self.doc(built)
+        doc["proposals"][0]["role"] = "ppl-nobody"
+        self.assertIn("ppl-nobody", self.refused("SCHEMA_INVALID", built, doc))
+        doc["proposals"][0]["role"] = "orchestrator"
+        code, _, err = self.record(built, doc)
+        self.assertEqual(code, 0, err)
+
+    def test_a_stale_memory_id_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9206")
+        doc = self.doc(built)
+        doc["assessments"][0]["memory_id"] = "M-99"
+        self.assertIn("M-99", self.refused("SCHEMA_INVALID", built, doc))
+        doc = self.doc(built)
+        doc["assessments"][0]["verdict"] = "helped a lot"
+        self.assertIn("helped a lot", self.refused("SCHEMA_INVALID", built, doc))
+
+    def test_no_entry_with_proposals_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9207")
+        self.assertIn("no_entry", self.refused("SCHEMA_INVALID", built, self.doc(built, no_entry=True)))
+
+    def test_no_entry_records_nothing_to_review(self):
+        built = self.bundled("DEMO-9208")
+        code, out, err = self.record(built, {"task": "DEMO-9208", "no_entry": True,
+                                             "proposals": []})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "recorded no entry for DEMO-9208")
+        stored = json.loads(lessons.proposals_path("example-maven", "DEMO-9208")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual((stored["no_entry"], stored["proposals"], stored["assessments"]),
+                         (True, [], []))
+
+    def test_more_than_five_proposals_are_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9209")
+        one = self.doc(built)["proposals"][0]
+        self.assertIn("5", self.refused("SCHEMA_INVALID", built, self.doc(built, proposals=[one] * 6)))
+        code, _, err = self.record(built, self.doc(built, proposals=[one] * 5))
+        self.assertEqual(code, 0, err)
+        stored = json.loads(lessons.proposals_path("example-maven", "DEMO-9209")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual([p["id"] for p in stored["proposals"]],
+                         ["DEMO-9209.%d" % n for n in range(1, 6)])
+
+    def test_the_documents_shape_is_checked(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9210")
+        good = self.doc(built)
+        for bad in (dict(good, task="DEMO-1"), dict(good, extra=1),
+                    dict(good, no_entry="yes"), dict(good, proposals={}),
+                    dict(good, assessments="x")):
+            self.refused("SCHEMA_INVALID", built, bad)
+        for key, value in (("cue", ""), ("cue", "<!-- x -->"), ("cue", "x" * 301), ("lesson", " "),
+                           ("lesson", "y" * 301), ("evidence", []),
+                           ("evidence", [{"kind": "mood", "ref": "1"}]),
+                           ("evidence", [{"kind": "finding"}]), ("extra", 1)):
+            doc = self.doc(built)
+            doc["proposals"][0][key] = value
+            self.refused("SCHEMA_INVALID", built, doc)
+        self.refused("SCHEMA_INVALID", built, [1, 2])
+        # invalid JSON is refused too
+        path = Path(tmphome.mkdtemp(prefix="pplreflect-")) / "bad.json"
+        path.write_text("{nope", encoding="utf-8")
+        code, _, err = call("lessons", "record", "--task", "DEMO-9210", "--file", str(path))
+        self.assertEqual((code, json.loads(err)["error_code"]), (2, "SCHEMA_INVALID"))
+
+    def test_a_second_record_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9211")
+        code, _, err = self.record(built, self.doc(built))
+        self.assertEqual(code, 0, err)
+        target = lessons.proposals_path("example-maven", "DEMO-9211")
+        before = target.read_bytes()
+        code, out, err = self.record(built, self.doc(built, no_entry=False, proposals=[]))
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_record_needs_a_task_and_a_file(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9212")
+        for argv in (["lessons", "record", "--file", "x.json"],
+                     ["lessons", "record", "--task", "DEMO-9212"],
+                     ["lessons", "record", "--task", "DEMO-9212", "--file", "/no/such.json"]):
+            code, _, err = call(*argv)
+            self.assertEqual((code, json.loads(err)["error_code"]), (2, "SCHEMA_INVALID"),
+                             argv)
+
+    def test_record_leaves_memory_unchanged(self):
+        # rule: R-LESSONS-OWNER-ACCEPTS
+        built = self.bundled("DEMO-9213")
+        memory_file = paths.harness_dir("example-maven") / "memory.toml"
+        before = memory_file.read_bytes()
+        code, _, err = self.record(built, self.doc(built))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(memory_file.read_bytes(), before)
+
+    def test_a_bundle_file_that_is_a_link_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9214")
+        elsewhere = Path(tmphome.mkdtemp(prefix="pplelsewhere-")) / "findings.json"
+        elsewhere.write_text(json.dumps([{"finding_id": "F-99"}]), encoding="utf-8")
+        (built["bundle"] / "findings.json").unlink()
+        (built["bundle"] / "findings.json").symlink_to(elsewhere)
+        doc = self.doc(built)
+        doc["proposals"][0]["evidence"] = [{"kind": "finding", "ref": "F-99"}]
+        self.assertIn("link", self.refused("SCHEMA_INVALID", built, doc))
+
+    def test_a_missing_bundle_says_to_build_it(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.build_run("DEMO-9215")
+        code, out, err = self.record(built, {"task": "DEMO-9215", "no_entry": True})
+        self.assertEqual(code, 2)
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+        self.assertIn("ppl lessons bundle", payload["message"])
+
+    def test_a_harness_name_that_is_not_a_plain_name_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9216")
+        file = built["bundle"] / "memory-in-effect.json"
+        store.write_json(file, {"harness": "../../escape", "entries": []})
+        doc = self.doc(built, assessments=[])
+        self.assertIn("harness", self.refused("SCHEMA_INVALID", built, doc))
+        self.assertFalse((paths.home() / "escape").exists())
+        self.assertFalse((paths.home().parent / "escape").exists())
+
+    def marker(self, task, bundle):
+        target = lessons.pending_path(task)
+        self.assertEqual(target, paths.home() / "lessons" / "pending" / (task + ".json"))
+        store.write_json(target, {"task": task, "bundle": str(bundle)})
+        return target
+
+    def test_a_pending_marker_names_the_bundle_of_a_destroyed_run(self):
+        built = self.bundled("DEMO-9217")
+        archive = paths.runs_dir() / "_archive" / "DEMO-9217-1"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(built["directory"], archive)
+        moved = dict(built, directory=archive, bundle=lessons.bundle_dir(archive))
+        marker = self.marker("DEMO-9217", moved["bundle"])
+        code, out, err = self.record(moved, self.doc(moved))
+        self.assertEqual(code, 0, err)
+        self.assertFalse(marker.exists())
+        self.assertTrue(lessons.proposals_path("example-maven", "DEMO-9217").is_file())
+
+    def test_a_refused_record_leaves_the_pending_marker(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9218")
+        marker = self.marker("DEMO-9218", built["bundle"])
+        doc = self.doc(built)
+        doc["proposals"][0]["evidence"] = [{"kind": "finding", "ref": "F-99"}]
+        self.refused("SCHEMA_INVALID", built, doc)
+        self.assertTrue(marker.is_file())
+        code, _, err = self.record(built, {"task": "DEMO-9218", "no_entry": True})
+        self.assertEqual(code, 0, err)
+        self.assertFalse(marker.exists())
+
+    def test_a_marker_naming_a_path_outside_the_runs_is_refused(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9219")
+        outside = Path(tmphome.mkdtemp(prefix="pplelsewhere-")) / "bundle"
+        outside.mkdir()
+        for name in lessons.BUNDLE_FILES:
+            (outside / name).write_text("null\n", encoding="utf-8")
+        marker = self.marker("DEMO-9219", outside)
+        self.assertIn("pending", self.refused("SCHEMA_INVALID", built, self.doc(built)))
+        linked = paths.runs_dir() / "_archive" / "linked-bundle"
+        linked.parent.mkdir(parents=True, exist_ok=True)
+        linked.symlink_to(built["bundle"])
+        store.write_json(marker, {"task": "DEMO-9219", "bundle": str(linked)})
+        self.assertIn("pending", self.refused("SCHEMA_INVALID", built, self.doc(built)))
+        store.write_json(marker, {"task": "DEMO-9219"})
+        self.assertIn("pending", self.refused("SCHEMA_INVALID", built, self.doc(built)))
+        self.assertTrue(marker.is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

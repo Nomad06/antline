@@ -1176,11 +1176,33 @@ def cmd_label(args):
     return 0
 
 
+def _lessons_record(args):
+    # --task is required: the run may be archived by now, so there is no active run to fall
+    # back to. Not a role-output command of refusals.COMMANDS and no control.enforce: it reads
+    # the bundle and writes only under PPL_HOME/lessons.
+    if not args.task or not args.file:
+        raise PplError("SCHEMA_INVALID", "ppl lessons record needs --task <id> and --file <json>")
+    try:
+        doc = store.read_json(args.file, None, lessons.BUNDLE_READ_LIMIT)
+    except OSError as exc:
+        raise PplError("SCHEMA_INVALID", "cannot read %s: %s" % (args.file, exc))
+    if doc is None:
+        raise PplError("SCHEMA_INVALID", "%s is not there" % args.file)
+    result = lessons.record(args.task, doc)
+    if result["no_entry"]:
+        print("recorded no entry for %s" % args.task)
+    else:
+        print("recorded %d proposals for %s" % (len(result["proposals"]), args.task))
+    return 0
+
+
 def cmd_lessons(args):
     # No control.enforce, by design: the bundle changes no run state, and a destroy with
     # reflection builds it after control.set_command recorded that destroy, so an enforce
     # would refuse its own caller. lessons.bundle holds the stage gate
     # [R-LESSONS-BUNDLE-AFTER-MERGE].
+    if args.action == "record":
+        return _lessons_record(args)
     task_id = resolve_task(args)
     target = lessons.bundle(task_id)
     if target is None:
@@ -1521,8 +1543,9 @@ def build_parser():
     p.add_argument("--task")
 
     p = sub.add_parser("lessons")
-    p.add_argument("action", choices=["bundle"])
+    p.add_argument("action", choices=["bundle", "record"])
     p.add_argument("--task")
+    p.add_argument("--file")
     return parser
 
 

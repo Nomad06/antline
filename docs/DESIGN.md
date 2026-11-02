@@ -831,7 +831,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 194 rows: 144 `blocking`, 21 `soft` and 29 `n/a`. Of the
+As of this commit the table carries 195 rows: 145 `blocking`, 21 `soft` and 29 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 10 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -1996,6 +1996,39 @@ file under `remarks/`, so a `review-threads.json` thread whose id is not a plain
 digits, `_` and `-`) is `SCHEMA_INVALID` with nothing written. Build and set-aside directories
 an interrupted build left in `lessons/` are removed when the next build starts, a link among
 them is left alone.
+
+**Recording.** The reflector answers with JSON, `{task, no_entry, proposals, assessments}`: at
+most 5 proposals of `{role, cue, lesson, evidence}`, and for each lesson that was in effect an
+assessment `{memory_id, verdict, evidence}` with a verdict of `helped`, `hurt`,
+`no observed effect` or `confounded`. Evidence is a list of `{kind, ref}`, `kind` one of
+`finding`, `remark`, `verdict`, `gate`, `park`, `deny` and `timeline`. The orchestrator writes the
+answer to a file and runs `ppl lessons record --task <id> --file <path>`. `--task` is required,
+since the run may already be archived. The command checks the answer against the bundle, not
+against the live run: a finding id of `findings.json`, a thread id with a `remarks/` file or a
+key of `threads.json`, a sha prefix of 7 hex digits or more that matches exactly one sha of
+`verdicts.json`, `<sha prefix>/<check>` of one entry of `gates.json`, and for `park`, `deny` and
+`timeline` the `n` the bundle recorded, not an index of the log read now. An `n` resolves only
+under the kind that names its event, so a `park` reference to a denial is refused [R-LESSONS-EVIDENCE-RESOLVES]. An unresolved
+reference, a role outside the lesson roles, a cue or lesson that is empty or over 300
+characters once cleaned, an assessment of a memory id that `memory-in-effect.json` does not hold,
+`no_entry` with proposals and more than 5 proposals each refuse the whole record `SCHEMA_INVALID`
+naming the first problem, with nothing written [R-LESSONS-EVIDENCE-RESOLVES]. A link among the
+bundle files, or a harness name in `memory-in-effect.json` that is not a plain directory name, is
+refused too, so a planted bundle cannot steer where the proposals are written
+[R-LESSONS-EVIDENCE-RESOLVES].
+
+A record that passes writes `PPL_HOME/lessons/<harness>/proposals/<task>.json`, outside `runs/`:
+`{task, harness, recorded_at, no_entry, proposals, assessments}`, each proposal with its id
+`<task>.<n>` from 1, the cleaned cue and lesson, its evidence and `status: "pending"`. It leaves
+`memory.toml` as it was: only the owner's accept writes it. A
+second record for the same task is refused `ILLEGAL_TRANSITION` [R-LESSONS-EVIDENCE-RESOLVES]. A
+pending marker `PPL_HOME/lessons/pending/<task>.json`, `{task, bundle}`, names the bundle of a
+run that was destroyed before it was reflected on and wins over the run's own path. It must name
+a real directory under `runs/`, live or archived, else the record is refused [R-LESSONS-EVIDENCE-RESOLVES]. A successful record
+removes the marker, a `no_entry` one too, and a refused one leaves it [R-LESSONS-EVIDENCE-RESOLVES]. `record` is not one of the
+role-output commands of `refusals.COMMANDS` and does not call `control.enforce`: a refused answer
+goes back to the reflector once, and then the orchestrator reports it, since parking a merged run
+over a missing lesson would cost more than the lesson [R-LESSONS-EVIDENCE-RESOLVES].
 
 ## 7. Stage flow: task link to MR
 
