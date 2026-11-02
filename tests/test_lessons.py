@@ -4,9 +4,11 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 # tests/ is not a package, so the helper next to this file is imported
 # by path. It must be imported before PPL_HOME is chosen below.
@@ -316,6 +318,87 @@ class TestBuildBundle(LessonsTestCase):
             lessons.build_bundle("DEMO-9124", {"ended": "merged", "merged_sha": "a" * 40})
         self.assertEqual(caught.exception.code, "EXTERNAL_BLOCKED")
         self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_a_remarks_link_planted_in_the_build_directory_is_refused(self):
+        built = self.build_run("DEMO-9125")
+        elsewhere = Path(tmphome.mkdtemp(prefix="pplelsewhere-"))
+        real_mkdtemp = tempfile.mkdtemp
+
+        def mkdtemp_with_a_link(*args, **kwargs):
+            folder = real_mkdtemp(*args, **kwargs)
+            Path(folder, "remarks").symlink_to(elsewhere)
+            return folder
+
+        with mock.patch.object(lessons.tempfile, "mkdtemp", mkdtemp_with_a_link):
+            with self.assertRaises(PplError) as caught:
+                lessons.build_bundle("DEMO-9125", {"ended": "merged", "merged_sha": "a" * 40})
+        self.assertEqual(caught.exception.code, "EXTERNAL_BLOCKED")
+        self.assertIn("remarks", caught.exception.message)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertEqual(os.listdir(built["directory"] / "lessons"), [])
+
+    def test_a_remarks_link_planted_while_the_files_are_written_is_refused(self):
+        built = self.build_run("DEMO-9126")
+        elsewhere = Path(tmphome.mkdtemp(prefix="pplelsewhere-"))
+        real_write = store.write_json
+        planted = []
+
+        def write_after_planting(path, obj):
+            # right before the first bundle file, remarks/ is swapped for a link
+            if not planted:
+                remarks = Path(path).parent / "remarks"
+                remarks.rmdir()
+                remarks.symlink_to(elsewhere)
+                planted.append(remarks)
+            return real_write(path, obj)
+
+        with mock.patch.object(store, "write_json", write_after_planting):
+            with self.assertRaises(PplError) as caught:
+                lessons.build_bundle("DEMO-9126", {"ended": "merged", "merged_sha": "a" * 40})
+        self.assertEqual(caught.exception.code, "EXTERNAL_BLOCKED")
+        self.assertEqual(len(planted), 1)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertEqual(os.listdir(built["directory"] / "lessons"), [])
+
+    def test_an_earlier_bundle_survives_a_failed_rebuild(self):
+        built = self.build_run("DEMO-9127")
+        self.merge(built)
+        target = lessons.bundle("DEMO-9127")
+        before = {p.relative_to(target).as_posix(): p.read_bytes()
+                  for p in sorted(target.rglob("*")) if p.is_file()}
+        store.append_log("DEMO-9127", {"event": "deny", "role": "ppl-code-worker",
+                                       "tool": "Bash", "code": "BOUNDARY_VIOLATION",
+                                       "target": "rm -rf build"})
+        real_rename = os.rename
+        aside = lessons.TEMP_PREFIX + "old-"
+
+        def refuse_the_new_bundle(source, destination, *args, **kwargs):
+            if Path(destination) == target and not Path(source).name.startswith(aside):
+                raise OSError(28, "No space left on device")
+            return real_rename(source, destination, *args, **kwargs)
+
+        with mock.patch.object(lessons.os, "rename", refuse_the_new_bundle):
+            with self.assertRaises(PplError) as caught:
+                lessons.bundle("DEMO-9127")
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("the earlier bundle is kept", caught.exception.message)
+        after = {p.relative_to(target).as_posix(): p.read_bytes()
+                 for p in sorted(target.rglob("*")) if p.is_file()}
+        self.assertEqual(after, before)
+        self.assertEqual(os.listdir(built["directory"] / "lessons"), ["bundle"])
+
+    def test_leftover_build_directories_are_removed_and_links_left_alone(self):
+        built = self.build_run("DEMO-9128")
+        folder = built["directory"] / "lessons"
+        (folder / ".bundle-abc123" / "remarks").mkdir(parents=True)
+        (folder / ".bundle-old-def456").mkdir()
+        (folder / ".bundle-old-def456" / "outcome.json").write_text("{}\n", encoding="utf-8")
+        elsewhere = Path(tmphome.mkdtemp(prefix="pplelsewhere-"))
+        (elsewhere / "keep.json").write_text("{}\n", encoding="utf-8")
+        (folder / ".bundle-linked").symlink_to(elsewhere)
+        lessons.build_bundle("DEMO-9128", {"ended": "merged", "merged_sha": "a" * 40})
+        self.assertEqual(sorted(os.listdir(folder)), [".bundle-linked", "bundle"])
+        self.assertEqual(os.listdir(elsewhere), ["keep.json"])
 
 
 if __name__ == "__main__":

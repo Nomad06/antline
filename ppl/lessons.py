@@ -3,13 +3,14 @@
 After the merge, `ppl lessons bundle` writes `runs/<task>/lessons/bundle/`, the run's
 evidence as files. The reflector is pointed at that directory: nothing of it is pasted into
 a prompt, and what a reviewer wrote in a remark stays data. The bundle is built in a temporary
-directory beside it and renamed onto it, so a build that fails leaves the earlier bundle as it
-was and no partial one.
+directory beside it and swapped in by two renames, so a build that fails leaves the earlier
+bundle as it was and no partial one.
 """
 import os
 import re
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 
 from . import config, paths, run, store, trail
@@ -28,6 +29,9 @@ TIMELINE_EVENTS = ("init", "stage_enter", "lifecycle", "park", "budget", "refusa
 KINDS = ("finding", "remark", "verdict", "gate", "park", "deny", "timeline")
 
 REFLECTOR_AGENT = "ppl-reflector.md"
+
+# The name start of a build directory and of an earlier bundle set aside, both in lessons/.
+TEMP_PREFIX = ".bundle-"
 
 # A thread id names its file under remarks/, and review-threads.json lies in runs/, where a
 # role's sandboxed Bash can write, so only a plain name becomes a file name.
@@ -132,12 +136,83 @@ def _documents(directory, outcome):
     return documents
 
 
+def _remove(path):
+    """Best effort: what it leaves behind, the next build's _clear_leftovers removes."""
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _clear_leftovers(lessons):
+    """Removes the build and set-aside directories an interrupted build left in lessons/.
+    Each is removed only as a real directory, a link of that name is left alone."""
+    if not os.path.isdir(lessons):
+        return
+    for name in sorted(os.listdir(lessons)):
+        path = lessons / name
+        if (name.startswith(TEMP_PREFIX) and os.path.isdir(path)
+                and not os.path.islink(path)):
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _write_all(building, documents):
+    """Writes every document under `building`. remarks/ is made here, never reused, and each
+    file's directory and the file itself are checked right before the write, the order
+    cmd_review_fetch uses, so nothing is written through a link a role planted."""
+    store.checked_run_path(building)
+    store.checked_run_path(building / "remarks")
+    try:
+        os.mkdir(building / "remarks")
+    except FileExistsError:
+        raise PplError("EXTERNAL_BLOCKED", "%s appeared while the lessons bundle was being "
+                       "built, so ppl will not write into it" % (building / "remarks"))
+    for rel in sorted(documents):
+        path = building / rel
+        store.checked_run_path(path.parent)
+        store.checked_run_path(path)
+        store.write_json(path, documents[rel])
+    trail._umask_modes(building)
+
+
+def _swap(lessons, building, target):
+    """Puts the new bundle in place: the earlier one is renamed aside, the new one renamed onto
+    `target`, and the earlier one removed only then. A failed rename puts the earlier one
+    back. Between the two renames no bundle is at `target`."""
+    aside = None
+    store.checked_run_path(lessons)
+    store.checked_run_path(target)
+    if os.path.lexists(target):
+        aside = lessons / ("%sold-%s" % (TEMP_PREFIX, uuid.uuid4().hex[:12]))
+        store.checked_run_path(aside)
+        os.rename(target, aside)
+    try:
+        store.checked_run_path(lessons)
+        store.checked_run_path(target)
+        os.rename(building, target)
+    except BaseException:
+        if aside is not None:
+            try:
+                os.rename(aside, target)
+            except OSError as exc:
+                raise PplError("SCHEMA_INVALID",
+                               "the lessons bundle could not be moved onto %s, and the earlier "
+                               "bundle could not be put back, it is at %s: %s"
+                               % (target, aside, exc))
+        raise
+    if aside is not None:
+        _remove(aside)
+
+
 def build_bundle(task_id, outcome):
     """Writes the live run's bundle with `outcome` as outcome.json and returns its path. It
     checks no stage and calls no control.enforce: `bundle` gates the command, and a destroy
     with reflection builds the bundle after its own destroy command is recorded. Every path
-    under the run is checked right before it is written, as a role may have linked one
-    elsewhere, and an earlier bundle is removed only once the new one is complete."""
+    under the run is checked right before it is written or renamed, as a role may have linked
+    one elsewhere, and a build or a swap that fails leaves the earlier bundle in place."""
     directory = paths.run_dir(task_id)
     store.checked_run_path(directory)
     run.load(task_id)
@@ -145,23 +220,24 @@ def build_bundle(task_id, outcome):
     lessons = directory / "lessons"
     target = bundle_dir(directory)
     store.checked_run_path(lessons)
+    _clear_leftovers(lessons)
     try:
         lessons.mkdir(exist_ok=True)
-        building = tempfile.mkdtemp(dir=str(lessons), prefix=".bundle-")
+        building = Path(tempfile.mkdtemp(dir=str(lessons), prefix=TEMP_PREFIX))
     except OSError as exc:
         raise PplError("SCHEMA_INVALID", "the lessons bundle could not be built under %s: %s"
                        % (lessons, exc))
     try:
-        for rel in sorted(documents):
-            store.write_json(Path(building, rel), documents[rel])
-        trail._umask_modes(building)
-        store.checked_run_path(lessons)
-        store.checked_run_path(target)
-        if os.path.isdir(target):
-            shutil.rmtree(target)
-        elif os.path.lexists(target):
-            os.unlink(target)
-        os.rename(building, target)
+        try:
+            _write_all(building, documents)
+        except OSError as exc:
+            raise PplError("SCHEMA_INVALID", "the lessons bundle could not be written under %s, "
+                           "the earlier bundle is kept: %s" % (lessons, exc))
+        try:
+            _swap(lessons, building, target)
+        except OSError as exc:
+            raise PplError("SCHEMA_INVALID", "the lessons bundle could not be moved onto %s, "
+                           "the earlier bundle is kept: %s" % (target, exc))
     except BaseException:
         shutil.rmtree(building, ignore_errors=True)
         raise

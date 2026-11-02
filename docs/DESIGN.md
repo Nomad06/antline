@@ -1982,13 +1982,20 @@ list or ledger is written as one:
   `ppl review fetch` wrote on GitHub. On GitLab no remark text is kept, and the ledger is the
   remark evidence.
 
-**Writing.** The bundle is built in a temporary directory under `runs/<task>/lessons/` and
-renamed onto `lessons/bundle/`. An earlier bundle is removed once the new one is complete, so a
-build that fails leaves the earlier one as it was. As in `ppl review fetch`, every path under
-the run is checked right before it is written, and one a role linked elsewhere is
-`EXTERNAL_BLOCKED` with nothing written. A thread id names its file under `remarks/`, so a
-`review-threads.json` thread whose id is not a plain name (letters, digits, `_` and `-`) is
-`SCHEMA_INVALID` with nothing written.
+**Writing.** The bundle is built in a temporary directory under `runs/<task>/lessons/`, then
+swapped in by two renames: the earlier bundle is renamed aside within `lessons/`, the new one is
+renamed onto `lessons/bundle/`, and only then is the earlier one removed. A build that fails
+leaves the earlier bundle as it was, and when the second rename fails the earlier one is renamed
+back, so `lessons/bundle/` holds a whole bundle, the earlier or the new one, except for the
+moment between the two renames. As in `ppl review fetch`, every path under the run is checked
+right before it is written or renamed: the temporary directory, each file's directory and the
+file, and `lessons/` and `lessons/bundle/` before each rename. `remarks/` is made by the build
+itself, not reused. A path a role linked elsewhere is `EXTERNAL_BLOCKED` with nothing written
+through it, and a link made between a check and its write is not caught. A thread id names its
+file under `remarks/`, so a `review-threads.json` thread whose id is not a plain name (letters,
+digits, `_` and `-`) is `SCHEMA_INVALID` with nothing written. Build and set-aside directories
+an interrupted build left in `lessons/` are removed when the next build starts, a link among
+them is left alone.
 
 ## 7. Stage flow: task link to MR
 
