@@ -450,7 +450,9 @@ def record(task_id, doc):
     or the whole record is refused SCHEMA_INVALID and nothing is written
     [R-LESSONS-EVIDENCE-RESOLVES]. A second record for the task is ILLEGAL_TRANSITION. Memory is
     never written here: the owner's accept does that. The pending marker of a destroyed run is
-    removed by a record that succeeds, and left by one that is refused."""
+    removed by a record that succeeds, and left by one that is refused, except the refusal of
+    a task that is already recorded, which removes it: nothing is left to record, and a marker
+    left there would send the next session to the reflector again."""
     bundle = find_bundle(task_id)
     cache = {}
     in_effect = _read(bundle, "memory-in-effect.json", cache)
@@ -467,6 +469,7 @@ def record(task_id, doc):
     ids = {e["id"] for e in entries}
     target = proposals_path(name, task_id)
     if target.exists():
+        _clear_marker(task_id)
         raise PplError("ILLEGAL_TRANSITION", "proposals for %s are already recorded at %s"
                        % (task_id, target))
     if not isinstance(doc, dict):
@@ -500,11 +503,15 @@ def record(task_id, doc):
               "no_entry": no_entry, "proposals": stored, "assessments": judged}
     target.parent.mkdir(parents=True, exist_ok=True)
     store.write_json(target, result)
+    _clear_marker(task_id)
+    return result
+
+
+def _clear_marker(task_id):
     try:
         pending_path(task_id).unlink()
     except FileNotFoundError:
         pass
-    return result
 
 
 def _harness_name(state):
@@ -613,10 +620,12 @@ def _sources(proposal):
 
 
 def listing(harness_name_=None):
-    """{"harness", "proposals", "memory"}: the pending proposals of every recorded task, each
-    with its "task", and every entry of memory.toml, retired ones included."""
+    """{"harness", "proposals", "memory", "skipped"}: the pending proposals of every recorded
+    task, each with its "task", every entry of memory.toml, retired ones included, and
+    `{"path", "reason"}` for each proposals file that could not be read as one, which is
+    left out of the list instead of failing it."""
     name = harness_name(harness_name_)
-    pending = []
+    pending, skipped = [], []
     folder = lessons_home() / name / "proposals"
     names = sorted(os.listdir(str(folder))) if folder.is_dir() else []
     for file_name in names:
@@ -624,14 +633,21 @@ def listing(harness_name_=None):
             continue
         try:
             doc = store.read_json(folder / file_name, None, BUNDLE_READ_LIMIT)
-        except (OSError, UnicodeDecodeError, RecursionError):
+        except PplError as exc:
+            skipped.append({"path": file_name, "reason": exc.message})
+            continue
+        except (OSError, UnicodeDecodeError, RecursionError) as exc:
+            skipped.append({"path": file_name, "reason": "cannot be read: %s" % exc})
             continue
         if not isinstance(doc, dict) or not isinstance(doc.get("proposals"), list):
+            skipped.append({"path": file_name,
+                            "reason": "is not an object with a proposals list"})
             continue
         for proposal in doc["proposals"]:
             if isinstance(proposal, dict) and proposal.get("status") == "pending":
                 pending.append(dict(proposal, task=doc.get("task")))
-    return {"harness": name, "proposals": pending, "memory": _load_memory(name)[1]}
+    return {"harness": name, "proposals": pending, "memory": _load_memory(name)[1],
+            "skipped": skipped}
 
 
 def accept(harness_name_, proposal_id, cue=None, lesson=None):
@@ -730,12 +746,51 @@ def edit(harness_name_, memory_id, cue=None, lesson=None):
     return entry
 
 
+def _recorded(state, task_id):
+    """True when proposals for the task are already recorded under the harness state.json
+    names. state.json lies in runs/, where a role's sandboxed Bash can write, so a name that
+    is not a plain one counts as not recorded."""
+    recorded = state.get("harness")
+    name = recorded.get("name") if isinstance(recorded, dict) else None
+    try:
+        harness.check_name(name)
+    except PplError:
+        return False
+    return proposals_path(name, task_id).is_file()
+
+
+def _ended(state, task_id, why):
+    """outcome.json for a destroy with reflection. A merge that `ppl merge observed` recorded
+    is `{"ended": "merged", "merged_sha"}`, as `ppl lessons bundle` writes it. Any other run
+    is `{"ended": "destroyed", "last_stage", "blocker", "why"}`: its stage, or the stage a
+    parked or escalated run resumes to, and the blocker of parking.json only while the run is
+    parked or escalated, since a resume leaves parking.json on disk."""
+    mr = state.get("mr")
+    merged = mr.get("merged_sha") if isinstance(mr, dict) else None
+    if merged:
+        return {"ended": "merged", "merged_sha": merged}
+    stage = state.get("stage")
+    blocker = None
+    if stage in ("parking", "escalation"):
+        parking = store.read_json(paths.run_dir(task_id) / "parking.json", None)
+        parking = parking if isinstance(parking, dict) else {}
+        blocker = parking.get("blocker")
+        if stage == "parking":
+            stage = parking.get("resume_stage")
+        elif state.get("escalation_resume_stage"):
+            stage = state["escalation_resume_stage"]
+    return {"ended": "destroyed", "last_stage": stage, "blocker": blocker, "why": why}
+
+
 def destroy_with_reflection(task_id, why):
-    """Archives a run that ends without a merge and leaves a pending marker for its
-    reflection. `why` is the owner's one line on why it ended. The bundle is built first, so
-    a failure refuses before anything is archived. With `[lessons] reflect = false` it only
-    destroys. A marker that cannot be written after the archive is an error naming the
-    archived bundle, so the owner can reflect by hand."""
+    """Archives a run at the owner's say-so and leaves a pending marker for its reflection.
+    `why` is the owner's one line on why it ended, in outcome.json for a run that was not
+    merged and in the result for one that was. The bundle is built first, so a failure
+    refuses before anything is archived. With `[lessons] reflect = false` it only destroys,
+    and so it does, as `"reflection": "recorded"`, when the task's proposals are already
+    recorded: the bundle they were drawn from stays as it is in the archive, and no marker
+    sends a later session to the reflector again. A marker that cannot be written after the
+    archive is an error naming the archived bundle, so the owner can reflect by hand."""
     if not isinstance(why, str) or not why.strip():
         raise PplError("SCHEMA_INVALID", "a destroy with reflection needs a non-empty why")
     why = why.strip()
@@ -744,14 +799,15 @@ def destroy_with_reflection(task_id, why):
         result["reflection"] = "off"
         return result
     state = run.load(task_id)
-    parking = store.read_json(paths.run_dir(task_id) / "parking.json", None)
-    parking = parking if isinstance(parking, dict) else {}
-    stage = state.get("stage")
-    if stage == "parking":
-        stage = parking.get("resume_stage")
-    build_bundle(task_id, {"ended": "destroyed", "last_stage": stage,
-                           "blocker": parking.get("blocker"), "why": why})
+    if _recorded(state, task_id):
+        result = run.destroy(task_id, "local")
+        result["reflection"] = "recorded"
+        return result
+    outcome = _ended(state, task_id, why)
+    build_bundle(task_id, outcome)
     result = run.destroy(task_id, "local")
+    if outcome["ended"] == "merged":
+        result["why"] = why
     bundle_path = result["archive"] + "/lessons/bundle"
     try:
         store.write_json(pending_path(task_id), {"task": task_id, "bundle": bundle_path})

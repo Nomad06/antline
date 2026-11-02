@@ -194,6 +194,7 @@ function LessonsSection() {
     <p class="muted">Finished runs propose lessons. A lesson reaches the agents only when you accept it here and then apply.</p>
     ${message ? html`<${Notice} kind="ok">${message}<//>` : null}
     ${problem ? html`<${Notice} kind="error">${problem}<//>` : null}
+    ${(data.skipped || []).map((item) => html`<${Notice} key=${item.path} kind="warn">Skipped proposals file ${item.path}: ${item.reason}<//>`)}
     <h3>To review (${data.proposals.length})</h3>
     ${data.proposals.length ? data.proposals.map((item) => html`<${Proposal} key=${item.id} item=${item} onWrite=${write} busy=${busy} />`)
       : html`<p class="muted">No proposals wait for you.</p>`}

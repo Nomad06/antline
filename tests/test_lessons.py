@@ -612,6 +612,38 @@ class TestRecord(LessonsTestCase):
         self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
         self.assertEqual(target.read_bytes(), before)
 
+    def test_a_second_record_clears_an_orphan_marker(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9228")
+        code, _, err = self.record(built, self.doc(built))
+        self.assertEqual(code, 0, err)
+        target = lessons.proposals_path("example-maven", "DEMO-9228")
+        before = target.read_bytes()
+        marker = self.marker("DEMO-9228", built["bundle"])
+        code, out, err = self.record(built, self.doc(built), tag="again")
+        self.assertEqual(code, 2, out)
+        self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
+        self.assertFalse(marker.exists())
+        self.assertEqual(lessons.pending(), [])
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_a_destroy_after_the_record_leaves_no_marker_and_the_merged_bundle(self):
+        built = self.bundled("DEMO-9229")
+        code, _, err = self.record(built, self.doc(built))
+        self.assertEqual(code, 0, err)
+        code, out, err = call("destroy", "--scope", "local", "--task", "DEMO-9229",
+                              "--reflect", "--why", "merged, cleaning up")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual((result["status"], result["reflection"]), ("archived", "recorded"))
+        self.assertFalse(lessons.pending_path("DEMO-9229").exists())
+        self.assertEqual(lessons.pending(), [])
+        self.assertEqual(call("lessons", "pending")[1].strip(), "no pending reflections")
+        archived = lessons.bundle_dir(result["archive"])
+        self.assertEqual(read_bundle(archived, "outcome.json"),
+                         {"ended": "merged", "merged_sha": built["passed"]})
+        self.assertFalse(built["directory"].exists())
+
     def test_record_needs_a_task_and_a_file(self):
         # rule: R-LESSONS-EVIDENCE-RESOLVES
         built = self.bundled("DEMO-9212")
@@ -781,7 +813,7 @@ class TestRecord(LessonsTestCase):
             self.assertIn("no_entry", self.refused("SCHEMA_INVALID", built, empty))
         self.assertTrue(marker.is_file())
 
-    def test_record_leaves_memory_unchanged(self):
+    def test_an_assessment_of_a_lesson_in_effect_leaves_memory_unchanged(self):
         built = self.bundled("DEMO-9226")
         path = paths.harness_dir("example-maven") / "memory.toml"
         before = path.read_bytes()
@@ -1053,6 +1085,28 @@ class TestOwnerReview(LessonsTestCase):
         self.assertEqual(call("lessons", "reject", "DEMO-9301.1", "--reason", "no")[0], 0)
         self.assertEqual(json.loads(call("lessons", "list", "--json")[1])["proposals"], [])
 
+    def test_list_skips_a_corrupt_proposals_file_and_names_it(self):
+        self.propose()
+        folder = lessons.proposals_path("example-maven", "DEMO-9302").parent
+        (folder / "DEMO-9302.json").write_text("{not json", encoding="utf-8")
+        (folder / "DEMO-9303.json").write_text("[1]", encoding="utf-8")
+        data = lessons.listing("example-maven")
+        self.assertEqual([p["id"] for p in data["proposals"]], ["DEMO-9301.1"])
+        self.assertEqual([item["path"] for item in data["skipped"]],
+                         ["DEMO-9302.json", "DEMO-9303.json"])
+        self.assertTrue(all(item["reason"] for item in data["skipped"]))
+        for argv in (("lessons", "list"), ("lessons", "list", "--json")):
+            code, out, err = call(*argv)
+            self.assertEqual(code, 0, err)
+            self.assertIn("DEMO-9301.1", out)
+            warnings = err.strip().splitlines()
+            self.assertEqual(len(warnings), 2, err)
+            self.assertTrue(warnings[0].startswith("warning: "), err)
+            self.assertIn("DEMO-9302.json", warnings[0])
+            self.assertIn("DEMO-9303.json", warnings[1])
+        self.assertEqual(json.loads(call("lessons", "list", "--json")[1])["skipped"],
+                         data["skipped"])
+
 
 class TestAbandonedRun(LessonsTestCase):
     """`ppl destroy --scope local --reflect --why`: a run that ends without a merge."""
@@ -1073,8 +1127,45 @@ class TestAbandonedRun(LessonsTestCase):
         self.assertTrue(Path(marker["bundle"]).is_dir())
         self.assertEqual(read_bundle(marker["bundle"], "outcome.json"),
                          {"ended": "destroyed", "last_stage": "merge_watch",
-                          "blocker": "EXTERNAL_BLOCKED", "why": "spec was wrong"})
+                          "blocker": None, "why": "spec was wrong"})
         self.assertFalse(built["directory"].exists())
+
+    def test_a_resumed_run_has_a_null_blocker(self):
+        # build_run parks the run once and resumes it, and parking.json stays on disk
+        built = self.build_run("DEMO-9313")
+        parking = json.loads((built["directory"] / "parking.json").read_text(encoding="utf-8"))
+        self.assertEqual(parking["blocker"], "EXTERNAL_BLOCKED")
+        self.assertEqual(run.load("DEMO-9313")["stage"], "merge_watch")
+        result = lessons.destroy_with_reflection("DEMO-9313", "gave up")
+        outcome = read_bundle(lessons.bundle_dir(result["archive"]), "outcome.json")
+        self.assertEqual((outcome["last_stage"], outcome["blocker"]), ("merge_watch", None))
+
+    def test_an_escalated_run_reports_the_stage_it_escalated_from(self):
+        built = self.build_run("DEMO-9314")
+        state = run.load("DEMO-9314")
+        state["stage"] = "briefing"
+        state["status"] = "in_progress"
+        run.save(state)
+        run.stage_enter("DEMO-9314", "escalation")
+        self.assertEqual(run.load("DEMO-9314")["escalation_resume_stage"], "briefing")
+        result = lessons.destroy_with_reflection("DEMO-9314", "the owner never answered")
+        outcome = read_bundle(lessons.bundle_dir(result["archive"]), "outcome.json")
+        self.assertEqual(outcome["last_stage"], "briefing")
+        self.assertEqual(outcome["blocker"], "EXTERNAL_BLOCKED")
+        self.assertFalse(built["directory"].exists())
+
+    def test_a_merged_run_destroyed_before_its_reflection_keeps_the_merged_outcome(self):
+        built = self.build_run("DEMO-9315")
+        self.merge(built)
+        code, out, err = self.destroy("DEMO-9315", "--reflect", "--why", " merged, cleaning up ")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual((result["reflection"], result["why"]), ("pending", "merged, cleaning up"))
+        marker = json.loads(lessons.pending_path("DEMO-9315").read_text(encoding="utf-8"))
+        self.assertEqual(marker, {"task": "DEMO-9315",
+                                  "bundle": result["archive"] + "/lessons/bundle"})
+        self.assertEqual(read_bundle(marker["bundle"], "outcome.json"),
+                         {"ended": "merged", "merged_sha": built["passed"]})
 
     def test_a_parked_run_reports_its_resume_stage(self):
         self.build_run("DEMO-9302")

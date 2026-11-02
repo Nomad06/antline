@@ -44,6 +44,14 @@ class TestLessonsApi(LessonsApiCase):
         self.assertEqual(data["proposals"][0]["task"], "DEMO-9")
         self.assertEqual([m["id"] for m in data["memory"]], ["M-1"])
 
+    def test_the_listing_skips_a_corrupt_proposals_file_and_names_it(self):
+        broken = lessons.proposals_path("demo", "DEMO-10")
+        broken.write_text("{not json", encoding="utf-8")
+        status, data, _ = panel_client.call("GET", "/api/lessons")
+        self.assertEqual(status, 200)
+        self.assertEqual([p["id"] for p in data["proposals"]], ["DEMO-9.1"])
+        self.assertEqual([item["path"] for item in data["skipped"]], ["DEMO-10.json"])
+
     def test_the_listing_without_an_active_harness_is_null(self):
         config.set_active_harness("")
         status, data, _ = panel_client.call("GET", "/api/lessons")

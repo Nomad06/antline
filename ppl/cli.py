@@ -1234,6 +1234,10 @@ def _lessons_review(args):
     name = lessons.harness_name(args.harness)
     if args.action == "list":
         data = lessons.listing(name)
+        for item in data["skipped"]:
+            print("warning: the proposals file %s was skipped: %s" % (item["path"],
+                                                                     item["reason"]),
+                  file=sys.stderr)
         print(json.dumps(data, indent=2, sort_keys=True) if args.json else _lessons_table(data))
         return 0
     if not args.target:
