@@ -101,6 +101,16 @@ class TestRouting(unittest.TestCase):
         self.assertNotIn("ppl-reflector", routing.loads(text, unfilled=True)["roles"])
         self.assertIn("ppl-reflector", routing.loads(text)["roles"])
 
+    def test_role_of_the_reflector_on_an_unfilled_document_uses_the_briefer_and_leaves_it_alone(self):
+        import tomllib
+        doc = tomllib.loads(self._example_text())
+        before = json.loads(json.dumps(doc))
+        entry = routing.role("ppl-reflector", doc)
+        self.assertEqual(entry["model"], routing.role("ppl-briefer", doc)["model"])
+        self.assertEqual(doc, before)
+        self.assertIn("ppl-reflector", routing.render("ppl-reflector", self.doc, config=doc))
+        self.assertEqual(doc, before)
+
     def test_an_explicit_reflector_entry_wins(self):
         text = self._example_text() + '\n[roles.ppl-reflector]\ntier = "light"\nparams = { effort = "low" }\n'
         config = routing.loads(text)

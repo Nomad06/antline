@@ -191,6 +191,9 @@ def _concrete(config, role_name, entry):
 
 
 def _entry_and_provider(config, name):
+    if name == "ppl-reflector":
+        # A raw document may lack the table: look it up in a filled copy, the caller's stays as it was.
+        config = _fill_reflector(copy.deepcopy(config))
     if name not in config.get("roles", {}):
         raise PplError("SCHEMA_INVALID", "unknown role %r" % name)
     entry = _concrete(config, name, config["roles"][name])

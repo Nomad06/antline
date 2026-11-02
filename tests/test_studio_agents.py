@@ -247,6 +247,15 @@ class TestAgentsApi(AgentsTestCase):
         self.assertEqual(files.read("harness:demo:templates/ppl-code-worker.part"), before)
         self.assertNotIn('effort = "max"', paths.routing_file().read_text(encoding="utf-8"))
 
+    def test_the_reflector_preview_works_without_the_reflector_table(self):
+        status, data, _ = panel_client.call("GET", "/api/agents")
+        self.assertNotIn("ppl-reflector", data["routing"]["roles"])
+        status, preview, _ = panel_client.call("POST", "/api/agents/ppl-reflector/preview",
+                                               body={"routing": data["routing"]})
+        self.assertEqual(status, 200, preview)
+        model = routing.role("ppl-briefer")["model"]
+        self.assertIn("model: %s" % model, preview["rendered"])
+
     def test_the_preview_shows_the_roles_lessons(self):
         (paths.harness_dir("demo") / "memory.toml").write_text(memory.dumps([{
             "id": "M-1", "role": "ppl-code-worker", "cue": "a changelog changes",
