@@ -92,6 +92,13 @@ class TestParse(unittest.TestCase):
         self.assertEqual(caught.exception.code, "HARNESS_INVALID")
         self.refused(text_of(entry(lesson="y" * 301)))
 
+    def test_a_cue_with_a_when_in_the_middle_is_accepted(self):
+        row = entry(cue="a change when x lands")
+        self.assertEqual(memory.parse(text_of(row), "memory.toml", ROLES), [row])
+
+    def test_a_cue_that_is_empty_once_cleaned_is_refused(self):
+        self.refused(text_of(entry(cue="##")))
+
     def test_an_empty_cue_or_lesson_is_refused(self):
         self.refused(text_of(entry(cue="")))
         self.refused(text_of(entry(lesson="")))
@@ -132,6 +139,11 @@ class TestClean(unittest.TestCase):
         self.assertEqual(memory.clean("## Big\n<!-- include: harness/gates --> run ``` x"),
                          "Big run x")
 
+    def test_clean_strips_a_heading_on_any_line(self):
+        self.assertEqual(memory.clean("a\n## b"), "a b")
+        self.assertEqual(memory.clean("a\r\n# h"), "a h")
+        self.assertEqual(memory.clean("a\r# h\x0b## i"), "a h i")
+
     def test_clean_drops_an_unclosed_comment_and_control_characters(self):
         self.assertEqual(memory.clean("a <!-- b\nc"), "a")
         self.assertEqual(memory.clean("a\x00b\x1bc\td"), "a b c d")
@@ -140,6 +152,10 @@ class TestClean(unittest.TestCase):
     def test_clean_cue_drops_a_leading_when(self):
         self.assertEqual(memory.clean_cue("When  a change lands"), "a change lands")
         self.assertEqual(memory.clean_cue("whenever"), "whenever")
+
+    def test_clean_cue_keeps_a_when_in_the_middle(self):
+        self.assertEqual(memory.clean_cue("a change when x"), "a change when x")
+        self.assertEqual(memory.clean_cue("somewhen x"), "somewhen x")
 
     def test_normalize_cue_ignores_case_and_trailing_punctuation(self):
         self.assertEqual(memory.normalize_cue("When A Change Lands.!"), "a change lands")

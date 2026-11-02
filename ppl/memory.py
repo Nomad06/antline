@@ -27,16 +27,18 @@ ID_RE = re.compile(r"M-[1-9][0-9]*")
 
 _COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 _FENCE_RE = re.compile(r"`{3,}")
-_HEADING_RE = re.compile(r"^[ \t]*#+", re.MULTILINE)
-_WHEN_RE = re.compile(r"when\s+", re.IGNORECASE)
+_HEADING_RE = re.compile(r"[ \t]*#+")
+_WHEN_RE = re.compile(r"\Awhen\s+", re.IGNORECASE)
 
 
 def _once(text):
     text = _COMMENT_RE.sub(" ", text)
     text = text.replace("<!-- include:", " ")
     text = _FENCE_RE.sub(" ", text)
+    # headings go line by line, before the line breaks are collapsed
+    text = "\n".join(_HEADING_RE.sub(" ", line, count=1) if _HEADING_RE.match(line) else line
+                    for line in text.splitlines())
     text = "".join(" " if unicodedata.category(c) == "Cc" else c for c in text)
-    text = _HEADING_RE.sub(" ", text)
     return " ".join(text.split())
 
 
