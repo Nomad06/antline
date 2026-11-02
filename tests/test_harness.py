@@ -16,7 +16,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import boundary, cli, config, forges, harness, models, os_sandbox, paths, setup
+from ppl import boundary, cli, config, forges, harness, memory, models, os_sandbox, paths, setup
 from ppl.errors import PplError
 from ppl.trackers import jira
 
@@ -357,6 +357,25 @@ class TestVerify(HarnessTestCase):
         for name in ("example-generic", "example-maven"):
             fixtures.install_harness(name)
             self.assertEqual(harness.verify(name, name), {"errors": [], "warnings": []}, name)
+
+    def test_an_invalid_memory_file_makes_the_harness_invalid(self):
+        # rule: R-MEMORY-CAP
+        fixtures.install_harness("example-generic")
+        (paths.harness_dir("example-generic") / "memory.toml").write_text(
+            'format = 1\n[[entry]]\nid = "M-1"\n', encoding="utf-8")
+        result = harness.verify("example-generic", "example-generic")
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("memory.toml", result["errors"][0])
+
+    def test_load_attaches_the_memory_entries(self):
+        fixtures.install_harness("example-generic")
+        self.assertEqual(harness.load("example-generic")["_memory"], [])
+        row = {"id": "M-1", "role": "ppl-verifier", "cue": "a gate is flaky",
+               "lesson": "rerun it once", "sources": ["K-1:finding:F-1"],
+               "accepted_at": "2026-10-28T00:00:00Z", "seen": 1, "status": "active"}
+        (paths.harness_dir("example-generic") / "memory.toml").write_text(
+            memory.dumps([row]), encoding="utf-8")
+        self.assertEqual(harness.load("example-generic")["_memory"], [row])
 
     def test_the_caps_are_one_and_a_half_and_three_times_the_largest_example(self):
         self.assertEqual(harness.SKILL_SOFT_BYTES, harness.SKILL_MEASURED_BYTES * 3 // 2)

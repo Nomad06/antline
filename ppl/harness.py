@@ -14,7 +14,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from . import boundary, escape, forges, os_sandbox, paths, routing, sequences, trackers
+from . import boundary, escape, forges, memory, os_sandbox, paths, routing, sequences, trackers
 from .errors import PplError
 
 FORMAT = 1
@@ -465,6 +465,8 @@ def load(name_or_path):
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         _fail(str(path), "not valid TOML: %s" % exc)
     doc["_dir"] = str(directory)
+    # an invalid memory.toml raises here, so validate needs no second parse
+    doc["_memory"] = memory.read(directory, routing.LESSON_ROLES)[0]
     validate(doc, str(path))
     return doc
 

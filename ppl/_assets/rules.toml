@@ -2170,6 +2170,18 @@ owner = "harness"
 residual = "a cap bounds one rendered file, not the skill as a whole: a harness may spread its growth over several references, each under the cap. A harness applied before the caps existed stays applied until its next apply. SKILL_MEASURED_BYTES was measured before each stage's procedure moved to its own references/stage-*.md, so the SKILL.md cap sits far above what the examples render now and no harness fragment renders into SKILL.md any more: what holds the shipped skill small is tests/test_skill_contract.py, at most 14,000 bytes of SKILL.md and 10,000 per stage reference on both examples"
 
 [[rule]]
+id = "R-MEMORY-CAP"
+statement = "memory.parse refuses HARNESS_INVALID a harness memory.toml with more than memory.MAX_ACTIVE (12) active entries for one role, a cue or lesson over memory.MAX_TEXT (300) characters, text that is not its own memory.clean form, a role outside routing.LESSON_ROLES, a repeated id or an unknown key. harness.load reads the file, so ppl harness validate, ppl harness apply and the studio's save refuse a harness whose memory.toml is invalid."
+scope = "ppl CLI and panel"
+event = "ppl harness validate, ppl harness apply, studio save of memory.toml"
+enforcement = "blocking"
+hook_or_check = "ppl/memory.py:parse, ppl/harness.py:load"
+deny_test = "tests/test_memory.py::TestParse::test_a_thirteenth_active_entry_for_one_role_is_refused, tests/test_memory.py::TestParse::test_a_cue_over_300_characters_is_refused, tests/test_memory.py::TestParse::test_unknown_role_is_refused"
+allow_test = "tests/test_memory.py::TestParse::test_a_valid_file_parses_into_entries"
+owner = "ppl"
+residual = "the cap bounds the entries of one role, not the bytes they render to: the existing agent-file caps (R-HARNESS-SIZE-CAP) measure the rendered file, lessons included. A hand edit of memory.toml in the harness directory is read at the next load, so an invalid file is refused there and not when it is written"
+
+[[rule]]
 id = "R-DOCTOR-HOOK-SHAPE"
 statement = "ppl doctor reports per settings file dispatch_hook and usage_hook (registered or missing) and hook_shape (ok or the problems of the guard, dispatch and usage entries, read from the file and never run: type not command, no timeout, an interpreter that is not an absolute path to an executable file, a hook script that is not an absolute path to a file). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook or the SubagentStop usage hook is not, or has such a problem, and when a registered hook script is not under this install's assets hooks directory. The interpreter version is asked only where ppl doctor already runs the guard (hook_runs), which reports one older than Python 3.11."
 scope = "hook registration"

@@ -34,6 +34,17 @@ class TestKeys(FilesTestCase):
         self.assertEqual(files.resolve("harness:demo:templates/ppl-verifier.part"),
                          paths.harness_dir("demo") / "templates" / "ppl-verifier.part")
 
+    def test_memory_toml_is_a_harness_file(self):
+        key = "harness:demo:memory.toml"
+        self.assertEqual(files.resolve(key), paths.harness_dir("demo") / "memory.toml")
+        self.assertIn("memory.toml", files.HARNESS_FILES)
+
+    def test_an_invalid_memory_file_is_refused_on_save(self):
+        with self.assertRaises(PplError) as caught:
+            files.validate("harness:demo:memory.toml", "format = 2\n")
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        files.validate("harness:demo:memory.toml", "format = 1\n")
+
     def test_a_key_naming_a_path_outside_the_harness_files_is_refused(self):
         # rule: R-STUDIO-NO-RAW-PATHS
         for key in ("/etc/passwd", "harness:demo:../../config.toml", "harness:demo:hooks/x.py",

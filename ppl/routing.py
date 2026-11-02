@@ -21,6 +21,9 @@ from .errors import PplError
 REQUIRED_ROLES = ("ppl-briefer", "ppl-brief-challenger", "ppl-code-worker",
                   "ppl-test-worker", "ppl-verifier", "ppl-review-responder")
 
+# The roles a memory.toml entry may name: the pipeline's agents and the orchestrator.
+LESSON_ROLES = REQUIRED_ROLES + ("orchestrator",)
+
 # The effort values Claude Code accepts in a subagent's frontmatter.
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 

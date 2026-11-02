@@ -828,7 +828,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 188 rows: 141 `blocking`, 20 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 189 rows: 142 `blocking`, 20 `soft` and 27 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -895,6 +895,14 @@ the harness snapshot, and `ppl apply-patch` refuses `OWNER_DECISION`, all in one
 (`boundary.unknown_patterns_reason`) [R-TEST-PATTERNS-FROM-SNAPSHOT]. No
 `ppl` command rewrites a snapshot, so the owner restores it or re-inits the run. The split is by
 path, so tests inside product files (Rust `#[cfg(test)]`, doctests) are not split.
+
+`memory.toml` holds the harness's lessons: entries of a role, a cue, a lesson of at most 300
+characters each, the evidence they came from, how often reflection proposed them and a status
+(`format = 1`, one `[[entry]]` table per lesson). The file belongs to one harness, and a lesson
+reaches another harness only when the owner copies it by hand. A harness holds 12 active entries per role at most, and
+`harness.load` reads the file, so a harness whose `memory.toml` is invalid is invalid
+[R-MEMORY-CAP]. Cue and lesson are stored as the clean one-line text `memory.clean` returns, not
+as markdown, because lesson text is data and not instructions.
 
 `ppl harness validate [--json]` runs `harness.verify`, the check the studio runs on a draft or a
 saved harness file, and prints its `{errors, warnings}` [R-STUDIO-SAME-VALIDATION]. Every load of
