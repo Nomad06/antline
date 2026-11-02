@@ -333,6 +333,20 @@ class TestAgentsApi(AgentsTestCase):
             self.assertEqual(status, 400, bad)
             self.assertEqual(payload["error_code"], "SCHEMA_INVALID", bad)
 
+    def test_an_agents_page_save_does_not_add_the_reflector_table(self):
+        self.assertNotIn("ppl-reflector", tomllib.loads(files.read("routing")["text"])["roles"])
+        status, data, _ = panel_client.call("GET", "/api/agents")
+        self.assertEqual(status, 200)
+        self.assertNotIn("ppl-reflector", data["routing"]["roles"])
+        row = next(r for r in data["roles"] if r["role"] == "ppl-reflector")
+        briefer = next(r for r in data["roles"] if r["role"] == "ppl-briefer")
+        self.assertEqual((row["tier"], row["effort"], row["model"]),
+                         (briefer["tier"], briefer["effort"], briefer["model"]))
+        status, _, _ = panel_client.call("PUT", "/api/routing",
+                                         body={"config": data["routing"], "hash": data["routing_hash"]})
+        self.assertEqual(status, 200)
+        self.assertNotIn("ppl-reflector", tomllib.loads(files.read("routing")["text"])["roles"])
+
     def test_saving_routing_validates_and_writes(self):
         doc = routing.load()
         doc["roles"]["ppl-briefer"]["params"]["effort"] = "low"

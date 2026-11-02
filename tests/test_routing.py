@@ -80,10 +80,26 @@ class TestRouting(unittest.TestCase):
         config["roles"]["ppl-briefer"]["by_risk"] = {"high": "heavy"}
         before = json.loads(json.dumps(config["roles"]["ppl-briefer"]))
         routing.validate_config(config)
+        config = routing._fill_reflector(config)
         self.assertEqual(config["roles"]["ppl-briefer"], before)
         self.assertNotIn("by_risk", config["roles"]["ppl-reflector"])
         config["roles"]["ppl-reflector"]["params"] = {"effort": "low"}
         self.assertEqual(config["roles"]["ppl-briefer"], before)
+
+    def test_validate_config_and_summary_leave_their_input_unchanged(self):
+        import tomllib
+        config = tomllib.loads(self._example_text())
+        before = json.loads(json.dumps(config))
+        routing.validate_config(config)
+        self.assertEqual(config, before)
+        rows = routing.summary(config)
+        self.assertEqual(config, before)
+        self.assertIn("ppl-reflector", [row["role"] for row in rows])
+
+    def test_loads_unfilled_leaves_the_reflector_table_out(self):
+        text = self._example_text()
+        self.assertNotIn("ppl-reflector", routing.loads(text, unfilled=True)["roles"])
+        self.assertIn("ppl-reflector", routing.loads(text)["roles"])
 
     def test_an_explicit_reflector_entry_wins(self):
         text = self._example_text() + '\n[roles.ppl-reflector]\ntier = "light"\nparams = { effort = "low" }\n'

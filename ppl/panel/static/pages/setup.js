@@ -143,7 +143,7 @@ function ApplyStep({ state, done, hooks }) {
     setDoctor(await get("/api/doctor"));
   });
   return html`<div>
-    <p>Writes the six agent files and the orchestrator skill into the workspace and makes the harness active.</p>
+    <p>Writes the agent files and the orchestrator skill into the workspace and makes the harness active.</p>
     <${Button} primary busy=${step.busy} onClick=${() => step.run({})}>Apply<//>
     <${Outcome} step=${step} />
     ${doctor ? html`<${DoctorCard} doctor=${doctor} workspace=${state.workspace} hookLines=${hooks && hooks.lines} />` : null}

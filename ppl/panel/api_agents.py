@@ -38,7 +38,7 @@ def _verified():
 
 def overview(params, body, query):
     current = files.read("routing")
-    doc = routing.loads(current["text"])
+    doc = routing.loads(current["text"], unfilled=True)
     try:
         name, harness_doc = _active()
         harness_error = None

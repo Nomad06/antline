@@ -123,6 +123,13 @@ export function AgentsPage({ mode }) {
   }
   const setRole = (role, mutate) => {
     const next = clone(doc);
+    if (!next.roles[role]) {
+      // a role the file does not list (the reflector) takes the row's values once the owner changes it
+      const row = data.roles.find((r) => r.role === role);
+      next.roles[role] = {};
+      if (row.tier) { next.roles[role].tier = row.tier; }
+      if (row.effort) { next.roles[role].params = { effort: row.effort }; }
+    }
     mutate(next.roles[role]);
     setDoc(next);
   };
@@ -156,7 +163,7 @@ export function AgentsPage({ mode }) {
   });
   const applyHelp = dirty ? "Save the routing first: apply writes the saved one."
     : notesDirty ? "Save the project notes first: apply writes the saved ones."
-    : data.harness ? "Apply writes the six agent files and the skill from the saved routing and the active harness."
+    : data.harness ? "Apply writes the agent files and the skill from the saved routing and the active harness."
       : data.harness_error ? "Apply is off until the active harness loads."
         : "Apply needs an active harness: set one up on the Harness page.";
   const setByRisk = (entry, tier) => {
@@ -195,7 +202,7 @@ export function AgentsPage({ mode }) {
     <p class="help">${dirty ? "Save or reload the routing first: a preset replaces the saved routing.toml, not the edits on this page."
       : "A preset sets the tier and the effort of every role and writes routing.toml at once. Comments in it are dropped, and its history keeps the old file."}</p>
     ${data.roles.map((row) => {
-      const entry = doc.roles[row.role];
+      const entry = doc.roles[row.role] || { tier: row.tier, params: row.effort ? { effort: row.effort } : {} };
       const params = entry.params || {};
       const shown = open === row.role;
       const toggle = () => setOpen(shown ? null : row.role);

@@ -103,18 +103,24 @@ def load(unfilled=False):
     had = "ppl-reflector" in (config.get("roles") or {})
     config = _require_roles(config)
     if unfilled and not had:
+        # Deliberate: the fill was only for the check above, the caller writes this document back.
         config["roles"].pop("ppl-reflector", None)
     return config
 
 
-def loads(text):
-    """The routing document of routing.toml's text, checked as load() checks the file."""
+def loads(text, unfilled=False):
+    """The routing document of routing.toml's text, checked as load() checks the file.
+    unfilled=True leaves the reflector fallback out, as load(unfilled=True) does."""
     try:
         config = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise PplError("SCHEMA_INVALID", "routing.toml at %s is not valid TOML: %s"
                        % (paths.routing_file(), exc))
-    return _require_roles(config)
+    had = "ppl-reflector" in (config.get("roles") or {})
+    config = _require_roles(config)
+    if unfilled and not had:
+        config["roles"].pop("ppl-reflector", None)
+    return config
 
 
 def _fill_reflector(config):
@@ -285,7 +291,7 @@ def validate_config(config):
     """Refuse a routing document ppl cannot route with: a missing role, an
     unknown tier or provider, a by_risk tier that is not declared, params that
     are not a table, or an effort Claude Code does not accept."""
-    _fill_reflector(config)
+    config = _fill_reflector(copy.deepcopy(config))  # never the caller's dict
     missing = [r for r in REQUIRED_ROLES if r not in (config.get("roles") or {})]
     if missing:
         raise PplError("SCHEMA_INVALID", "routing.toml is missing roles: %s" % ", ".join(missing))
@@ -323,7 +329,7 @@ def preset_document(name):
             entry["by_risk"] = dict(spec["by_risk"])
         else:
             entry.pop("by_risk", None)
-    validate_config(copy.deepcopy(config))  # the copy takes the reflector fallback, the file does not
+    validate_config(config)
     return config
 
 
@@ -338,7 +344,7 @@ def apply_preset(name):
 def summary(config=None):
     """One row per role: its tier, the model the tier resolves to, effort and
     by_risk, for the wizard and the Agents page."""
-    config = _fill_reflector(config if config is not None else load())
+    config = _fill_reflector(copy.deepcopy(config if config is not None else load()))
     rows = []
     for name in REQUIRED_ROLES:
         raw = config["roles"][name]

@@ -855,7 +855,7 @@ def write_skill(doc, skills_dir, skill_name="pipeline"):
 
 
 def apply(name, agents_dir=None, skills_dir=None):
-    """Render the six agents and the skill for an installed harness, then
+    """Render the agents and the skill for an installed harness, then
     record it as the active one. Everything is rendered before anything is
     written, so a bad marker or a bad routing.toml leaves the disk as it was."""
     from . import config, setup, store
