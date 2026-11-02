@@ -1218,15 +1218,24 @@ ppl merge observed --sha <sha> [--url <url>]
                                   # only and once; the tracker gate waits for it
 ppl lessons bundle [--task <id>] # writes runs/<task>/lessons/bundle/ for ppl-reflector,
                                   # in merge_watch after merge observed (6.13)
-ppl lessons list|accept|reject|retire|edit [<id>] [--harness <name>]
+ppl lessons record --task <id> --file <json>
+                                  # checks the reflector's answer against the run's bundle
+                                  # and stores its proposals for the owner (6.13)
+ppl lessons pending              # one `<task> <bundle>` line per run destroyed with
+                                  # --reflect whose reflection is not recorded yet (6.13)
+ppl lessons list|accept|reject|retire|edit [<id>] [--harness <name>] [--json]
+                                  [--cue <text>] [--lesson <text>] [--reason <text>]
                                   # the owner's review of proposed lessons (6.13)
 
 ppl serve [--port 8787]          # admin panel, loopback only
 ppl control set <pause|resume|stop|destroy> [--scope local|full]
 ppl control get                  # what the panel has queued, if anything
-ppl destroy --scope <local|full> # local: worktree removed and run archived immediately.
+ppl destroy --scope <local|full> [--reflect --why "<line>"]
+                                  # local: worktree removed and run archived immediately.
                                   # full: remote_cleanup.json queued for the orchestrator,
-                                  # local archive happens only after that half completes (9.3)
+                                  # local archive happens only after that half completes.
+                                  # --reflect --why, local only: the run's lessons bundle
+                                  # and a pending marker for its reflection (9.3)
 
 ppl routing apply [--harness <name>]
                                  # regenerate the agent files from routing.toml and the harness,
@@ -1999,7 +2008,8 @@ digits, `_` and `-`) is `SCHEMA_INVALID` with nothing written. Build and set-asi
 an interrupted build left in `lessons/` are removed when the next build starts, a link among
 them is left alone.
 
-**Runs that end without a merge.** A destroy at the owner's say-so builds the bundle too (9.3).
+**Runs that end without a merge.** A destroy at the owner's say-so builds the bundle too, or keeps the one
+already reflected on (9.3).
 
 **Recording.** The reflector answers with JSON, `{task, no_entry, proposals, assessments}`: at
 most 5 proposals of `{role, cue, lesson, evidence}`, and for each lesson that was in effect an
@@ -2029,14 +2039,17 @@ second record for the same task is refused `ILLEGAL_TRANSITION` [R-LESSONS-EVIDE
 pending marker `PPL_HOME/lessons/pending/<task>.json`, `{task, bundle}`, names the bundle of a
 run that was destroyed before it was reflected on and wins over the run's own path. It must name
 a real directory under `runs/`, live or archived, else the record is refused [R-LESSONS-EVIDENCE-RESOLVES]. A successful record
-removes the marker, a `no_entry` one too, and a refused one leaves it [R-LESSONS-EVIDENCE-RESOLVES]. `record` is not one of the
+removes the marker, a `no_entry` one too. A refused one leaves it, except the `ILLEGAL_TRANSITION` of a task already
+recorded, which removes it, so a marker left for a recorded task does not outlive the next record [R-LESSONS-EVIDENCE-RESOLVES]. `record` is not one of the
 role-output commands of `refusals.COMMANDS` and does not call `control.enforce`: a refused answer
 goes back to the reflector once, and then the orchestrator reports it, since parking a merged run
 over a missing lesson would cost more than the lesson [R-LESSONS-EVIDENCE-RESOLVES].
 
 **Review.** The owner decides each proposal with `ppl lessons list|accept|reject|retire|edit` on
 the active harness, or on `--harness <name>`, which must be an installed harness [R-LESSONS-OWNER-ACCEPTS].
-`list` prints the pending proposals and the active entries, or JSON with `--json`. `accept <task>.<n>`
+`list` prints the pending proposals and the active entries, or JSON with `--json`. A proposals file
+that does not read as one is left out and named, by `list` in a warning line on stderr and under
+`skipped` in its JSON, and by the studio's Lessons section in a notice, so the others still show. `accept <task>.<n>`
 merges the proposal into an active entry of the same role whose cue is the same after
 `memory.normalize_cue`, which adds 1 to its `seen` and appends the proposal's sources that the
 entry lacks, and otherwise appends `M-<max + 1>` with `sources` of `<task>:<kind>:<ref>` and
@@ -2063,9 +2076,11 @@ inside the bundle. It writes the answer to `<scratch>/<id>/lessons.json` and run
 `ppl lessons record --task <id> --file <that file>`. An answer `record` turns down goes back to the reflector
 once with the message quoted, and a second one is reported to the operator: the run's work
 is done, so it is not parked. At the start of a session the orchestrator runs
-`ppl lessons pending` and reflects on each task it lists, from the bundle path on that line,
-which covers a run destroyed with `--reflect` and a merged run whose session ended before the
-reflection. Proposals then wait for the owner, who accepts, rejects, retires or edits them and
+`ppl lessons pending` and reflects on each task it lists, from the bundle path on that line:
+the runs destroyed with `--reflect` whose reflection is not recorded yet. Such a reflection runs
+outside the run it reflects on, so the dispatch hook counts its `ppl-reflector` dispatch against
+whichever run is active at that moment, and the usage hook logs its tokens into that run's log,
+or neither is recorded when no run is active. Proposals then wait for the owner, who accepts, rejects, retires or edits them and
 runs `ppl harness apply <name>`. The orchestrator does not run those commands. Its session is
 not a role, so that is discipline there, as the residual of [R-LESSONS-OWNER-ACCEPTS] says.
 A run reads the lessons its snapshot froze at `ppl init` [R-MEMORY-APPLIED].
@@ -2358,11 +2373,17 @@ Destroy does not silently touch remote state. If the dialog is dismissed, nothin
 **Reflecting on an abandoned run.** `ppl destroy --scope local --reflect --why "<line>"` and the
 panel's destroy dialog, which asks for the line after the scope `local`, write the run's lessons
 bundle (6.13) before the archive step, with `outcome.json` `{ended: "destroyed", last_stage,
-blocker, why}`: the stage the run was in, or its resume stage when it was parked, the blocker of
-`parking.json` or `null`, and the owner's line. The archive keeps the bundle, and a pending
-marker `PPL_HOME/lessons/pending/<task>.json` names it. The next orchestrator session lists the
-markers with `ppl lessons pending` and reflects on each. An empty line in the dialog skips
-reflection. `--reflect` takes `--why`, and the two are only valid for scope `local`:
+blocker, why}`: the stage the run was in, or the stage it resumes to when it is parked or
+escalated, the blocker of `parking.json` while it is parked or escalated and `null` otherwise
+(a resume leaves `parking.json` on disk), and the owner's line. A run whose merge
+`ppl merge observed` recorded gets `{ended: "merged", merged_sha}` instead, as
+`ppl lessons bundle` writes it, and the owner's line goes in the command's result. The archive
+keeps the bundle, and a pending marker `PPL_HOME/lessons/pending/<task>.json` names it. The next
+orchestrator session lists the markers with `ppl lessons pending` and reflects on each. A run
+whose proposals are already recorded is archived with no new bundle and no marker, and the
+result says `"reflection": "recorded"`: the bundle those proposals came from stays in the
+archive as it was. An empty line in the dialog skips reflection, and Cancel aborts the destroy,
+as the prompt says. `--reflect` takes `--why`, and the two are only valid for scope `local`:
 `--reflect` with scope `full` exits `SCHEMA_INVALID` ("reflect at the local destroy that
 archives the run"), as does `--why` without `--reflect` and an empty line. A failed bundle build
 ends the command before anything is archived. From the panel the destroy command is already recorded by then, so the run stays

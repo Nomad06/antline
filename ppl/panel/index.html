@@ -308,7 +308,7 @@ document.addEventListener("click", async (event) => {
     if (scope === "full" && prompt("Type the task id to confirm irreversible cleanup:") !== task) return;
     const body = { command: "destroy", scope: scope };
     if (scope === "local") {
-      const why = prompt("Reflect on this run before it is archived? One line on why it ended, or leave empty to skip:");
+      const why = prompt("Reflect on this run before it is archived? One line on why it ended, or leave empty to skip. Cancel aborts the destroy:");
       if (why === null) return;
       body.why = why;
     }

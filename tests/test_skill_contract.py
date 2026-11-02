@@ -1002,6 +1002,18 @@ class TestReflectionSkillText(unittest.TestCase):
             self.assertIn("/<TASK-ID>/lessons.json", text, name)
             self.assertIn("ppl-reflector", text, name)
 
+    def test_the_reflection_says_what_ends_it_early(self):
+        for name in RENDERED:
+            text = self.reflection(name)
+            step1 = text[text.index("1. Get the bundle."):text.index("2. Dispatch")]
+            self.assertIn("If it exits with `ILLEGAL_TRANSITION`", step1, name)
+            step2 = text[text.index("2. Dispatch"):text.index("3. Write")]
+            self.assertIn("If the dispatch fails", step2, name)
+            self.assertIn("leave the marker in place", step2, name)
+            self.assertIn("ppl harness apply <name>", step2, name)
+            step4 = text[text.index("4. If"):text.index("5. The proposals")]
+            self.assertIn("cleared its pending marker", step4, name)
+
     def test_the_reflection_never_accepts_or_applies(self):
         for name, files in RENDERED.items():
             text = files["references/reflection.md"]
