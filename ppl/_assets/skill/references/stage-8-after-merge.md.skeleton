@@ -5,6 +5,7 @@ watching the <!-- include: vocab/short -->.<!-- include: os/merge-watch --> Once
 first record it: <!-- include: sequence/after-merge -->, once per run - a second call is
 refused [R-MERGE-OBSERVED-ONCE]. Then write to the tracker <!-- include: harness/tracker-close -->: <!-- include: tracker/close -->.
 Only after the merge is observed and recorded, and always in plain informal English, not a formal template.
+Then reflect: `references/reflection.md`.
 
 **This is enforced, not just a convention, only when `ppl doctor` reports the guard hook
 registered** (`local`, or an accepted `global`/`both`) **for this session** - the hook denies

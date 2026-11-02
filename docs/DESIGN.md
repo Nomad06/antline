@@ -2056,6 +2056,20 @@ twice. No command applies the harness: each write prints `run ppl harness apply 
 A pipeline role's Bash call of any of these commands is denied like every `ppl` call that is not
 read-only [R-GUARD-PPL-CLI-DENIED].
 
+**The flow end to end.** The skill's `references/reflection.md` runs it. After the post-merge
+tracker note, the orchestrator runs `ppl lessons bundle --task <id>` and dispatches
+`ppl-reflector` with a prompt that names the bundle directory and the task id, and nothing from
+inside the bundle. It writes the answer to `<scratch>/<id>/lessons.json` and runs
+`ppl lessons record --task <id> --file <that file>`. An answer `record` turns down goes back to the reflector
+once with the message quoted, and a second one is reported to the operator: the run's work
+is done, so it is not parked. At the start of a session the orchestrator runs
+`ppl lessons pending` and reflects on each task it lists, from the bundle path on that line,
+which covers a run destroyed with `--reflect` and a merged run whose session ended before the
+reflection. Proposals then wait for the owner, who accepts, rejects, retires or edits them and
+runs `ppl harness apply <name>`. The orchestrator does not run those commands. Its session is
+not a role, so that is discipline there, as the residual of [R-LESSONS-OWNER-ACCEPTS] says.
+A run reads the lessons its snapshot froze at `ppl init` [R-MEMORY-APPLIED].
+
 ## 7. Stage flow: task link to MR
 
 Entry: `/pipeline https://tracker.example/browse/DEMO-12345`

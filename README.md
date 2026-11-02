@@ -46,6 +46,9 @@ test suite fails if a blocking row has no test that asserts the refusal.
 - **Runs that survive a crash.** State lives on disk, `ppl recover` picks a run up after a
   restart, and a run that hits something it should not decide parks with a code and a
   question for you.
+- **Lessons from finished runs.** After a merge, a read-only reflector reads the run's evidence and
+  proposes lessons for the harness. You accept, edit or reject each one, and none reaches an agent
+  before you do and apply the harness.
 - **Models routed per role.** Strong models where the solution space is wide (the brief,
   the verification), cheaper ones on rails (code, tests), with Economy, Balanced and Max
   quality presets. A run refuses to start on a model that has not answered a probe
@@ -122,7 +125,7 @@ the test writer tries to `cat` product code and the hook denies it
 - Independent tests by construction, not by a line in a prompt.
 - The limits that matter are code. `ppl/_assets/rules.toml` holds 196 rules, 146 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 2897 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 3056 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
