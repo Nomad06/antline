@@ -1056,3 +1056,156 @@ class TestOwnerReview(LessonsTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAbandonedRun(LessonsTestCase):
+    """`ppl destroy --scope local --reflect --why`: a run that ends without a merge."""
+
+    def destroy(self, task, *extra):
+        return call("destroy", "--scope", "local", "--task", task, *extra)
+
+    def test_destroy_with_reflect_archives_the_bundle_and_leaves_a_marker(self):
+        built = self.build_run("DEMO-9301")
+        code, out, err = self.destroy("DEMO-9301", "--reflect", "--why", "  spec was wrong  ")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result["status"], "archived")
+        self.assertEqual(result["reflection"], "pending")
+        marker = json.loads(lessons.pending_path("DEMO-9301").read_text(encoding="utf-8"))
+        self.assertEqual(marker, {"task": "DEMO-9301",
+                                  "bundle": result["archive"] + "/lessons/bundle"})
+        self.assertTrue(Path(marker["bundle"]).is_dir())
+        self.assertEqual(read_bundle(marker["bundle"], "outcome.json"),
+                         {"ended": "destroyed", "last_stage": "merge_watch",
+                          "blocker": "EXTERNAL_BLOCKED", "why": "spec was wrong"})
+        self.assertFalse(built["directory"].exists())
+
+    def test_a_parked_run_reports_its_resume_stage(self):
+        self.build_run("DEMO-9302")
+        run.park("DEMO-9302", "SPEC_GAP", "ask", [])
+        result = lessons.destroy_with_reflection("DEMO-9302", "gave up")
+        outcome = read_bundle(Path(result["archive"]) / "lessons" / "bundle", "outcome.json")
+        self.assertEqual(outcome["last_stage"], "merge_watch")
+        self.assertEqual(outcome["blocker"], "SPEC_GAP")
+
+    def test_a_run_without_parking_has_a_null_blocker(self):
+        built = self.build_run("DEMO-9303")
+        (built["directory"] / "parking.json").unlink()
+        result = lessons.destroy_with_reflection("DEMO-9303", "gave up")
+        outcome = read_bundle(Path(result["archive"]) / "lessons" / "bundle", "outcome.json")
+        self.assertIsNone(outcome["blocker"])
+
+    def test_the_marker_is_a_bundle_find_bundle_accepts(self):
+        self.build_run("DEMO-9304")
+        result = lessons.destroy_with_reflection("DEMO-9304", "gave up")
+        self.assertEqual(lessons.find_bundle("DEMO-9304"),
+                         Path(result["archive"]) / "lessons" / "bundle")
+
+    def test_reflect_needs_a_why(self):
+        built = self.build_run("DEMO-9305")
+        for extra in (("--reflect",), ("--reflect", "--why", "   ")):
+            code, _, err = self.destroy("DEMO-9305", *extra)
+            self.assertEqual(code, 2)
+            self.assertIn("SCHEMA_INVALID", err)
+        self.assertTrue(built["directory"].is_dir())
+        self.assertFalse((built["directory"] / "lessons").exists())
+
+    def test_why_without_reflect_is_refused(self):
+        built = self.build_run("DEMO-9306")
+        code, _, err = self.destroy("DEMO-9306", "--why", "because")
+        self.assertEqual(code, 2)
+        self.assertIn("SCHEMA_INVALID", err)
+        self.assertTrue(built["directory"].is_dir())
+
+    def test_reflect_is_refused_with_scope_full(self):
+        built = self.build_run("DEMO-9307")
+        code, _, err = call("destroy", "--scope", "full", "--task", "DEMO-9307", "--reflect",
+                            "--why", "because")
+        self.assertEqual(code, 2)
+        self.assertIn("SCHEMA_INVALID", err)
+        self.assertIn("reflect at the local destroy that archives the run", err)
+        self.assertFalse((built["directory"] / "remote_cleanup.json").exists())
+
+    def test_destroy_without_reflect_writes_no_bundle(self):
+        built = self.build_run("DEMO-9308")
+        code, out, err = self.destroy("DEMO-9308")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("reflection", json.loads(out))
+        self.assertFalse(lessons.pending_path("DEMO-9308").exists())
+        self.assertFalse((Path(json.loads(out)["archive"]) / "lessons").exists())
+        self.assertFalse(built["directory"].exists())
+
+    def test_reflection_off_destroys_without_a_bundle(self):
+        self.build_run("DEMO-9309")
+        paths.config_file().write_text("[lessons]\nreflect = false\n", encoding="utf-8")
+        code, out, err = self.destroy("DEMO-9309", "--reflect", "--why", "gave up")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result["reflection"], "off")
+        self.assertFalse((Path(result["archive"]) / "lessons").exists())
+        self.assertFalse(lessons.pending_path("DEMO-9309").exists())
+
+    def test_a_bundle_failure_refuses_before_anything_is_archived(self):
+        built = self.build_run("DEMO-9310")
+        with mock.patch.object(lessons, "build_bundle",
+                               side_effect=PplError("SCHEMA_INVALID", "no bundle")):
+            with self.assertRaises(PplError):
+                lessons.destroy_with_reflection("DEMO-9310", "gave up")
+        self.assertTrue(built["directory"].is_dir())
+        self.assertFalse(lessons.pending_path("DEMO-9310").exists())
+
+    def test_a_marker_that_cannot_be_written_names_the_archived_bundle(self):
+        self.build_run("DEMO-9311")
+        real = store.write_json
+
+        def write_json(path, doc, *rest, **more):
+            if Path(path) == lessons.pending_path("DEMO-9311"):
+                raise OSError("disk full")
+            return real(path, doc, *rest, **more)
+
+        with mock.patch.object(store, "write_json", side_effect=write_json):
+            with self.assertRaises(PplError) as caught:
+                lessons.destroy_with_reflection("DEMO-9311", "gave up")
+        self.assertIn("archived", caught.exception.message)
+        self.assertIn("/lessons/bundle", caught.exception.message)
+        self.assertIn("disk full", caught.exception.message)
+
+    def test_a_pending_reflection_records_against_the_archived_bundle(self):
+        built = self.build_run("DEMO-9312")
+        lessons.destroy_with_reflection("DEMO-9312", "gave up")
+        doc = {"task": "DEMO-9312", "no_entry": False, "assessments": [],
+               "proposals": [{"role": "ppl-code-worker", "cue": "when a change touches the cart",
+                              "lesson": "round once, in the cart total",
+                              "evidence": [{"kind": "finding", "ref": built["finding"]}]}]}
+        lessons.record("DEMO-9312", doc)
+        self.assertTrue(lessons.proposals_path("example-maven", "DEMO-9312").is_file())
+        self.assertFalse(lessons.pending_path("DEMO-9312").exists())
+
+    def test_pending_lists_the_markers_oldest_first(self):
+        for task in ("DEMO-9322", "DEMO-9321"):
+            self.build_run(task)
+            lessons.destroy_with_reflection(task, "gave up")
+        os.utime(str(lessons.pending_path("DEMO-9322")), (1000, 1000))
+        os.utime(str(lessons.pending_path("DEMO-9321")), (2000, 2000))
+        code, out, err = call("lessons", "pending")
+        self.assertEqual(code, 0, err)
+        lines = out.splitlines()
+        self.assertEqual([line.split()[0] for line in lines], ["DEMO-9322", "DEMO-9321"])
+        self.assertEqual(lines[0].split()[1], lessons.find_bundle("DEMO-9322").as_posix())
+
+    def test_pending_with_no_markers(self):
+        code, out, _ = call("lessons", "pending")
+        self.assertEqual((code, out.strip()), (0, "no pending reflections"))
+
+    def test_pending_skips_a_malformed_marker_with_one_warning(self):
+        self.build_run("DEMO-9330")
+        lessons.destroy_with_reflection("DEMO-9330", "gave up")
+        bad = lessons.pending_path("DEMO-9331")
+        bad.write_text("{not json", encoding="utf-8")
+        wrong = lessons.pending_path("DEMO-9332")
+        wrong.write_text("[1]", encoding="utf-8")
+        code, out, err = call("lessons", "pending")
+        self.assertEqual(code, 0)
+        self.assertEqual([line.split()[0] for line in out.splitlines()], ["DEMO-9330"])
+        self.assertEqual(len(err.strip().splitlines()), 2)
+        self.assertIn("DEMO-9331", err)

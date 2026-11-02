@@ -728,3 +728,66 @@ def edit(harness_name_, memory_id, cue=None, lesson=None):
         entry["lesson"] = _check_text("the owner's lesson", "lesson", lesson, memory.clean)
     _save_memory(name, entries, expected)
     return entry
+
+
+def destroy_with_reflection(task_id, why):
+    """Archives a run that ends without a merge and leaves a pending marker for its
+    reflection. `why` is the owner's one line on why it ended. The bundle is built first, so
+    a failure refuses before anything is archived. With `[lessons] reflect = false` it only
+    destroys. A marker that cannot be written after the archive is an error naming the
+    archived bundle, so the owner can reflect by hand."""
+    if not isinstance(why, str) or not why.strip():
+        raise PplError("SCHEMA_INVALID", "a destroy with reflection needs a non-empty why")
+    why = why.strip()
+    if not config.lessons_reflect():
+        result = run.destroy(task_id, "local")
+        result["reflection"] = "off"
+        return result
+    state = run.load(task_id)
+    parking = store.read_json(paths.run_dir(task_id) / "parking.json", None)
+    parking = parking if isinstance(parking, dict) else {}
+    stage = state.get("stage")
+    if stage == "parking":
+        stage = parking.get("resume_stage")
+    build_bundle(task_id, {"ended": "destroyed", "last_stage": stage,
+                           "blocker": parking.get("blocker"), "why": why})
+    result = run.destroy(task_id, "local")
+    bundle_path = result["archive"] + "/lessons/bundle"
+    try:
+        store.write_json(pending_path(task_id), {"task": task_id, "bundle": bundle_path})
+    except (OSError, PplError) as exc:
+        raise PplError("EXTERNAL_BLOCKED",
+                       "%s is archived at %s, but its pending reflection marker could not be "
+                       "written (%s). The bundle is at %s: reflect on it by hand"
+                       % (task_id, result["archive"], exc, bundle_path))
+    result["reflection"] = "pending"
+    return result
+
+
+def pending():
+    """The pending markers, oldest first by modification time, then by name, as
+    `{"task", "bundle", "warning"}`: a marker that is unreadable or malformed comes back with
+    a `warning` and no bundle, for the caller to report and skip."""
+    folder = pending_path("X").parent
+    try:
+        names = sorted(name for name in os.listdir(str(folder)) if name.endswith(".json"))
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        marker = folder / name
+        try:
+            stamp = os.lstat(str(marker)).st_mtime
+        except OSError:
+            continue
+        task = name[:-len(".json")]
+        try:
+            doc = store.read_json(marker, None, BUNDLE_READ_LIMIT)
+            ok = isinstance(doc, dict) and doc.get("task") == task \
+                and isinstance(doc.get("bundle"), str)
+            entry = {"task": task, "bundle": doc["bundle"]} if ok else \
+                {"task": task, "warning": "is not {\"task\": %s, \"bundle\": <path>}" % task}
+        except (PplError, OSError, UnicodeDecodeError, RecursionError) as exc:
+            entry = {"task": task, "warning": "cannot be read: %s" % exc}
+        found.append((stamp, name, entry))
+    return [entry for _, _, entry in sorted(found, key=lambda item: item[:2])]

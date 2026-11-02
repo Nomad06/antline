@@ -137,6 +137,40 @@ class TestPanelApi(unittest.TestCase):
         result = server.handle_control(self.task, {"command": "destroy", "scope": "full"})
         self.assertEqual(result["result"]["status"], "queued_remote_cleanup")
 
+    def test_the_panel_destroy_with_a_why_reflects(self):
+        with mock.patch("ppl.lessons.destroy_with_reflection",
+                        return_value={"status": "archived", "reflection": "pending"}) as spy:
+            result = server.handle_control(self.task, {"command": "destroy", "scope": "local",
+                                                       "why": "spec was wrong"})
+        spy.assert_called_once_with(self.task, "spec was wrong")
+        self.assertEqual(result["result"]["reflection"], "pending")
+
+    def test_the_panel_destroy_without_a_why_does_not(self):
+        with mock.patch("ppl.lessons.destroy_with_reflection") as spy:
+            for why in (None, ""):
+                task = "DEMO-%d" % next(COUNTER)
+                run.init(task, "https://j/x", "/tmp/r")
+                body = {"command": "destroy", "scope": "local"}
+                if why is not None:
+                    body["why"] = why
+                result = server.handle_control(task, body)
+                self.assertEqual(result["result"]["status"], "archived")
+        spy.assert_not_called()
+
+    def test_the_panel_destroy_refuses_a_why_that_is_not_text(self):
+        with self.assertRaises(PplError) as caught:
+            server.handle_control(self.task, {"command": "destroy", "scope": "local",
+                                              "why": 5})
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertTrue(paths.run_dir(self.task).is_dir())
+
+    def test_the_panel_destroy_with_scope_full_ignores_a_why(self):
+        with mock.patch("ppl.lessons.destroy_with_reflection") as spy:
+            result = server.handle_control(self.task, {"command": "destroy", "scope": "full",
+                                                       "why": "x"})
+        spy.assert_not_called()
+        self.assertEqual(result["result"]["status"], "queued_remote_cleanup")
+
     def test_control_destroy_without_scope_is_refused(self):
         # rule: R-DESTROY-SCOPE
         with self.assertRaises(PplError):

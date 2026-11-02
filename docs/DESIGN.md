@@ -1999,6 +1999,8 @@ digits, `_` and `-`) is `SCHEMA_INVALID` with nothing written. Build and set-asi
 an interrupted build left in `lessons/` are removed when the next build starts, a link among
 them is left alone.
 
+**Runs that end without a merge.** A destroy at the owner's say-so builds the bundle too (9.3).
+
 **Recording.** The reflector answers with JSON, `{task, no_entry, proposals, assessments}`: at
 most 5 proposals of `{role, cue, lesson, evidence}`, and for each lesson that was in effect an
 assessment `{memory_id, verdict, evidence}` with a verdict of `helped`, `hurt`,
@@ -2338,6 +2340,20 @@ Destroy always prompts and the owner picks the scope per run:
   after which the local archive step runs.
 
 Destroy does not silently touch remote state. If the dialog is dismissed, nothing happens.
+
+**Reflecting on an abandoned run.** `ppl destroy --scope local --reflect --why "<line>"` and the
+panel's destroy dialog, which asks for the line after the scope `local`, write the run's lessons
+bundle (6.13) before the archive step, with `outcome.json` `{ended: "destroyed", last_stage,
+blocker, why}`: the stage the run was in, or its resume stage when it was parked, the blocker of
+`parking.json` or `null`, and the owner's line. The archive keeps the bundle, and a pending
+marker `PPL_HOME/lessons/pending/<task>.json` names it. The next orchestrator session lists the
+markers with `ppl lessons pending` and reflects on each. An empty line in the dialog skips
+reflection. `--reflect` takes `--why`, and the two are only valid for scope `local`:
+`--reflect` with scope `full` exits `SCHEMA_INVALID` ("reflect at the local destroy that
+archives the run"), as does `--why` without `--reflect` and an empty line. A failed bundle build
+ends the command before anything is archived. With `[lessons] reflect = false` the run
+is destroyed without a bundle. When the marker write fails after the archive, the report says
+the run is archived and gives the bundle path, for reflecting by hand.
 
 `pause`, `stop` and `destroy` all halt the run at the next `ppl` call or tool call. `stop`
 additionally writes a real parking record with blocker `OWNER_DECISION`, so a stopped run

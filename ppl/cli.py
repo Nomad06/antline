@@ -1138,8 +1138,18 @@ def cmd_dispatch(args):
 
 
 def cmd_destroy(args):
+    if args.why is not None and not args.reflect:
+        raise PplError("SCHEMA_INVALID", "--why goes with --reflect")
+    if args.reflect and args.scope != "local":
+        raise PplError("SCHEMA_INVALID", "reflect at the local destroy that archives the run")
+    if args.reflect and (args.why is None or not args.why.strip()):
+        raise PplError("SCHEMA_INVALID", "--reflect needs --why \"<one line on why the run "
+                                         "ended>\"")
     task_id = resolve_task(args)
-    result = run.destroy(task_id, args.scope)
+    if args.reflect:
+        result = lessons.destroy_with_reflection(task_id, args.why)
+    else:
+        result = run.destroy(task_id, args.scope)
     print(json.dumps(result, sort_keys=True))
     return 0
 
@@ -1245,6 +1255,22 @@ def _lessons_review(args):
     return 0
 
 
+def _lessons_pending():
+    markers = lessons.pending()
+    shown = 0
+    for marker in markers:
+        if "warning" in marker:
+            print("warning: the pending marker for %s %s, skipped" % (marker["task"],
+                                                                    marker["warning"]),
+                  file=sys.stderr)
+        else:
+            print("%s %s" % (marker["task"], marker["bundle"]))
+            shown += 1
+    if not shown:
+        print("no pending reflections")
+    return 0
+
+
 def cmd_lessons(args):
     # No control.enforce, by design: the bundle changes no run state, and a destroy with
     # reflection builds it after control.set_command recorded that destroy, so an enforce
@@ -1254,6 +1280,8 @@ def cmd_lessons(args):
         return _lessons_record(args)
     if args.action in OWNER_ACTIONS:
         return _lessons_review(args)
+    if args.action == "pending":
+        return _lessons_pending()
     task_id = resolve_task(args)
     target = lessons.bundle(task_id)
     if target is None:
@@ -1564,6 +1592,8 @@ def build_parser():
     p = sub.add_parser("destroy")
     p.add_argument("--scope", choices=["local", "full"], required=True)
     p.add_argument("--task")
+    p.add_argument("--reflect", action="store_true")
+    p.add_argument("--why")
 
     p = sub.add_parser("apply-patch")
     p.add_argument("--role", required=True)
@@ -1595,7 +1625,7 @@ def build_parser():
 
     p = sub.add_parser("lessons")
     p.add_argument("action", choices=["bundle", "record", "list", "accept", "reject", "retire",
-                                      "edit"])
+                                      "edit", "pending"])
     p.add_argument("target", nargs="?")
     p.add_argument("--task")
     p.add_argument("--file")

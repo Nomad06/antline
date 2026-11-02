@@ -33,6 +33,11 @@ class TestPanelPage(unittest.TestCase):
         self.assertIn("full", self.text)
         self.assertIn("confirm", self.text.lower())
 
+    def test_a_local_destroy_asks_whether_to_reflect(self):
+        self.assertIn("Reflect on this run before it is archived? One line on why it ended, "
+                      "or leave empty to skip:", self.text)
+        self.assertIn("body.why = why", self.text)
+
     def test_destroy_reports_a_worktree_that_could_not_be_removed(self):
         # run.destroy archives the run either way, so a silent panel made an
         # orphaned worktree look exactly like a clean destroy.
