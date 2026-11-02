@@ -1196,6 +1196,55 @@ def _lessons_record(args):
     return 0
 
 
+OWNER_ACTIONS = ("list", "accept", "reject", "retire", "edit")
+
+
+def _lessons_table(data):
+    lines = ["harness %s" % data["harness"], "", "pending proposals:"]
+    for item in data["proposals"]:
+        lines.append("  %s  %s  when %s: %s" % (item["id"], item["role"], item["cue"],
+                                                  item["lesson"]))
+    if not data["proposals"]:
+        lines.append("  none")
+    lines += ["", "active lessons:"]
+    active = [e for e in data["memory"] if e["status"] == "active"]
+    for entry in active:
+        lines.append("  %s  %s  seen %d  when %s: %s" % (entry["id"], entry["role"],
+                                                           entry["seen"], entry["cue"],
+                                                           entry["lesson"]))
+    if not active:
+        lines.append("  none")
+    return "\n".join(lines)
+
+
+def _lessons_review(args):
+    # The owner's review: the only writer of memory.toml, through the studio's versioned save.
+    # Not a role-output command, and a role's Bash call of it is denied by the guard
+    # [R-LESSONS-OWNER-ACCEPTS]. No control.enforce: it touches no run.
+    name = lessons.harness_name(args.harness)
+    if args.action == "list":
+        data = lessons.listing(name)
+        print(json.dumps(data, indent=2, sort_keys=True) if args.json else _lessons_table(data))
+        return 0
+    if not args.target:
+        raise PplError("SCHEMA_INVALID", "ppl lessons %s needs a %s" % (
+            args.action, "proposal id" if args.action in ("accept", "reject") else "lesson id"))
+    if args.action == "accept":
+        entry = lessons.accept(name, args.target, args.cue, args.lesson)
+        print("accepted %s as %s (seen %d)" % (args.target, entry["id"], entry["seen"]))
+    elif args.action == "reject":
+        lessons.reject(name, args.target, args.reason)
+        print("rejected %s" % args.target)
+    elif args.action == "retire":
+        lessons.retire(name, args.target)
+        print("retired %s" % args.target)
+    else:
+        lessons.edit(name, args.target, args.cue, args.lesson)
+        print("edited %s" % args.target)
+    print("run ppl harness apply %s to render it" % name)
+    return 0
+
+
 def cmd_lessons(args):
     # No control.enforce, by design: the bundle changes no run state, and a destroy with
     # reflection builds it after control.set_command recorded that destroy, so an enforce
@@ -1203,6 +1252,8 @@ def cmd_lessons(args):
     # [R-LESSONS-BUNDLE-AFTER-MERGE].
     if args.action == "record":
         return _lessons_record(args)
+    if args.action in OWNER_ACTIONS:
+        return _lessons_review(args)
     task_id = resolve_task(args)
     target = lessons.bundle(task_id)
     if target is None:
@@ -1543,9 +1594,16 @@ def build_parser():
     p.add_argument("--task")
 
     p = sub.add_parser("lessons")
-    p.add_argument("action", choices=["bundle", "record"])
+    p.add_argument("action", choices=["bundle", "record", "list", "accept", "reject", "retire",
+                                      "edit"])
+    p.add_argument("target", nargs="?")
     p.add_argument("--task")
     p.add_argument("--file")
+    p.add_argument("--harness")
+    p.add_argument("--reason")
+    p.add_argument("--cue")
+    p.add_argument("--lesson")
+    p.add_argument("--json", action="store_true")
     return parser
 
 

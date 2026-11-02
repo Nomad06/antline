@@ -88,7 +88,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     setup.py                     `ppl setup`, the six-step onboarding wizard
     models.py                    tier models: `ppl models verify` probes and their record
     harness.py                   harness load, validate, add, apply, and the run snapshot (5.6)
-    lessons.py                   a finished run's evidence bundle for ppl-reflector (6.13)
+    lessons.py                   a finished run's evidence bundle for ppl-reflector, and the owner's review of its lessons (6.13)
     tomlout.py                   the TOML writer for the files setup rewrites
     schema.py                    brief and verdict field/shape checks (Python, not JSON Schema files)
     refusals.py                  refused role output: the refusal count and its park (6.6)
@@ -831,7 +831,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 195 rows: 145 `blocking`, 21 `soft` and 29 `n/a`. Of the
+As of this commit the table carries 196 rows: 146 `blocking`, 21 `soft` and 29 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 10 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
@@ -1218,6 +1218,8 @@ ppl merge observed --sha <sha> [--url <url>]
                                   # only and once; the tracker gate waits for it
 ppl lessons bundle [--task <id>] # writes runs/<task>/lessons/bundle/ for ppl-reflector,
                                   # in merge_watch after merge observed (6.13)
+ppl lessons list|accept|reject|retire|edit [<id>] [--harness <name>]
+                                  # the owner's review of proposed lessons (6.13)
 
 ppl serve [--port 8787]          # admin panel, loopback only
 ppl control set <pause|resume|stop|destroy> [--scope local|full]
@@ -2029,6 +2031,28 @@ removes the marker, a `no_entry` one too, and a refused one leaves it [R-LESSONS
 role-output commands of `refusals.COMMANDS` and does not call `control.enforce`: a refused answer
 goes back to the reflector once, and then the orchestrator reports it, since parking a merged run
 over a missing lesson would cost more than the lesson [R-LESSONS-EVIDENCE-RESOLVES].
+
+**Review.** The owner decides each proposal with `ppl lessons list|accept|reject|retire|edit` on
+the active harness, or on `--harness <name>`, which must be an installed harness [R-LESSONS-OWNER-ACCEPTS].
+`list` prints the pending proposals and the active entries, or JSON with `--json`. `accept <task>.<n>`
+merges the proposal into an active entry of the same role whose cue is the same after
+`memory.normalize_cue`, which adds 1 to its `seen` and appends the proposal's sources that the
+entry lacks, and otherwise appends `M-<max + 1>` with `sources` of `<task>:<kind>:<ref>` and
+`accepted_at` now. A new entry for a role that already has 12 active ones is refused `SCHEMA_INVALID`
+("retire one first: ppl lessons retire <id>"), and a merge is accepted at 12, since it adds no
+entry [R-LESSONS-OWNER-ACCEPTS]. `--cue` and `--lesson` on `accept` and `edit` replace the text, cleaned
+by `memory.clean_cue` and `memory.clean`, and an empty or over-long result is refused
+`SCHEMA_INVALID` [R-LESSONS-OWNER-ACCEPTS]. `reject <task>.<n> --reason <text>` needs a reason, and a proposal that is accepted
+or rejected is refused `ILLEGAL_TRANSITION` if decided again [R-LESSONS-OWNER-ACCEPTS]. `retire <id>`
+keeps the entry in the file and out of the render, and `edit <id>` is refused for an unknown or
+retired id [R-LESSONS-OWNER-ACCEPTS]. Each writer reads `memory.toml` once, builds the new entries from that text and saves them
+through the studio's `files.validate` and `files.save` with that read's hash: the old file stays in
+the studio history, and a change made in between is refused `CHANGED_ON_DISK` with nothing written
+[R-LESSONS-OWNER-ACCEPTS]. The proposal is marked after the memory save. A mark that fails then leaves the
+lesson saved and the proposal pending, and accepting it again marks it without adding the lesson
+twice. No command applies the harness: each write prints `run ppl harness apply <name> to render it`.
+A pipeline role's Bash call of any of these commands is denied like every `ppl` call that is not
+read-only [R-GUARD-PPL-CLI-DENIED].
 
 ## 7. Stage flow: task link to MR
 

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import config, harness, memory, paths, routing, run, store, trail
 from .errors import PplError
+from .studio import files
 
 BUNDLE_FILES = ("outcome.json", "brief.json", "challenge.json", "findings.json",
                 "verdicts.json", "gates.json", "timeline.json", "threads.json",
@@ -373,7 +374,9 @@ def resolve(bundle, kind, ref, cache=None):
                  and e.get("check") == check}
         return len(found) == 1
     if kind in ("park", "deny", "timeline"):
-        if not re.fullmatch(r"(0|[1-9][0-9]*)", ref):
+        # at most 18 digits: int() of a longer one raises past Python's digit limit, and no
+        # log holds so many events
+        if not re.fullmatch(r"(0|[1-9][0-9]{0,17})", ref):
             return False
         return any(e.get("n") == int(ref) and (kind == "timeline" or e.get("event") == kind)
                    for e in _entries(bundle, "timeline.json", cache))
@@ -535,3 +538,193 @@ def bundle(task_id):
                        "the reflector's agent file %s is missing, so ppl-reflector cannot be "
                        "dispatched: run `ppl harness apply %s`" % (agent, _harness_name(state)))
     return build_bundle(task_id, {"ended": "merged", "merged_sha": merged})
+
+
+# --- the owner's review: list, accept, reject, retire, edit -------------------------------
+
+_PROPOSAL_ID = re.compile(r"(.+)\.([0-9]+)")
+
+
+def harness_name(given=None):
+    """`given`, else the active harness, as a plain name of an installed harness, else
+    SCHEMA_INVALID naming it. The proposals file it selects stays inside lessons_home()."""
+    name = given or config.active_harness()
+    if not name:
+        _refuse("no harness is active: name one with --harness <name>")
+    harness.check_name(name)
+    if name not in harness.list_names():
+        _refuse("no installed harness %r" % name)
+    return name
+
+
+def _key(name):
+    return "harness:%s:memory.toml" % name
+
+
+def _load_memory(name):
+    """(expected hash, entries) from one read of memory.toml. The hash goes to the save, so a
+    change in between is CHANGED_ON_DISK and nothing is written."""
+    read = files.read(_key(name))
+    return read["hash"], memory.parse(read["text"], _key(name), routing.LESSON_ROLES)
+
+
+def _save_memory(name, entries, expected_hash):
+    """The only write of memory.toml: the harness check on a private copy, then the studio's
+    versioned save, which keeps the old file in history [R-LESSONS-OWNER-ACCEPTS]."""
+    key = _key(name)
+    text = memory.dumps(entries)
+    files.validate(key, text)
+    files.save(key, text, expected_hash)
+
+
+def _load_proposal(name, proposal_id):
+    """(path, document, proposal) of a pending proposal, else SCHEMA_INVALID for one that is
+    not there and ILLEGAL_TRANSITION for one already decided."""
+    match = _PROPOSAL_ID.fullmatch(proposal_id) if isinstance(proposal_id, str) else None
+    if not match:
+        _refuse("%r is not a proposal id, which reads <task>.<n>" % (proposal_id,))
+    paths.check_task_id(match.group(1))
+    path = proposals_path(name, match.group(1))
+    doc = store.read_json(path, None, BUNDLE_READ_LIMIT)
+    if not isinstance(doc, dict) or not isinstance(doc.get("proposals"), list):
+        _refuse("no proposals are recorded for %s in harness %s" % (match.group(1), name))
+    for proposal in doc["proposals"]:
+        if isinstance(proposal, dict) and proposal.get("id") == proposal_id:
+            if proposal.get("status") != "pending":
+                raise PplError("ILLEGAL_TRANSITION", "proposal %s is already %s"
+                               % (proposal_id, proposal.get("status")))
+            return path, doc, proposal
+    _refuse("proposal %s is not in %s" % (proposal_id, path))
+
+
+def _mark(path, doc, proposal, **fields):
+    proposal.update(fields)
+    store.write_json(path, doc)
+
+
+def _sources(proposal):
+    task = proposal["id"].rsplit(".", 1)[0]
+    evidence = proposal.get("evidence")
+    if not isinstance(evidence, list) or not evidence or not all(
+            isinstance(e, dict) and isinstance(e.get("kind"), str)
+            and isinstance(e.get("ref"), str) for e in evidence):
+        _refuse("proposal %s has no evidence of {kind, ref}" % proposal["id"])
+    return ["%s:%s:%s" % (task, e["kind"], e["ref"]) for e in evidence]
+
+
+def listing(harness_name_=None):
+    """{"harness", "proposals", "memory"}: the pending proposals of every recorded task, each
+    with its "task", and every entry of memory.toml, retired ones included."""
+    name = harness_name(harness_name_)
+    pending = []
+    folder = lessons_home() / name / "proposals"
+    names = sorted(os.listdir(str(folder))) if folder.is_dir() else []
+    for file_name in names:
+        if not file_name.endswith(".json") or file_name.startswith("."):
+            continue
+        try:
+            doc = store.read_json(folder / file_name, None, BUNDLE_READ_LIMIT)
+        except (OSError, UnicodeDecodeError, RecursionError):
+            continue
+        if not isinstance(doc, dict) or not isinstance(doc.get("proposals"), list):
+            continue
+        for proposal in doc["proposals"]:
+            if isinstance(proposal, dict) and proposal.get("status") == "pending":
+                pending.append(dict(proposal, task=doc.get("task")))
+    return {"harness": name, "proposals": pending, "memory": _load_memory(name)[1]}
+
+
+def accept(harness_name_, proposal_id, cue=None, lesson=None):
+    """The owner accepts a pending proposal [R-LESSONS-OWNER-ACCEPTS]. A cue that normalizes
+    like an active entry's of the same role merges into it (`seen` + 1, sources unioned in
+    order), else a new entry M-<max + 1> is appended, which the cap of memory.MAX_ACTIVE active
+    entries per role refuses. `cue` and `lesson` are the owner's edit, cleaned and checked.
+    memory.toml is saved first, with the hash read at the start, and the proposal is marked
+    after that: a mark that fails leaves the lesson saved and the proposal pending, and
+    accepting it again marks it without adding it twice, as its sources are already in the
+    entry. Returns the entry written."""
+    name = harness_name(harness_name_)
+    expected, entries = _load_memory(name)
+    path, doc, proposal = _load_proposal(name, proposal_id)
+    role = proposal.get("role")
+    if role not in routing.LESSON_ROLES:
+        _refuse("proposal %s has the role %r, which is not one of %s"
+                % (proposal_id, role, ", ".join(routing.LESSON_ROLES)))
+    cue = _check_text("the owner's cue" if cue is not None else "proposal %s" % proposal_id,
+                      "cue", proposal.get("cue") if cue is None else cue, memory.clean_cue)
+    new_lesson = None if lesson is None else _check_text(
+        "the owner's lesson", "lesson", lesson, memory.clean)
+    text = new_lesson or _check_text("proposal %s" % proposal_id, "lesson",
+                                     proposal.get("lesson"), memory.clean)
+    sources = _sources(proposal)
+    wanted = memory.normalize_cue(cue)
+    target = next((e for e in memory.active(entries, role)
+                   if memory.normalize_cue(e["cue"]) == wanted), None)
+    if target is not None:
+        fresh = [source for source in sources if source not in target["sources"]]
+        if fresh or new_lesson:
+            if fresh:
+                target["seen"] += 1
+                target["sources"] = target["sources"] + fresh
+            if new_lesson:
+                target["lesson"] = new_lesson
+            _save_memory(name, entries, expected)
+        entry = target
+    else:
+        if len(memory.active(entries, role)) >= memory.MAX_ACTIVE:
+            _refuse("%s already has %d active lessons: retire one first: ppl lessons retire <id>"
+                    % (role, memory.MAX_ACTIVE))
+        entry = {"id": memory.next_id(entries), "role": role, "cue": cue, "lesson": text,
+                 "sources": sources, "accepted_at": store.now(), "seen": 1,
+                 "status": "active"}
+        _save_memory(name, entries + [entry], expected)
+    try:
+        _mark(path, doc, proposal, status="accepted", memory_id=entry["id"])
+    except OSError as exc:
+        _refuse("memory.toml now holds the lesson as %s, but %s could not be updated (%s): "
+                "the proposal stays pending, accept it again to mark it, nothing is added twice"
+                % (entry["id"], path, exc))
+    return entry
+
+
+def reject(harness_name_, proposal_id, reason):
+    """The owner rejects a pending proposal with a reason. memory.toml is not touched."""
+    name = harness_name(harness_name_)
+    reason = memory.clean(reason) if isinstance(reason, str) else ""
+    if not reason:
+        _refuse("rejecting %s needs a reason: --reason <text>" % proposal_id)
+    path, doc, proposal = _load_proposal(name, proposal_id)
+    _mark(path, doc, proposal, status="rejected", reason=reason)
+
+
+def _find_active(entries, memory_id):
+    for entry in entries:
+        if entry["id"] == memory_id:
+            if entry["status"] != "active":
+                _refuse("%s is already retired" % memory_id)
+            return entry
+    _refuse("no lesson %s in memory.toml" % memory_id)
+
+
+def retire(harness_name_, memory_id):
+    """The owner retires an active entry: it stays in memory.toml, out of the render."""
+    name = harness_name(harness_name_)
+    expected, entries = _load_memory(name)
+    _find_active(entries, memory_id)["status"] = "retired"
+    _save_memory(name, entries, expected)
+
+
+def edit(harness_name_, memory_id, cue=None, lesson=None):
+    """The owner rewrites the cue or the lesson of an active entry, cleaned and checked.
+    Returns the entry."""
+    name = harness_name(harness_name_)
+    if cue is None and lesson is None:
+        _refuse("editing %s needs --cue or --lesson" % memory_id)
+    expected, entries = _load_memory(name)
+    entry = _find_active(entries, memory_id)
+    if cue is not None:
+        entry["cue"] = _check_text("the owner's cue", "cue", cue, memory.clean_cue)
+    if lesson is not None:
+        entry["lesson"] = _check_text("the owner's lesson", "lesson", lesson, memory.clean)
+    _save_memory(name, entries, expected)
+    return entry

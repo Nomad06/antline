@@ -781,6 +781,278 @@ class TestRecord(LessonsTestCase):
             self.assertIn("no_entry", self.refused("SCHEMA_INVALID", built, empty))
         self.assertTrue(marker.is_file())
 
+    def test_record_leaves_memory_unchanged(self):
+        built = self.bundled("DEMO-9226")
+        path = paths.harness_dir("example-maven") / "memory.toml"
+        before = path.read_bytes()
+        code, _, err = self.record(built, self.doc(built))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_a_huge_n_reference_is_refused_without_crashing(self):
+        # rule: R-LESSONS-EVIDENCE-RESOLVES
+        built = self.bundled("DEMO-9227")
+        for kind in ("park", "deny", "timeline"):
+            self.assertFalse(lessons.resolve(built["bundle"], kind, "9" * 4400))
+            doc = self.doc(built)
+            doc["proposals"][0]["evidence"] = [{"kind": kind, "ref": "9" * 4400}]
+            self.refused("SCHEMA_INVALID", built, doc)
+
+
+class TestOwnerReview(LessonsTestCase):
+    """`ppl lessons list|accept|reject|retire|edit`: the owner's review, the only writer of
+    memory.toml."""
+
+    KEY = "harness:example-maven:memory.toml"
+    APPLY = "run ppl harness apply example-maven to render it"
+
+    def setUp(self):
+        super().setUp()
+        paths.config_file().write_text('[harness]\nactive = "example-maven"\n', encoding="utf-8")
+
+    def propose(self, task="DEMO-9301", items=None):
+        items = items if items is not None else [
+            {"id": task + ".1", "role": "ppl-code-worker", "cue": "a change touches the invoice",
+             "lesson": "round once, in the invoice total",
+             "evidence": [{"kind": "finding", "ref": "F-9"}, {"kind": "remark", "ref": "1001"}],
+             "status": "pending"}]
+        store.write_json(lessons.proposals_path("example-maven", task),
+                         {"task": task, "harness": "example-maven",
+                          "recorded_at": "2026-10-28T00:00:00Z", "no_entry": False,
+                          "proposals": items, "assessments": []})
+
+    def memory_path(self):
+        return paths.harness_dir("example-maven") / "memory.toml"
+
+    def memory_bytes(self):
+        return self.memory_path().read_bytes()
+
+    def entries(self):
+        return memory.parse(self.memory_bytes(), "memory.toml", lessons.routing.LESSON_ROLES)
+
+    def stored(self, task="DEMO-9301"):
+        return json.loads(lessons.proposals_path("example-maven", task)
+                          .read_text(encoding="utf-8"))["proposals"]
+
+    def fill_role(self, role, count):
+        rows = [{"id": "M-%d" % n, "role": role, "cue": "cue number %d" % n,
+                 "lesson": "lesson %d" % n, "sources": ["DEMO-1:finding:F-1"],
+                 "accepted_at": "2026-10-28T00:00:00Z", "seen": 1, "status": "active"}
+                for n in range(1, count + 1)]
+        self.memory_path().write_text(memory.dumps(rows), encoding="utf-8")
+
+    def refused(self, code, *args):
+        before = self.memory_bytes()
+        exit_code, out, err = call(*args)
+        self.assertEqual(exit_code, 2, out)
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], code)
+        self.assertEqual(self.memory_bytes(), before)
+        return payload["message"]
+
+    def test_accept_appends_a_new_entry_with_its_sources(self):
+        self.propose()
+        code, out, err = call("lessons", "accept", "DEMO-9301.1")
+        self.assertEqual(code, 0, err)
+        self.assertIn("M-2", out)
+        self.assertIn(self.APPLY, out)
+        new = self.entries()[1]
+        self.assertEqual((new["id"], new["role"], new["seen"], new["status"]),
+                         ("M-2", "ppl-code-worker", 1, "active"))
+        self.assertEqual(new["cue"], "a change touches the invoice")
+        self.assertEqual(new["sources"], ["DEMO-9301:finding:F-9", "DEMO-9301:remark:1001"])
+        self.assertRegex(new["accepted_at"], r"^\d{4}-\d\d-\d\dT")
+        self.assertEqual(self.stored()[0]["status"], "accepted")
+        self.assertEqual(self.stored()[0]["memory_id"], "M-2")
+
+    def test_accept_with_the_same_cue_merges_into_the_entry(self):
+        self.propose(items=[{"id": "DEMO-9301.1", "role": "ppl-code-worker",
+                             "cue": "A change touches the cart.", "lesson": "other words",
+                             "evidence": [{"kind": "finding", "ref": "F-9"}],
+                             "status": "pending"}])
+        code, out, err = call("lessons", "accept", "DEMO-9301.1")
+        self.assertEqual(code, 0, err)
+        entries = self.entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["seen"], 2)
+        self.assertEqual(entries[0]["sources"], ["DEMO-1:finding:F-1", "DEMO-9301:finding:F-9"])
+        self.assertEqual(entries[0]["lesson"], "run the cart tests before handing back")
+        self.assertEqual(self.stored()[0]["memory_id"], "M-1")
+
+    def test_accept_takes_an_owner_edit_of_cue_and_lesson(self):
+        self.propose()
+        code, out, err = call("lessons", "accept", "DEMO-9301.1", "--cue",
+                              "When  the invoice\n## changes", "--lesson",
+                              "keep <!-- x --> one rounding")
+        self.assertEqual(code, 0, err)
+        new = self.entries()[1]
+        self.assertEqual(new["cue"], "the invoice changes")
+        self.assertEqual(new["lesson"], "keep one rounding")
+
+    def test_accept_refuses_an_owner_edit_that_is_empty_or_too_long(self):
+        self.propose()
+        for flag, value in (("--cue", "  "), ("--lesson", "x" * 301), ("--cue", "y" * 301)):
+            message = self.refused("SCHEMA_INVALID", "lessons", "accept", "DEMO-9301.1", flag,
+                                   value)
+            self.assertIn(flag[2:], message)
+        self.assertEqual(self.stored()[0]["status"], "pending")
+
+    def test_accept_refuses_a_role_at_its_cap(self):
+        self.fill_role("ppl-code-worker", memory.MAX_ACTIVE)
+        self.propose()
+        message = self.refused("SCHEMA_INVALID", "lessons", "accept", "DEMO-9301.1")
+        self.assertIn("ppl lessons retire", message)
+        self.assertEqual(self.stored()[0]["status"], "pending")
+
+    def test_a_merge_at_the_cap_is_accepted(self):
+        self.fill_role("ppl-code-worker", memory.MAX_ACTIVE)
+        self.propose(items=[{"id": "DEMO-9301.1", "role": "ppl-code-worker",
+                             "cue": "cue number 3", "lesson": "x",
+                             "evidence": [{"kind": "finding", "ref": "F-9"}],
+                             "status": "pending"}])
+        code, _, err = call("lessons", "accept", "DEMO-9301.1")
+        self.assertEqual(code, 0, err)
+        entries = self.entries()
+        self.assertEqual(len(entries), memory.MAX_ACTIVE)
+        self.assertEqual(entries[2]["seen"], 2)
+
+    def test_reject_needs_a_reason_and_keeps_memory_unchanged(self):
+        # rule: R-LESSONS-OWNER-ACCEPTS
+        self.propose()
+        before = self.memory_bytes()
+        for args in (("lessons", "reject", "DEMO-9301.1"),
+                     ("lessons", "reject", "DEMO-9301.1", "--reason", "  ")):
+            self.refused("SCHEMA_INVALID", *args)
+        self.assertEqual(self.stored()[0]["status"], "pending")
+        code, out, err = call("lessons", "reject", "DEMO-9301.1", "--reason", "too vague")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.stored()[0]["status"], "rejected")
+        self.assertEqual(self.stored()[0]["reason"], "too vague")
+        self.assertEqual(self.memory_bytes(), before)
+
+    def test_a_decided_proposal_cannot_be_decided_again(self):
+        # rule: R-LESSONS-OWNER-ACCEPTS
+        self.propose(items=[
+            {"id": "DEMO-9301.1", "role": "ppl-code-worker", "cue": "one", "lesson": "a",
+             "evidence": [{"kind": "finding", "ref": "F-9"}], "status": "pending"},
+            {"id": "DEMO-9301.2", "role": "ppl-code-worker", "cue": "two", "lesson": "b",
+             "evidence": [{"kind": "finding", "ref": "F-9"}], "status": "pending"}])
+        self.assertEqual(call("lessons", "accept", "DEMO-9301.1")[0], 0)
+        self.assertEqual(call("lessons", "reject", "DEMO-9301.2", "--reason", "no")[0], 0)
+        for args in (("accept", "DEMO-9301.1"), ("reject", "DEMO-9301.1", "--reason", "x"),
+                     ("accept", "DEMO-9301.2"), ("reject", "DEMO-9301.2", "--reason", "x")):
+            self.refused("ILLEGAL_TRANSITION", "lessons", *args)
+        self.assertEqual(len(self.entries()), 2)
+
+    def test_an_unknown_proposal_is_refused(self):
+        self.propose()
+        for target in ("DEMO-9301.7", "DEMO-9999.1", "nonsense", "../x.1"):
+            self.refused("SCHEMA_INVALID", "lessons", "accept", target)
+
+    def test_accept_refuses_when_memory_changed_since_it_was_read(self):
+        # rule: R-LESSONS-OWNER-ACCEPTS
+        from ppl.studio import files
+        self.propose()
+        before = self.memory_bytes()
+        real = files.read(self.KEY)
+        stale = dict(real, hash="0" * 64)
+        with mock.patch.object(files, "read", return_value=stale):
+            exit_code, out, err = call("lessons", "accept", "DEMO-9301.1")
+        self.assertEqual(exit_code, 2, out)
+        self.assertEqual(json.loads(err)["error_code"], "CHANGED_ON_DISK")
+        self.assertEqual(self.memory_bytes(), before)
+        self.assertEqual(self.stored()[0]["status"], "pending")
+
+    def test_accept_keeps_the_old_file_in_studio_history(self):
+        from ppl.studio import files
+        self.propose()
+        before = self.memory_bytes()
+        self.assertEqual(call("lessons", "accept", "DEMO-9301.1")[0], 0)
+        versions = files.versions(self.KEY)
+        self.assertEqual(len(versions), 1)
+        self.assertEqual(files.version_text(self.KEY, versions[0]["version"]).encode(), before)
+
+    def test_accept_refuses_a_harness_that_is_not_installed(self):
+        # rule: R-LESSONS-OWNER-ACCEPTS
+        self.propose()
+        for name in ("gone", "../x", "a/b"):
+            message = self.refused("SCHEMA_INVALID", "lessons", "accept", "DEMO-9301.1",
+                                   "--harness", name)
+            self.assertIn(name, message)
+
+    def test_a_failed_proposal_write_keeps_the_lesson_and_a_second_accept_repairs_it(self):
+        self.propose()
+        real = store.write_json
+
+        def failing(path, obj):
+            if "proposals" in str(path):
+                raise OSError("disk full")
+            return real(path, obj)
+
+        with mock.patch.object(store, "write_json", failing):
+            code, out, err = call("lessons", "accept", "DEMO-9301.1")
+        self.assertEqual(code, 2, out)
+        payload = json.loads(err)
+        self.assertIn("M-2", payload["message"])
+        self.assertEqual(len(self.entries()), 2)
+        self.assertEqual(self.stored()[0]["status"], "pending")
+        code, out, err = call("lessons", "accept", "DEMO-9301.1")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.entries()), 2)
+        self.assertEqual(self.entries()[1]["seen"], 1)
+        self.assertEqual(self.stored()[0]["memory_id"], "M-2")
+
+    def test_retire_hides_the_entry_from_the_render(self):
+        entries = self.entries()
+        self.assertIn("run the cart tests", memory.section(entries, "ppl-code-worker"))
+        code, out, err = call("lessons", "retire", "M-1")
+        self.assertEqual(code, 0, err)
+        self.assertIn(self.APPLY, out)
+        entries = self.entries()
+        self.assertEqual(entries[0]["status"], "retired")
+        self.assertEqual(memory.section(entries, "ppl-code-worker"), "")
+        self.refused("SCHEMA_INVALID", "lessons", "retire", "M-1")
+        self.assertIn("M-9", self.refused("SCHEMA_INVALID", "lessons", "retire", "M-9"))
+
+    def test_edit_cleans_and_checks_the_new_text(self):
+        code, out, err = call("lessons", "edit", "M-1", "--cue", "When the cart\n# moves",
+                              "--lesson", "test it <!-- c -->")
+        self.assertEqual(code, 0, err)
+        self.assertIn(self.APPLY, out)
+        entry = self.entries()[0]
+        self.assertEqual((entry["cue"], entry["lesson"]), ("the cart moves", "test it"))
+        self.refused("SCHEMA_INVALID", "lessons", "edit", "M-1")
+        self.refused("SCHEMA_INVALID", "lessons", "edit", "M-1", "--lesson", "x" * 301)
+        self.refused("SCHEMA_INVALID", "lessons", "edit", "M-1", "--cue", "  ")
+        self.assertIn("M-9", self.refused("SCHEMA_INVALID", "lessons", "edit", "M-9",
+                                          "--lesson", "x"))
+        self.assertEqual(call("lessons", "retire", "M-1")[0], 0)
+        self.assertIn("M-1", self.refused("SCHEMA_INVALID", "lessons", "edit", "M-1",
+                                          "--lesson", "x"))
+
+    def test_only_accept_and_edit_write_memory(self):
+        self.propose()
+        before = self.memory_bytes()
+        self.assertEqual(call("lessons", "list")[0], 0)
+        self.assertEqual(call("lessons", "list", "--json")[0], 0)
+        self.assertEqual(call("lessons", "reject", "DEMO-9301.1", "--reason", "no")[0], 0)
+        self.assertEqual(self.memory_bytes(), before)
+
+    def test_list_shows_pending_proposals_and_active_entries(self):
+        self.propose()
+        code, out, err = call("lessons", "list")
+        self.assertEqual(code, 0, err)
+        for text in ("DEMO-9301.1", "ppl-code-worker", "round once, in the invoice total", "M-1"):
+            self.assertIn(text, out)
+        code, out, err = call("lessons", "list", "--json")
+        data = json.loads(out)
+        self.assertEqual(data["harness"], "example-maven")
+        self.assertEqual([(p["id"], p["task"]) for p in data["proposals"]],
+                         [("DEMO-9301.1", "DEMO-9301")])
+        self.assertEqual([e["id"] for e in data["memory"]], ["M-1"])
+        self.assertEqual(call("lessons", "reject", "DEMO-9301.1", "--reason", "no")[0], 0)
+        self.assertEqual(json.loads(call("lessons", "list", "--json")[1])["proposals"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

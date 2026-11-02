@@ -1769,6 +1769,12 @@ class TestGuard(unittest.TestCase):
                         "--fix-link x --generation 1"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
+    def test_a_role_may_not_accept_a_lesson(self):
+        # rule: R-LESSONS-OWNER-ACCEPTS
+        result = ppl_guard.decide(payload(
+            "ppl-code-worker", "Bash", {"command": "ppl lessons accept KEY-1.1"}))
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
     def test_test_worker_deleting_a_finding_is_denied(self):
         # rule: R-GUARD-PPL-CLI-DENIED
         result = ppl_guard.decide(payload(
