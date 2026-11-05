@@ -116,7 +116,8 @@ def commit(harness_dir):
             raise PplError("SETUP_INCOMPLETE", "harness %s has no commit yet: commit it in the "
                            "harness repository" % harness_dir)
         return sha
-    fetch = git(harness_dir, ["fetch", "--quiet", "origin"], timeout=FETCH_TIMEOUT_SECONDS)
+    fetch = git(harness_dir, ["fetch", "--quiet", escape_git.FETCH_FLAG, "origin"],
+                timeout=FETCH_TIMEOUT_SECONDS)
     if fetch.returncode != 0:
         raise PplError("EXTERNAL_BLOCKED", "git fetch of origin failed in %s: %s"
                        % (harness_dir, stderr_text(fetch)))

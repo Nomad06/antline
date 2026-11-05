@@ -27,17 +27,19 @@ PINNED_CONFIG = ["-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=ssh",
                  "-c", "protocol.git.allow=never", "-c", "push.gpgSign=false",
                  "-c", "gpg.program=", "-c", "core.alternateRefsCommand=",
                  "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"]
-# The -c words on every git `ppl lane` runs in a project checkout (a probe, the fetch, the
-# worktree add and their undoing) and in an installed harness, outside any sandbox. They win over
-# a local config a role may have rewritten for each key that can run a program there: a hook, an
-# fsmonitor, an alternate-refs command, a gpg program, the ext transport, an automatic gc or
-# maintenance run. The transport stays the operator's (credential.helper, core.sshCommand,
-# protocol.allow): their global config carries HTTPS forges and local mirrors, and a local key
-# overriding one is outside GIT_SAFE_KEYS, so the lane refuses it before any of these runs.
+# The -c words on every git `ppl lane` runs in a project checkout (its config read, a probe, the
+# fetch, the worktree add and their undoing) and in an installed harness, outside any sandbox.
+# They win over a local config a role may have rewritten for each key that can run a program
+# there: a hook, an fsmonitor, an alternate-refs command, a gpg program, the ext transport, an
+# automatic gc or maintenance run, and a recursion into a submodule (whose own config no check
+# reads, and whose child git drops these words). The transport stays the operator's
+# (credential.helper, core.sshCommand, protocol.allow): their global config carries HTTPS forges
+# and local mirrors, and a local key overriding one is outside GIT_SAFE_KEYS, so the lane
+# refuses it before any of these runs.
 OPERATOR_PINNED_CONFIG = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                           "-c", "core.alternateRefsCommand=", "-c", "gpg.program=",
                           "-c", "protocol.ext.allow=never", "-c", "gc.auto=0",
-                          "-c", "maintenance.auto=false"]
+                          "-c", "maintenance.auto=false", "-c", "submodule.recurse=false"]
 FETCH_FLAG = "--no-recurse-submodules"
 # A push's first words. The command line wins over a global push.followTags or
 # push.recurseSubmodules the guard cannot read, so no tag a role made and no submodule goes too.
@@ -189,11 +191,12 @@ def _branch_problem(branch, default_branch):
     return None
 
 
-def _git(run_git, git, directory, args, timeout=TIMEOUT_SECONDS):
+def _git(run_git, git, directory, args, timeout=TIMEOUT_SECONDS, pins=()):
     """(exit code, stdout, None), or (None, None, why) when git cannot be run or outlasts
-    `timeout`. Its output is captured, so none of it reaches the hook's stderr."""
+    `timeout`. `pins` are -c words put before -C. Its output is captured, so none of it reaches
+    the hook's stderr."""
     try:
-        done = run_git([git, "-C", directory] + args, stdin=subprocess.DEVNULL,
+        done = run_git([git] + list(pins) + ["-C", directory] + args, stdin=subprocess.DEVNULL,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     except subprocess.TimeoutExpired:
         return None, None, "git %s did not answer within %s s in %s" % (
@@ -208,13 +211,15 @@ def _forge_urls(repo):
             "git@github.com:%s" % repo, "git@github.com:%s.git" % repo)
 
 
-def local_config(directory, run_git=subprocess.run, git="git", timeout=TIMEOUT_SECONDS):
+def local_config(directory, run_git=subprocess.run, git="git", timeout=TIMEOUT_SECONDS,
+                 pins=()):
     """([(scope, key, value)], None) for each entry of the local and worktree config of
     `directory`, the scopes a role can write, in git's order, or (None, why) when git cannot
     list them. With -z an entry is its scope, then its key, a newline and its value, so a value
-    holding a newline cannot pass for an entry."""
+    holding a newline cannot pass for an entry. The -c words of `pins` are listed in the
+    command scope, which is not one of these."""
     code, output, problem = _git(run_git, git, directory,
-                                 ["config", "--list", "--show-scope", "-z"], timeout)
+                                 ["config", "--list", "--show-scope", "-z"], timeout, pins)
     if problem:
         return None, problem
     if code != 0:
@@ -251,6 +256,12 @@ def _config_problem(run_git, git, directory, remote, forge_repo):
         return ("the %s git config of %s sets %s, which could run a command or redirect the "
                 "remote: only the keys of escape_git.GIT_SAFE_KEYS may be set there, and no "
                 "include" % (scope, directory, _short(key)))
+    return remote_url_problem(entries, directory, remote, forge_repo)
+
+
+def remote_url_problem(entries, directory, remote, forge_repo):
+    """None when the local_config entries of `directory` give `remote` exactly one url, the
+    forge repo on github.com."""
     url_key = "remote.%s.url" % remote
     urls = [value for _, key, value in entries if key == url_key]
     allowed = _forge_urls(forge_repo)

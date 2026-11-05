@@ -13,7 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import config, doctor, forges, harness, models, paths, routing, tomlout, trackers
+from . import (config, doctor, escape_git, forges, harness, models, paths, routing, tomlout,
+               trackers)
 from .errors import PplError
 
 STEPS = ("paths", "claude", "models", "harness", "forge", "apply")
@@ -523,9 +524,11 @@ _GIT_TIMEOUT_SECONDS = 10
 
 
 def _origin_repo(checkout):
-    """The owner/name of the checkout's GitHub origin remote, or None."""
+    """The owner/name of the checkout's GitHub origin remote, or None. A role may write the
+    checkout's config, so the read carries escape_git.OPERATOR_PINNED_CONFIG."""
     try:
-        done = subprocess.run(["git", "-C", str(checkout), "remote", "get-url", "origin"],
+        done = subprocess.run(["git", *escape_git.OPERATOR_PINNED_CONFIG, "-C", str(checkout),
+                               "remote", "get-url", "origin"],
                               capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS)
     except (OSError, subprocess.SubprocessError):
         return None

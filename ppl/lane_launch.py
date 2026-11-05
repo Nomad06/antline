@@ -173,13 +173,16 @@ def _layout(doc, task_id, slug):
 _git = lane_harness.git
 
 
-def _check_config(checkout):
+def _check_config(doc, checkout):
     """Refuse a checkout whose local or worktree config sets a key outside
     escape_git.GIT_SAFE_KEYS. A sandboxed role of any lane may write the checkout, and the git
     ppl lane runs there is the operator's own, outside any sandbox: such a key could run a
     command (a filter, a pager, an upload-pack) or send git elsewhere (a url rewrite, an ssh
-    command, a proxy) that no -c word of the lane's covers."""
-    entries, problem = escape_git.local_config(checkout, timeout=lane_harness.GIT_TIMEOUT_SECONDS)
+    command, a proxy) that no -c word of the lane's covers. On a GitHub forge origin must also
+    have exactly one url, the forge repo on github.com, as the guard asks of the orchestrator's
+    fetch."""
+    entries, problem = escape_git.local_config(checkout, timeout=lane_harness.GIT_TIMEOUT_SECONDS,
+                                               pins=escape_git.OPERATOR_PINNED_CONFIG)
     if problem:
         raise PplError("SETUP_INCOMPLETE", "the git config of the checkout %s cannot be checked: "
                        "%s" % (checkout, problem))
@@ -194,6 +197,17 @@ def _check_config(checkout):
                        "config --unset <key>`, with --worktree for a worktree key), then run ppl "
                        "lane again. Only the keys of escape_git.GIT_SAFE_KEYS may be set there."
                        % (checkout, named, checkout, checkout))
+    if doc["forge"]["kind"] != "github":
+        return
+    forge_repo, _ = os_sandbox.repos(doc)
+    problem = ("the harness's forge is GitHub and origin in %s names no github.com repository"
+               % checkout) if not forge_repo else escape_git.remote_url_problem(
+                   entries, checkout, "origin", forge_repo)
+    if problem:
+        raise PplError("OWNER_DECISION", "%s. A sandboxed role can rewrite that url, and the "
+                       "lane's base is fetched from it: set it back with `git -C %s remote "
+                       "set-url origin <the forge repo's url>`, then run ppl lane again"
+                       % (problem, checkout))
 
 
 def _branch_exists(checkout, branch):
@@ -215,12 +229,12 @@ def _remove_worktree(checkout, worktree):
         raise PplError("SETUP_INCOMPLETE", lane_harness.stderr_text(result))
 
 
-def _add_worktree(checkout, worktree, branch, default, undo):
+def _add_worktree(doc, checkout, worktree, branch, default, undo):
     """Create the run's branch and worktree from a fresh default branch: origin's after a fetch
     when the checkout has an origin, else the local one. The checkout's config is checked
     before the first git there. Refuses a branch or a worktree path that already exists, so the
     undo steps only ever remove what this call made."""
-    _check_config(checkout)
+    _check_config(doc, checkout)
     remotes = _git(checkout, ["remote"])
     if remotes.returncode != 0:
         raise PplError("SETUP_INCOMPLETE", "the harness's [repo] path %s is not a git "
@@ -236,7 +250,11 @@ def _add_worktree(checkout, worktree, branch, default, undo):
                        % (worktree, checkout, worktree))
     base = default
     if "origin" in remotes.stdout.split():
-        fetch = _git(checkout, ["fetch", "--quiet", "origin", default],
+        # no submodule recursion: a submodule's own config is read by no check, and the child
+        # fetch drops the pinned words. The refspec is explicit, so no configured
+        # remote.origin.fetch decides where origin's default branch lands.
+        fetch = _git(checkout, ["fetch", "--quiet", escape_git.FETCH_FLAG, "origin",
+                                "+refs/heads/%s:refs/remotes/origin/%s" % (default, default)],
                      timeout=lane_harness.FETCH_TIMEOUT_SECONDS)
         if fetch.returncode != 0:
             raise PplError("EXTERNAL_BLOCKED", "git fetch origin %s failed in %s: %s"
@@ -329,7 +347,7 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
             raise PplError("ILLEGAL_TRANSITION", "an earlier lane of %s left its start directory "
                            "%s: remove it (`ppl destroy --scope local --task %s` does, with the "
                            "run), then run ppl lane again" % (task_id, start_dir, task_id))
-        _add_worktree(checkout, worktree, branch, default, undo)
+        _add_worktree(doc, checkout, worktree, branch, default, undo)
         try:
             os.rename(str(staging), str(start_dir))
         except OSError as exc:

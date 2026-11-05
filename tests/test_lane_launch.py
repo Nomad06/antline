@@ -16,7 +16,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import cli, lane_launch, lanes, lessons, paths, run, store, tomlout
+from ppl import cli, harness, lane_launch, lanes, lessons, paths, run, store, tomlout
 from ppl.errors import PplError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -432,6 +432,84 @@ class TestCheckoutGit(LaneCase):
         self.assertTrue(self.worktree.is_dir())
         self.assertFalse((self.base / "post-checkout.ran").exists())
         self.assertFalse((self.base / "reference-transaction.ran").exists())
+
+    def test_a_submodule_of_the_checkout_runs_nothing_of_its_own_config(self):
+        # rule: R-LANE-LAUNCH-GIT-CONFIG
+        # the checkout's own config passes the check, but a fetch that recursed into the
+        # submodule would run the upload-pack its config names, which no check reads
+        script, marker = self.planted("submodule-upload-pack")
+        # the operator's own global config asks for recursion, which the lane's flag and pin
+        # must override
+        with open(os.environ["GIT_CONFIG_GLOBAL"], "a", encoding="utf-8") as config:
+            config.write("[submodule]\n\trecurse = true\n[fetch]\n\trecurseSubmodules = on-demand\n")
+        upstream = self.make_repo(self.base / "upstream")
+        first = git(upstream, "rev-parse", "HEAD")
+        modules = '[submodule "sub"]\n\tpath = sub\n\turl = %s\n' % upstream
+        # what a sandboxed role can write in the checkout: .gitmodules, a gitlink in the
+        # index and a submodule repository whose own config names the program
+        (self.project / ".gitmodules").write_text(modules, encoding="utf-8")
+        git(self.project, "update-index", "--add", "--cacheinfo", "160000,%s,sub" % first)
+        subprocess.run(["git", "clone", "-q", str(upstream), str(self.project / "sub")],
+                       check=True)
+        git(self.project / "sub", "config", "remote.origin.uploadpack", str(script))
+        # then origin's main moves the gitlink to a commit the submodule does not have yet,
+        # which an on-demand fetch would go and get
+        (upstream / "two.txt").write_text("two\n", encoding="utf-8")
+        git(upstream, "add", "-A")
+        git(upstream, "commit", "-q", "-m", "second")
+        other = self.base / "other"
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(other)], check=True)
+        (other / ".gitmodules").write_text(modules, encoding="utf-8")
+        git(other, "add", ".gitmodules")
+        git(other, "update-index", "--add", "--cacheinfo",
+            "160000,%s,sub" % git(upstream, "rev-parse", "HEAD"))
+        git(other, "commit", "-q", "-m", "bump sub")
+        git(other, "push", "-q", "origin", "main")
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertEqual(git(self.worktree, "rev-parse", "HEAD"), git(other, "rev-parse", "HEAD"))
+        self.assertFalse(marker.exists())
+
+    def test_a_remapped_fetch_refspec_cannot_choose_the_base(self):
+        # a role sends origin's main elsewhere and points origin/main at its own commit
+        planted = self.base / "planted.txt"
+        (self.project / "planted.txt").write_text("planted\n", encoding="utf-8")
+        git(self.project, "add", "planted.txt")
+        git(self.project, "commit", "-q", "-m", "planted")
+        git(self.project, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(self.project, "config", "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/elsewhere")
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertEqual(git(self.worktree, "rev-parse", "HEAD"),
+                         git(self.origin, "rev-parse", "main"))
+        self.assertFalse((self.worktree / planted.name).exists())
+
+    def test_on_a_github_forge_origin_must_be_the_forge_repo(self):
+        # rule: R-LANE-LAUNCH-GIT-CONFIG
+        github = {"forge": {"kind": "github"}, "tracker": fixtures.GITHUB_ISSUES["tracker"],
+                  "task": fixtures.GITHUB_ISSUES["task"]}
+        self.install("gh-lane", **github)
+        message = refusal(self, "OWNER_DECISION", lane_launch.start,
+                          "https://github.com/o/r/issues/7", harness_name="gh-lane", exec_=False)
+        self.assertIn("not the forge repo o/r on github.com", message)
+        self.assertIn("remote set-url origin", message)
+        self.assertEqual(lanes.read(), [])
+        self.assertEqual(self.staging_dirs(), [])
+        self.assertFalse((self.worktrees / "shop-GH-7").exists())
+        doc = harness.load(paths.harness_dir("gh-lane"))
+        for urls in (["https://github.com/o/r.git"], ["git@github.com:o/r.git"]):
+            git(self.project, "remote", "set-url", "origin", urls[0])
+            self.assertIsNone(lane_launch._check_config(doc, str(self.project)))
+        git(self.project, "config", "--add", "remote.origin.url", "https://github.com/o/r")
+        with self.assertRaises(PplError) as caught:
+            lane_launch._check_config(doc, str(self.project))
+        self.assertIn("2 urls", caught.exception.message)
+        # with no tracker repo the forge repo is read from origin, which must be on github.com
+        self.install("gh-jira", forge={"kind": "github"})
+        git(self.project, "config", "--unset-all", "remote.origin.url")
+        git(self.project, "remote", "set-url", "--add", "origin", str(self.origin))
+        message = refusal(self, "OWNER_DECISION", lane_launch.start, LINK,
+                          harness_name="gh-jira", exec_=False)
+        self.assertIn("names no github.com repository", message)
 
 
 class TestResume(LaneCase):
