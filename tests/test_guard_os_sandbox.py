@@ -1990,27 +1990,35 @@ class TestProtectedPaths(ProtectedPathCase):
                 call = payload("ppl-code-worker", "Write", {"file_path": path}, REPO)
                 self.assertIsNone(escape.edit_denial(call, paths.home(), facts_doc()))
 
-    def test_without_guard_facts_the_edit_check_stands_aside(self):
-        # a GitLab or Jira harness that has not opted in writes no guard facts, and keeps
-        # today's behaviour: the check denies nothing, for any session, run or no run
+    def test_without_guard_facts_a_lane_keeps_only_the_protected_paths(self):
+        # a GitLab or Jira harness that has not opted in gets no guard facts: in its lane an
+        # edit tool has no write scope to keep to, and still never writes a protected path
+        # every session has (R28), and in no lane the check denies nothing
         with self.facts_text(None):
-            for path in (self.at(".gitconfig"), self.at(".ssh/config"),
-                         self.at(".claude/hooks/x.sh"), os.path.join(self.outside, "notes.md"),
-                         " " + self.at(".gitconfig")):
+            for path in (self.at(".claude/hooks/x.sh"), os.path.join(self.outside, "notes.md")):
                 for agent in (None, "general-purpose"):
                     with self.subTest(path=path, agent=agent):
                         self.assertIsNone(self.edit(path, agent=agent, tool="Write"))
+            for path in (self.at(".gitconfig"), self.at(".ssh/config"),
+                         self.at(".claude/settings.json"), str(paths.home() / "config.toml"),
+                         str(paths.home() / "routing.toml"), " " + self.at(".gitconfig")):
+                for agent in (None, "general-purpose"):
+                    with self.subTest(protected=path, agent=agent):
+                        reason = self.deny_reason(self.edit(path, agent=agent, tool="Write"))
+                        self.assertIn("BOUNDARY_VIOLATION", reason)
             # the lane's start directory is protected all the same, keyed on the lane, not on
             # the facts [R-LANE-START-DIR-PROTECTED]
-            reason = self.deny_reason(self.edit(WS + "/settings.json", tool="Write"))
-            self.assertIn("ppl lane keeps", reason)
+            self.assert_protected(self.deny_reason(self.edit(WS + "/settings.json",
+                                                             tool="Write")))
             with self.no_lane():
                 self.assertIsNone(self.edit(self.at(".gitconfig")))
+                self.assertIsNone(self.edit(self.at(".claude/settings.json"), tool="Write"))
                 # a role outside a lane is refused whatever it edits, facts or none
                 reason = self.deny_reason(self.edit(self.at(".gitconfig"), agent="ppl-code-worker"))
                 self.assertIn("ppl roles run only inside a lane session", reason)
             # the older rules still hold an edit tool: a role outside the run's repo, and run state
-            reason = self.deny_reason(self.edit(self.at(".gitconfig"), agent="ppl-code-worker"))
+            reason = self.deny_reason(self.edit(os.path.join(self.outside, "notes.md"),
+                                                agent="ppl-code-worker"))
             self.assertIn("may write only inside run %s's repo" % TASK, reason)
             reason = self.deny_reason(self.edit(str(paths.run_dir(TASK) / "state.json")))
             self.assertIn("run state is written only by ppl", reason)

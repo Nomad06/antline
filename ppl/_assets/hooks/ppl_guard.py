@@ -922,14 +922,25 @@ def facts_file(argv):
     return lanes.start_dir(task) / escape.FACTS_FILE
 
 
+def _names_a_lane(argv):
+    """True when the hook's command line carries a --task, well formed or not: a session ppl
+    lane started, whatever the registry says of it."""
+    try:
+        return lanes.hook_task(argv) is not None
+    except Exception:
+        return True
+
+
 def protected_edit_denial(payload, argv=()):
     """(code, reason) when an edit tool call may not write its target, else None: while the
     guard facts of the session (facts_file) exist it writes only inside the OS sandbox's write
     scope and Claude Code's projects and plans directories, and never a protected path, a
-    lane's whole start directory among them [R-OS-SANDBOX-PROTECTED-PATHS]. Facts that cannot
+    lane's whole start directory among them [R-OS-SANDBOX-PROTECTED-PATHS]. In a lane whose
+    harness has no OS sandbox, and so no facts, it still never writes a protected path every
+    session has: Claude Code's settings, ppl's code, config, routing, harnesses and facts, the
+    lanes' start directories and registry, and the git, ssh and gh config. Facts that cannot
     be read put every session in scope with no write scope to check, so every edit is refused
-    until they are repaired. No run file is read: the check holds only while the facts exist,
-    which an active run does not change."""
+    until they are repaired. No run file is read, nor the registry."""
     home = paths.home()
     try:
         facts = escape.load_facts(facts_file(argv))
@@ -937,7 +948,7 @@ def protected_edit_denial(payload, argv=()):
         return ("OWNER_DECISION",
                 "the guard's OS sandbox facts are unusable (%s), so an edit tool's target cannot "
                 "be checked against the write scope: %s" % (err, escape.APPLY))
-    reason = escape.edit_denial(payload, home, facts)
+    reason = escape.edit_denial(payload, home, facts, _names_a_lane(argv))
     return ("BOUNDARY_VIOLATION", reason) if reason else None
 
 
@@ -2424,7 +2435,7 @@ def cross_lane_denial(payload, binding, lanes_list):
     who = agent if isinstance(agent, str) and agent else "a session with no role"
     files = _lane_files(binding, lanes_list)
     for forms, real_forms, removal in placed:
-        root = escape_paths.hit(forms, files) or _takes(real_forms, removal, files)
+        root = escape_paths.under(forms, files) or _takes(real_forms, removal, files)
         if root:
             return ("BOUNDARY_VIOLATION",
                     "%s may not write %s: it is or lies under %s, where ppl lane keeps the "
@@ -2453,22 +2464,24 @@ def cross_lane_denial(payload, binding, lanes_list):
                 worktree = item.get("worktree")
                 if not (isinstance(worktree, str) and os.path.isabs(worktree)):
                     continue
-                if escape_paths.hit([form], [worktree]) or _takes([form], removal, [worktree]):
+                if escape_paths.under([form], [worktree]) or _takes([form], removal, [worktree]):
                     return ("BOUNDARY_VIOLATION",
                             "%s may not write %s: it lies in lane %s's worktree %s, and lane %s "
                             "writes only its own" % (who, forms[0], item.get("task"), worktree,
                                                      binding.task))
             for item in [entry] + others:
                 checkout = item.get("repo")
-                root = (escape_paths.hit([form], [checkout])
-                        if isinstance(checkout, str) and os.path.isabs(checkout) else None)
+                if not (isinstance(checkout, str) and os.path.isabs(checkout)):
+                    continue
+                within = escape_paths.under([form], [checkout])
+                root = within or _takes([form], removal, [checkout])
                 if root:
                     return ("BOUNDARY_VIOLATION",
-                            "%s may not write %s: it lies in the project checkout %s outside "
-                            "lane %s's worktree %s. The lanes branch from that checkout, and a "
-                            "lane writes only its own worktree"
-                            % (who, forms[0], root, binding.task,
-                               own[0] if own else "(none recorded)"))
+                            "%s may not write %s: it %s the project checkout %s outside lane "
+                            "%s's worktree %s. The lanes branch from that checkout, and a lane "
+                            "writes only its own worktree"
+                            % (who, forms[0], "lies in" if within else "would take with it",
+                               root, binding.task, own[0] if own else "(none recorded)"))
     return None
 
 
@@ -2530,7 +2543,10 @@ def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
     places = [where for tokens, start, where in segments
               if tokens is not None and _is_ppl_command(tokens[start:])]
     if not places:
-        if not PPL_INVOCATION_RE.search(command):
+        # a command the walk read whole runs no ppl, and one it could not is read by its
+        # literal spelling
+        readable = bool(segments) and all(tokens is not None for tokens, _, _ in segments)
+        if readable or not PPL_INVOCATION_RE.search(command):
             return None
         places = [cwd if isinstance(cwd, str) else None]
     if lanes_list is None:
@@ -2607,7 +2623,8 @@ def _decide(payload, argv=()):
     # R-OS-SANDBOX-PROTECTED-PATHS: an edit tool runs outside the OS sandbox too, so while the
     # guard facts exist it writes only where sandboxed Bash may, and never what an unsandboxed
     # gh, git or ppl reads, for roles and the orchestrator alike, before any run file is read.
-    # Every path key of the call is checked, not only the one target_path takes.
+    # In a lane with no facts the protected paths every session has still hold. Every path
+    # key of the call is checked, not only the one target_path takes.
     if tool in WRITE_TOOLS:
         refusal = protected_edit_denial(payload, argv)
         if refusal:

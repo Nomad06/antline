@@ -7,6 +7,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # tests/ is not a package, so the helper next to this file is imported
 # by path. It must be imported before PPL_HOME is chosen below.
@@ -18,7 +19,7 @@ HOOKS = Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"
 sys.path.insert(0, str(HOOKS))
 
 import fixtures
-from ppl import control, harness, lanes, os_sandbox, paths, run, store
+from ppl import control, escape_paths, harness, lanes, os_sandbox, paths, run, store
 import ppl_dispatch
 import ppl_guard
 import ppl_usage
@@ -451,6 +452,14 @@ class TestLaneProtection(LaneCase):
     def bash(self, command, agent=None, cwd=None, task=LANE_A):
         return self.decide(agent, "Bash", {"command": command}, cwd, task)
 
+    def assert_lane_file(self, result):
+        """Denied as a lane's file: by the lane files check, or, for an edit tool in a lane, by
+        the protected paths that hold with or without facts (R28)."""
+        reason = self.deny_reason(result)
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertTrue("ppl lane keeps" in reason or escape_paths.PROTECTED_WHY in reason,
+                        reason)
+
     def test_edit_and_write_into_the_start_directory_are_denied_for_everyone(self):
         # rule: R-LANE-START-DIR-PROTECTED
         # R27: the harness needs no OS sandbox, so no facts file names the start directory,
@@ -465,9 +474,7 @@ class TestLaneProtection(LaneCase):
             for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
                 for target in targets:
                     with self.subTest(agent=agent, tool=tool, target=target):
-                        result = self.decide(agent, tool, edit_input(tool, target))
-                        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
-                        self.assertIn("ppl lane keeps", self.deny_reason(result))
+                        self.assert_lane_file(self.decide(agent, tool, edit_input(tool, target)))
         # a write-shaped Bash too, relative to the start directory the session stands in, and
         # a removal that takes the start directories with it
         for command in ("echo x > settings.json", "echo x > %s/settings.json" % own,
@@ -543,6 +550,80 @@ class TestLaneProtection(LaneCase):
         self.assertNotIn("project checkout", reason)
         self.assertIsNone(self.decide(None, "Write", edit_input("Write", "/tmp/elsewhere/n.md")))
 
+    def test_a_removal_that_takes_a_project_checkout_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R28: removing the checkout, or a directory that holds it, takes the lanes' base and
+        # their worktrees with it, whether the checkout is the lane's own or another's
+        parent = real(tmphome.mkdtemp(prefix="pplprojects-"))
+        checkout = os.path.join(parent, "web")
+        worktree = os.path.join(checkout, ".worktrees", "web-LANE-5105")
+        os.makedirs(worktree)
+        run.init("LANE-5105", "u", worktree)
+        fixtures.bind_lane("LANE-5105", checkout, worktree=worktree, lane=3)
+        for command in ("rm -rf %s" % checkout, "mv %s /tmp/gone" % checkout,
+                        "rm -rf %s" % parent, "cd %s && rm -rf web" % parent,
+                        "mv %s /tmp/gone" % parent):
+            for task in ("LANE-5105", LANE_A):
+                with self.subTest(command=command, task=task):
+                    reason = self.deny_reason(self.bash(command, task=task))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    if task == "LANE-5105":
+                        self.assertIn("project checkout %s" % checkout, reason)
+        # lane A's own checkout too, which holds its own worktree
+        for command in ("rm -rf %s" % self.checkout, "mv %s /tmp/gone" % self.checkout):
+            with self.subTest(own=command):
+                reason = self.deny_reason(self.bash(command))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+
+    def test_without_facts_a_lane_keeps_the_protected_paths(self):
+        # rule: R-LANE-START-DIR-PROTECTED
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # R28: the harness needs no OS sandbox, so the lane has no guard facts, and an edit
+        # tool still never writes the registry the binding trusts, Claude Code's settings,
+        # ppl's own code or its config, for a role or the orchestrator
+        fake_home = real(tmphome.mkdtemp(prefix="pplfakehome-"))
+        self.assertFalse((lanes.start_dir(LANE_A) / os_sandbox.FACTS_FILE).exists())
+        package = os.path.dirname(real(escape_paths.__file__))
+        targets = (str(lanes.registry_path()), str(paths.home() / lanes.LOCK_FILE),
+                   os.path.join(fake_home, ".claude", "settings.json"),
+                   os.path.join(fake_home, ".claude.json"), os.path.join(package, "escape.py"),
+                   str(GUARD), str(paths.home() / "config.toml"),
+                   str(paths.home() / "routing.toml"))
+        with mock.patch.dict(os.environ, {"HOME": fake_home}):
+            for agent in (None, "ppl-code-worker", "general-purpose"):
+                for tool in ("Edit", "Write"):
+                    for target in targets:
+                        with self.subTest(agent=agent, tool=tool, target=target):
+                            reason = self.deny_reason(self.decide(agent, tool,
+                                                                  edit_input(tool, target)))
+                            self.assertIn("BOUNDARY_VIOLATION", reason)
+                            self.assertIn(escape_paths.PROTECTED_WHY, reason)
+            # what is not protected stays the orchestrator's to edit
+            self.assertIsNone(self.decide(None, "Write", edit_input(
+                "Write", os.path.join(fake_home, "notes", "todo.md"))))
+
+    def test_an_unreadable_registry_holds_a_bound_write_and_a_ppl_command(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-CROSS-TASK
+        # the binding read the lane's entry, and the registry cannot be read again for the
+        # other lanes' work: a write and a ppl command fail closed, what neither does passes
+        bound = lanes.binding(argv(LANE_A))
+        start = str(lanes.start_dir(LANE_A))
+        write = payload(None, "Write", {"file_path": self.worktree[LANE_A] + "/x"}, start)
+        refusal = ppl_guard.cross_lane_denial(write, bound, None)
+        self.assertEqual(refusal[0], "OWNER_DECISION")
+        self.assertIn("registry cannot be read", refusal[1])
+        refusal = ppl_guard.ppl_task_mismatch("ppl show", bound, None, start)
+        self.assertEqual(refusal[0], "OWNER_DECISION")
+        self.assertIsNone(ppl_guard.ppl_task_mismatch("ls -la", bound, None, start))
+        self.assertIsNone(ppl_guard.cross_lane_denial(
+            payload(None, "Read", {"file_path": self.worktree[LANE_A] + "/x"}, start), bound,
+            None))
+        # a session in no lane has no other lanes' work to place
+        self.assertIsNone(ppl_guard.cross_lane_denial(
+            payload(None, "Write", {"file_path": "/tmp/elsewhere/n.md"}, start),
+            lanes.binding([]), None))
+
     def test_a_write_into_another_lanes_worktree_through_a_symlink_is_denied(self):
         # rule: R-LANE-CROSS-WRITE
         # Review Focus 4: lane B, on another project, is recorded through a symlinked parent
@@ -575,6 +656,7 @@ class TestLaneProtection(LaneCase):
                     "ppl findings list --task '%s'" % theirs,
                     "python3 -m ppl show --task %s" % theirs,
                     "/opt/pin/bin/ppl show --task %s" % theirs,
+                    "ppl lane close %s" % theirs, "ppl lane resume %s" % theirs,
                     "ppl show --task $(echo %s)" % theirs,
                     # bare ppl takes its run from a cwd inside a lane once PPL_TASK is gone
                     "cd %s && PPL_TASK= ppl show" % worktree,

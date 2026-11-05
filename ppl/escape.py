@@ -155,15 +155,16 @@ def is_role(agent):
     return isinstance(agent, str) and bool(agent) and _is_role(agent)
 
 
-def edit_denial(payload, home, facts):
+def edit_denial(payload, home, facts, in_lane=False):
     """Why a pipeline session's Edit, Write, MultiEdit or NotebookEdit may not write its
     target, or None. Edit tools run outside the OS sandbox: escape_paths.target_denial says
-    why about each path key of the call, for roles and the orchestrator alike, and only while
-    `facts` is there: without an OS sandbox profile it stands aside, run or no run. Facts that
-    cannot be read are the guard's to refuse before this."""
+    why about each path key of the call, for roles and the orchestrator alike, while `facts`
+    is there. Without them, a session `in_lane` (its harness has no OS sandbox profile) is
+    held to the protected paths every session has (escape_paths.protected_denial), and one in
+    no lane is left alone. Facts that cannot be read are the guard's to refuse before this."""
     if not isinstance(payload, dict) or payload.get("tool_name") not in EDIT_TOOLS:
         return None
-    if facts is None:
+    if facts is None and not in_lane:
         return None
     agent = payload.get("agent_type")
     tool_input = payload.get("tool_input")
@@ -174,8 +175,12 @@ def edit_denial(payload, home, facts):
     try:
         for key in escape_paths.PATH_KEYS:
             if tool_input.get(key):
-                reason = escape_paths.target_denial(tool_input[key], payload.get("cwd"), home,
-                                                    facts, who, tool)
+                if facts is None:
+                    reason = escape_paths.protected_denial(tool_input[key], payload.get("cwd"),
+                                                           home, who, tool)
+                else:
+                    reason = escape_paths.target_denial(tool_input[key], payload.get("cwd"),
+                                                        home, facts, who, tool)
                 if reason:
                     return reason
     except (OSError, ValueError, TypeError, KeyError) as err:
