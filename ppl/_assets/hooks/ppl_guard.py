@@ -2264,6 +2264,39 @@ def dispatch_leak_deny(prompt, task_id, state, patterns):
                 "brief's interfaces only." % (len(hits), rel, first[:40]))
 
 
+def stateless_lane_write_denial(tool, tool_input, path, payload, agent, task_id, entry):
+    """R-UNROLED-REPO-WRITE while the bound run has no readable state.json, as between
+    ppl lane and ppl init: the lane's registry entry names its worktree and the project
+    repo, and they stand in for the run's repo, so that window opens no repo write. A role
+    never gets here, every role call is denied while the state cannot be read. An entry
+    that names neither leaves a write nowhere to be placed, so every write is denied."""
+    roots = [root for root in (entry.get("worktree"), entry.get("repo"))
+             if isinstance(root, str) and root]
+    unplaced = deny("OWNER_DECISION",
+                    "lane %s's registry entry names no worktree or repo, so a write cannot be "
+                    "placed: run ppl lane resume %s" % (task_id, task_id))
+    if tool == "Bash":
+        command = tool_input.get("command", "")
+        if not roots:
+            return unplaced if _bash_write_targets(command, payload.get("cwd")) else None
+        for root in roots:
+            refusal = bash_write_boundary_deny(command, payload, agent, False, task_id,
+                                               {"repo": root}, ())
+            if refusal:
+                return refusal
+        return None
+    if not path:
+        return None
+    if not roots:
+        return unplaced
+    if any(targets_repo(path, {"repo": root}) for root in roots):
+        return deny("BOUNDARY_VIOLATION",
+                    "%s may not write repo code: %s is inside lane %s's worktree or repo, which "
+                    "only ppl-code-worker and ppl-test-worker write, inside their boundary"
+                    % (agent or "a session with no role", path, task_id))
+    return None
+
+
 # What an unroled session keeps in a lane whose registry entry cannot be confirmed: it
 # reads, it changes nothing [R-LANE-HOOK-BINDING].
 UNCONFIRMED_LANE_TOOLS = ("Read", "Glob", "Grep")
@@ -2431,6 +2464,11 @@ def _decide(payload, argv=()):
                         "run %s state is unreadable, cannot check the ppl-test-worker "
                         "dispatch for implementation content. Repair or restore "
                         "state.json to continue." % task_id)
+        if task_id:
+            # R-UNROLED-REPO-WRITE before ppl init, or over an unreadable state.json: the
+            # lane's own worktree and repo place the write instead
+            return stateless_lane_write_denial(tool, tool_input, path, payload, agent,
+                                               task_id, binding().entry)
         return None
 
     is_role = agent in boundary.ROLE_RULES

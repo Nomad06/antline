@@ -173,6 +173,55 @@ class TestTheHookBinding(LaneCase):
             payload(None, "Write", {"file_path": "/tmp/somewhere-else/notes.txt"}, start),
             argv(LANE_A)))
 
+    def test_before_ppl_init_an_unroled_write_into_the_lane_is_denied(self):
+        # rule: R-UNROLED-REPO-WRITE
+        # R24: ppl lane registered the lane and made its worktree, ppl init has not run, so
+        # there is no state.json to name the run's repo. The registry entry's worktree and
+        # repo stand in for it, and an unreadable state.json changes nothing.
+        repo = tmphome.mkdtemp(prefix="pplrepo-")
+        worktree = tmphome.mkdtemp(prefix="pplworktree-")
+        fixtures.bind_lane(LANE_A, repo, worktree=worktree)
+        hook = argv(LANE_A)
+        start = str(lanes.start_dir(LANE_A))
+        for state in (None, "{not json"):
+            if state is not None:
+                run.state_path(LANE_A).parent.mkdir(parents=True, exist_ok=True)
+                run.state_path(LANE_A).write_text(state, encoding="utf-8")
+            for root in (worktree, repo):
+                for call in (payload(None, "Write", {"file_path": root + "/src/App.java"}, start),
+                             payload(None, "Edit", {"file_path": root + "/src/App.java",
+                                                    "old_string": "a", "new_string": "b"}),
+                             payload(None, "Bash", {"command": "echo x > %s/App.java" % root},
+                                     ELSEWHERE),
+                             payload("general-purpose", "Write", {"file_path": root + "/x"})):
+                    with self.subTest(state=state, root=root, tool=call["tool_name"],
+                                      agent=call["agent_type"]):
+                        result = ppl_guard.decide(call, hook)
+                        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                        self.assertIn(LANE_A, self.deny_reason(result))
+            # what lands outside the lane stays the session's business
+            self.assertIsNone(ppl_guard.decide(
+                payload(None, "Write", {"file_path": "/tmp/somewhere-else/notes.txt"}), hook))
+            self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": "ls"}), hook))
+            # a target the hook cannot resolve is denied, as everywhere in a lane
+            result = ppl_guard.decide(payload(None, "Bash", {"command": "echo x > $W/App.java"}),
+                                      hook)
+            self.assertIn("could not be resolved", self.deny_reason(result))
+            # and a role is denied every call before ppl init, write or not (R22)
+            result = ppl_guard.decide(payload("ppl-code-worker", "Read",
+                                              {"file_path": worktree + "/src/App.java"}), hook)
+            self.assertIn("OWNER_DECISION", self.deny_reason(result))
+        # an entry that names no worktree or repo places no write, so every write is denied
+        entry = {key: item for key, item in lanes.entry(LANE_A).items()
+                 if key not in ("worktree", "repo")}
+        store.write_json(lanes.registry_path(), {"version": 1, "lanes": [entry]})
+        for call in (payload(None, "Write", {"file_path": "/tmp/somewhere-else/notes.txt"}),
+                     payload(None, "Bash", {"command": "echo x > /tmp/notes.txt"})):
+            with self.subTest(entry="no roots", tool=call["tool_name"]):
+                self.assertIn("OWNER_DECISION",
+                              self.deny_reason(ppl_guard.decide(call, hook)))
+        self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": "ls"}), hook))
+
     def test_two_lanes_never_see_each_others_state(self):
         # rule: R-LANE-HOOK-BINDING
         repo_a = self.lane(LANE_A, lane=1)
@@ -260,6 +309,38 @@ class TestTheHookBinding(LaneCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stderr, "")
         return json.loads(done.stdout) if done.stdout.strip() else None
+
+    def test_the_hooks_run_without_the_posix_only_modules(self):
+        # rule: R-LANE-HOOK-BINDING
+        # Windows has no fcntl, pwd, grp, termios or resource. A hook that dies importing one
+        # exits 1 with no output, which Claude Code reads as allow. Only the registry's
+        # writers lock (D1), so no hook imports fcntl, and the rest are imported guarded or
+        # not at all. The shim blocks them the way a platform without them fails the import.
+        env = fixtures.isolated_env()
+        shim = ("import runpy, sys\n"
+                "for name in ('fcntl', 'pwd', 'grp', 'termios', 'resource'):\n"
+                "    sys.modules[name] = None\n"
+                "sys.argv = sys.argv[1:]\n"
+                "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+        push = payload("ppl-code-worker", "Bash", {"command": "git push --force origin x"})
+        for hook_argv in ([], argv(LANE_A)):
+            with self.subTest(argv=hook_argv):
+                done = subprocess.run([sys.executable, "-c", shim, str(GUARD)] + hook_argv,
+                                      input=json.dumps(push), capture_output=True, text=True,
+                                      env=env, timeout=HOOK_BOUND_SECONDS)
+                self.assertEqual((done.returncode, done.stderr), (0, ""))
+                decision = json.loads(done.stdout)["hookSpecificOutput"]
+                self.assertEqual(decision["permissionDecision"], "deny")
+                self.assertIn("BOUNDARY_VIOLATION", decision["permissionDecisionReason"])
+        start = {"hook_event_name": "SubagentStart", "agent_type": "ppl-code-worker",
+                 "cwd": "/tmp"}
+        for hook in ("ppl_dispatch.py", "ppl_usage.py"):
+            with self.subTest(hook=hook):
+                done = subprocess.run([sys.executable, "-c", shim, str(HOOKS / hook)]
+                                      + argv(LANE_A), input=json.dumps(start),
+                                      capture_output=True, text=True, env=env,
+                                      timeout=HOOK_BOUND_SECONDS)
+                self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
 
     def test_the_guard_with_no_argv_still_runs_on_the_floor_job_payload(self):
         # D10: the python floor runs before argv is read, so the CI job's payload with no

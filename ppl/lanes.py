@@ -3,7 +3,6 @@ running task. Writers take an exclusive flock on `lanes.lock`, re-read, change a
 file atomically; readers (the hooks) take no lock, so a hook never blocks on one and never
 sees a torn file. Parses on Python 3.9: the hooks import it."""
 import collections
-import fcntl
 import json
 import os
 from contextlib import contextmanager
@@ -135,6 +134,10 @@ def for_path(path, limit=READ_LIMIT):
 
 @contextmanager
 def _locked():
+    # imported here: only the registry's writers lock, and the hooks, which read it with no
+    # lock (D1), must import this module where fcntl does not exist
+    import fcntl
+
     home = paths.home()
     home.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(str(home / LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
