@@ -186,5 +186,39 @@ class TestAddImport(unittest.TestCase):
         self.assertEqual(git(target, "rev-parse", "HEAD"), before)
 
 
+
+def planted(name):
+    """(an executable script that appends to a marker file and fails, that marker file)."""
+    folder = Path(tmphome.mkdtemp(prefix="pplplanted-"))
+    marker = folder / ("%s.ran" % name)
+    script = folder / name
+    script.write_text("#!/bin/sh\necho ran >> %s\nexit 1\n" % marker, encoding="utf-8")
+    script.chmod(0o755)
+    return script, marker
+
+
+class TestPinnedGit(unittest.TestCase):
+    def test_an_fsmonitor_in_the_harness_config_does_not_run(self):
+        repo = make_repo()
+        script, marker = planted("fsmonitor")
+        git(repo, "config", "core.fsmonitor", str(script))
+        self.assertEqual(lane_harness.commit(repo), git(repo, "rev-parse", "HEAD"))
+        self.assertFalse(marker.exists())
+
+    def test_the_import_commit_signs_with_the_operators_gpg_program(self):
+        # the pinned gpg.program= would fail every signed import, so the import commit keeps it
+        script, marker = planted("gpg")
+        config = Path(tmphome.mkdtemp(prefix="pplgitcfg-")) / "gitconfig"
+        config.write_text("[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = true\n"
+                          "[gpg]\n\tprogram = %s\n" % script, encoding="utf-8")
+        source = fixtures.SOURCE / "defaults" / "harnesses" / "example-generic"
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config),
+                                          "GIT_CONFIG_NOSYSTEM": "1"}):
+            with self.assertRaises(PplError) as caught:
+                harness.add(str(source), name="signed-import")
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertTrue(marker.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

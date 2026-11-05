@@ -832,7 +832,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 196 rows: 146 `blocking`, 21 `soft` and 29 `n/a`. Of the
+As of this commit the table carries 197 rows: 147 `blocking`, 21 `soft` and 29 `n/a`. Of the
 `n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 10 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the

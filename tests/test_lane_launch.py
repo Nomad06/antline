@@ -129,6 +129,15 @@ class LaneCase(unittest.TestCase):
     def branch_exists(self, branch=BRANCH):
         return bool(git(self.project, "branch", "--list", branch))
 
+    def planted(self, name):
+        """(an executable script that appends to a marker file, that marker file)."""
+        marker = self.base / ("%s.ran" % name)
+        script = self.base / "planted" / name
+        script.parent.mkdir(exist_ok=True)
+        script.write_text("#!/bin/sh\necho ran >> %s\n" % marker, encoding="utf-8")
+        script.chmod(0o755)
+        return script, marker
+
     def assert_nothing_made(self):
         self.assertFalse(lanes.start_dir(TASK).exists())
         self.assertFalse(self.worktree.exists())
@@ -362,6 +371,67 @@ class TestStart(LaneCase):
         self.assertTrue(self.worktree.is_dir())
         self.assertTrue(self.branch_exists())
         self.assertEqual(self.staging_dirs(), [])
+
+
+class TestCheckoutGit(LaneCase):
+    """ppl lane runs git in the project checkout outside any sandbox, where a sandboxed role
+    may have written the config or the hooks."""
+
+    def test_a_checkout_config_key_that_could_run_a_command_is_refused(self):
+        # rule: R-LANE-LAUNCH-GIT-CONFIG
+        # both would run at ppl lane's fetch from the local origin and its worktree checkout
+        script, marker = self.planted("upload-pack")
+        git(self.project, "config", "remote.origin.uploadpack", str(script))
+        git(self.project, "config", "filter.x.smudge", str(script))
+        (self.project / ".git" / "info").mkdir(exist_ok=True)
+        (self.project / ".git" / "info" / "attributes").write_text("* filter=x\n",
+                                                                   encoding="utf-8")
+        message = refusal(self, "OWNER_DECISION", lane_launch.start, LINK,
+                          harness_name=HARNESS, exec_=False)
+        self.assertIn("remote.origin.uploadpack (local)", message)
+        self.assertIn("filter.x.smudge (local)", message)
+        self.assertIn("git -C %s config --list --show-scope" % self.project, message)
+        self.assertFalse(marker.exists())
+        self.assertEqual(lanes.read(), [])
+        self.assertFalse(self.branch_exists())
+        self.assert_nothing_made()
+
+    def test_a_url_rewrite_an_ssh_command_or_an_include_is_refused(self):
+        script, marker = self.planted("ssh")
+        # git lowers the section and the name of a key, never its subsection
+        for key, named, value in (
+                ("url.%s.insteadOf" % self.origin, "url.%s.insteadof" % self.origin,
+                 str(self.base / "elsewhere.git")),
+                ("core.sshCommand", "core.sshcommand", str(script)),
+                ("include.path", "include.path", "/dev/null"),
+                ("filter.x.smudge", "filter.x.smudge", str(script))):
+            with self.subTest(key=key):
+                git(self.project, "config", key, value)
+                message = refusal(self, "OWNER_DECISION", lane_launch.start, LINK,
+                                  harness_name=HARNESS, exec_=False)
+                self.assertIn(named + " (local)", message)
+                git(self.project, "config", "--unset", key)
+                self.assertEqual(lanes.read(), [])
+                self.assert_nothing_made()
+        self.assertFalse(marker.exists())
+
+    def test_a_hooks_path_in_the_checkout_config_is_pinned_off(self):
+        script, marker = self.planted("post-checkout")
+        git(self.project, "config", "core.hooksPath", str(script.parent))
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertTrue(self.worktree.is_dir())
+        self.assertFalse(marker.exists())
+
+    def test_a_hook_of_the_checkout_does_not_run(self):
+        hooks = self.project / ".git" / "hooks"
+        for name in ("post-checkout", "reference-transaction"):
+            script, marker = self.planted(name)
+            (hooks / name).write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+            (hooks / name).chmod(0o755)
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertTrue(self.worktree.is_dir())
+        self.assertFalse((self.base / "post-checkout.ran").exists())
+        self.assertFalse((self.base / "reference-transaction.ran").exists())
 
 
 class TestResume(LaneCase):

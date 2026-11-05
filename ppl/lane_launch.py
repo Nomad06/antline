@@ -13,8 +13,8 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import (config, harness, lane_harness, lane_render, lanes, lessons, os_sandbox, paths,
-               routing, run, store, trackers)
+from . import (config, escape_git, harness, lane_harness, lane_render, lanes, lessons, os_sandbox,
+               paths, routing, run, store, trackers)
 from .errors import PplError
 
 VERBS = ("list", "resume", "close")
@@ -168,8 +168,32 @@ def _layout(doc, task_id, slug):
             "%s-%s" % (task_id, slug), repo["default_branch"])
 
 
-def _git(checkout, args, timeout=lane_harness._GIT_TIMEOUT_SECONDS):
-    return lane_harness._git(checkout, args, timeout=timeout)
+# Every git below runs in the project checkout outside any sandbox, through lane_harness.git,
+# so each call carries escape_git.OPERATOR_PINNED_CONFIG, and _check_config runs before them.
+_git = lane_harness.git
+
+
+def _check_config(checkout):
+    """Refuse a checkout whose local or worktree config sets a key outside
+    escape_git.GIT_SAFE_KEYS. A sandboxed role of any lane may write the checkout, and the git
+    ppl lane runs there is the operator's own, outside any sandbox: such a key could run a
+    command (a filter, a pager, an upload-pack) or send git elsewhere (a url rewrite, an ssh
+    command, a proxy) that no -c word of the lane's covers."""
+    entries, problem = escape_git.local_config(checkout, timeout=lane_harness.GIT_TIMEOUT_SECONDS)
+    if problem:
+        raise PplError("SETUP_INCOMPLETE", "the git config of the checkout %s cannot be checked: "
+                       "%s" % (checkout, problem))
+    unsafe = escape_git.unsafe_entries(entries)
+    if unsafe:
+        named = ", ".join("%s (%s)" % (key[:120], scope) for scope, key, _ in unsafe)
+        raise PplError("OWNER_DECISION",
+                       "the git config of the checkout %s sets %s, which could run a command or "
+                       "send git elsewhere when ppl lane runs git there outside any sandbox, and "
+                       "a sandboxed role can write that config. Inspect them (`git -C %s config "
+                       "--list --show-scope`), remove each you did not set yourself (`git -C %s "
+                       "config --unset <key>`, with --worktree for a worktree key), then run ppl "
+                       "lane again. Only the keys of escape_git.GIT_SAFE_KEYS may be set there."
+                       % (checkout, named, checkout, checkout))
 
 
 def _branch_exists(checkout, branch):
@@ -182,23 +206,25 @@ def _delete_branch(checkout, branch):
         return
     result = _git(checkout, ["branch", "-D", branch])
     if result.returncode != 0:
-        raise PplError("SETUP_INCOMPLETE", lane_harness._stderr(result))
+        raise PplError("SETUP_INCOMPLETE", lane_harness.stderr_text(result))
 
 
 def _remove_worktree(checkout, worktree):
     result = _git(checkout, ["worktree", "remove", "--force", worktree])
     if result.returncode != 0:
-        raise PplError("SETUP_INCOMPLETE", lane_harness._stderr(result))
+        raise PplError("SETUP_INCOMPLETE", lane_harness.stderr_text(result))
 
 
 def _add_worktree(checkout, worktree, branch, default, undo):
     """Create the run's branch and worktree from a fresh default branch: origin's after a fetch
-    when the checkout has an origin, else the local one. Refuses a branch or a worktree path
-    that already exists, so the undo steps only ever remove what this call made."""
+    when the checkout has an origin, else the local one. The checkout's config is checked
+    before the first git there. Refuses a branch or a worktree path that already exists, so the
+    undo steps only ever remove what this call made."""
+    _check_config(checkout)
     remotes = _git(checkout, ["remote"])
     if remotes.returncode != 0:
         raise PplError("SETUP_INCOMPLETE", "the harness's [repo] path %s is not a git "
-                       "checkout: %s" % (checkout, lane_harness._stderr(remotes)))
+                       "checkout: %s" % (checkout, lane_harness.stderr_text(remotes)))
     if _branch_exists(checkout, branch):
         raise PplError("ILLEGAL_TRANSITION",
                        "the branch %s already exists in %s, and a lane starts its run on a new "
@@ -211,10 +237,10 @@ def _add_worktree(checkout, worktree, branch, default, undo):
     base = default
     if "origin" in remotes.stdout.split():
         fetch = _git(checkout, ["fetch", "--quiet", "origin", default],
-                     timeout=lane_harness._FETCH_TIMEOUT_SECONDS)
+                     timeout=lane_harness.FETCH_TIMEOUT_SECONDS)
         if fetch.returncode != 0:
             raise PplError("EXTERNAL_BLOCKED", "git fetch origin %s failed in %s: %s"
-                           % (default, checkout, lane_harness._stderr(fetch)))
+                           % (default, checkout, lane_harness.stderr_text(fetch)))
         base = "origin/" + default
     # git can leave the new branch behind when the checkout fails, so the branch undo goes
     # first. The branch did not exist a moment ago, so a branch there now is this call's
@@ -222,7 +248,7 @@ def _add_worktree(checkout, worktree, branch, default, undo):
     added = _git(checkout, ["worktree", "add", "--quiet", worktree, "-b", branch, base])
     if added.returncode != 0:
         raise PplError("SETUP_INCOMPLETE", "git worktree add %s failed in %s: %s"
-                       % (worktree, checkout, lane_harness._stderr(added)))
+                       % (worktree, checkout, lane_harness.stderr_text(added)))
     undo.append(("remove the worktree %s" % worktree,
                  lambda: _remove_worktree(checkout, worktree)))
 

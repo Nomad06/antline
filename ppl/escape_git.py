@@ -3,8 +3,10 @@ the checkout, and a push or a remote delete of the run's own branch from the run
 with the fixed -c words of PINNED_CONFIG. Both repositories are ones a role can write, so
 before allowing a command the guard asks git itself, never a run file: the repository's local
 and worktree config may set only keys that run nothing and point the remote at the forge repo
-alone, and the pushed branch is the one HEAD is on. The guard hook imports this module, so it
-parses on Python 3.9 and carries no annotations."""
+alone, and the pushed branch is the one HEAD is on. `ppl lane` runs its own git in a project
+checkout outside any sandbox too: it checks that config with local_config first and carries
+OPERATOR_PINNED_CONFIG. The guard hook imports this module, so it parses on Python 3.9 and
+carries no annotations."""
 import os
 import re
 import subprocess
@@ -25,6 +27,17 @@ PINNED_CONFIG = ["-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=ssh",
                  "-c", "protocol.git.allow=never", "-c", "push.gpgSign=false",
                  "-c", "gpg.program=", "-c", "core.alternateRefsCommand=",
                  "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"]
+# The -c words on every git `ppl lane` runs in a project checkout (a probe, the fetch, the
+# worktree add and their undoing) and in an installed harness, outside any sandbox. They win over
+# a local config a role may have rewritten for each key that can run a program there: a hook, an
+# fsmonitor, an alternate-refs command, a gpg program, the ext transport, an automatic gc or
+# maintenance run. The transport stays the operator's (credential.helper, core.sshCommand,
+# protocol.allow): their global config carries HTTPS forges and local mirrors, and a local key
+# overriding one is outside GIT_SAFE_KEYS, so the lane refuses it before any of these runs.
+OPERATOR_PINNED_CONFIG = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                          "-c", "core.alternateRefsCommand=", "-c", "gpg.program=",
+                          "-c", "protocol.ext.allow=never", "-c", "gc.auto=0",
+                          "-c", "maintenance.auto=false"]
 FETCH_FLAG = "--no-recurse-submodules"
 # A push's first words. The command line wins over a global push.followTags or
 # push.recurseSubmodules the guard cannot read, so no tag a role made and no submodule goes too.
@@ -32,7 +45,7 @@ PUSH_FLAGS = ["--no-verify", "--no-follow-tags", "--no-recurse-submodules"]
 # Every git the guard runs gets this long: a hook that runs past its own timeout denies nothing.
 TIMEOUT_SECONDS = 0.2
 # Config keys known to run nothing and to send nothing elsewhere. core.hooksPath is here
-# because PINNED_CONFIG wins over it.
+# because PINNED_CONFIG and OPERATOR_PINNED_CONFIG win over it.
 GIT_SAFE_KEYS = (
     r"core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase"
     r"|precomposeunicode|symlinks|hookspath)",
@@ -176,15 +189,15 @@ def _branch_problem(branch, default_branch):
     return None
 
 
-def _git(run_git, git, directory, args):
+def _git(run_git, git, directory, args, timeout=TIMEOUT_SECONDS):
     """(exit code, stdout, None), or (None, None, why) when git cannot be run or outlasts
-    TIMEOUT_SECONDS. Its output is captured, so none of it reaches the hook's stderr."""
+    `timeout`. Its output is captured, so none of it reaches the hook's stderr."""
     try:
         done = run_git([git, "-C", directory] + args, stdin=subprocess.DEVNULL,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT_SECONDS)
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     except subprocess.TimeoutExpired:
         return None, None, "git %s did not answer within %s s in %s" % (
-            args[0], TIMEOUT_SECONDS, directory)
+            args[0], timeout, directory)
     except (OSError, ValueError) as err:
         return None, None, "the pinned git %s cannot be run (%s)" % (git, type(err).__name__)
     return done.returncode, done.stdout.decode("utf-8", "replace"), None
@@ -195,34 +208,51 @@ def _forge_urls(repo):
             "git@github.com:%s" % repo, "git@github.com:%s.git" % repo)
 
 
-def _config_problem(run_git, git, directory, remote, forge_repo):
-    """None when the local and worktree config of `directory` set only GIT_SAFE_KEYS and give
-    `remote` exactly one url, the forge repo on github.com. With -z an entry is its scope, then
-    its key, a newline and its value, so a value holding a newline cannot pass for an entry."""
+def local_config(directory, run_git=subprocess.run, git="git", timeout=TIMEOUT_SECONDS):
+    """([(scope, key, value)], None) for each entry of the local and worktree config of
+    `directory`, the scopes a role can write, in git's order, or (None, why) when git cannot
+    list them. With -z an entry is its scope, then its key, a newline and its value, so a value
+    holding a newline cannot pass for an entry."""
     code, output, problem = _git(run_git, git, directory,
-                                 ["config", "--list", "--show-scope", "-z"])
+                                 ["config", "--list", "--show-scope", "-z"], timeout)
     if problem:
-        return problem
+        return None, problem
     if code != 0:
-        return "git config --list exited %d in %s, so its config cannot be checked" % (
+        return None, "git config --list exited %d in %s, so its config cannot be checked" % (
             code, directory)
     fields = output.split("\0")
     if fields[-1:] == [""]:
         fields.pop()
     if len(fields) % 2:
-        return "git config --list in %s gave output the guard cannot read" % directory
-    url_key = "remote.%s.url" % remote
-    urls = []
+        return None, "git config --list in %s gave output the guard cannot read" % directory
+    entries = []
     for scope, entry in zip(fields[0::2], fields[1::2]):
-        if scope not in _CHECKED_SCOPES:
-            continue
-        key, _, value = entry.partition("\n")
-        if not _SAFE_KEY.fullmatch(key):
-            return ("the %s git config of %s sets %s, which could run a command or redirect the "
-                    "remote: only the keys of escape_git.GIT_SAFE_KEYS may be set there, and no "
-                    "include" % (scope, directory, _short(key)))
-        if key == url_key:
-            urls.append(value)
+        if scope in _CHECKED_SCOPES:
+            key, _, value = entry.partition("\n")
+            entries.append((scope, key, value))
+    return entries, None
+
+
+def unsafe_entries(entries):
+    """The entries of local_config whose key is not one of GIT_SAFE_KEYS: an include, or a key
+    that could run a command or send git elsewhere."""
+    return [entry for entry in entries if not _SAFE_KEY.fullmatch(entry[1])]
+
+
+def _config_problem(run_git, git, directory, remote, forge_repo):
+    """None when the local and worktree config of `directory` set only GIT_SAFE_KEYS and give
+    `remote` exactly one url, the forge repo on github.com."""
+    entries, problem = local_config(directory, run_git, git)
+    if problem:
+        return problem
+    unsafe = unsafe_entries(entries)
+    if unsafe:
+        scope, key, _ = unsafe[0]
+        return ("the %s git config of %s sets %s, which could run a command or redirect the "
+                "remote: only the keys of escape_git.GIT_SAFE_KEYS may be set there, and no "
+                "include" % (scope, directory, _short(key)))
+    url_key = "remote.%s.url" % remote
+    urls = [value for _, key, value in entries if key == url_key]
     allowed = _forge_urls(forge_repo)
     for url in urls:
         if url not in allowed:
