@@ -6,8 +6,9 @@ import stat
 import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
-               harness, lessons, metrics, models, os_sandbox, paths, recover, refusals, review, routing,
-               run, schema, setup, status, store, trackers, trail, usage, verdict, watchdog)
+               harness, lane_launch, lessons, metrics, models, os_sandbox, paths, recover, refusals,
+               review, routing, run, schema, setup, status, store, trackers, trail, usage, verdict,
+               watchdog)
 from .errors import PplError, role_output
 from .forges import github_fetch
 
@@ -1295,6 +1296,41 @@ def cmd_lessons(args):
     return 0
 
 
+def _lane_close_task(args):
+    """The task `ppl lane close` frees: the one it names, else the lane session's PPL_TASK."""
+    if args.rest and args.task and args.rest != args.task:
+        raise PplError("SCHEMA_INVALID", "ppl lane close names %s and --task %s: name one task"
+                       % (args.rest, args.task))
+    task_id = args.rest or args.task or os.environ.get("PPL_TASK")
+    if not task_id:
+        raise PplError("SCHEMA_INVALID", "ppl lane close needs the task: --task <id>, or run it "
+                       "in the lane's session, which sets PPL_TASK")
+    return task_id
+
+
+def cmd_lane(args):
+    # The first word is read by hand: list, resume and close are verbs, anything else is a
+    # task link or id (task ids cannot be these words).
+    if args.target == "list":
+        rows = lane_launch.listing()
+        print(json.dumps(rows, indent=2, sort_keys=True) if args.json else lane_launch.text(rows))
+        return 0
+    if args.target == "resume":
+        if not args.rest:
+            raise PplError("SCHEMA_INVALID", "ppl lane resume needs the task: ppl lane resume <id>")
+        result = lane_launch.resume(args.rest, exec_=not args.no_exec)
+    elif args.target == "close":
+        result = lane_launch.close(_lane_close_task(args))
+    else:
+        if args.rest:
+            raise PplError("SCHEMA_INVALID", "ppl lane takes one task link or id, and %r is a "
+                           "second" % args.rest)
+        result = lane_launch.start(args.target, harness_name=args.harness, slug=args.slug,
+                                   exec_=not args.no_exec)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_apply_patch(args):
     task_id = resolve_task(args)
     require_current_generation(task_id, args.generation)
@@ -1326,6 +1362,7 @@ COMMANDS = {
     "mr": cmd_mr, "merge": cmd_merge, "review": cmd_review, "doctor": cmd_doctor,
     "watchdog": cmd_watchdog, "metrics": cmd_metrics, "label": cmd_label,
     "setup": cmd_setup, "tracker": cmd_tracker, "trail": cmd_trail, "lessons": cmd_lessons,
+    "lane": cmd_lane,
 }
 
 
@@ -1626,6 +1663,17 @@ def build_parser():
     p.add_argument("--actual", required=True, choices=list(metrics.LABEL_VALUES))
     p.add_argument("--by")
     p.add_argument("--task")
+
+    p = sub.add_parser("lane", help="start a task window, or list, resume or close one")
+    p.add_argument("target", help="a task link or id, or one of %s" % ", ".join(lane_launch.VERBS))
+    p.add_argument("rest", nargs="?", help="the task id after resume or close")
+    p.add_argument("--harness", help="the installed harness (default: the one whose [repo] path "
+                                     "holds the cwd, else the default harness)")
+    p.add_argument("--slug", default="work", help="the branch is <TASK-ID>-<slug>")
+    p.add_argument("--no-exec", action="store_true",
+                   help="print {argv, env, cwd} as JSON instead of starting claude")
+    p.add_argument("--task", help="close: the task whose lane to free (default: PPL_TASK)")
+    p.add_argument("--json", action="store_true", help="list: print JSON")
 
     p = sub.add_parser("lessons")
     p.add_argument("action", choices=["bundle", "record", "list", "accept", "reject", "retire",

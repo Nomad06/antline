@@ -631,5 +631,13 @@ def _ppl_problem(args, state):
         return "ppl review fetch takes only --pr <number>"
     if args == ["doctor", "--forge"]:
         return None
-    return ("ppl %s is not one of tracker fetch --task <id>, review fetch --pr <n> or "
-            "doctor --forge" % " ".join(_short(a) for a in args[:2]))
+    if args[:2] == ["lane", "close"]:
+        # it writes PPL_HOME/lanes.json, outside every write scope. Bare, ppl reads the task
+        # from the session's PPL_TASK
+        rest = args[2:]
+        if not rest or (task_id and rest in ([task_id], ["--task", task_id],
+                                             ["--task=" + task_id])):
+            return None
+        return "ppl lane close takes nothing, or the active run's id as <id> or --task <id>"
+    return ("ppl %s is not one of tracker fetch --task <id>, review fetch --pr <n>, "
+            "doctor --forge or lane close" % " ".join(_short(a) for a in args[:2]))

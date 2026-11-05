@@ -604,8 +604,9 @@ apply` pinned in `PPL_HOME/os_sandbox.json`, in a shape from the guard's table
 `pr create`, `pr view`, `pr checks` and `pr close`, `api user`, a review reply and `auth
 status`, each naming the harness's own repository, with any body file a plain file directly
 in the run's scratch directory [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For ppl it holds `tracker
-fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`
-[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For git (`ppl/escape_git.py`) every shape starts with
+fetch --task` for the active run, `review fetch --pr <n>`, `doctor --forge` and `lane close`,
+bare or naming the active run [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For git
+(`ppl/escape_git.py`) every shape starts with
 the fixed `-c` words of `escape_git.PINNED_CONFIG`, in this order and as its only `-c` words:
 `core.hooksPath=/dev/null`, `core.sshCommand=ssh`, an empty `credential.helper` and
 `core.askPass`, `protocol.ext.allow`, `protocol.file.allow` and `protocol.allow` `never`,

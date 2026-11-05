@@ -22,7 +22,7 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
 
 import fixtures
-from ppl import escape, harness, os_sandbox, paths, run, store
+from ppl import escape, harness, lanes, os_sandbox, paths, run, store
 import ppl_guard
 
 TASK = "GH-7"
@@ -731,6 +731,33 @@ class TestOrchestratorShape(OsSandboxCase):
         with self.no_active_run():
             result = self.decide(PPL + " tracker fetch --task GH-7")
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_ppl_lane_close_from_the_start_directory_is_allowed(self):
+        # lane close writes PPL_HOME/lanes.json, outside every write scope, so the orchestrator
+        # runs it outside the sandbox from the lane's start directory, for its own run only
+        start = lanes.start_dir(TASK)
+        start.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(shutil.rmtree, str(start), True)
+        with self.facts_text(json.dumps(facts_doc(workspace=real(start)))):
+            for command in (PPL + " lane close", PPL + " lane close GH-7",
+                            PPL + " lane close --task GH-7", PPL + " lane close --task=GH-7"):
+                with self.subTest(command=command):
+                    self.assertIsNone(self.decide(command, cwd=real(start)))
+            for command in (PPL + " lane close GH-8", PPL + " lane close --task GH-8",
+                            PPL + " lane close GH-7 GH-7", PPL + " lane close --force",
+                            PPL + " lane resume GH-7", PPL + " lane list",
+                            PPL + " lane https://github.com/o/r/issues/8"):
+                with self.subTest(command=command):
+                    self.assertIn("BOUNDARY_VIOLATION",
+                                  self.deny_reason(self.decide(command, cwd=real(start))))
+            reason = self.deny_reason(self.decide(PPL + " lane close", cwd=REPO))
+            self.assertIn("BOUNDARY_VIOLATION", reason)
+            self.assertIn(real(start), reason)
+        with self.no_active_run():
+            with self.facts_text(json.dumps(facts_doc(workspace=real(start)))):
+                self.assertIsNone(self.decide(PPL + " lane close", cwd=real(start)))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(
+                    self.decide(PPL + " lane close --task GH-7", cwd=real(start))))
 
     def test_ppl_init_unsandboxed_is_denied(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
