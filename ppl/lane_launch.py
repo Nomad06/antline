@@ -231,7 +231,7 @@ def _remove_worktree(checkout, worktree):
 
 def _add_worktree(doc, checkout, worktree, branch, default, undo):
     """Create the run's branch and worktree from a fresh default branch: origin's after a fetch
-    when the checkout has an origin, else the local one. The checkout's config is checked
+    when the checkout has an origin, else the local one, each resolved by its full ref name. The checkout's config is checked
     before the first git there. Refuses a branch or a worktree path that already exists, so the
     undo steps only ever remove what this call made."""
     _check_config(doc, checkout)
@@ -248,7 +248,7 @@ def _add_worktree(doc, checkout, worktree, branch, default, undo):
         raise PplError("ILLEGAL_TRANSITION", "the worktree path %s already exists: remove it "
                        "(`git -C %s worktree remove %s`) and run ppl lane again"
                        % (worktree, checkout, worktree))
-    base = default
+    base = "refs/heads/" + default
     if "origin" in remotes.stdout.split():
         # no submodule recursion: a submodule's own config is read by no check, and the child
         # fetch drops the pinned words. The refspec is explicit, so no configured
@@ -259,11 +259,19 @@ def _add_worktree(doc, checkout, worktree, branch, default, undo):
         if fetch.returncode != 0:
             raise PplError("EXTERNAL_BLOCKED", "git fetch origin %s failed in %s: %s"
                            % (default, checkout, lane_harness.stderr_text(fetch)))
-        base = "origin/" + default
+        base = "refs/remotes/origin/" + default
+    # the base by its full name, as a sha: a short name would let a tag or a branch a role
+    # wrote under the same name win where the operator's config turns the ambiguity warning off
+    resolved = _git(checkout, ["rev-parse", "--verify", "--quiet", "--end-of-options",
+                               base + "^{commit}"])
+    sha = resolved.stdout.strip()
+    if resolved.returncode != 0 or not sha:
+        raise PplError("SETUP_INCOMPLETE", "%s names no commit in %s, so the run has no base"
+                       % (base, checkout))
     # git can leave the new branch behind when the checkout fails, so the branch undo goes
     # first. The branch did not exist a moment ago, so a branch there now is this call's
     undo.append(("delete the branch %s" % branch, lambda: _delete_branch(checkout, branch)))
-    added = _git(checkout, ["worktree", "add", "--quiet", worktree, "-b", branch, base])
+    added = _git(checkout, ["worktree", "add", "--quiet", worktree, "-b", branch, sha])
     if added.returncode != 0:
         raise PplError("SETUP_INCOMPLETE", "git worktree add %s failed in %s: %s"
                        % (worktree, checkout, lane_harness.stderr_text(added)))

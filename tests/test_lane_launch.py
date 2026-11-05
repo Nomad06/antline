@@ -483,6 +483,41 @@ class TestCheckoutGit(LaneCase):
                          git(self.origin, "rev-parse", "main"))
         self.assertFalse((self.worktree / planted.name).exists())
 
+    def plant_ambiguous_refs(self, repo, *refs):
+        """A commit holding planted.txt, on a side branch of `repo`, with `refs` pointed at it,
+        and the operator's global config turning git's ambiguous-ref warning off."""
+        with open(os.environ["GIT_CONFIG_GLOBAL"], "a", encoding="utf-8") as config:
+            config.write("[core]\n\twarnAmbiguousRefs = false\n")
+        git(repo, "checkout", "-q", "-b", "side")
+        (repo / "planted.txt").write_text("planted\n", encoding="utf-8")
+        git(repo, "add", "planted.txt")
+        git(repo, "commit", "-q", "-m", "planted")
+        git(repo, "checkout", "-q", "main")
+        for ref in refs:
+            git(repo, "update-ref", ref, "side")
+
+    def test_a_ref_planted_under_the_base_name_cannot_choose_the_base(self):
+        # rule: R-LANE-LAUNCH-GIT-CONFIG
+        # the short name origin/main reads refs/tags/origin/main and refs/heads/origin/main
+        # before refs/remotes/origin/main
+        self.plant_ambiguous_refs(self.project, "refs/heads/origin/main",
+                                  "refs/tags/origin/main")
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertEqual(git(self.worktree, "rev-parse", "HEAD"),
+                         git(self.origin, "rev-parse", "main"))
+        self.assertFalse((self.worktree / "planted.txt").exists())
+
+    def test_without_an_origin_a_tag_named_like_the_default_branch_cannot_choose_the_base(self):
+        # the short name main reads refs/tags/main before refs/heads/main
+        local = self.make_repo(self.base / "local")
+        self.install(HARNESS, project=local)
+        self.plant_ambiguous_refs(local, "refs/tags/main")
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        worktree = self.worktrees / ("local-" + TASK)
+        self.assertEqual(git(worktree, "rev-parse", "HEAD"),
+                         git(local, "rev-parse", "refs/heads/main"))
+        self.assertFalse((worktree / "planted.txt").exists())
+
     def test_on_a_github_forge_origin_must_be_the_forge_repo(self):
         # rule: R-LANE-LAUNCH-GIT-CONFIG
         github = {"forge": {"kind": "github"}, "tracker": fixtures.GITHUB_ISSUES["tracker"],
