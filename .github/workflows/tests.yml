@@ -22,8 +22,9 @@ jobs:
   python-floor:
     # The interpreter floor under Python 3.9: every hook denies a role and exits 0,
     # bin/ppl names the version it found. The suite itself needs 3.11 and does
-    # not run here.
-    runs-on: ubuntu-latest
+    # not run here. Pinned to 24.04: setup-python has no 3.9 build for the
+    # Ubuntu 26.04 image that ubuntu-latest moved to in October 2026.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
