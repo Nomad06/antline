@@ -24,9 +24,10 @@ _IMPORT_PINS = [word for pair in zip(escape_git.OPERATOR_PINNED_CONFIG[0::2],
 
 def git(directory, args, timeout=GIT_TIMEOUT_SECONDS, text=True, pins=None):
     """`git -C <directory> <args>` run outside any sandbox: the -c words of
-    escape_git.OPERATOR_PINNED_CONFIG (or `pins`) first, no prompt, captured output and a
-    timeout. EXTERNAL_BLOCKED when git cannot start or runs out of time."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    escape_git.OPERATOR_PINNED_CONFIG (or `pins`) first, no prompt, no replace refs
+    (GIT_NO_REPLACE_OBJECTS, which git's child processes inherit as well), captured output and
+    a timeout. EXTERNAL_BLOCKED when git cannot start or runs out of time."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_NO_REPLACE_OBJECTS="1")
     pinned = escape_git.OPERATOR_PINNED_CONFIG if pins is None else pins
     argv = ["git", *pinned, "-C", str(directory), *args]
     try:

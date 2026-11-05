@@ -32,14 +32,16 @@ PINNED_CONFIG = ["-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=ssh",
 # They win over a local config a role may have rewritten for each key that can run a program
 # there: a hook, an fsmonitor, an alternate-refs command, a gpg program, the ext transport, an
 # automatic gc or maintenance run, and a recursion into a submodule (whose own config no check
-# reads, and whose child git drops these words). The transport stays the operator's
-# (credential.helper, core.sshCommand, protocol.allow): their global config carries HTTPS forges
-# and local mirrors, and a local key overriding one is outside GIT_SAFE_KEYS, so the lane
-# refuses it before any of these runs.
+# reads, and whose child git drops these words). They also turn off replace refs: a
+# refs/replace/<sha> a role wrote would make the lane's base sha check out another commit's
+# tree. The transport stays the operator's (credential.helper, core.sshCommand,
+# protocol.allow): their global config carries HTTPS forges and local mirrors, and a local key
+# overriding one is outside GIT_SAFE_KEYS, so the lane refuses it before any of these runs.
 OPERATOR_PINNED_CONFIG = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                           "-c", "core.alternateRefsCommand=", "-c", "gpg.program=",
                           "-c", "protocol.ext.allow=never", "-c", "gc.auto=0",
-                          "-c", "maintenance.auto=false", "-c", "submodule.recurse=false"]
+                          "-c", "maintenance.auto=false", "-c", "submodule.recurse=false",
+                          "-c", "core.useReplaceRefs=false"]
 FETCH_FLAG = "--no-recurse-submodules"
 # A push's first words. The command line wins over a global push.followTags or
 # push.recurseSubmodules the guard cannot read, so no tag a role made and no submodule goes too.

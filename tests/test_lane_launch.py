@@ -484,10 +484,14 @@ class TestCheckoutGit(LaneCase):
         self.assertFalse((self.worktree / planted.name).exists())
 
     def plant_ambiguous_refs(self, repo, *refs):
-        """A commit holding planted.txt, on a side branch of `repo`, with `refs` pointed at it,
-        and the operator's global config turning git's ambiguous-ref warning off."""
+        """plant_side_commit, with the operator's global config turning git's ambiguous-ref
+        warning off."""
         with open(os.environ["GIT_CONFIG_GLOBAL"], "a", encoding="utf-8") as config:
             config.write("[core]\n\twarnAmbiguousRefs = false\n")
+        self.plant_side_commit(repo, *refs)
+
+    def plant_side_commit(self, repo, *refs):
+        """A commit holding planted.txt, on a side branch of `repo`, with `refs` pointed at it."""
         git(repo, "checkout", "-q", "-b", "side")
         (repo / "planted.txt").write_text("planted\n", encoding="utf-8")
         git(repo, "add", "planted.txt")
@@ -517,6 +521,16 @@ class TestCheckoutGit(LaneCase):
         self.assertEqual(git(worktree, "rev-parse", "HEAD"),
                          git(local, "rev-parse", "refs/heads/main"))
         self.assertFalse((worktree / "planted.txt").exists())
+
+    def test_a_replace_ref_for_the_base_cannot_change_what_is_checked_out(self):
+        # rule: R-LANE-LAUNCH-GIT-CONFIG
+        # git reads an object through refs/replace/<its sha> unless told not to: HEAD would
+        # still name the fetched tip while the worktree held the replacement's tree
+        tip = git(self.origin, "rev-parse", "main")
+        self.plant_side_commit(self.project, "refs/replace/" + tip)
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertEqual(git(self.worktree, "rev-parse", "HEAD"), tip)
+        self.assertFalse((self.worktree / "planted.txt").exists())
 
     def test_on_a_github_forge_origin_must_be_the_forge_repo(self):
         # rule: R-LANE-LAUNCH-GIT-CONFIG

@@ -169,7 +169,8 @@ def _layout(doc, task_id, slug):
 
 
 # Every git below runs in the project checkout outside any sandbox, through lane_harness.git,
-# so each call carries escape_git.OPERATOR_PINNED_CONFIG, and _check_config runs before them.
+# so each call carries escape_git.OPERATOR_PINNED_CONFIG and GIT_NO_REPLACE_OBJECTS=1, and
+# _check_config runs before them.
 _git = lane_harness.git
 
 
