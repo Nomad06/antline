@@ -76,12 +76,15 @@ def make_worktree(layout="java"):
     return tree
 
 
-def run_hook(payload, ppl_home):
+def run_hook(payload, ppl_home, task_id):
+    """The hook bound to `task_id`'s lane by its command line, as a lane's settings.json
+    renders it (`--task <id>`), or with no lane at all when `task_id` is None."""
     env = dict(os.environ)
     env["PPL_HOME"] = str(ppl_home)
     env["HOME"] = str(ppl_home.parent)
+    lane = ["--task", task_id] if task_id else []
     result = subprocess.run(
-        [sys.executable, str(GUARD_HOOK)],
+        [sys.executable, str(GUARD_HOOK)] + lane,
         input=json.dumps(payload), capture_output=True, text=True, env=env,
         timeout=10)
     return result
@@ -114,7 +117,7 @@ class Cage:
         # ppl modules are imported only after PPL_HOME is set, matching the
         # convention every test module in tests/ already uses, so paths.home()
         # resolves to this run's sandbox and never to the real data root (~/.ppl).
-        from ppl import harness, run, store, paths  # noqa: E402
+        from ppl import harness, lanes, run, store, paths  # noqa: E402
         self._run = run
         self._store = store
         self._paths = paths
@@ -122,6 +125,9 @@ class Cage:
         self.task_id = "CAGE-90002" if python else "CAGE-90001"
         run.init(self.task_id, "https://example.atlassian.net/browse/" + self.task_id,
                  str(self.worktree))
+        # the lane `ppl lane` would hold for the run, so the hook's --task binds to it
+        lanes.claim(self.task_id, "cage", "0" * 40, str(self.worktree), str(self.worktree),
+                    "00000000-0000-4000-8000-000000000000", 1, 1)
         store.write_json(paths.run_dir(self.task_id) / "boundary.json",
                           {"write": ["src/**" if python else "source/**"], "forbid": []})
         # The test worker's build shapes and the test globs come from the run's
@@ -144,10 +150,11 @@ class Cage:
         return {"hook_event_name": "PreToolUse", "agent_type": agent,
                 "tool_name": tool, "tool_input": tool_input, "cwd": cwd}
 
-    def check(self, name, payload, expect, reason=None):
+    def check(self, name, payload, expect, reason=None, lane=True):
         """expect is "allow" or a deny code substring. A deny can also be held
-        to a `reason` substring, for a case another rule would deny as well."""
-        result = run_hook(payload, self.ppl_home)
+        to a `reason` substring, for a case another rule would deny as well. The
+        hook runs in this run's lane session, or in no lane with `lane` False."""
+        result = run_hook(payload, self.ppl_home, self.task_id if lane else None)
         kind, detail = decision(result)
         if kind == "error":
             ok, detail_str = False, "hook raised: %s" % detail
@@ -905,7 +912,7 @@ def run_cases(cage):
         "the fail-closed direction must not leak into other projects",
         cage.payload(None, "Bash",
                      {"command": "sed -i 's/a/b/' notes.txt"}, unrelated),
-        "allow")
+        "allow", lane=False)
 
     cage._store.write_json(cage.run_dir() / "boundary.json",
                            {"write": ["source/**"], "forbid": ["source/secrets/**"]})

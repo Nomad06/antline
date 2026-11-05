@@ -282,14 +282,15 @@ def webfetch_github(tool_input):
 
 def decide(payload, home, state):
     """None to let a flagged call go on to the guard's other checks, else (code, reason).
-    `state` is the guard's active_state, a callable answering (task_id, run state or None),
-    called only past the role checks so a ppl-* role is refused before any file is read. A
-    run state already read, or None, is taken as well.
+    `state` is the guard's bound_state reader, a callable answering (task_id, run state or
+    None) for the run the hook's own command line binds it to, and raising when that lane
+    cannot be confirmed. It is called only past the role checks so a ppl-* role is refused
+    before any file is read. A run state already read, or None, is taken as well.
 
-    While the guard facts exist or a run is active, every flagged call is the pipeline's
-    whatever its cwd, since a cwd and the run's recorded repo are both in a role's reach: any
-    other subagent is denied and the unroled session meets the shape check. With neither, the
-    call goes on."""
+    While the guard facts exist or the session is bound to a run, every flagged call is the
+    pipeline's whatever its cwd, since a cwd and the run's recorded repo are both in a role's
+    reach: any other subagent is denied and the unroled session meets the shape check. With
+    neither, the call goes on."""
     agent = payload.get("agent_type")
     if agent is not None and not (isinstance(agent, str) and agent):
         return ("BOUNDARY_VIOLATION",
@@ -303,12 +304,14 @@ def decide(payload, home, state):
         try:
             task_id, run_state = state()
         except Exception as err:
-            # a run file that is no regular one or over the hook's cap: the call is still
-            # refused, with its reason, and never read as "no active run"
+            # a lane the registry cannot confirm, or a file that is no regular one or over
+            # the hook's cap: the call is still refused, with its reason, and never read as
+            # "no run"
             return ("OWNER_DECISION",
-                    "the active run's files cannot be read (%s), so a command outside the OS "
-                    "sandbox cannot be checked: remove or repair runs/ACTIVE and the run's "
-                    "state.json" % _short(getattr(err, "message", None) or type(err).__name__))
+                    "the run this session is bound to cannot be read (%s), so a command outside "
+                    "the OS sandbox cannot be checked: repair PPL_HOME/lanes.json or the run's "
+                    "state.json, or run ppl lane resume <task>"
+                    % _short(getattr(err, "message", None) or type(err).__name__))
     else:
         run_state = state if isinstance(state, dict) else None
         task_id = (run_state or {}).get("task_id")

@@ -1,8 +1,8 @@
 # Reading `ppl doctor`
 
-The guard hook is a `PreToolUse` hook registration in Claude Code settings, and registering
-it is a decision the owner makes separately from anything `ppl` does - it is not armed by
-default, and nothing about starting a run arms it on its own [R-GUARD-NOT-ARMED n/a].
+The guard hook is a `PreToolUse` hook registration in Claude Code settings: `ppl lane`
+registers it in the settings of the session it starts for a run, and a session resumed by
+hand without the lane flags has none [R-LANE-BARE-RESUME n/a].
 `ppl doctor` prints a JSON line whose `registration` field is one of:
 
 - **`none`** - the hook is not registered anywhere. Every sentence in this skill about a hook

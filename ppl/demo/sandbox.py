@@ -15,6 +15,12 @@ from . import sample
 
 TASK = "GH-1"
 TIMEOUT_SECONDS = 60
+# The lane `ppl lane` would hold for TASK, claimed in the sandbox's own data root. Interim
+# until the demo starts its run with `ppl lane --no-exec`.
+_CLAIM = ("import sys\n"
+          "from ppl import lanes\n"
+          "lanes.claim(sys.argv[1], 'demo', '0' * 40, sys.argv[2], sys.argv[2],\n"
+          "            '00000000-0000-4000-8000-000000000000', 1, 1)\n")
 _STRIPPED_PREFIXES = ("PPL_", "GIT_", "GH_", "GITHUB_")
 # These are the throwaway sample repository's commits, so the identity rule in CLAUDE.md,
 # which is about this repository, does not apply to them.
@@ -81,8 +87,10 @@ class Sandbox:
     def guard(self, payload):
         settings = json.loads((self.workspace / ".claude" / "settings.local.json").read_text())
         command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        # the hook binds to TASK's lane by its own command line, as a lane's settings render it
+        argv = shlex.split(command) + ["--task", TASK]
         try:
-            done = self._run(shlex.split(command), cwd=self.workspace, input=json.dumps(payload))
+            done = self._run(argv, cwd=self.workspace, input=json.dumps(payload))
         except PplError as error:
             return {"decision": "error", "code": None, "reason": error.message}
         if done.returncode != 0 or done.stderr.strip():
@@ -135,6 +143,10 @@ class Sandbox:
                    "--answer", "harness_from=%s" % source, "--answer", "harness_name=demo")
         self._step("init", TASK, "--tracker-url", "https://github.com/demo/shop/issues/1",
                    "--repo", str(self.repo), "--harness", "demo", "--skip-model-check", "--no-os-sandbox")
+        done = self._run([sys.executable, "-c", _CLAIM, TASK, str(self.repo)], cwd=self.workspace)
+        if done.returncode != 0:
+            raise PplError("SCHEMA_INVALID", "demo sandbox: the lane for %s was not claimed: %s"
+                           % (TASK, (done.stderr or done.stdout).strip()[:500]))
 
     def remove(self):
         shutil.rmtree(self.root, ignore_errors=True)

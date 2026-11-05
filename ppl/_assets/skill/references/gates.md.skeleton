@@ -12,8 +12,8 @@ instead of trusting a scrollback read.
 Every path below is spelled out literally, on purpose. The guard hook fails closed on a
 redirect whose target it cannot resolve, and a `$VAR/...` or `$(...)` target is exactly
 that: an earlier version of this recipe used `RUN=$(mktemp -d)` and `> "$RUN/install.log"`,
-and the hook refused the build line for any role that ran it, and for the orchestrator whenever
-its session's cwd sat inside the worktree [R-GUARD-BASH-WRITE-BOUNDARY]. So: one scratch
+and the hook refused the build line for any session of the run's lane that ran it, the
+orchestrator's included [R-GUARD-BASH-WRITE-BOUNDARY]. So: one scratch
 directory per task, `<!-- include: harness/scratch -->/<TASK-ID>`, written into every line by hand; `<SHA>` read off
 `git -C <worktree> rev-parse HEAD` in its own call and pasted in; `<GENERATION>` from
 `ppl stage enter` or `ppl recover` (SKILL.md "The lease"). Run each line below as its own
@@ -72,7 +72,7 @@ previous candidate, by design (see the same-SHA rule in `references/stage-4-gate
 
 These are denied by the `PreToolUse` guard hook for any `Bash` call, everywhere, not scoped
 to this run and not just a style preference - do not attempt a workaround (a different flag
-spelling, a subshell) to get past the hook [R-GUARD-GLOBAL-DENIALS] [R-GUARD-NOT-ARMED n/a].
+spelling, a subshell) to get past the hook [R-GUARD-GLOBAL-DENIALS].
 
 For a worker role the same hook also runs `git rm`, `git mv`, `git checkout <ref> -- <path>`
 and `git restore` through the write boundary like a redirect, and refuses `git apply`,

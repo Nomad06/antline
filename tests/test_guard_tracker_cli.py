@@ -71,13 +71,21 @@ GLOB_WRITES = ("gh api repos/o/r/pulls/12/comments --jq={a,b}",
                "gh api repos/o/r/pulls/1*/comments --jq=.[].body")
 
 
+# The hook's own command line in GH-7's lane session, as the lane's settings render it.
+LANE = ["--task", TASK]
+
+
 def payload(agent, tool, tool_input, cwd=REPO):
     return {"hook_event_name": "PreToolUse", "agent_type": agent,
             "tool_name": tool, "tool_input": tool_input, "cwd": cwd}
 
 
-def bash(agent, command, cwd=REPO):
-    return ppl_guard.decide(payload(agent, "Bash", {"command": command}, cwd))
+def decide(call, argv=LANE):
+    return ppl_guard.decide(call, argv)
+
+
+def bash(agent, command, cwd=REPO, argv=LANE):
+    return decide(payload(agent, "Bash", {"command": command}, cwd), argv)
 
 
 def snapshot_path():
@@ -95,12 +103,10 @@ def setUpModule():
         run.init(TASK, "https://github.com/o/r/issues/7", REPO)
     store.write_json(paths.run_dir(TASK) / "boundary.json", {"write": ["src/**"], "forbid": []})
     store.write_json(snapshot_path(), github_issues_snapshot())
+    fixtures.bind_lane(TASK, REPO, harness="gh-issues")
 
 
 class GhRunCase(unittest.TestCase):
-    def setUp(self):
-        run.set_active(TASK)
-
     def deny_reason(self, result):
         self.assertIsNotNone(result, "the call was allowed")
         return result["hookSpecificOutput"]["permissionDecisionReason"]
@@ -169,9 +175,9 @@ class TestTrackerCliGate(GhRunCase):
         # the stage 8 close: the note in the run's scratch directory, then gh issue comment
         note = str(os_sandbox.scratch_dir("GH-7") / "note.md")
         with self.at_merge_watch():
-            self.assertIsNone(ppl_guard.decide(payload(None, "Write", {"file_path": note,
-                                                                       "content": "Done."},
-                                                       ELSEWHERE)))
+            self.assertIsNone(decide(payload(None, "Write", {"file_path": note,
+                                                             "content": "Done."},
+                                             ELSEWHERE)))
             self.assertIsNone(bash(None, "gh issue comment 7 -R o/r --body-file " + note,
                                    ELSEWHERE))
 
@@ -220,24 +226,24 @@ class TestTrackerCliGate(GhRunCase):
     def test_a_github_issues_run_still_gates_jira_mcp_writes(self):
         # rule: R-JIRA-GATE
         for tool in JIRA_WRITES:
-            reason = self.deny_reason(ppl_guard.decide(payload(None, tool, {"body": "x"},
-                                                               ELSEWHERE)))
+            reason = self.deny_reason(decide(payload(None, tool, {"body": "x"},
+                                                     ELSEWHERE)))
             self.assertIn("OWNER_DECISION", reason, tool)
             self.assertIn("merge is observed", reason, tool)
         with self.at_merge_watch():
             for tool in JIRA_WRITES:
-                self.assertIsNone(ppl_guard.decide(payload(None, tool, {"body": "x"},
-                                                           ELSEWHERE)), tool)
+                self.assertIsNone(decide(payload(None, tool, {"body": "x"},
+                                                 ELSEWHERE)), tool)
 
     def test_a_jira_run_also_gates_github_mcp_issue_writes(self):
         # rule: R-JIRA-GATE
         with self.with_tracker(dict(jira.DEFAULTS, kind="jira")):
             for tool in GITHUB_MCP_WRITES:
-                reason = self.deny_reason(ppl_guard.decide(payload(None, tool, {"body": "x"},
-                                                                   ELSEWHERE)))
+                reason = self.deny_reason(decide(payload(None, tool, {"body": "x"},
+                                                         ELSEWHERE)))
                 self.assertIn("OWNER_DECISION", reason, tool)
             # the GitHub server's reads stay open
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 None, "mcp__github__get_issue", {"issue_number": 7}, ELSEWHERE)))
 
     def test_a_failing_check_reads_as_a_write(self):
@@ -259,8 +265,8 @@ class TestTrackerCliGate(GhRunCase):
         with mock.patch.object(ppl_guard, "is_tracker_write_tool",
                                side_effect=RuntimeError("defect")):
             for tool in JIRA_WRITES + GITHUB_MCP_WRITES:
-                reason = self.deny_reason(ppl_guard.decide(payload(None, tool, {"body": "x"},
-                                                                   ELSEWHERE)))
+                reason = self.deny_reason(decide(payload(None, tool, {"body": "x"},
+                                                         ELSEWHERE)))
                 self.assertIn("OWNER_DECISION", reason, tool)
 
     def test_the_installed_matcher_passes_github_mcp_issue_writes_to_the_guard(self):
@@ -272,8 +278,8 @@ class TestTrackerCliGate(GhRunCase):
         self.assertEqual(matcher, ".*")
         for tool in GITHUB_MCP_WRITES:
             self.assertTrue(doctor.matcher_covers(matcher, tool), tool)
-            reason = self.deny_reason(ppl_guard.decide(payload(None, tool, {"body": "x"},
-                                                               ELSEWHERE)))
+            reason = self.deny_reason(decide(payload(None, tool, {"body": "x"},
+                                                     ELSEWHERE)))
             self.assertIn("OWNER_DECISION", reason, tool)
 
     def test_a_bracketed_jq_read_passes_before_the_merge(self):
@@ -310,11 +316,11 @@ class TestTrackerCliGate(GhRunCase):
             reason = self.deny_reason(bash(None, COMMENT, ELSEWHERE))
             self.assertIn("OWNER_DECISION", reason)
             for tool in JIRA_WRITES + GITHUB_MCP_WRITES:
-                reason = self.deny_reason(ppl_guard.decide(payload(None, tool, {"body": "x"},
-                                                                   ELSEWHERE)))
+                reason = self.deny_reason(decide(payload(None, tool, {"body": "x"},
+                                                         ELSEWHERE)))
                 self.assertIn("OWNER_DECISION", reason, tool)
-                role = self.deny_reason(ppl_guard.decide(payload("ppl-code-worker", tool,
-                                                                 {"body": "x"})))
+                role = self.deny_reason(decide(payload("ppl-code-worker", tool,
+                                                       {"body": "x"})))
                 self.assertIn("BOUNDARY_VIOLATION", role, tool)
 
     def test_a_snapshot_tracker_that_is_no_table_reads_as_none(self):
@@ -351,15 +357,11 @@ class TestTrackerCliNoRole(GhRunCase):
 
     def test_a_role_is_denied_tracker_writes_with_no_active_run(self):
         # rule: R-TRACKER-CLI-NO-ROLE
-        paths.active_file().unlink()
-        try:
-            self.assertIsNone(run.active())
-            for role in boundary.ROLE_RULES:
-                reason = self.deny_reason(bash(role, CLOSE_MUTATION, ELSEWHERE))
-                self.assertIn("BOUNDARY_VIOLATION", reason, role)
-                self.assertIn("%s may not write the tracker" % role, reason)
-        finally:
-            run.set_active(TASK)
+        # a session in no lane has no run: the tracker ban still names itself
+        for role in boundary.ROLE_RULES:
+            reason = self.deny_reason(bash(role, CLOSE_MUTATION, ELSEWHERE, argv=()))
+            self.assertIn("BOUNDARY_VIOLATION", reason, role)
+            self.assertIn("%s may not write the tracker" % role, reason)
 
     def test_the_review_responder_has_no_gh_issue_shape(self):
         # rule: R-REVIEW-RESPONDER-BASH-SHAPES
@@ -439,22 +441,18 @@ class TestTrackerMcpNoRole(GhRunCase):
     # mcp__github__add_issue_comment first, the write the ruling names
     WRITES = GITHUB_MCP_WRITES + JIRA_WRITES
 
-    def calls(self, tools, cwd=REPO):
+    def calls(self, tools, cwd=REPO, argv=LANE):
         """(role, tool, decide() result) for every role calling every tool."""
-        return [(role, tool, ppl_guard.decide(payload(role, tool, {"body": "x"}, cwd)))
+        return [(role, tool, decide(payload(role, tool, {"body": "x"}, cwd), argv))
                 for role in boundary.ROLE_RULES for tool in tools]
 
     def test_a_role_is_denied_a_github_mcp_issue_write_with_no_active_run(self):
         # rule: R-JIRA-NO-ROLE-TOOL
-        paths.active_file().unlink()
-        try:
-            self.assertIsNone(run.active())
-            for role, tool, result in self.calls(self.WRITES, ELSEWHERE):
-                reason = self.deny_reason(result)
-                self.assertIn("BOUNDARY_VIOLATION", reason, (role, tool))
-                self.assertIn("%s may not write the tracker" % role, reason)
-        finally:
-            run.set_active(TASK)
+        # a session in no lane has no run: the tracker ban still names itself
+        for role, tool, result in self.calls(self.WRITES, ELSEWHERE, argv=()):
+            reason = self.deny_reason(result)
+            self.assertIn("BOUNDARY_VIOLATION", reason, (role, tool))
+            self.assertIn("%s may not write the tracker" % role, reason)
 
     def test_a_role_is_denied_a_github_mcp_issue_write_after_the_merge_is_recorded(self):
         # rule: R-JIRA-NO-ROLE-TOOL
@@ -480,7 +478,7 @@ class TestTrackerMcpNoRole(GhRunCase):
         # a GitHub MCP read is no longer one: no role calls a GitHub MCP server at all
         # (R-FORGE-GH-MCP-NO-ROLE, tests/test_guard_os_sandbox.py TestGithubMcp)
         for tool in ("mcp__atlassian__getJiraIssue", "mcp__claude_ai_Atlassian_Rovo__getJiraIssue"):
-            self.assertIsNone(ppl_guard.decide(payload("ppl-briefer", tool, {"issueKey": "X-1"})),
+            self.assertIsNone(decide(payload("ppl-briefer", tool, {"issueKey": "X-1"})),
                               tool)
 
 

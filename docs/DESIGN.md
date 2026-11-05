@@ -292,24 +292,26 @@ message. `<CODE>` is one of the codes in section 13 (`BOUNDARY_VIOLATION` for ev
 denial in this section, `OWNER_DECISION` for a pause/stop/destroy or a tracker write before
 `merge_watch` or before the merge is recorded).
 
-**What the hook is scoped by.** Five denials are global and are decided before any run is
-looked up (`ppl_guard.py`'s `decide()`, before `active_state()` is called): the denied forge
-tools and forge Bash commands, the repo landmines, the `runs/` write protection, a `ppl-*`
-role invoking a state-changing `ppl` CLI subcommand of its own, and a `ppl-*` role writing a
-tracker, through its CLI or a tracker MCP write tool - all in the table below
-[R-GUARD-GLOBAL-DENIALS] [R-TRACKER-CLI-NO-ROLE] [R-JIRA-NO-ROLE-TOOL]. They fire in every session and every directory, run or no run.
-Everything else belongs to the active run, and a tool call belongs to that run when any of
-three things is true: its `agent_type` is a `ppl-*` role, the path it is writing is inside
-`state["repo"]`, or the session's cwd is inside that repo (or, for the tracker gate and the
-operator pause specifically, the run is `isolated` and the session carries no `agent_type` at
-all - see below). The path test is the load-bearing one and the cwd test alone is not enough:
-a session's cwd is fixed when it launches, and stage 1 creates the worktree beside the
-orchestrator's session rather than under it, so a cage scoped only by cwd is inert for exactly
-the layout this design prescribes. A consequence, and an intended one (5.3): a write landing
-inside the run's repo from a session carrying no `agent_type` - the orchestrator itself - is
-denied `BOUNDARY_VIOLATION`, because only the two worker roles write the tree
-[R-UNROLED-REPO-WRITE]. A session writing paths outside that repo, with no `ppl-*` role, is
-not touched by any of this.
+**What the hook is scoped by.** Every hook command carries its lane's task as `--task <id>` on
+its own command line, which `ppl lane` renders into the lane's settings, so a hook knows its run
+from that, never from the payload or a pointer shared by every session [R-LANE-HOOK-BINDING].
+Five denials are global and are decided before the bound run is looked up (`ppl_guard.py`'s
+`decide()`, before `bound_state()` is called): the denied forge tools and forge Bash commands,
+the repo landmines, the `runs/` write protection, a `ppl-*` role invoking a state-changing `ppl`
+CLI subcommand of its own, and a `ppl-*` role writing a tracker, through its CLI or a tracker
+MCP write tool - all in the table below [R-GUARD-GLOBAL-DENIALS] [R-TRACKER-CLI-NO-ROLE]
+[R-JIRA-NO-ROLE-TOOL]. They fire in every session and every directory, lane or no lane. A
+session whose hooks carry no `--task` is in no lane: a `ppl-*` role there is denied every other
+call, and any other session meets the global denials alone [R-LANE-ROLE-OUTSIDE]. A `--task`
+that is malformed, or names a lane the registry does not hold, or a registry the hook cannot
+read, fails closed: a role is denied every call, and any other session keeps `Read`, `Glob` and
+`Grep` only [R-LANE-HOOK-BINDING]. In a lane session everything else belongs to its run,
+whatever the session's cwd: the hooks fire only in the window `ppl lane` started for that run,
+so neither the cwd nor the written path has to place the call. A consequence, and an intended
+one (5.3): a write landing inside the run's repo from a session carrying no `agent_type` - the
+orchestrator itself - is denied `BOUNDARY_VIOLATION`, because only the two worker roles write
+the tree [R-UNROLED-REPO-WRITE]. A session writing paths outside that repo, with no `ppl-*`
+role, is not touched by any of this.
 
 Denies, in addition to per-role boundaries, each row naming the rule-matrix id that carries
 its deny test [R-DOC-RULE-IDS]. Not everything below is global - the "Scope" column says,
@@ -327,8 +329,8 @@ for each row, exactly what `ppl_guard.py` requires before it fires:
 | direct writes to the repo tree by any role whose provider is not a Claude Code subagent [R-APPLY-PATCH-BOUNDARY] | such a provider has no hooks at all to deny anything with; the guarantee is architectural (no direct write path exists for it), backed by `ppl apply-patch`'s separate diff validation (section 10.1) - `ppl_guard.py` makes no check of its own here | not a hook check |
 | tracker write tools, of every known tracker whatever tracker the run names, until the run is in `merge_watch` and the merge observed on the forge is recorded with `ppl merge observed` [R-JIRA-GATE] | owner rule: tracker writes only after merge | requires an active run; scoped as described above (the `isolated` broadening included) - **not** global, and not enforced at all when no run is active |
 | a Bash command that writes a tracker through its CLI - every CLI adapter's write check, today GitHub Issues through `gh` (an issue write verb, a `gh api` call that writes an issues route, a GraphQL issue mutation) - whatever tracker the run names, until the run is in `merge_watch` and the merge is recorded with `ppl merge observed` [R-TRACKER-CLI-GATE] | owner rule: tracker writes only after merge, through a CLI as through MCP | requires an active run; scoped like the tracker write tools above - **not** global |
-| a tracker write, when `agent_type` is one of the roles in `boundary.ROLE_RULES`, before or after the merge: a Bash command that writes a tracker through its CLI [R-TRACKER-CLI-NO-ROLE], or a call to a tracker MCP write tool of any known tracker, every adapter's defaults and the run's own prefixes [R-JIRA-NO-ROLE-TOOL] | the tracker is the orchestrator's, and a worker holding `Bash` could otherwise comment on or close the issue before anyone reviewed the change; issue reads and tracker read tools stay allowed | global, no run required - fires by `agent_type` alone, before `active_state()` is even looked up |
-| every state-changing `ppl` CLI subcommand, when `agent_type` is one of the roles in `boundary.ROLE_RULES` [R-GUARD-PPL-CLI-DENIED] | `ppl-code-worker` and `ppl-test-worker` both hold `Bash`, and none of the write checks above sees a `ppl <command>` invocation - it writes through ppl's own API, not a shell redirect or a tracked path, so a worker driving its own CLI could mark its own blocking finding fixed or open its own done gate. Read-only lookups (`ppl show`, with `--task <id>` and not a positional id, `ppl status`, `ppl doctor`, `ppl metrics`, `ppl findings list`, `ppl control get`, `ppl routing show`, `ppl approval check`, `ppl mr state`, `ppl review pending`) stay allowed | global, no run required - fires by `agent_type` alone, before `active_state()` is even looked up |
+| a tracker write, when `agent_type` is one of the roles in `boundary.ROLE_RULES`, before or after the merge: a Bash command that writes a tracker through its CLI [R-TRACKER-CLI-NO-ROLE], or a call to a tracker MCP write tool of any known tracker, every adapter's defaults and the run's own prefixes [R-JIRA-NO-ROLE-TOOL] | the tracker is the orchestrator's, and a worker holding `Bash` could otherwise comment on or close the issue before anyone reviewed the change; issue reads and tracker read tools stay allowed | global, no run required - fires by `agent_type` alone, before `bound_state()` is even looked up |
+| every state-changing `ppl` CLI subcommand, when `agent_type` is one of the roles in `boundary.ROLE_RULES` [R-GUARD-PPL-CLI-DENIED] | `ppl-code-worker` and `ppl-test-worker` both hold `Bash`, and none of the write checks above sees a `ppl <command>` invocation - it writes through ppl's own API, not a shell redirect or a tracked path, so a worker driving its own CLI could mark its own blocking finding fixed or open its own done gate. Read-only lookups (`ppl show`, with `--task <id>` and not a positional id, `ppl status`, `ppl doctor`, `ppl metrics`, `ppl findings list`, `ppl control get`, `ppl routing show`, `ppl approval check`, `ppl mr state`, `ppl review pending`) stay allowed | global, no run required - fires by `agent_type` alone, before `bound_state()` is even looked up |
 | a write-shaped Bash construct (a redirect - `>`, `>>`, `&>`, `>|`, glued to a word like `echo x>f` or spaced, a `cd`'s own redirect included - `tee`, `sed -i`, `cp`, `mv`, `dd`, `rm`, `touch`, `truncate`, `ln`, `install`, `rsync`, `git rm`/`git mv`/`git checkout <ref> -- <path>`/`git restore`; `patch`, `git apply` and the whole-tree git rewriters fail closed as unnameable) whose target resolves inside the active run's repo [R-GUARD-BASH-WRITE-BOUNDARY] | the structured write boundary (`is_role` / `hits_repo` / `boundary.check_path`) covers Edit/Write/MultiEdit/NotebookEdit only, and both workers hold Bash, so `ppl/_assets/hooks/ppl_guard.py:bash_write_boundary_deny` extracts the target out of every such construct and runs it through the same per-role decision `check_path` makes | active run, any writing role or an unroled session - fires whenever the resolved target lands inside the repo, whatever the session's cwd, mirroring R-UNROLED-REPO-WRITE's own "the target path is the honest question" |
 
 **How the `ppl`-CLI row reads a command.** Every occurrence of the word `ppl` in the command
@@ -561,19 +563,11 @@ feature: parallel waves (section 2, out of scope for v1) must not be turned on u
 resource separation exists for whichever of these a gate recipe actually touches, and nothing
 in this codebase enforces that precondition today [R-LANE-RESOURCE-ISOLATION n/a].
 
-**The `isolated` flag.** Two of the checks above - the tracker-write gate (9.2) and the
-operator pause (9.2) - additionally fire for the unroled main session (the orchestrator,
-which carries no `agent_type`) whenever the active run's `isolated` field is true, regardless
-of cwd. `ppl init` writes this field; it defaults to true and can be turned off with
-`--no-isolated`. This is not something the hook can verify against reality - it is the
-operator's assertion that the guard hook is registered only in this run's own launch
-directory, so it does not fire in an unrelated session at all. Under that assumption,
-broadening these two checks to "this run is active" is safe: the documented workflow (6.3,
-Stage 1) creates the worktree beside the orchestrator's session rather than under it, so a
-cwd-only check does not catch that session at all, which is why both checks would be inert
-for it without this flag. `--no-isolated` restores the plain cwd check instead, for an
-operator who registered the hook more broadly (e.g. in global settings) and knows scoping by
-"run active" would reach their other projects.
+**The `isolated` flag.** `ppl init` still writes this field (true by default, false with
+`--no-isolated`) and still checks where the guard is registered (below), but the guard no
+longer reads it: every call of a lane session is its run's, so the tracker-write gate (9.2) and
+the operator pause (9.2) reach the unroled main session (the orchestrator, which carries no
+`agent_type`) from any cwd, and a session in no lane meets neither [R-LANE-HOOK-BINDING].
 
 **The `os_sandboxed` flag.** On a harness that reaches GitHub, `ppl init` also requires
 that this session runs inside Claude Code's OS sandbox with GitHub denied
@@ -709,7 +703,7 @@ refuses with `SCHEMA_INVALID` on three combinations that are silently wrong
 `--no-isolated` is not refused by any of these, and neither is `"local"` or `"none"` - "none"
 is the openly documented unregistered state (README.md "Hooks"), not a mismatch between a flag
 and reality, and refusing it would block using `ppl` before the hook exists at all
-[R-INIT-ISOLATION-CHECK] [R-GUARD-NOT-ARMED n/a].
+[R-INIT-ISOLATION-CHECK].
 
 **Residual, still not fixed.** The check is a file inspection, not a proof that the *session
 running this command* was itself launched from a directory whose `.claude/settings.local.json`
@@ -728,17 +722,17 @@ doctor` and `ppl init --isolated` inspect an unrelated, likely-empty directory a
 literal substring `ppl_guard.py` in a hook's `command`, so a different checkout's guard hook,
 at a different path on the same machine, reads as this one's.
 
-All four gaps above are known limitations, each recorded as a matrix row
-[R-ISOLATION-SESSION-IDENTITY n/a] [R-ISOLATION-POINT-IN-TIME n/a]
-[R-ISOLATION-CLAUDE-HOME n/a] [R-ISOLATION-GUARD-BASENAME n/a]. What is checked, not merely
+All four gaps above are limits of the `isolated` assertion, which the guard no longer reads:
+a lane's hooks come from the settings `ppl lane` renders for its run and carry that run on
+their own command line [R-LANE-HOOK-BINDING], and the payload's session identity stays
+unchecked [R-ISOLATION-SESSION-IDENTITY n/a]. What is checked, not merely
 trusted: the hook being registered only globally (`"global"`), registered both locally and
 globally (`"both"`), and the registration being unreadable or unparseable at all (`"unknown"`,
 including a confirmed local yes next to an unreadable global file - see above) - all three
 refuse `ppl init --isolated` with `SCHEMA_INVALID`, and all are reported by `ppl doctor`
 together with the paths and, for `"unknown"`, the parse or read error [R-INIT-ISOLATION-CHECK].
-The write-boundary checks earlier in this section do not participate in the `isolated`
-broadening at all, checked or not: an unroled session's ordinary file write outside any run's
-repo is untouched whether or not the run is isolated.
+Every call of a lane session is its run's, and still an unroled session's ordinary file
+write outside the run's repo is untouched [R-UNROLED-REPO-WRITE].
 
 ### 5.5 The rule matrix
 
@@ -832,12 +826,12 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 197 rows: 147 `blocking`, 21 `soft` and 29 `n/a`. Of the
-`n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 10 are
-`PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
-registered at all (README.md "Hooks"), the
-stage 6 preconditions being unchecked before the push, the four isolation-check blind spots of
-5.4, the harness gate recipes of section 11, the three blind spots the matrix has as GAP rows
+As of this commit the table carries 196 rows: 149 `blocking`, 21 `soft` and 26 `n/a`. Of the
+`n/a` rows, 16 are `GAP:` - a rule this design names and no code performs - and 10 are
+`PROPERTY:`. The gaps are the honest output of the matrix: a lane session resumed by hand
+without the lane flags having no guard at all, the stage 6 preconditions being unchecked
+before the push, the session identity the isolation check of 5.4 leaves unproven, the
+harness gate recipes of section 11, the three blind spots the matrix has as GAP rows
 of its own, a foreign finding's owner not actually being notified (6.6a), per-lane resources
 (test databases, ports, temp directories, queues, object storage) having no isolation at all
 beyond the worktree's own files (5.4), the dollar budget being spent before a dispatch, whose
@@ -1587,7 +1581,7 @@ blocking finding's file rewritten to `[]` - still valid JSON, just the wrong sha
 from `open_blocking_on_own_diff` and open the done gate for free, and invalid JSON would crash
 the process. Both are the same refusal: `list_all`, `list_open` and
 `open_blocking_on_own_diff` all raise `SCHEMA_INVALID` when any finding file on disk cannot
-be read as a finding object, the same fail-closed treatment `ppl/_assets/hooks/ppl_guard.py:active_state`
+be read as a finding object, the same fail-closed treatment `ppl/_assets/hooks/ppl_guard.py:bound_state`
 already gives an unreadable `state.json` [R-FINDINGS-FAILS-CLOSED-ON-MALFORMED].
 
 ### 6.7 Authority order
@@ -2341,8 +2335,8 @@ Two independent readers act on it:
   [R-OPERATOR-HALT-CLI]. Every path that moves a run forward or rewrites ledger/boundary/mr/budget
   state passes through one of the eleven, so a halt still lands at the next such call
 - the `PreToolUse` guard hook stats the control file on every tool call, so a pause lands
-  within one tool call rather than one stage; for the unroled main session specifically, it
-  does so under the `isolated` scoping described in 5.4
+  within one tool call rather than one stage, for every call of the run's lane session, the
+  unroled main session's included (5.4)
 
 This is the one carve-out to the "only `ppl` writes under `runs/`" rule: `control.json` is
 written by the panel or by `ppl control set`, and read by `ppl` and the hook. It is an
@@ -2533,7 +2527,7 @@ routes, not by a check [R-STUDIO-WRITE-SURFACE n/a].
 read-only beside the harness overlay and the agent file `routing.render` would produce from
 the active harness with the notes and routing as edited on the page. The blocking rows of the
 rule table whose scope covers the role are listed with them; the rows that act through the guard
-hook fire only once it is registered [R-GUARD-NOT-ARMED n/a].
+hook fire only in a lane session [R-LANE-HOOK-BINDING].
 
 **Playground.** One tool call goes through the real `ppl/_assets/hooks/ppl_guard.py` in a subprocess,
 against a fake active run built under a temporary data root: `harness.json` is the draft's

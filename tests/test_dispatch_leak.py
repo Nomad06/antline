@@ -13,6 +13,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
 
+import fixtures
 from ppl import paths, run, store
 import ppl_guard
 
@@ -67,6 +68,9 @@ class TestDispatchLeak(unittest.TestCase):
                                    check=True, capture_output=True, text=True).stdout.strip()
         self.task = "LEAK-%d" % next(_TASK_IDS)
         run.init(self.task, "u", str(self.repo))
+        fixtures.bind_lane(self.task, self.repo)
+        # the dispatching session is the run's lane session
+        self.argv = ["--task", self.task]
         state = run.load(self.task)
         state["base_sha"] = self.base
         state["stage"] = "tests"
@@ -74,6 +78,9 @@ class TestDispatchLeak(unittest.TestCase):
         store.write_json(paths.run_dir(self.task) / "brief.json",
                          {"name_contract": {"interfaces": [SIGNATURE]},
                           "acceptance": [ACCEPTANCE]})
+
+    def decide(self, call):
+        return ppl_guard.decide(call, self.argv)
 
     def commit_implementation(self):
         write(self.repo, MAIN, IMPLEMENTATION)
@@ -88,7 +95,7 @@ class TestDispatchLeak(unittest.TestCase):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
         self.commit_implementation()
         prompt = ACCEPTANCE + "\n\ndiff --git a/x b/x\n@@ -1,2 +1,3 @@\n+changed\n"
-        reason = self.reason(ppl_guard.decide(dispatch(prompt)))
+        reason = self.reason(self.decide(dispatch(prompt)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("diff", reason)
 
@@ -96,7 +103,7 @@ class TestDispatchLeak(unittest.TestCase):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
         self.commit_implementation()
         prompt = ACCEPTANCE + "\n\nThe code does:\n" + BODY_ONE + "\n" + BODY_TWO + "\n"
-        reason = self.reason(ppl_guard.decide(dispatch(prompt)))
+        reason = self.reason(self.decide(dispatch(prompt)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("PriceCalculator.java", reason)
 
@@ -104,20 +111,20 @@ class TestDispatchLeak(unittest.TestCase):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
         self.commit_implementation()
         prompt = ACCEPTANCE + "\n- `%s`\n>   %s\n" % (BODY_ONE, BODY_TWO)
-        self.assertIn("BOUNDARY_VIOLATION", self.reason(ppl_guard.decide(dispatch(prompt))))
+        self.assertIn("BOUNDARY_VIOLATION", self.reason(self.decide(dispatch(prompt))))
 
     def test_the_older_task_tool_name_is_checked_too(self):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
         self.commit_implementation()
         prompt = BODY_ONE + "\n" + BODY_TWO
         self.assertIn("BOUNDARY_VIOLATION",
-                      self.reason(ppl_guard.decide(dispatch(prompt, tool="Task"))))
+                      self.reason(self.decide(dispatch(prompt, tool="Task"))))
 
     def test_an_uncommitted_new_file_counts_as_added(self):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
         write(self.repo, MAIN, IMPLEMENTATION)
         prompt = BODY_ONE + "\n" + BODY_TWO
-        self.assertIn("BOUNDARY_VIOLATION", self.reason(ppl_guard.decide(dispatch(prompt))))
+        self.assertIn("BOUNDARY_VIOLATION", self.reason(self.decide(dispatch(prompt))))
 
     def commit_file(self, rel):
         write(self.repo, rel, "class P {\n    %s\n    %s\n}\n" % (BODY_ONE, BODY_TWO))
@@ -128,7 +135,7 @@ class TestDispatchLeak(unittest.TestCase):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
         # git quotes a non-ASCII path in the +++ header unless core.quotepath is off
         self.commit_file("source/core/orders/Pr\u00e9is.java")
-        reason = self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
+        reason = self.reason(self.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("Pr\u00e9is.java", reason)
 
@@ -136,7 +143,7 @@ class TestDispatchLeak(unittest.TestCase):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
         # a double quote is C-quoted in the header whatever core.quotepath says
         self.commit_file('source/core/orders/Odd"Name.java')
-        reason = self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
+        reason = self.reason(self.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn('Odd"Name.java', reason)
 
@@ -144,7 +151,7 @@ class TestDispatchLeak(unittest.TestCase):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
         # git ends a +++ header that holds a space with a tab
         self.commit_file("source/core/orders/Price Calc.java")
-        reason = self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
+        reason = self.reason(self.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("from source/core/orders/Price Calc.java (", reason)
 
@@ -159,7 +166,7 @@ class TestDispatchLeak(unittest.TestCase):
         run.save(state)
         git(self.repo, "mv", "source/core/orders/Before.java", "source/core/orders/After.java")
         git(self.repo, "commit", "-q", "-m", "move")
-        reason = self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
+        reason = self.reason(self.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("After.java", reason)
 
@@ -172,7 +179,7 @@ class TestDispatchLeak(unittest.TestCase):
         git(self.repo, "add", ".")
         git(self.repo, "commit", "-q", "-m", "implementation")
         self.assertIn("BOUNDARY_VIOLATION",
-                      self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO))))
+                      self.reason(self.decide(dispatch(BODY_ONE + "\n" + BODY_TWO))))
 
     def test_an_untracked_symlink_to_an_endless_device_is_not_read(self):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
@@ -180,7 +187,7 @@ class TestDispatchLeak(unittest.TestCase):
         os.symlink("/dev/zero", str(self.repo / "zero.java"))
         self.commit_implementation()
         self.assertIn("BOUNDARY_VIOLATION",
-                      self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO))))
+                      self.reason(self.decide(dispatch(BODY_ONE + "\n" + BODY_TWO))))
 
     def test_an_unexpected_error_in_the_check_denies(self):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
@@ -188,20 +195,17 @@ class TestDispatchLeak(unittest.TestCase):
         # orchestrator policy
         self.commit_implementation()
         (paths.run_dir(self.task) / "brief.json").write_text("{not json", encoding="utf-8")
-        reason = self.reason(ppl_guard.decide(dispatch(ACCEPTANCE)))
+        reason = self.reason(self.decide(dispatch(ACCEPTANCE)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("could not be checked", reason)
 
-    def test_a_non_isolated_run_dispatching_from_elsewhere_is_checked(self):
+    def test_a_dispatch_from_anywhere_in_the_lane_is_checked(self):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
         # ppl-test-worker is a pipeline role name, so the dispatch is the run's
         # business wherever the orchestrator's session sits.
-        state = run.load(self.task)
-        state["isolated"] = False
-        run.save(state)
         self.commit_implementation()
         prompt = BODY_ONE + "\n" + BODY_TWO
-        result = ppl_guard.decide(dispatch(prompt, cwd="/somewhere/else"))
+        result = self.decide(dispatch(prompt, cwd="/somewhere/else"))
         self.assertIn("BOUNDARY_VIOLATION", self.reason(result))
 
     def test_a_dispatch_without_a_recorded_base_is_denied(self):
@@ -209,37 +213,37 @@ class TestDispatchLeak(unittest.TestCase):
         state = run.load(self.task)
         state["base_sha"] = None
         run.save(state)
-        reason = self.reason(ppl_guard.decide(dispatch(ACCEPTANCE)))
+        reason = self.reason(self.decide(dispatch(ACCEPTANCE)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("could not be checked", reason)
 
     def test_a_dispatch_against_unreadable_state_is_denied(self):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
         run.state_path(self.task).write_text("{not json", encoding="utf-8")
-        reason = self.reason(ppl_guard.decide(dispatch(ACCEPTANCE)))
+        reason = self.reason(self.decide(dispatch(ACCEPTANCE)))
         self.assertIn("OWNER_DECISION", reason)
         self.assertIn("unreadable", reason)
 
     def test_acceptance_criteria_only_are_allowed(self):
         self.commit_implementation()
-        self.assertIsNone(ppl_guard.decide(dispatch(ACCEPTANCE)))
+        self.assertIsNone(self.decide(dispatch(ACCEPTANCE)))
 
     def test_interface_lines_the_brief_agreed_are_allowed(self):
         self.commit_implementation()
         prompt = ACCEPTANCE + "\nThe interface is:\n" + SIGNATURE + "\n"
-        self.assertIsNone(ppl_guard.decide(dispatch(prompt)))
+        self.assertIsNone(self.decide(dispatch(prompt)))
 
     def test_one_added_line_alone_is_allowed(self):
         self.commit_implementation()
         prompt = ACCEPTANCE + "\n" + BODY_ONE + "\n"
-        self.assertIsNone(ppl_guard.decide(dispatch(prompt)))
+        self.assertIsNone(self.decide(dispatch(prompt)))
 
     def test_added_lines_in_test_sources_do_not_count(self):
         write(self.repo, TEST, "class T {\n    %s\n    %s\n}\n" % (BODY_ONE, BODY_TWO))
         git(self.repo, "add", ".")
         git(self.repo, "commit", "-q", "-m", "tests")
         prompt = BODY_ONE + "\n" + BODY_TWO
-        self.assertIsNone(ppl_guard.decide(dispatch(prompt)))
+        self.assertIsNone(self.decide(dispatch(prompt)))
 
     def test_python_test_lines_are_not_counted_under_python_patterns(self):
         write(self.repo, "tests/test_price.py",
@@ -248,12 +252,12 @@ class TestDispatchLeak(unittest.TestCase):
         git(self.repo, "commit", "-q", "-m", "tests")
         prompt = BODY_ONE + "\n" + BODY_TWO
         # no snapshot: the Java defaults, which take tests/test_price.py for product code
-        reason = self.reason(ppl_guard.decide(dispatch(prompt)))
+        reason = self.reason(self.decide(dispatch(prompt)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("tests/test_price.py", reason)
         store.write_json(paths.run_dir(self.task) / "harness.json",
                          {"format": 1, "tests": {"sources": PYTHON}})
-        self.assertIsNone(ppl_guard.decide(dispatch(prompt)))
+        self.assertIsNone(self.decide(dispatch(prompt)))
 
     def test_a_product_file_named_like_a_test_directory_still_counts(self):
         # rule: R-TEST-WORKER-DISPATCH-LEAK
@@ -264,18 +268,18 @@ class TestDispatchLeak(unittest.TestCase):
         git(self.repo, "commit", "-q", "-m", "a product script named test")
         store.write_json(paths.run_dir(self.task) / "harness.json",
                          {"format": 1, "tests": {"sources": PYTHON}})
-        reason = self.reason(ppl_guard.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
+        reason = self.reason(self.decide(dispatch(BODY_ONE + "\n" + BODY_TWO)))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("first from test ", reason)
 
     def test_the_same_prompt_to_the_code_worker_is_allowed(self):
         self.commit_implementation()
         prompt = "diff --git a/x b/x\n" + BODY_ONE + "\n" + BODY_TWO
-        self.assertIsNone(ppl_guard.decide(dispatch(prompt, subagent_type="ppl-code-worker")))
+        self.assertIsNone(self.decide(dispatch(prompt, subagent_type="ppl-code-worker")))
 
     def test_without_an_active_run_a_dispatch_is_left_alone(self):
-        paths.active_file().unlink()
-        self.assertIsNone(ppl_guard.decide(dispatch("diff --git a/x b/x\n")))
+        # a session in no lane: its hooks carry no --task
+        self.assertIsNone(ppl_guard.decide(dispatch("diff --git a/x b/x\n"), ()))
 
     def test_the_agent_tools_are_in_the_guarded_names_doctor_checks(self):
         # rule: R-GUARD-MATCHER

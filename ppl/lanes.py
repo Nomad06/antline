@@ -2,6 +2,7 @@
 running task. Writers take an exclusive flock on `lanes.lock`, re-read, change and replace the
 file atomically; readers (the hooks) take no lock, so a hook never blocks on one and never
 sees a torn file. Parses on Python 3.9: the hooks import it."""
+import collections
 import fcntl
 import json
 import os
@@ -29,14 +30,17 @@ def _invalid(why):
 
 
 def read(limit=READ_LIMIT):
-    """The entries of lanes.json, [] when it is absent."""
+    """The entries of lanes.json, [] when it is absent. SCHEMA_INVALID when it is not a
+    regular file, over `limit`, not UTF-8, not JSON or not the registry's shape."""
     try:
         text = store.read_regular_text(registry_path(), limit)
     except FileNotFoundError:
         return []
+    except UnicodeDecodeError as exc:
+        raise _invalid("is not UTF-8: %s" % exc)
     try:
         doc = json.loads(text)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise _invalid("is not valid JSON: %s" % exc)
     lanes = doc.get("lanes") if isinstance(doc, dict) else None
     if (not isinstance(doc, dict) or doc.get("version") != 1 or not isinstance(lanes, list)
@@ -50,6 +54,66 @@ def entry(task_id, limit=READ_LIMIT):
         if item.get("task") == task_id:
             return item
     return None
+
+
+Binding = collections.namedtuple("Binding", "task entry problem")
+
+
+def hook_task(argv):
+    """The task id a hook command names as `--task <id>`, None when it names none. A hook's
+    argv comes from the lane's write-protected settings.json, where ppl renders exactly that
+    pair, so anything else is refused: ValueError when --task is given twice, has no value or
+    is not a task id, and for any other argument."""
+    task = None
+    items = list(argv)
+    index = 0
+    while index < len(items):
+        item = items[index]
+        if item != "--task":
+            raise ValueError("unexpected argument %r" % (item,))
+        if task is not None:
+            raise ValueError("--task is given twice")
+        if index + 1 >= len(items):
+            raise ValueError("--task has no value")
+        value = items[index + 1]
+        if not isinstance(value, str):
+            raise ValueError("--task %r is not a string" % (value,))
+        try:
+            paths.check_task_id(value)
+        except PplError as err:
+            raise ValueError(err.message)
+        # check_task_id's `$` lets a trailing newline through, a run directory name it never makes
+        if not paths.TASK_ID_RE.fullmatch(value):
+            raise ValueError("task id must match %s, got: %r" % (paths.TASK_ID_RE.pattern, value))
+        task = value
+        index += 2
+    return task
+
+
+def binding(argv, limit=READ_LIMIT):
+    """The lane a hook's argv binds it to, as Binding(task, entry, problem). Never raises.
+    - no --task: Binding(None, None, None), a hook outside any lane;
+    - a registered lane: Binding(task, its registry entry, None);
+    - otherwise `problem` says why the lane cannot be confirmed (a malformed argv, a registry
+      that cannot be read, a task with no entry), and the caller fails closed.
+    The registry is read with no lock (a hook never waits on one) and through `limit`."""
+    try:
+        task = hook_task(argv)
+    except Exception as err:
+        return Binding(None, None, "the hook's command line binds no lane (%s): its settings.json "
+                                   "is not the one ppl lane renders" % err)
+    if task is None:
+        return Binding(None, None, None)
+    try:
+        found = entry(task, limit)
+    except Exception as err:
+        return Binding(task, None, "lane %s cannot be confirmed, the lane registry cannot be read "
+                                   "(%s): repair PPL_HOME/lanes.json, then run ppl lane resume %s"
+                       % (task, getattr(err, "message", None) or type(err).__name__, task))
+    if found is None:
+        return Binding(task, None, "lane %s is not registered: run ppl lane resume %s"
+                       % (task, task))
+    return Binding(task, found, None)
 
 
 def _contains(directory, target):

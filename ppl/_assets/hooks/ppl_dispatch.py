@@ -35,18 +35,20 @@ if not _PPL_FILE or not Path(_PPL_FILE).resolve().is_relative_to(_PACKAGE_PARENT
     sys.stderr.write("ppl_dispatch: imported ppl from %s, not the one beside this hook in %s\n"
                      % (_PPL_FILE, _PACKAGE_PARENT))
 
-from ppl import boundary, budget, run
+from ppl import boundary, budget, lanes, run
 from ppl.errors import PplError
 
 
-def on_start(payload):
-    """Count every ppl-* role dispatch against the active run's dispatch budget.
+def on_start(payload, argv=()):
+    """Count every ppl-* role dispatch against the dispatch budget of the run this
+    hook's command line `argv` binds it to (`--task <id>`, lanes.binding).
 
     Returns a deny document if the dispatch exceeds the hard budget cap -
     informational only, SubagentStart cannot block (DESIGN 12.1,
     R-DISPATCH-HOOK-CANNOT-BLOCK). Returns None for all other cases - no
-    active run, an agent_type that is not a pipeline role, or errors reading
-    the state file.
+    lane, a lane the registry cannot confirm (the guard refuses that role's
+    every call anyway), an agent_type that is not a pipeline role, or errors
+    reading the state file.
 
     Scoped by agent_type, not by cwd (post-branch review, finding 2). This
     used to count only when the payload's cwd sat inside the run's repo, and
@@ -58,8 +60,8 @@ def on_start(payload):
     enforcement) compared against zero for the life of the run - the same bug
     class cycle 1 fixed for the write boundary. A ppl-* agent_type is
     pipeline-internal wherever its session sits (ppl/_assets/hooks/ppl_guard.py:decide
-    already scopes on that), and ppl runs one active run at a time, so a role
-    dispatch anywhere this hook fires is this run's dispatch.
+    already scopes on that), and this hook fires only in its own lane's session,
+    so a role dispatch anywhere this hook fires is the bound run's dispatch.
     """
     if not isinstance(payload, dict):
         return None
@@ -68,9 +70,10 @@ def on_start(payload):
     if agent not in boundary.ROLE_RULES:
         return None
 
-    task_id = run.active()
-    if not task_id:
+    bound = lanes.binding(argv)
+    if bound.problem or not bound.task:
         return None
+    task_id = bound.task
 
     try:
         state = run.load(task_id)
@@ -85,9 +88,9 @@ def on_start(payload):
 
     # Dispatch budget is incremented on SubagentStart, not completion - a subagent that
     # crashes immediately still consumes budget, which is intended for surfacing runaway
-    # loops. Note: the increment is not atomic against concurrent SubagentStart events,
-    # but this is accepted while ppl runs a single sequential lane. ppl budget refusing
-    # the next transition is the real guarantee.
+    # loops. Note: the increment is not atomic against concurrent SubagentStart events of
+    # one lane, which dispatches its roles one at a time. ppl budget refusing the next
+    # transition is the real guarantee.
     try:
         budget.spend(task_id, "dispatch", 1)
     except PplError as err:
@@ -99,12 +102,14 @@ def on_start(payload):
 
 
 def main():
+    # the lane binding is this hook's own command line, read after the python floor
+    argv = sys.argv[1:]
     try:
         payload = json.load(sys.stdin)
     except Exception:
         return 0
     try:
-        result = on_start(payload)
+        result = on_start(payload, argv)
     except Exception as err:
         sys.stderr.write("ppl_dispatch internal error: %s\n" % err)
         return 0

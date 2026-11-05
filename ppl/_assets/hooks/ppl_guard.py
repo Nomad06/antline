@@ -39,7 +39,7 @@ if not _PPL_FILE or not Path(_PPL_FILE).resolve().is_relative_to(_PACKAGE_PARENT
     sys.stderr.write("ppl_guard: imported ppl from %s, not the one beside this hook in %s\n"
                      % (_PPL_FILE, _PACKAGE_PARENT))
 
-from ppl import boundary, control, escape, gitfacts, paths, run, store, trackers
+from ppl import boundary, control, escape, gitfacts, lanes, paths, run, store, trackers
 from ppl import forges as _forges
 from ppl.errors import PplError
 from ppl.trackers import jira as _jira
@@ -883,15 +883,6 @@ def unknown_patterns_deny(task_id):
     return deny("OWNER_DECISION", boundary.unknown_patterns_reason(task_id))
 
 
-def _active_task_id():
-    """run.active(), or None when the ACTIVE file cannot be read at all, so the
-    forge denials fall back to the union instead of raising into main()."""
-    try:
-        return run.active(_READ_LIMIT)
-    except Exception:
-        return None
-
-
 def forge_from_snapshot(task_id):
     """(adapter module, forge table) for the forge the run's harness snapshot
     names, or (None, None) when there is no snapshot or its forge table is not
@@ -1400,12 +1391,9 @@ def bash_denies_main_source_read(command, state, cwd, shapes, patterns):
 # (GNU's optional attached suffix and BSD's mandatory separate one cannot be
 # told apart lexically), a tee/cp/mv/rm/redirect missing its argument, or a
 # relative path after a `cd` this cannot resolve - Task 8's own discipline
-# applied to writes instead of reads. That fail-closed deny only fires when
-# the command is otherwise pipeline-scoped (a ppl-* role, or a session whose
-# cwd sits inside the run's repo): an unrelated session working somewhere
-# else on the machine must not be denied a `sed -i` just because some other
-# run happens to be active, which would be exactly the leak into other
-# projects this cage exists not to cause.
+# applied to writes instead of reads. That fail-closed deny fires only in a
+# session bound to a run, a lane session: one in no lane gets the global
+# denials alone, and the hooks reach no other session at all.
 # `>|` (clobber, writes even under noclobber) is tried before `>`, or its `|`
 # would be read as the start of the target.
 _REDIR_GLUED_RE = re.compile(r"^(?:\d*>\||\d*>>?|&>>?|>&)(.+)$")
@@ -2021,7 +2009,7 @@ def bash_write_lands_in_runs(command, cwd, control_inbox=True):
     only with `control_inbox`, which the caller passes for the unroled operator
     session alone: a role that rewrites it can lift the operator's pause. A
     target this cannot resolve (a variable, a substitution) is not judged here,
-    and bash_write_boundary_deny fails closed on it for a pipeline-scoped session.
+    and bash_write_boundary_deny fails closed on it for a session bound to a run.
     BASH_WRITE_SHAPES is not run over the whole command first: its git alternative
     rescans the line from every `git`, which is quadratic, and this check runs on
     every Bash call. A substitution leaves no target to resolve, so it returns at once.
@@ -2061,13 +2049,13 @@ def _dotdot_reason(tool, path):
 
 def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state, patterns):
     """The Bash equivalent of the structured Edit/Write/MultiEdit/
-    NotebookEdit write-boundary checks below (R-GUARD-BASH-WRITE-BOUNDARY).
+    NotebookEdit write-boundary checks below (R-GUARD-BASH-WRITE-BOUNDARY), for a call
+    of a session bound to run `task_id`, every one of which is in that run's scope.
     `patterns` is test_patterns(task_id). Returns a deny dict or None.
     """
     targets = _bash_write_targets(command, payload.get("cwd"))
     if not targets:
         return None
-    pipeline_scoped = is_role or in_scope(payload, state)
     bound = None
     if is_role:
         bound = store.read_json(paths.run_dir(task_id) / "boundary.json",
@@ -2077,11 +2065,9 @@ def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state, p
             return deny("BOUNDARY_VIOLATION", _dotdot_reason("Bash write", raw))
         resolved = _resolve_path_against_cwd(raw, seg_cwd) if raw else None
         if resolved is None:
-            if pipeline_scoped:
-                return deny("BOUNDARY_VIOLATION",
-                            "a write-shaped Bash command's target could not be "
-                            "resolved, denied rather than allowed: %s" % command)
-            continue
+            return deny("BOUNDARY_VIOLATION",
+                        "a write-shaped Bash command's target could not be "
+                        "resolved, denied rather than allowed: %s" % command)
         if not targets_repo(resolved, state):
             continue
         if is_role:
@@ -2135,22 +2121,27 @@ def relative_to_repo(path, state):
     return path.lstrip("/")
 
 
-def active_state():
-    """The pipeline run this machine is currently executing, if any.
+def bound_state(binding):
+    """The run this hook's own argv binds it to (lanes.binding), as (task_id, state).
 
-    Returns (task_id, state). task_id is None only when there is no active run at
-    all. state is None both when there is no active run AND when there is one but
-    its state.json could not be read or parsed into a usable record - the caller
-    must tell those two apart, because "no active run" permits everything and "an
-    active run whose state we cannot trust" must not.
+    task_id is None only outside a lane. state is None both outside a lane AND when the
+    bound run's state.json could not be read or parsed into a usable record - the caller
+    must tell those two apart, because outside a lane every run-scoped check is off and a
+    bound run whose state we cannot trust must not be. A binding with a problem raises
+    PplError OWNER_DECISION naming it, so escape.decide, which takes this as its reader,
+    refuses a flagged call in a lane it cannot confirm [R-LANE-HOOK-BINDING]. _decide
+    answers the problem itself and must never call this with one: main() reads an exception
+    from _decide as an internal error, which allows an unroled call, so the fail-closed
+    refusal would turn into an allow.
 
     run.load raises PplError when state.json is simply missing, but a state.json
     that exists and is corrupt (a half-written file from a crashed process) makes
     the underlying json.load raise json.JSONDecodeError, and a permission problem
-    raises OSError; neither is a PplError. This hook must never raise regardless of
-    which of those it hits.
+    raises OSError; neither is a PplError. None of those escapes.
     """
-    task_id = run.active(_READ_LIMIT)
+    if binding.problem:
+        raise PplError("OWNER_DECISION", binding.problem)
+    task_id = binding.task
     if not task_id:
         return None, None
     try:
@@ -2182,24 +2173,6 @@ def targets_repo(path, state):
     if not repo or not path:
         return False
     return _inside(path, repo)
-
-
-def in_scope(payload, state):
-    """True when this tool call's session sits inside the active run's worktree.
-
-    ACTIVE is global state, so without a scope check a paused run would deny
-    every tool call in every unrelated Claude session on the machine. cwd is no
-    longer the only way into scope (see decide), but it is still the way the
-    orchestrator's own session - which carries no agent_type and may call a
-    non-write tool - is recognised. Both sides go through realpath for the same
-    symlink-aliasing reason as relative_to_repo.
-    """
-    if not state or not state.get("repo"):
-        return False
-    cwd = payload.get("cwd") or ""
-    if not cwd:
-        return False
-    return _inside(cwd, state["repo"])
 
 
 # A dispatch prompt line in patch syntax. The test worker never needs one.
@@ -2291,7 +2264,33 @@ def dispatch_leak_deny(prompt, task_id, state, patterns):
                 "brief's interfaces only." % (len(hits), rel, first[:40]))
 
 
-def _decide(payload):
+# What an unroled session keeps in a lane whose registry entry cannot be confirmed: it
+# reads, it changes nothing [R-LANE-HOOK-BINDING].
+UNCONFIRMED_LANE_TOOLS = ("Read", "Glob", "Grep")
+
+
+def lane_denial(binding, agent, tool):
+    """The deny for a call this hook's lane binding refuses, else None.
+
+    A hook knows its run from the `--task` its own command line carries, which ppl lane
+    renders into the lane's settings.json, never from shared state. With no --task the
+    session is in no lane: a ppl-* role there is refused [R-LANE-ROLE-OUTSIDE], anything
+    else meets only the global denials. A --task that is malformed, or names a lane the
+    registry does not hold or a registry that cannot be read, fails closed: a role is
+    refused, and any other session keeps Read, Glob and Grep [R-LANE-HOOK-BINDING]."""
+    if binding.problem:
+        if escape.is_role(agent) or tool not in UNCONFIRMED_LANE_TOOLS:
+            return deny("OWNER_DECISION", binding.problem)
+        return None
+    if binding.task is None and escape.is_role(agent):
+        return deny("BOUNDARY_VIOLATION",
+                    "%s is denied: ppl roles run only inside a lane session; start one with "
+                    "ppl lane <link>" % agent)
+    return None
+
+
+def _decide(payload, argv=()):
+    """The decision on one tool call, for the hook whose command line is `argv`."""
     if not isinstance(payload, dict):
         return None
     tool = payload.get("tool_name", "")
@@ -2299,12 +2298,21 @@ def _decide(payload):
     if not isinstance(tool_input, dict):
         tool_input = {}
     agent = payload.get("agent_type")
+    # The lane binding, read once and only when a check needs it: the role checks just
+    # below decide from the call alone.
+    bound = []
+
+    def binding():
+        if not bound:
+            bound.append(lanes.binding(argv, _READ_LIMIT))
+        return bound[0]
+
     # R-OS-SANDBOX-ROLE-NO-ESCAPE, R-OS-SANDBOX-ORCHESTRATOR-SHAPE: a call that asks to run
     # outside the OS sandbox is decided first, before any file read, so a ppl-* role is
     # refused from the call alone. One the escape check lets through still meets every
     # check below, the tracker gate and the forge denials included.
     if escape.flagged(payload):
-        refusal = escape.decide(payload, paths.home(), active_state)
+        refusal = escape.decide(payload, paths.home(), lambda: bound_state(binding()))
         if refusal:
             return deny(*refusal)
 
@@ -2334,7 +2342,9 @@ def _decide(payload):
         if refusal:
             return deny(*refusal)
 
-    active = _active_task_id()
+    # The bound task's snapshot only adds to the global denials below, so it is asked even
+    # for a lane the registry cannot confirm. A malformed --task names no snapshot.
+    active = binding().task
 
     denied = denied_tools(active)
     if isinstance(tool, str) and tool in denied:
@@ -2395,13 +2405,22 @@ def _decide(payload):
         return deny("BOUNDARY_VIOLATION",
                     "run state is written only by ppl, use the ppl CLI")
 
-    task_id, state = active_state()
+    # R-LANE-ROLE-OUTSIDE, R-LANE-HOOK-BINDING: past the global denials every check is the
+    # bound run's, so a session in no lane stops here, and one in a lane that cannot be
+    # confirmed fails closed.
+    refusal = lane_denial(binding(), agent, tool)
+    if refusal:
+        return refusal
+    if binding().problem:
+        return None
+
+    task_id, state = bound_state(binding())
     if state is None:
-        # state.json for the active run is missing, corrupt, or malformed. We
-        # cannot scope by cwd without a readable repo path, but a ppl-* agent_type
-        # is pipeline-internal and never appears in an unrelated session, so a
-        # tool call carrying one is denied outright rather than silently falling
-        # through every scoped check because state could not be read.
+        # state.json for the bound run is missing, corrupt, or malformed. The
+        # write boundary cannot be checked without a readable repo path, and a
+        # ppl-* agent_type is pipeline-internal, so a tool call carrying one is
+        # denied outright rather than silently falling through every scoped check
+        # because state could not be read.
         if task_id and agent in boundary.ROLE_RULES:
             return deny("OWNER_DECISION",
                         "run %s state is unreadable, cannot verify write boundary "
@@ -2421,8 +2440,7 @@ def _decide(payload):
     patterns = test_patterns(task_id)
 
     # R-TEST-WORKER-DISPATCH-LEAK. ppl-test-worker is a pipeline role name, so a
-    # dispatch of it is this run's business wherever the dispatching session sits,
-    # and the check runs before any cwd-based scoping.
+    # dispatch of it is this run's business wherever the dispatching session sits.
     if dispatches_test_worker(tool, tool_input):
         try:
             leak = dispatch_leak_deny(tool_input.get("prompt"), task_id, state, patterns)
@@ -2439,7 +2457,7 @@ def _decide(payload):
     if tool == "Bash":
         # R-GUARD-BASH-WRITE-BOUNDARY (whole-branch review, C1): a
         # write-shaped Bash construct (redirect, tee, sed -i, cp, mv, dd, rm)
-        # targeting a path inside the active run's repo gets the same
+        # targeting a path inside the bound run's repo gets the same
         # per-role decision a structured Write does, from any cwd, for a
         # role or for an unroled session. See the function's own docstring
         # for exactly what this does and does not cover.
@@ -2450,29 +2468,10 @@ def _decide(payload):
             return bash_result
 
     hits_repo = targets_repo(path, state)
-    # Three independent ways into scope, because cwd alone was none of them in
-    # practice: a ppl-* agent_type is pipeline-internal wherever its session
-    # sits, a write aimed into the run's repo is the run's business whoever
-    # launched it, and cwd still catches the orchestrator's own session doing
-    # something that has no target path at all (a Jira write, a Bash call).
-    scoped = is_role or hits_repo or in_scope(payload, state)
-    # DESIGN 5.4: an isolated run (the default - see `ppl init --isolated`) is
-    # one whose guard hook is assumed to be registered only in its own launch
-    # directory, so it never fires in an unrelated session at all. Under that
-    # assumption, the unroled main session - the orchestrator, which carries no
-    # agent_type - can safely be scoped by "this run is active" rather than by
-    # cwd for the Jira gate and the operator pause: the documented workflow
-    # creates the worktree beside the orchestrator's session rather than under
-    # it, so cwd never lined up for exactly that session. This does not widen
-    # the write-boundary tail below, which stays gated on `scoped` alone - an
-    # unroled session's ordinary file write outside any run's repo is still
-    # untouched. The accepted residual: if the operator's actual hook
-    # registration is broader than an isolated launch despite the flag, both
-    # gates reach their other projects' own unroled sessions too, for as long
-    # as this run is active.
-    halt_scoped = scoped or (agent is None and bool(state.get("isolated", True)))
-    if not halt_scoped:
-        return None
+    # Every call from here on is the bound run's, whatever the session's cwd: the hook
+    # fires only in its own lane's session, which ppl lane started with this run's
+    # settings, so neither cwd nor the target path has to place the call. An unroled
+    # session's write outside the run's repo is still untouched, see the tail below.
 
     # R-TRACKER-CLI-GATE and R-JIRA-GATE: one stage check for both transports. The
     # CLI gate runs first, as it needs no snapshot, and asks the stage before reading
@@ -2496,9 +2495,6 @@ def _decide(payload):
     if record and record["command"] in control.HALTING:
         return deny("OWNER_DECISION",
                     "run %s is %sd by the operator" % (task_id, record["command"]))
-
-    if not scoped:
-        return None
 
     # R-TEST-WORKER-READ-TOOLS / R-TEST-WORKER-BASH-READS: the test worker
     # writes tests from behaviour, never from the implementation (5.3/5.4).
@@ -2573,7 +2569,7 @@ def _decide(payload):
     if hits_repo:
         # DESIGN 5.3: the orchestrator writes state through ppl and nothing else.
         # It carries no agent_type, and neither does any other session, so the
-        # discriminator is the target path: inside an active run's repo it is
+        # discriminator is the target path: inside the bound run's repo it is
         # repo code that only a worker role may touch, and outside it this
         # branch is never reached at all.
         return deny("BOUNDARY_VIOLATION",
@@ -2594,19 +2590,21 @@ def _is_doctor_probe(payload):
             and payload.get("tool_input") == {"file_path": "/dev/null"})
 
 
-def log_denial(payload, result):
-    """Append one deny event to the active run's log. Best effort: whatever goes
-    wrong here, the decision already made stands [R-GUARD-DENIAL-LOGGED]. The
-    doctor's probe is not logged: it is not a call any session made. A log.jsonl
+def log_denial(payload, result, argv=()):
+    """Append one deny event to the log of the run this hook's `argv` binds it to,
+    nothing outside a lane or in one the registry cannot confirm. Best effort:
+    whatever goes wrong here, the decision already made stands [R-GUARD-DENIAL-LOGGED].
+    The doctor's probe is not logged: it is not a call any session made. A log.jsonl
     that is there but not a regular file is skipped, since opening a FIFO for
     append blocks until a reader appears."""
     try:
         if _is_doctor_probe(payload):
             return
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        task_id = run.active(_READ_LIMIT)
-        if not task_id:
+        bound = lanes.binding(argv, _READ_LIMIT)
+        if bound.problem or not bound.task:
             return
+        task_id = bound.task
         log = paths.run_dir(task_id) / "log.jsonl"
         if os.path.lexists(log) and not os.path.isfile(log):
             return
@@ -2627,20 +2625,25 @@ def log_denial(payload, result):
         pass
 
 
-def decide(payload):
-    result = _decide(payload)
+def decide(payload, argv=()):
+    """The decision on `payload` for the hook whose command line is `argv` (the arguments
+    after the script, as main() passes sys.argv[1:]), with a deny logged to the bound run."""
+    result = _decide(payload, argv)
     if result and isinstance(payload, dict):
-        log_denial(payload, result)
+        log_denial(payload, result, argv)
     return result
 
 
 def main():
+    # The lane binding is the hook's own command line [R-LANE-HOOK-BINDING]. The python
+    # floor ran before any of it was read.
+    argv = sys.argv[1:]
     try:
         payload = json.load(sys.stdin)
     except Exception:
         return 0
     try:
-        result = _decide(payload)
+        result = _decide(payload, argv)
     except Exception as err:
         # Claude Code reads exit 0 with no output as allow. A ppl-* role is
         # refused instead, an unroled session keeps the allow so a hook defect
@@ -2662,7 +2665,7 @@ def main():
                 % ("unsandboxed" if unsandboxed else "role", type(err).__name__))
             sys.stdout.write(json.dumps(refusal))
             sys.stdout.flush()
-            log_denial(payload, refusal)
+            log_denial(payload, refusal, argv)
         try:
             sys.stderr.write("ppl_guard internal error: %s\n" % err)
         except Exception:
@@ -2673,7 +2676,7 @@ def main():
         sys.stdout.write(json.dumps(result))
         sys.stdout.flush()
         if isinstance(payload, dict):
-            log_denial(payload, result)
+            log_denial(payload, result, argv)
     return 0
 
 

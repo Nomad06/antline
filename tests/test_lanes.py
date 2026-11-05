@@ -133,9 +133,76 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(sorted(code for code, _ in results), ["BUSY", "ok"])
         self.assertEqual(len(lanes.read()), 1)
 
+    def test_a_registry_that_is_not_utf8_is_refused(self):
+        lanes.registry_path().parent.mkdir(parents=True, exist_ok=True)
+        lanes.registry_path().write_bytes(b"\xff")
+        self.assert_invalid()
+
     def test_lanes_parses_on_python_3_9(self):
         source = Path(lanes.__file__).read_text(encoding="utf-8")
         ast.parse(source, feature_version=(3, 9))
+
+
+class TestBinding(unittest.TestCase):
+    """A hook's lane is the `--task <id>` its own command line carries."""
+
+    def setUp(self):
+        self._home = os.environ.get("PPL_HOME")
+        os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+
+    def tearDown(self):
+        os.environ["PPL_HOME"] = self._home
+
+    def test_hook_task_reads_one_task_pair_and_nothing_else(self):
+        self.assertIsNone(lanes.hook_task([]))
+        self.assertEqual(lanes.hook_task(["--task", "LA-1"]), "LA-1")
+        for argv in (["--task"], ["--task", "LA-1", "--task", "LA-1"], ["--task", "la-1"],
+                     ["--task", ""], ["--task", "LA-1\n"], ["--task=LA-1"], ["LA-1"],
+                     ["--task", "LA-1", "-q"], ["--task", 7]):
+            with self.subTest(argv=argv), self.assertRaises(ValueError):
+                lanes.hook_task(argv)
+
+    def test_binding_names_the_registered_lane(self):
+        record = claim("LA-1")
+        self.assertEqual(lanes.binding(["--task", "LA-1"]), lanes.Binding("LA-1", record, None))
+        self.assertEqual(lanes.binding([]), lanes.Binding(None, None, None))
+        self.assertEqual(lanes.binding(()), lanes.Binding(None, None, None))
+        # an argv that is no list at all binds no lane and fails closed, it does not raise
+        for argv in (None, 7):
+            bound = lanes.binding(argv)
+            self.assertEqual((bound.task, bound.entry), (None, None))
+            self.assertIn("binds no lane", bound.problem)
+
+    def test_a_lane_the_registry_does_not_hold_is_a_problem(self):
+        claim("LA-1")
+        bound = lanes.binding(["--task", "LB-1"])
+        self.assertEqual((bound.task, bound.entry), ("LB-1", None))
+        self.assertEqual(bound.problem, "lane LB-1 is not registered: run ppl lane resume LB-1")
+        bound = lanes.binding(["--task", "lb-1"])
+        self.assertEqual((bound.task, bound.entry), (None, None))
+        self.assertIn("binds no lane", bound.problem)
+
+    def test_binding_never_raises_on_any_registry(self):
+        path = lanes.registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cases = (b"", b"\xff", b"garbage", b'{"version": 1, "lan', b"[]", b"null",
+                 b'{"version": 2, "lanes": []}', b'{"version": 1, "lanes": [1]}',
+                 b"[" * 100000 + b"]" * 100000)
+        for data in cases:
+            with self.subTest(data=data[:20]):
+                path.write_bytes(data)
+                bound = lanes.binding(["--task", "LA-1"])
+                self.assertEqual((bound.task, bound.entry), ("LA-1", None))
+                self.assertIn(str(path), bound.problem)
+        path.unlink()
+        os.mkfifo(str(path))
+        started = time.monotonic()
+        self.assertIn("not a regular file", lanes.binding(["--task", "LA-1"]).problem)
+        self.assertLess(time.monotonic() - started, 1)
+        path.unlink()
+        with open(str(path), "wb") as handle:
+            handle.truncate(lanes.READ_LIMIT + 1)
+        self.assertIn(str(path), lanes.binding(["--task", "LA-1"]).problem)
 
 
 if __name__ == "__main__":

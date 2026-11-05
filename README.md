@@ -85,8 +85,9 @@ The cells are the guard hook's own answers: each call was sent through
 writes open once the run reaches the merge watch and `ppl merge observed` has recorded the
 merge [R-JIRA-GATE]. The read-only agents
 also get no Edit, Write or Bash tool in their agent files [R-ROLE-TOOLS-READONLY].
-The hook has to be registered first, and until it is, nothing in the cage is enforced
-[R-GUARD-NOT-ARMED n/a].
+Roles run only in a lane session, the window `ppl lane` starts with the run's own hooks: a
+`ppl-*` role anywhere else is refused [R-LANE-ROLE-OUTSIDE], and a lane session resumed by hand
+without the lane flags (`claude --resume`) has no guard at all [R-LANE-BARE-RESUME n/a].
 
 ### The review loop
 
@@ -264,8 +265,8 @@ The studio listens on loopback only. Every request needs the session token in th
 After setup the studio has three more pages. **Agents** sets the model tier and effort per
 role (or a preset for all of them), shows each role's base prompt beside its project notes
 and the agent file apply would write, and lists the blocking rules of the cage that cover that
-role, which hold whatever its prompt says once the guard hook is registered
-[R-GUARD-NOT-ARMED n/a]. **Harness** edits, adds and creates harnesses, and applies one, which
+role, which hold whatever its prompt says in a lane session [R-LANE-HOOK-BINDING].
+**Harness** edits, adds and creates harnesses, and applies one, which
 also makes it the active harness, as `ppl harness apply` does.
 
 In Expert mode the Harness page adds a raw `harness.toml` editor and the fragments beside its
@@ -319,8 +320,9 @@ Those names carry the default tracker prefixes and forge server names only, so a
 explicit matcher plus a custom `tracker.mcp_prefixes` or `forge.mcp_server` needs
 those names covered by hand. `ppl init` also refuses an isolated run while the
 guard is in `~/.claude/settings.json` [R-INIT-ISOLATION-CHECK], so if you answered
-`global` in `ppl setup claude`, start runs with `ppl init --no-isolated`. Until the
-hooks are registered, nothing in the cage is enforced [R-GUARD-NOT-ARMED n/a].
+`global` in `ppl setup claude`, start runs with `ppl init --no-isolated`. In a session
+`ppl lane` did not start the hooks carry no task, so a role there is refused and no
+run-scoped rule is enforced [R-LANE-ROLE-OUTSIDE].
 
 `ppl doctor` reports per settings file `dispatch_hook` and `usage_hook` (registered or
 missing) and `hook_shape` (`ok` or what is wrong with the hook entries: a `type`

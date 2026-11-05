@@ -30,6 +30,12 @@ def payload(agent, tool, tool_input, cwd="/tmp/repo"):
 
 
 RESPONDER_DIFF = "git -C /work/repo diff --no-ext-diff --no-textconv abc1234..def5678"
+# TestGuard's calls come from DEMO-700's lane session: the hook's own command line binds it.
+LANE = ["--task", "DEMO-700"]
+
+
+def decide(call, argv=LANE):
+    return ppl_guard.decide(call, argv)
 
 
 class TestGuard(unittest.TestCase):
@@ -41,47 +47,48 @@ class TestGuard(unittest.TestCase):
         fixtures.install_harness("example-maven")
         store.write_json(paths.run_dir("DEMO-700") / "harness.json",
                          harness.snapshot(harness.load("example-maven")))
+        fixtures.bind_lane("DEMO-700", "/tmp/repo")
 
     def deny_reason(self, result):
         return result["hookSpecificOutput"]["permissionDecisionReason"]
 
     def test_code_worker_may_edit_inside_boundary(self):
-        self.assertIsNone(ppl_guard.decide(
+        self.assertIsNone(decide(
             payload("ppl-code-worker", "Edit",
                     {"file_path": "/tmp/repo/source/core/orders/Foo.java"})))
 
     def test_code_worker_may_not_edit_a_test(self):
         # rule: R-ROLE-CODE-WORKER-TESTS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Write",
             {"file_path": "/tmp/repo/source/core/orders/src/test/java/FooIT.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_may_not_edit_main_source(self):
         # rule: R-ROLE-TEST-WORKER-MAIN
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Edit",
             {"file_path": "/tmp/repo/source/core/orders/src/main/java/Foo.java"}))
         self.assertIsNotNone(result)
 
     def test_verifier_may_not_write_anything(self):
         # rule: R-ROLE-READONLY-NO-WRITE
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-verifier", "Write", {"file_path": "/tmp/repo/notes.txt"}))
         self.assertIsNotNone(result)
 
     def test_the_reflector_may_not_write_anything(self):
         # rule: R-ROLE-READONLY-NO-WRITE
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-reflector", "Write", {"file_path": "/tmp/repo/notes.txt"}))
         self.assertIn("may not write any path", self.deny_reason(result))
 
     def test_brief_challenger_may_not_write_anything(self):
         # rule: R-ROLE-READONLY-NO-WRITE
-        inside = ppl_guard.decide(payload(
+        inside = decide(payload(
             "ppl-brief-challenger", "Write", {"file_path": "/tmp/repo/notes.txt"}))
         self.assertIn("may not write any path", self.deny_reason(inside))
-        outside = ppl_guard.decide(payload(
+        outside = decide(payload(
             "ppl-brief-challenger", "Write", {"file_path": "/tmp/somewhere-else/notes.txt"},
             cwd="/tmp/somewhere-else"))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(outside))
@@ -89,59 +96,59 @@ class TestGuard(unittest.TestCase):
     def test_git_add_all_is_denied_for_every_agent(self):
         # rule: R-GIT-ADD-ALL
         for agent in [None, "ppl-code-worker", "ppl-verifier"]:
-            result = ppl_guard.decide(payload(agent, "Bash", {"command": "git add -A"}))
+            result = decide(payload(agent, "Bash", {"command": "git add -A"}))
             self.assertIsNotNone(result, agent)
             self.assertIn("credential", self.deny_reason(result).lower())
 
     def test_bare_git_stash_is_denied(self):
         # rule: R-GIT-STASH
-        self.assertIsNotNone(ppl_guard.decide(
+        self.assertIsNotNone(decide(
             payload("ppl-code-worker", "Bash", {"command": "git stash"})))
 
     def test_named_git_stash_push_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(
+        self.assertIsNone(decide(
             payload("ppl-code-worker", "Bash", {"command": "git stash push -u -m ppl-700"})))
 
     def test_force_push_is_denied(self):
         # rule: R-GIT-FORCE-PUSH
-        self.assertIsNotNone(ppl_guard.decide(
+        self.assertIsNotNone(decide(
             payload("ppl-code-worker", "Bash", {"command": "git push --force origin x"})))
 
     def test_resolving_a_thread_is_denied(self):
         # rule: R-MCP-RESOLVE-THREAD
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             None, "mcp__GitLab-MCP__resolve_merge_request_thread", {"thread_id": "1"}))
         self.assertIn("remark author", self.deny_reason(result))
 
     def test_merging_is_denied(self):
         # rule: R-MCP-MERGE-MR
-        self.assertIsNotNone(ppl_guard.decide(
+        self.assertIsNotNone(decide(
             payload(None, "mcp__GitLab-MCP__merge_merge_request", {})))
 
     def test_approving_its_own_mr_is_denied(self):
         # rule: R-MCP-APPROVE-MR
         # The third denied MCP tool had no test of its own until the rule
         # matrix asked which test proved it.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             None, "mcp__GitLab-MCP__approve_merge_request", {"merge_request_iid": 1}))
         self.assertIn("never approves", self.deny_reason(result))
 
     def test_writing_state_json_directly_is_denied(self):
         # rule: R-RUNS-WRITE-PROTECTION
         target = str(paths.run_dir("DEMO-700") / "state.json")
-        self.assertIsNotNone(ppl_guard.decide(
+        self.assertIsNotNone(decide(
             payload("ppl-code-worker", "Write", {"file_path": target})))
 
     def test_writing_control_json_is_allowed(self):
         target = str(paths.run_dir("DEMO-700") / "control.json")
-        self.assertIsNone(ppl_guard.decide(
+        self.assertIsNone(decide(
             payload(None, "Write", {"file_path": target})))
 
     def test_pause_denies_every_tool_call(self):
         # rule: R-OPERATOR-HALT-HOOK
         control.set_command("DEMO-700", "pause")
         try:
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": "ls"}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": "ls"}))
             self.assertIn("OWNER_DECISION", self.deny_reason(result))
         finally:
             control.clear("DEMO-700")
@@ -149,7 +156,7 @@ class TestGuard(unittest.TestCase):
     def test_unknown_agent_outside_the_pipeline_is_not_boundary_checked(self):
         # The load-bearing property: an ordinary session, in an unrelated
         # directory, writing an unrelated path is untouched by an active run.
-        self.assertIsNone(ppl_guard.decide(
+        self.assertIsNone(decide(
             payload(None, "Edit", {"file_path": "/tmp/somewhere-else/anywhere.java"},
                     cwd="/tmp/somewhere-else")))
 
@@ -161,21 +168,21 @@ class TestGuard(unittest.TestCase):
         # to say about it. The discriminator is the target path: inside the
         # active run's repo it is repo code, and DESIGN 5.3 denies the
         # orchestrator Edit/Write on repo code.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             None, "Write", {"file_path": "/tmp/repo/DANGER.txt"},
             cwd="/home/dev/some/other/project"))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_unrecognised_agent_writing_inside_the_run_repo_is_denied(self):
         # rule: R-UNROLED-REPO-WRITE
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "SomeOtherProjectAgent", "Write", {"file_path": "/tmp/repo/DANGER.txt"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     # --- C2: cwd is not the scope ---
 
     def test_role_write_into_the_repo_is_denied_from_any_cwd(self):
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-verifier", "Write", {"file_path": "/tmp/repo/notes.txt"},
             cwd="/home/dev/some/other/project"))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -185,7 +192,7 @@ class TestGuard(unittest.TestCase):
         # boundary.check_path returns early for a test-shaped path under the
         # test worker's rules, so a role writing a test-shaped path outside the
         # tree has to be refused before that check, not by it.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Write",
             {"file_path": "/tmp/somewhere-else/src/test/java/FooTest.java"},
             cwd="/tmp/somewhere-else"))
@@ -195,7 +202,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-OPERATOR-HALT-HOOK
         control.set_command("DEMO-700", "pause")
         try:
-            result = ppl_guard.decide(
+            result = decide(
                 payload("ppl-code-worker", "Bash", {"command": "ls"},
                         cwd="/home/dev/some/other/project"))
             self.assertIn("OWNER_DECISION", self.deny_reason(result))
@@ -206,7 +213,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-OPERATOR-HALT-HOOK
         control.set_command("DEMO-700", "pause")
         try:
-            result = ppl_guard.decide(
+            result = decide(
                 payload("ppl-brief-challenger", "Read", {"file_path": "/tmp/repo/README.md"},
                         cwd="/home/dev/some/other/project"))
             self.assertIn("OWNER_DECISION", self.deny_reason(result))
@@ -214,71 +221,61 @@ class TestGuard(unittest.TestCase):
             control.clear("DEMO-700")
 
     def test_pause_does_not_touch_a_named_agent_from_another_project(self):
-        # A recognisable, non-pipeline agent_type is never the orchestrator's own
-        # session, isolated or not, so it stays untouched by DEMO-700's pause.
+        # Another project's session is in no lane, so its hooks carry no --task
+        # and DEMO-700's pause does not reach it.
         control.set_command("DEMO-700", "pause")
         try:
-            self.assertIsNone(ppl_guard.decide(
+            self.assertIsNone(decide(
                 payload("SomeOtherProjectAgent", "Edit",
                         {"file_path": "/tmp/somewhere-else/Foo.java"},
-                        cwd="/tmp/somewhere-else")))
+                        cwd="/tmp/somewhere-else"), ()))
         finally:
             control.clear("DEMO-700")
 
-    # --- R1: isolated scoping for the unroled session (DESIGN 5.4) ---
+    # --- D13: every call of the lane's session is the run's, whatever its cwd ---
     #
-    # DEMO-700 is created isolated=True by setUpClass (the default). Under
-    # isolated=True the Jira gate and the pause fire for the unroled session
-    # (agent_type absent) whenever this run is active, regardless of cwd - the
-    # documented workflow creates the worktree beside the orchestrator's own
-    # session, so cwd never lines up with the run's repo for that session in
-    # the first place. This is a known, accepted residual (DESIGN 5.4): if the
-    # operator's actual hook registration is broader than an isolated launch
-    # directory despite the flag, both gates reach their other projects' own
-    # unroled sessions too, for as long as this run stays active.
+    # The hooks fire only in DEMO-700's lane session, which `ppl lane` started
+    # with this run's settings, so the Jira gate and the pause reach the
+    # unroled session (agent_type absent) from any cwd - the orchestrator's
+    # session sits in the lane's start directory, beside the worktree. A
+    # session in no lane carries no --task and meets the global denials only.
 
-    def test_pause_denies_unroled_session_from_anywhere_when_isolated(self):
+    def test_pause_denies_the_lanes_unroled_session_from_anywhere(self):
+        # rule: R-OPERATOR-HALT-HOOK
         control.set_command("DEMO-700", "pause")
         try:
-            result = ppl_guard.decide(payload(
+            result = decide(payload(
                 None, "Bash", {"command": "ls"}, cwd="/home/dev/some/other/project"))
             self.assertIn("OWNER_DECISION", self.deny_reason(result))
         finally:
             control.clear("DEMO-700")
 
-    def test_jira_gate_fires_for_unroled_session_outside_repo_when_isolated(self):
+    def test_jira_gate_fires_for_the_lanes_unroled_session_outside_the_repo(self):
         # rule: R-JIRA-GATE
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"},
             cwd="/home/dev/some/other/project"))
         self.assertIn("after the merge", self.deny_reason(result))
 
-    def test_pause_does_not_reach_a_non_isolated_runs_unroled_session_elsewhere(self):
-        run.init("DEMO-710", "u", "/tmp/repo710", isolated=False)
+    def test_pause_does_not_reach_a_session_outside_the_lane(self):
+        control.set_command("DEMO-700", "pause")
         try:
-            control.set_command("DEMO-710", "pause")
-            self.assertIsNone(ppl_guard.decide(
+            self.assertIsNone(decide(
                 payload(None, "Bash", {"command": "ls"},
-                        cwd="/home/dev/some/other/project")))
+                        cwd="/home/dev/some/other/project"), ()))
         finally:
-            control.clear("DEMO-710")
-            run.set_active("DEMO-700")
+            control.clear("DEMO-700")
 
-    def test_jira_gate_does_not_reach_a_non_isolated_runs_unroled_session_elsewhere(self):
-        run.init("DEMO-711", "u", "/tmp/repo711", isolated=False)
-        try:
-            result = ppl_guard.decide(payload(
-                None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"},
-                cwd="/home/dev/some/other/project"))
-            self.assertIsNone(result)
-        finally:
-            run.set_active("DEMO-700")
+    def test_jira_gate_does_not_reach_a_session_outside_the_lane(self):
+        result = decide(payload(
+            None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"},
+            cwd="/home/dev/some/other/project"), ())
+        self.assertIsNone(result)
 
-    def test_unroled_ordinary_write_outside_repo_is_still_untouched_when_isolated(self):
-        # The broadened scope must stay confined to the Jira gate and the pause
-        # check: it must never start denying an unroled session's ordinary file
-        # write outside any run's repo, isolated or not.
-        self.assertIsNone(ppl_guard.decide(
+    def test_unroled_ordinary_write_outside_repo_is_still_untouched_in_the_lane(self):
+        # Every call being the run's must never start denying the lane's unroled
+        # session an ordinary file write outside the run's repo.
+        self.assertIsNone(decide(
             payload(None, "Edit", {"file_path": "/tmp/somewhere-else/anywhere.java"},
                     cwd="/tmp/somewhere-else")))
 
@@ -287,20 +284,20 @@ class TestGuard(unittest.TestCase):
         # Broadening the unroled session's scope must not weaken the existing
         # property that a ppl-* role writing an unrelated path outside any run
         # repo is denied - that check never depended on cwd in the first place.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Write", {"file_path": "/tmp/somewhere-else/Foo.java"},
             cwd="/tmp/somewhere-else"))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_landmine_denies_apply_even_outside_the_run_directory(self):
         # rule: R-GUARD-GLOBAL-DENIALS
-        self.assertIsNotNone(ppl_guard.decide(
+        self.assertIsNotNone(decide(
             payload(None, "Bash", {"command": "git add -A"},
                     cwd="/home/dev/some/other/project")))
 
     def test_jira_write_is_denied_before_merge_watch(self):
         # rule: R-JIRA-GATE
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"}))
         self.assertIn("after the merge", self.deny_reason(result))
 
@@ -324,7 +321,7 @@ class TestGuard(unittest.TestCase):
 
     def test_jira_write_is_allowed_at_merge_watch(self):
         with self.at_merge_watch():
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"})))
 
     def test_tracker_write_in_merge_watch_before_the_merge_is_recorded_is_denied(self):
@@ -335,7 +332,7 @@ class TestGuard(unittest.TestCase):
             for tool in ("mcp__atlassian__addCommentToJiraIssue",
                          "mcp__claude_ai_Atlassian_Rovo__transitionJiraIssue",
                          "mcp__atlassian__executeWrite"):
-                result = ppl_guard.decide(payload(None, tool, {"body": "x"}))
+                result = decide(payload(None, tool, {"body": "x"}))
                 self.assertIn("OWNER_DECISION", self.deny_reason(result), tool)
                 self.assertIn("ppl merge observed", self.deny_reason(result), tool)
 
@@ -343,11 +340,11 @@ class TestGuard(unittest.TestCase):
         # rule: R-JIRA-GATE
         # a state written before the mr record had merged fields, or with none at all
         with self.at_merge_watch(mr_missing=True):
-            result = ppl_guard.decide(payload(
+            result = decide(payload(
                 None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"}))
             self.assertIn("OWNER_DECISION", self.deny_reason(result))
         with self.at_merge_watch(merged_sha=""):
-            result = ppl_guard.decide(payload(
+            result = decide(payload(
                 None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"}))
             self.assertIn("OWNER_DECISION", self.deny_reason(result))
 
@@ -359,7 +356,7 @@ class TestGuard(unittest.TestCase):
                 code = cli.main(["merge", "observed", "--sha", "a" * 40,
                                  "--url", "https://forge/mr/7", "--task", "DEMO-700"])
             self.assertEqual(code, 0)
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"})))
 
     def test_jira_write_under_the_rovo_prefix_is_denied_before_merge_watch(self):
@@ -367,21 +364,21 @@ class TestGuard(unittest.TestCase):
         # The same remote server registers as mcp__claude_ai_Atlassian_Rovo__ when
         # added through claude.ai - the prefix this machine actually has. A gate
         # that only knew mcp__atlassian__ was dead here.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             None, "mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue", {"body": "x"}))
         self.assertIn("after the merge", self.deny_reason(result))
 
     def test_jira_write_under_a_numbered_rovo_prefix_is_denied_before_merge_watch(self):
         # rule: R-JIRA-GATE
         # Claude Code suffixes a duplicate registration _2, _3 and so on.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             None, "mcp__claude_ai_Atlassian_Rovo_2__transitionJiraIssue", {"body": "x"}))
         self.assertIn("after the merge", self.deny_reason(result))
 
     def test_jira_write_under_the_rovo_prefix_is_allowed_at_merge_watch(self):
         # rule: R-JIRA-GATE
         with self.at_merge_watch():
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 None, "mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue",
                 {"body": "x"})))
 
@@ -394,7 +391,7 @@ class TestGuard(unittest.TestCase):
                      "mcp__claude_ai_Atlassian_Rovo__getConfluencePage"):
             self.assertFalse(ppl_guard.is_jira_write_tool(tool), tool)
             self.assertIsNone(
-                ppl_guard.decide(payload(None, tool, {"issueKey": "X-1"})), tool)
+                decide(payload(None, tool, {"issueKey": "X-1"})), tool)
 
     # The tool names the Atlassian server exposes today. The older names stay gated
     # too, the tests above and the snapshot tests below still use them.
@@ -423,7 +420,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-JIRA-GATE
         for tool in self.CURRENT_WRITE_TOOLS:
             self.assertTrue(ppl_guard.is_jira_write_tool(tool), tool)
-            result = ppl_guard.decide(payload(None, tool, {"issueKey": "X-1"}))
+            result = decide(payload(None, tool, {"issueKey": "X-1"}))
             self.assertIn("after the merge", self.deny_reason(result), tool)
 
     def test_the_graph_context_write_is_denied_before_merge_watch(self):
@@ -432,7 +429,7 @@ class TestGuard(unittest.TestCase):
                      "mcp__claude_ai_Atlassian_Rovo__addGraphContext",
                      "mcp__atlassian_2__addGraphContext"):
             self.assertTrue(ppl_guard.is_jira_write_tool(tool), tool)
-            result = ppl_guard.decide(payload(None, tool, {"issueKey": "X-1"}))
+            result = decide(payload(None, tool, {"issueKey": "X-1"}))
             self.assertIn("after the merge", self.deny_reason(result), tool)
 
     def test_the_older_confluence_write_tools_are_denied_before_merge_watch(self):
@@ -443,7 +440,7 @@ class TestGuard(unittest.TestCase):
             for prefix in ("mcp__atlassian__", "mcp__claude_ai_Atlassian_Rovo__",
                            "mcp__atlassian_2__"):
                 tool = prefix + operation
-                result = ppl_guard.decide(payload(None, tool, {"pageId": "1"}))
+                result = decide(payload(None, tool, {"pageId": "1"}))
                 self.assertIn("OWNER_DECISION", self.deny_reason(result), tool)
                 self.assertIn("after the merge", self.deny_reason(result), tool)
 
@@ -452,14 +449,14 @@ class TestGuard(unittest.TestCase):
         with self.at_merge_watch():
             for tool in self.CURRENT_WRITE_TOOLS:
                 self.assertIsNone(
-                    ppl_guard.decide(payload(None, tool, {"issueKey": "X-1"})), tool)
+                    decide(payload(None, tool, {"issueKey": "X-1"})), tool)
 
     def test_the_current_atlassian_read_tools_are_not_gated(self):
         # rule: R-JIRA-GATE
         for tool in self.CURRENT_READ_TOOLS:
             self.assertFalse(ppl_guard.is_jira_write_tool(tool), tool)
             self.assertIsNone(
-                ppl_guard.decide(payload(None, tool, {"issueKey": "X-1"})), tool)
+                decide(payload(None, tool, {"issueKey": "X-1"})), tool)
 
     def test_tracker_gate_uses_the_snapshot_prefixes(self):
         # rule: R-JIRA-GATE
@@ -469,11 +466,11 @@ class TestGuard(unittest.TestCase):
         saved = snap.read_text(encoding="utf-8")
         snap.write_text(json.dumps(doc), encoding="utf-8")
         try:
-            result = ppl_guard.decide(payload(None, "mcp__corp_jira__editJiraIssue", {},
-                                              cwd="/tmp/repo"))
+            result = decide(payload(None, "mcp__corp_jira__editJiraIssue", {},
+                                    cwd="/tmp/repo"))
             self.assertIn("OWNER_DECISION", self.deny_reason(result))
-            self.assertIsNone(ppl_guard.decide(payload(None, "mcp__corp_jira__getJiraIssue", {},
-                                                       cwd="/tmp/repo")))
+            self.assertIsNone(decide(payload(None, "mcp__corp_jira__getJiraIssue", {},
+                                             cwd="/tmp/repo")))
         finally:
             snap.write_text(saved, encoding="utf-8")
 
@@ -483,8 +480,8 @@ class TestGuard(unittest.TestCase):
         saved = snap.read_text(encoding="utf-8")
         snap.unlink()
         try:
-            result = ppl_guard.decide(payload(None, "mcp__atlassian__editJiraIssue", {},
-                                              cwd="/tmp/repo"))
+            result = decide(payload(None, "mcp__atlassian__editJiraIssue", {},
+                                    cwd="/tmp/repo"))
             self.assertIn("OWNER_DECISION", self.deny_reason(result))
         finally:
             snap.write_text(saved, encoding="utf-8")
@@ -507,8 +504,8 @@ class TestGuard(unittest.TestCase):
             for table in tables:
                 doc["tracker"] = table
                 snap.write_text(json.dumps(doc), encoding="utf-8")
-                result = ppl_guard.decide(payload(None, "mcp__atlassian__editJiraIssue", {},
-                                                  cwd="/tmp/repo"))
+                result = decide(payload(None, "mcp__atlassian__editJiraIssue", {},
+                                        cwd="/tmp/repo"))
                 self.assertIn("OWNER_DECISION", self.deny_reason(result), table)
             for table in tables:
                 self.assertTrue(ppl_guard.is_tracker_write_tool(
@@ -530,8 +527,8 @@ class TestGuard(unittest.TestCase):
                              ["mcp__a.b__"], ["mcp__corp_jira__", "mcp__corp_jira"]):
                 doc["tracker"]["mcp_prefixes"] = prefixes
                 snap.write_text(json.dumps(doc), encoding="utf-8")
-                result = ppl_guard.decide(payload(None, "mcp__atlassian__editJiraIssue", {},
-                                                  cwd="/tmp/repo"))
+                result = decide(payload(None, "mcp__atlassian__editJiraIssue", {},
+                                        cwd="/tmp/repo"))
                 self.assertIn("OWNER_DECISION", self.deny_reason(result), prefixes)
         finally:
             snap.write_text(saved, encoding="utf-8")
@@ -574,7 +571,7 @@ class TestGuard(unittest.TestCase):
         control_path = paths.run_dir("DEMO-700") / "control.json"
         store.write_json(control_path, {"not": "a usable control record"})
         try:
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": "ls"}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": "ls"}))
             self.assertIsNotNone(result)
             self.assertIn("OWNER_DECISION", self.deny_reason(result))
         finally:
@@ -590,69 +587,63 @@ class TestGuard(unittest.TestCase):
         # so a corrupt state.json must deny it outright rather than fail open just
         # because cwd-based scoping is impossible without a readable repo path.
         run.init("DEMO-701", "u", "/tmp/repo2")
+        fixtures.bind_lane("DEMO-701", "/tmp/repo2")
         state_file = paths.run_dir("DEMO-701") / "state.json"
         state_file.write_text("{not valid json", encoding="utf-8")
-        try:
-            result = ppl_guard.decide(payload(
-                "ppl-code-worker", "Bash", {"command": "ls"}, cwd="/tmp/repo2"))
-            self.assertIsNotNone(result)
-            self.assertIn("OWNER_DECISION", self.deny_reason(result))
-        finally:
-            run.set_active("DEMO-700")
+        result = decide(payload(
+            "ppl-code-worker", "Bash", {"command": "ls"}, cwd="/tmp/repo2"),
+            ["--task", "DEMO-701"])
+        self.assertIsNotNone(result)
+        self.assertIn("OWNER_DECISION", self.deny_reason(result))
 
     def test_broken_run_state_denies_a_boundary_sensitive_edit(self):
         # The concrete case that matters: a real write, not just an inert `ls`,
         # must be denied while state cannot be read - not merely non-crashing.
         run.init("DEMO-704", "u", "/tmp/repo4")
+        fixtures.bind_lane("DEMO-704", "/tmp/repo4")
         state_file = paths.run_dir("DEMO-704") / "state.json"
         state_file.write_text("not json at all", encoding="utf-8")
-        try:
-            result = ppl_guard.decide(payload(
-                "ppl-code-worker", "Edit",
-                {"file_path": "/tmp/repo4/anywhere/Foo.java"}, cwd="/tmp/repo4"))
-            self.assertIsNotNone(result)
-            self.assertIn("OWNER_DECISION", self.deny_reason(result))
-        finally:
-            run.set_active("DEMO-700")
+        result = decide(payload(
+            "ppl-code-worker", "Edit",
+            {"file_path": "/tmp/repo4/anywhere/Foo.java"}, cwd="/tmp/repo4"),
+            ["--task", "DEMO-704"])
+        self.assertIsNotNone(result)
+        self.assertIn("OWNER_DECISION", self.deny_reason(result))
 
     def test_broken_run_state_permits_a_non_pipeline_agent_without_raising(self):
-        # A tool call with no recognised agent_type cannot be assumed to belong to
-        # this specific broken run, so it must not be denied on that basis alone -
-        # only that it must not crash. This is what keeps a corrupt run directory
-        # from taking down unrelated sessions on the same machine.
+        # A tool call with no recognised agent_type is not denied on that basis
+        # alone - only it must not crash. This is what keeps a corrupt run
+        # directory from locking its own lane's operator out of the repair.
         run.init("DEMO-706", "u", "/tmp/repo2")
+        fixtures.bind_lane("DEMO-706", "/tmp/repo2")
         state_file = paths.run_dir("DEMO-706") / "state.json"
         state_file.write_text("{not valid json", encoding="utf-8")
-        try:
-            result = ppl_guard.decide(payload(
-                None, "Bash", {"command": "ls"}, cwd="/tmp/repo2"))
-            self.assertIsNone(result)
-        finally:
-            run.set_active("DEMO-700")
+        result = decide(payload(
+            None, "Bash", {"command": "ls"}, cwd="/tmp/repo2"), ["--task", "DEMO-706"])
+        self.assertIsNone(result)
 
     def test_non_dict_state_file_denies_pipeline_agent_without_raising(self):
         # state.json can be syntactically valid JSON that is not an object (e.g. a
         # crashed writer left "[]" or "null"). run.load returns that as-is, so
-        # active_state must reject a non-dict result rather than let a later
+        # bound_state must reject a non-dict result rather than let a later
         # `state.get(...)` raise AttributeError deep inside decide - and, as above,
         # must deny a pipeline agent rather than silently permit it.
         run.init("DEMO-702", "u", "/tmp/repo3")
+        fixtures.bind_lane("DEMO-702", "/tmp/repo3")
         state_file = paths.run_dir("DEMO-702") / "state.json"
         state_file.write_text("[]", encoding="utf-8")
-        try:
-            result = ppl_guard.decide(payload(
-                "ppl-code-worker", "Bash", {"command": "ls"}, cwd="/tmp/repo3"))
-            self.assertIsNotNone(result)
-            self.assertIn("OWNER_DECISION", self.deny_reason(result))
-        finally:
-            run.set_active("DEMO-700")
+        result = decide(payload(
+            "ppl-code-worker", "Bash", {"command": "ls"}, cwd="/tmp/repo3"),
+            ["--task", "DEMO-702"])
+        self.assertIsNotNone(result)
+        self.assertIn("OWNER_DECISION", self.deny_reason(result))
 
     def test_decide_does_not_raise_on_non_dict_payload(self):
         for bad in (None, [], "git add -A", 42):
-            self.assertIsNone(ppl_guard.decide(bad))
+            self.assertIsNone(decide(bad))
 
     def test_decide_does_not_raise_on_non_dict_tool_input(self):
-        self.assertIsNone(ppl_guard.decide(
+        self.assertIsNone(decide(
             payload("ppl-code-worker", "Bash", "git add -A")))
 
     # --- finding 1: a global git flag between "git" and the subcommand bypassed
@@ -660,56 +651,56 @@ class TestGuard(unittest.TestCase):
 
     def test_add_all_bypass_via_global_dir_flag_is_denied(self):
         # rule: R-GIT-ADD-ALL
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash", {"command": "git -C /tmp/repo add -A"}))
         self.assertIsNotNone(result)
         self.assertIn("credential", self.deny_reason(result).lower())
 
     def test_bare_stash_bypass_via_global_dir_flag_is_denied(self):
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "git -C /tmp/repo stash"})))
 
     def test_bare_stash_bypass_via_git_dir_flag_is_denied(self):
         # the coordinator's exact reproduction
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             None, "Bash", {"command": "git --git-dir=/x stash"})))
 
     def test_stash_pop_bypass_via_global_dir_flag_is_denied(self):
         # rule: R-GIT-STASH
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "git -C /tmp/repo stash pop"})))
 
     def test_force_push_bypass_via_global_dir_flag_is_denied(self):
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "git -C /tmp/repo push --force origin x"})))
 
     def test_reset_hard_bypass_via_global_dir_flag_is_denied(self):
         # rule: R-GIT-RESET-HARD
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "git -C /tmp/repo reset --hard"})))
 
     def test_add_all_bypass_via_c_flag_is_denied(self):
         # rule: R-GIT-ADD-ALL
         # the coordinator's exact reproduction
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             None, "Bash", {"command": "git -C /tmp/repo add -A"})))
 
     # --- finding 2: git push -f, the shorthand for --force, was not denied ---
 
     def test_force_push_shorthand_f_is_denied(self):
         # rule: R-GIT-FORCE-PUSH
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "git push -f origin x"})))
 
     def test_force_push_long_flag_still_denied(self):
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "git push --force origin x"})))
 
     def test_plain_git_push_is_allowed(self):
         # regression guard: the -f pattern must not over-match an ordinary push
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "git push origin main"})))
 
     def test_refspec_force_push_is_denied(self):
@@ -723,7 +714,7 @@ class TestGuard(unittest.TestCase):
                         "git push &>log origin +main", "git push &>>log origin +main",
                         "git push >&log origin +main"):
             for agent in (None, "ppl-code-worker"):
-                result = ppl_guard.decide(payload(agent, "Bash", {"command": command}))
+                result = decide(payload(agent, "Bash", {"command": command}))
                 self.assertIn("force push", self.deny_reason(result), command)
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
 
@@ -737,24 +728,25 @@ class TestGuard(unittest.TestCase):
                         "git push origin main 2>&1 && git log --grep +x",
                         "git push origin main &>/dev/null; echo +x",
                         "git push origin main & echo +x"):
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Bash", {"command": command})), command)
 
     def test_the_refspec_span_stays_fast_on_fd_redirects(self):
         # rule: R-GIT-FORCE-PUSH
         # The span's alternatives share no character, so a run of `>&` and
-        # `&>` is read once, at the role's length cap too.
+        # `&>` is read once, at the role's length cap too. A session in no lane,
+        # so the global denial alone decides.
         for command in ("git push " + ">&" * 2000, "git push " + "&>" * 2000,
                         "git push " + ">&>" * 1300, "git push 2>&1 " * 290):
             with self.subTest(command=command[:20]):
                 start = time.perf_counter()
-                result = ppl_guard.decide(payload(None, "Bash", {"command": command},
-                                                  cwd="/tmp/elsewhere"))
+                result = decide(payload(None, "Bash", {"command": command},
+                                        cwd="/tmp/elsewhere"), ())
                 self.assertLess(time.perf_counter() - start, 0.2)
                 self.assertIsNone(result)
-        result = ppl_guard.decide(payload(None, "Bash",
-                                          {"command": "git push " + ">&" * 2000 + " +main"},
-                                          cwd="/tmp/elsewhere"))
+        result = decide(payload(None, "Bash",
+                                {"command": "git push " + ">&" * 2000 + " +main"},
+                                cwd="/tmp/elsewhere"), ())
         self.assertIn("force push", self.deny_reason(result)[:80])
 
     def test_git_stash_clear_and_a_bare_drop_are_denied(self):
@@ -767,14 +759,14 @@ class TestGuard(unittest.TestCase):
                         "git stash drop\nstash@{0}", "git stash drop 3",
                         "git stash drop stash@{0}x", "git stash drop -q\n-q stash@{0}"):
             for agent in (None, "ppl-code-worker"):
-                result = ppl_guard.decide(payload(agent, "Bash", {"command": command}))
+                result = decide(payload(agent, "Bash", {"command": command}))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
                 self.assertIn("stash", self.deny_reason(result), command)
 
     def test_git_stash_pop_is_still_denied(self):
         # rule: R-GIT-STASH
         for command in ("git stash pop", "git stash pop stash@{0}", "git stash 'pop'"):
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
 
     def test_a_stash_drop_naming_its_entry_is_allowed(self):
@@ -785,7 +777,7 @@ class TestGuard(unittest.TestCase):
                         "git -C /tmp/repo stash drop stash@{2}",
                         'git stash drop "stash@{1}" && git stash list'):
             for agent in (None, "ppl-code-worker"):
-                self.assertIsNone(ppl_guard.decide(payload(
+                self.assertIsNone(decide(payload(
                     agent, "Bash", {"command": command})), command)
 
     def test_the_stash_drop_shape_stays_fast_on_decoys(self):
@@ -801,7 +793,7 @@ class TestGuard(unittest.TestCase):
                                 ("git" + " -a" * 34 + " stash drop", True)):
             with self.subTest(command=command[:40], denied=denied):
                 start = time.perf_counter()
-                result = ppl_guard.decide(payload(None, "Bash", {"command": command}))
+                result = decide(payload(None, "Bash", {"command": command}))
                 self.assertLess(time.perf_counter() - start, 0.2)
                 if denied:
                     self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -812,7 +804,7 @@ class TestGuard(unittest.TestCase):
         for command in ("git stash push -u -m ppl-700", "git stash push -m x",
                         "git stash apply 1a2b3c4", "git stash list",
                         "git stash show -p stash@{0}"):
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Bash", {"command": command})), command)
 
     def test_git_denials_stay_fast_on_backtracking_flag_decoys(self):
@@ -839,7 +831,7 @@ class TestGuard(unittest.TestCase):
                              ('git -C "' + 'a\\"' * 2000 + '" add -A', "credential")):
             with self.subTest(command=command[:40]):
                 start = time.perf_counter()
-                result = ppl_guard.decide(payload(None, "Bash", {"command": command}))
+                result = decide(payload(None, "Bash", {"command": command}))
                 self.assertLess(time.perf_counter() - start, 0.2)
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
                 self.assertIn(why, self.deny_reason(result))
@@ -876,12 +868,12 @@ class TestGuard(unittest.TestCase):
                         'git -C "a\\\nb" add -A',
                         'git -c "k=a\\\nb" push --force origin x',
                         "git -C a\\\nb add -A"):
-            result = ppl_guard.decide(payload(None, "Bash", {"command": command}))
+            result = decide(payload(None, "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
         for command in ("git -c push.default=current push origin main",
                         "git -C /tmp/x status -s",
                         "git stash push -u -m tag"):
-            self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": command})),
+            self.assertIsNone(decide(payload(None, "Bash", {"command": command})),
                               command)
 
     def test_git_denials_see_a_terminator_glued_to_the_option(self):
@@ -904,7 +896,7 @@ class TestGuard(unittest.TestCase):
                         "git add ..",
                         "git push -f;echo",
                         "git push origin x -f>/dev/null"):
-            result = ppl_guard.decide(payload(None, "Bash", {"command": command}))
+            result = decide(payload(None, "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
         for command in ("git add -Ax",
                         "git add src/test/Foo.java",
@@ -914,7 +906,7 @@ class TestGuard(unittest.TestCase):
                         "git stash-list",
                         "git stash list",
                         "git stash push -u -m tag"):
-            self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": command})),
+            self.assertIsNone(decide(payload(None, "Bash", {"command": command})),
                               command)
 
     def test_git_denials_skip_plain_options_before_the_dangerous_one(self):
@@ -942,7 +934,7 @@ class TestGuard(unittest.TestCase):
                         "git push '-fu' origin x",
                         "git push -f4 origin x",
                         "git push -4f origin x"):
-            result = ppl_guard.decide(payload(None, "Bash", {"command": command}))
+            result = decide(payload(None, "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
         for command in ("git add -v src/test/Foo.java",
                         "git add -f src/x",
@@ -956,14 +948,14 @@ class TestGuard(unittest.TestCase):
                         "git push -u origin x",
                         "git push -4 origin x",
                         "git push --follow-tags origin x"):
-            self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": command})),
+            self.assertIsNone(decide(payload(None, "Bash", {"command": command})),
                               command)
         # A long option run has one parse whether the dangerous option follows
         # or not, so both shapes are decided at once.
         for command, denied in (("git add " + "-v " * 2000 + "-A", True),
                                 ("git add " + "-v " * 2000 + "src/x", False)):
             start = time.perf_counter()
-            result = ppl_guard.decide(payload(None, "Bash", {"command": command}))
+            result = decide(payload(None, "Bash", {"command": command}))
             self.assertLess(time.perf_counter() - start, 0.2)
             self.assertEqual(result is not None, denied, command[:20])
 
@@ -978,16 +970,16 @@ class TestGuard(unittest.TestCase):
         just_over = ("git -a " * 700)[:limit + 1]
         for agent in ("ppl-code-worker", "ppl-test-worker", "ppl-review-responder"):
             start = time.perf_counter()
-            result = ppl_guard.decide(payload(agent, "Bash", {"command": just_over}))
+            result = decide(payload(agent, "Bash", {"command": just_over}))
             self.assertLess(time.perf_counter() - start, 0.01)
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), agent)
             self.assertIn("may not exceed 4096 characters", self.deny_reason(result), agent)
         # The cap is about length, not content: a harmless long command is
         # refused the same way, and one exactly at the cap is not.
         harmless = "echo " + "x" * limit
-        result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": harmless}))
+        result = decide(payload("ppl-code-worker", "Bash", {"command": harmless}))
         self.assertIn("may not exceed 4096 characters", self.deny_reason(result))
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": harmless[:limit]})))
         # Just under the cap every pattern runs on the worst shapes, and the
         # decision must still land well inside the hook budget. The two
@@ -1001,7 +993,7 @@ class TestGuard(unittest.TestCase):
                         ("git push " * 80 + "-" + "f" * 3900 + "1")[:limit],
                         push_cluster, add_cluster):
             start = time.perf_counter()
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertLess(time.perf_counter() - start, 1.0, command[:20])
             self.assertTrue(result is None or "may not exceed" not in self.deny_reason(result))
 
@@ -1012,8 +1004,8 @@ class TestGuard(unittest.TestCase):
         # own reason, not for its length.
         harmless = "echo " + "x" * 16384
         self.assertGreater(len(harmless), ppl_guard.ROLE_COMMAND_LENGTH_LIMIT)
-        self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": harmless})))
-        result = ppl_guard.decide(payload(None, "Bash", {"command": harmless + "; git reset --hard"}))
+        self.assertIsNone(decide(payload(None, "Bash", {"command": harmless})))
+        result = decide(payload(None, "Bash", {"command": harmless + "; git reset --hard"}))
         self.assertIn("hard reset", self.deny_reason(result))
         self.assertNotIn("may not exceed", self.deny_reason(result))
 
@@ -1038,12 +1030,12 @@ class TestGuard(unittest.TestCase):
                         "git push>/dev/null --force origin x",
                         "git 'reset' '--hard'",
                         r"git reset \--hard"):
-            result = ppl_guard.decide(payload(None, "Bash", {"command": command}))
+            result = decide(payload(None, "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
         for command in ('git commit -m "add -A later"',
                         "git commit -m 'stash'",
                         "git push origin main"):
-            self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": command})),
+            self.assertIsNone(decide(payload(None, "Bash", {"command": command})),
                               command)
 
     # --- finding 3: a Bash write into runs/ bypassed the run-state protection
@@ -1052,36 +1044,36 @@ class TestGuard(unittest.TestCase):
     def test_bash_redirect_into_runs_dir_is_denied(self):
         # rule: R-RUNS-BASH-WRITE
         target = str(paths.run_dir("DEMO-700") / "state.json")
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             None, "Bash", {"command": "echo x > %s" % target}))
         self.assertIsNotNone(result)
 
     def test_bash_tee_into_runs_dir_is_denied(self):
         # rule: R-RUNS-BASH-WRITE
         target = str(paths.run_dir("DEMO-700") / "state.json")
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             None, "Bash", {"command": "echo x | tee %s" % target})))
 
     def test_bash_sed_inplace_on_runs_dir_is_denied(self):
         # rule: R-RUNS-BASH-WRITE
         target = str(paths.run_dir("DEMO-700") / "state.json")
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             None, "Bash", {"command": "sed -i '' 's/a/b/' %s" % target})))
 
     def test_bash_rm_in_runs_dir_is_denied(self):
         target = str(paths.run_dir("DEMO-700") / "state.json")
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             None, "Bash", {"command": "rm %s" % target})))
 
     def test_bash_cp_into_runs_dir_is_denied(self):
         target = str(paths.run_dir("DEMO-700") / "state.json")
-        self.assertIsNotNone(ppl_guard.decide(payload(
+        self.assertIsNotNone(decide(payload(
             None, "Bash", {"command": "cp /tmp/x.json %s" % target})))
 
     def test_bash_read_of_runs_dir_is_allowed(self):
         # conservative deny only, not a blanket ban - a plain read must pass
         target = str(paths.run_dir("DEMO-700") / "state.json")
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             None, "Bash", {"command": "cat %s" % target})))
 
     # --- the runs-root check resolves the target, so another spelling of the
@@ -1109,8 +1101,8 @@ class TestGuard(unittest.TestCase):
             for agent in (None, "ppl-code-worker", "ppl-test-worker"):
                 for command in commands:
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_cd_relative_bash_write_into_runs_is_denied_for_every_caller(self):
@@ -1120,23 +1112,24 @@ class TestGuard(unittest.TestCase):
         cd_command = "cd %s && cd runs/DEMO-700 && echo x > state.json" % tilde
         with patched:
             for agent in (None, "ppl-code-worker"):
-                result = ppl_guard.decide(payload(agent, "Bash", {"command": cd_command},
-                                                  cwd="/tmp/elsewhere"))
+                result = decide(payload(agent, "Bash", {"command": cd_command},
+                                        cwd="/tmp/elsewhere"))
                 self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, agent))
                 # relative to the session's own cwd, with no cd at all
-                result = ppl_guard.decide(payload(
+                result = decide(payload(
                     agent, "Bash", {"command": "echo x > runs/DEMO-700/state.json"},
                     cwd=data_root))
                 self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, agent))
 
     def test_bash_write_into_runs_with_no_active_run_is_still_denied(self):
         # rule: R-RUNS-BASH-WRITE
-        # global, no run required: the check runs before active_state()
+        # global, no run required: the check runs before bound_state(), so a
+        # session in no lane meets it too
         patched, tilde = self.home_spelled()
         command = "echo x > %s/runs/DEMO-700/state.json" % tilde
-        with patched, mock.patch.object(ppl_guard.run, "active", return_value=None):
-            result = ppl_guard.decide(payload(None, "Bash", {"command": command},
-                                              cwd="/tmp/elsewhere"))
+        with patched:
+            result = decide(payload(None, "Bash", {"command": command},
+                                    cwd="/tmp/elsewhere"), ())
         self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, "no active run"))
 
     def test_home_variable_spelling_is_denied_for_a_role_by_the_unresolvable_target_rule(self):
@@ -1145,7 +1138,7 @@ class TestGuard(unittest.TestCase):
         # judge `$HOME/...`. A role is still denied, by the write boundary's
         # fail-closed rule for a target it cannot resolve. An unroled session
         # outside the repo is not: R-RUNS-BASH-WRITE's residual says so.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "echo x > $HOME/.ppl/runs/DEMO-700/state.json"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -1155,11 +1148,11 @@ class TestGuard(unittest.TestCase):
         # control.json is the operator's inbox: the unroled session keeps the carve-out
         patched, tilde = self.home_spelled()
         with patched:
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 None, "Bash",
                 {"command": "echo '{}' > %s/runs/DEMO-700/control.json" % tilde},
                 cwd="/tmp/elsewhere")))
-            result = ppl_guard.decide(payload(
+            result = decide(payload(
                 None, "Bash", {"command": "echo '{}' > %s/runs/DEMO-700/state.json" % tilde},
                 cwd="/tmp/elsewhere"))
         self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, "unroled state.json"))
@@ -1175,8 +1168,8 @@ class TestGuard(unittest.TestCase):
             for agent in ("ppl-code-worker", "ppl-test-worker", "ppl-review-responder"):
                 for command in commands:
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_a_subshell_brace_group_pushd_or_env_cd_into_runs_is_followed(self):
@@ -1196,8 +1189,8 @@ class TestGuard(unittest.TestCase):
             for agent in (None, "ppl-code-worker"):
                 for command in commands:
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_a_wrapper_in_front_of_a_write_verb_is_unwrapped(self):
@@ -1223,8 +1216,8 @@ class TestGuard(unittest.TestCase):
             for agent in (None, "ppl-code-worker"):
                 for command in commands:
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_a_path_spelled_verb_or_wrapper_is_read_by_its_name(self):
@@ -1240,11 +1233,11 @@ class TestGuard(unittest.TestCase):
             for agent in (None, "ppl-code-worker"):
                 for command in commands:
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
             # a cd spelled by path is a program of its own and moves no shell
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 None, "Bash", {"command": "/usr/bin/cd %s && echo x > notes.txt" % run_dir},
                 cwd="/tmp/elsewhere")))
 
@@ -1253,7 +1246,7 @@ class TestGuard(unittest.TestCase):
         test_source = "source/core/orders/src/test/java/FooTest.java"
         for command in ("/bin/cp /tmp/x %s" % test_source,
                         "/usr/bin/nohup cp /tmp/x %s" % test_source):
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             self.assertIn("test", self.deny_reason(result), command)
 
@@ -1267,7 +1260,7 @@ class TestGuard(unittest.TestCase):
                             "nohup cd %s/runs/DEMO-700 && echo x > notes.txt" % tilde,
                             "nice cd %s/runs/DEMO-700; echo x > notes.txt" % tilde):
                 for agent in (None, "ppl-code-worker"):
-                    self.assertIsNone(ppl_guard.decide(payload(
+                    self.assertIsNone(decide(payload(
                         agent, "Bash", {"command": command}, cwd="/tmp/elsewhere")),
                         "%s: %s" % (agent, command))
 
@@ -1278,7 +1271,7 @@ class TestGuard(unittest.TestCase):
                 ("nice -n 5 tee source/core/orders/src/test/java/FooTest.java", "test"),
                 # a wrapper option this does not know: the target is not pinned down
                 ("nice --weird cp /tmp/x source/core/orders/Foo.java", "could not be resolved")):
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             self.assertIn(why, self.deny_reason(result), command)
 
@@ -1301,8 +1294,8 @@ class TestGuard(unittest.TestCase):
         command = "env -C %s/runs/DEMO-700 sh -c 'echo x > boundary.json'" % tilde
         with patched:
             for agent in (None, "ppl-code-worker"):
-                self.assertIsNone(ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                           cwd="/tmp/elsewhere")), agent)
+                self.assertIsNone(decide(payload(agent, "Bash", {"command": command},
+                                                 cwd="/tmp/elsewhere")), agent)
 
     def test_a_subshell_or_pushd_cd_ends_where_the_shell_says(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY
@@ -1315,13 +1308,13 @@ class TestGuard(unittest.TestCase):
                             "(cd /tmp && true) && echo x > %s" % test_source,
                             "pushd /tmp && popd && echo x > %s" % test_source,
                             "env -C /tmp true > %s" % test_source):
-                result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+                result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             for command, cwd in (("(cd /tmp && echo x > y)", "/tmp/repo"),
                                  ("pushd %s/runs/DEMO-700 && cat state.json" % tilde, "/tmp/elsewhere"),
                                  ("(cd %s/runs/DEMO-700) && echo x > notes.txt" % tilde, "/tmp/elsewhere"),
                                  ("env -C %s/runs/DEMO-700 true > notes.txt" % tilde, "/tmp/elsewhere")):
-                self.assertIsNone(ppl_guard.decide(payload(
+                self.assertIsNone(decide(payload(
                     "ppl-code-worker", "Bash", {"command": command}, cwd=cwd)), command)
 
     def test_a_redirect_on_a_cd_pushd_or_popd_is_still_a_write(self):
@@ -1332,11 +1325,11 @@ class TestGuard(unittest.TestCase):
                         "command cd /tmp > %s" % test_source,
                         "builtin cd . > %s" % test_source, "cd . > %s" % test_source,
                         "pushd /tmp >> %s" % test_source, "cd /tmp 2>%s" % test_source):
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             self.assertIn("test", self.deny_reason(result), command)
-        result = ppl_guard.decide(payload(None, "Bash",
-                                          {"command": "pushd /tmp > %s" % test_source}))
+        result = decide(payload(None, "Bash",
+                                {"command": "pushd /tmp > %s" % test_source}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_a_redirect_on_a_cd_into_runs_is_denied_for_every_caller(self):
@@ -1349,8 +1342,8 @@ class TestGuard(unittest.TestCase):
                             "cd > %s" % state):
                 for agent in (None, "ppl-code-worker"):
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_a_cd_with_a_harmless_redirect_still_moves_the_shell(self):
@@ -1358,7 +1351,7 @@ class TestGuard(unittest.TestCase):
         for command in ("pushd /tmp > /dev/null && echo x > y",
                         "cd /tmp 2>/dev/null && echo x > y",
                         "pushd /tmp >/dev/null 2>&1; cp /tmp/a b"):
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Bash", {"command": command})), command)
 
     def test_a_quoted_paren_does_not_close_the_subshell(self):
@@ -1373,8 +1366,8 @@ class TestGuard(unittest.TestCase):
                             "(cd %s && echo x > 'notes)')" % run_dir):
                 for agent in (None, "ppl-code-worker"):
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_a_quoted_paren_inside_a_subshell_keeps_its_directory(self):
@@ -1382,9 +1375,9 @@ class TestGuard(unittest.TestCase):
         test_source = "source/core/orders/src/test/java/FooTest.java"
         for command in ('(cd /tmp && echo "x)" > y)',
                         "(cd /tmp && echo x > 'y)' && echo z > %s)" % test_source):
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Bash", {"command": command})), command)
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "(cd /tmp && echo 'y)'); echo z > %s" % test_source}))
         self.assertIn("test", self.deny_reason(result))
@@ -1398,14 +1391,14 @@ class TestGuard(unittest.TestCase):
                         "{ cd /tmp; echo x; } > %s" % test_source,
                         "( cd /tmp && ( cd /var && echo n ) > x ) > %s" % test_source,
                         '(cd /tmp && echo "x)") > %s' % test_source):
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             self.assertIn("test", self.deny_reason(result), command)
 
     def test_a_closer_with_no_group_resolves_its_redirect_everywhere(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY
         test_source = "source/core/orders/src/test/java/FooTest.java"
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash", {"command": "echo x ) > %s" % test_source}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         self.assertIn("test", self.deny_reason(result))
@@ -1418,7 +1411,7 @@ class TestGuard(unittest.TestCase):
         for command in ("(cd /tmp && echo x) < /dev/null; echo y > %s" % test_source,
                         "(cd /tmp && echo x) <<< hi; echo y > %s" % test_source,
                         "(cd /tmp && echo x) # note\necho y > %s" % test_source):
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             self.assertIn("test", self.deny_reason(result), command)
         # a `}` keeps the cwd its group moved to, an input redirect or not
@@ -1431,8 +1424,8 @@ class TestGuard(unittest.TestCase):
         with patched:
             for agent in (None, "ppl-code-worker"):
                 command = "(cd /tmp) < /dev/null; echo x > state.json"
-                result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                  cwd=str(paths.run_dir("DEMO-700"))))
+                result = decide(payload(agent, "Bash", {"command": command},
+                                        cwd=str(paths.run_dir("DEMO-700"))))
                 self.assertIn("BOUNDARY_VIOLATION",
                               self.run_state_denial(result, "%s: %s" % (agent, command)))
 
@@ -1448,7 +1441,7 @@ class TestGuard(unittest.TestCase):
                         "cd /tmp && echo x & echo y > %s" % test_source,
                         "(cd /tmp && echo x) & echo y; echo z > %s" % test_source,
                         "{ cd /tmp; } & echo y; echo z > %s" % test_source):
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             self.assertIn("test", self.deny_reason(result), command)
 
@@ -1460,21 +1453,21 @@ class TestGuard(unittest.TestCase):
                             "true & cp /tmp/x %s/runs/DEMO-700/state.json" % tilde):
                 for agent in (None, "ppl-code-worker"):
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_an_fd_ampersand_or_a_quoted_one_is_no_command_end(self):
         for command in ('curl "http://x?a=1&b=2" > /tmp/o.json',
                         "make 2>&1 & echo y > /tmp/out", "make &> /tmp/l; echo $? > /tmp/rc",
                         "cat <&0 > /tmp/out"):
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Bash", {"command": command})), command)
         self.assertEqual(ppl_guard._bash_write_targets(
             "cd /tmp && echo x & cd /var; echo y > g", "/tmp/repo"), [("g", "/var", False)])
 
     def test_a_redirect_after_a_group_outside_the_repo_is_still_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "(cd /tmp && echo x) > /tmp/out"})))
 
     def test_a_group_redirect_target_is_resolved_where_the_shell_opens_it(self):
@@ -1494,16 +1487,16 @@ class TestGuard(unittest.TestCase):
         patched, tilde = self.home_spelled()
         command = "(cd %s/runs/DEMO-700 && echo x) > out.txt" % tilde
         with patched:
-            self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": command},
-                                                       cwd="/tmp/elsewhere")))
+            self.assertIsNone(decide(payload(None, "Bash", {"command": command},
+                                             cwd="/tmp/elsewhere")))
 
     def test_a_group_redirect_into_runs_with_no_active_run_is_denied(self):
         # rule: R-RUNS-BASH-WRITE
         patched, tilde = self.home_spelled()
         command = "(cd /tmp && echo x) > %s/runs/DEMO-700/state.json" % tilde
-        with patched, mock.patch.object(ppl_guard.run, "active", return_value=None):
-            result = ppl_guard.decide(payload(None, "Bash", {"command": command},
-                                              cwd="/tmp/elsewhere"))
+        with patched:
+            result = decide(payload(None, "Bash", {"command": command},
+                                    cwd="/tmp/elsewhere"), ())
         self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, "no active run"))
 
     def test_a_redirect_glued_to_a_word_is_a_redirect(self):
@@ -1514,7 +1507,7 @@ class TestGuard(unittest.TestCase):
                         "echo x>>%s" % test_source, "echo x&>%s" % test_source,
                         "echo 1&>%s" % test_source, "cat /tmp/a.txt>%s" % test_source,
                         "echo '1'>%s" % test_source, "printf %%s --x=1>%s" % test_source):
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             self.assertIn("test", self.deny_reason(result), command)
 
@@ -1526,8 +1519,8 @@ class TestGuard(unittest.TestCase):
                             "echo x>|%s/runs/DEMO-700/state.json" % tilde):
                 for agent in (None, "ppl-code-worker"):
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_a_quoted_or_escaped_angle_bracket_is_no_redirect(self):
@@ -1536,12 +1529,12 @@ class TestGuard(unittest.TestCase):
                         'echo "a>b" > /tmp/x', "echo a\\>b > /tmp/x",
                         "awk '$1>2' %s > /tmp/out" % main_source,
                         "echo x 2>/dev/null", "echo x 2>&1", "echo $?>/tmp/rc"):
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Bash", {"command": command})), command)
 
     def test_closing_an_fd_names_no_file(self):
         for command in ("echo x 2>&-", "echo x >&-", "exec 3>&-"):
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Bash", {"command": command})), command)
 
     def test_popd_on_an_empty_stack_keeps_the_directory(self):
@@ -1556,8 +1549,8 @@ class TestGuard(unittest.TestCase):
                                   str(paths.run_dir("DEMO-700")))):
                 for agent in (None, "ppl-code-worker"):
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd=cwd))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd=cwd))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_the_cd_and_grouping_walk_stays_linear(self):
@@ -1593,15 +1586,15 @@ class TestGuard(unittest.TestCase):
             for command in ("echo x >| %s/runs/DEMO-700/state.json" % tilde,
                             "echo x >|%s/runs/DEMO-700/state.json" % tilde,
                             "echo x 2>| %s/runs/DEMO-700/state.json" % tilde):
-                result = ppl_guard.decide(payload(None, "Bash", {"command": command},
-                                                  cwd="/tmp/elsewhere"))
+                result = decide(payload(None, "Bash", {"command": command},
+                                        cwd="/tmp/elsewhere"))
                 self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, command))
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "echo x >| source/core/orders/src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         for command in ("echo x >| /tmp/x", "echo x >|/tmp/x"):
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Bash", {"command": command})), command)
 
     def test_removing_or_moving_a_parent_of_runs_is_denied(self):
@@ -1613,8 +1606,8 @@ class TestGuard(unittest.TestCase):
                             "rm -rf /"):
                 for agent in (None, "ppl-code-worker"):
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_writing_beside_runs_under_the_data_root_is_allowed(self):
@@ -1626,7 +1619,7 @@ class TestGuard(unittest.TestCase):
                             "rm -rf %s/runs-old" % tilde, "rm -rf %s/runsX" % tilde,
                             "mv %s/runsX %s/runs-old" % (tilde, tilde)):
                 for agent in (None, "ppl-code-worker"):
-                    self.assertIsNone(ppl_guard.decide(payload(
+                    self.assertIsNone(decide(payload(
                         agent, "Bash", {"command": command}, cwd="/tmp/elsewhere")),
                         "%s: %s" % (agent, command))
 
@@ -1641,7 +1634,7 @@ class TestGuard(unittest.TestCase):
                                  ("cp x %s/" % tilde, "/tmp/elsewhere"),
                                  ("cp /tmp/x .", str(paths.home().parent))):
                 for agent in (None, "ppl-code-worker"):
-                    self.assertIsNone(ppl_guard.decide(payload(
+                    self.assertIsNone(decide(payload(
                         agent, "Bash", {"command": command}, cwd=cwd)),
                         "%s: %s" % (agent, command))
 
@@ -1654,8 +1647,8 @@ class TestGuard(unittest.TestCase):
                             "rsync -a --delete /tmp/src/ ~/", "rsync -a --del /tmp/src/ ~/"):
                 for agent in (None, "ppl-code-worker"):
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_a_copy_whose_own_name_lands_on_runs_is_denied(self):
@@ -1670,8 +1663,8 @@ class TestGuard(unittest.TestCase):
                             "mv /tmp/fake/runs %s" % tilde):
                 for agent in (None, "ppl-code-worker"):
                     label = "%s: %s" % (agent, command)
-                    result = ppl_guard.decide(payload(agent, "Bash", {"command": command},
-                                                      cwd="/tmp/elsewhere"))
+                    result = decide(payload(agent, "Bash", {"command": command},
+                                            cwd="/tmp/elsewhere"))
                     self.assertIn("BOUNDARY_VIOLATION", self.run_state_denial(result, label))
 
     def test_the_resolved_runs_check_stays_linear_on_a_long_command(self):
@@ -1685,7 +1678,7 @@ class TestGuard(unittest.TestCase):
     def test_tilde_spelled_bash_write_under_the_data_root_but_outside_runs_is_allowed(self):
         patched, tilde = self.home_spelled()
         with patched:
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Bash", {"command": "echo x > %s/notes.txt" % tilde},
                 cwd="/tmp/elsewhere")))
 
@@ -1696,16 +1689,16 @@ class TestGuard(unittest.TestCase):
         if real == runs_root:
             self.skipTest("the runs directory has no symlinked alias on this machine")
         target = os.path.join(real, "DEMO-700", "state.json")
-        result = ppl_guard.decide(payload(None, "Write", {"file_path": target},
-                                          cwd="/tmp/elsewhere"))
+        result = decide(payload(None, "Write", {"file_path": target},
+                                cwd="/tmp/elsewhere"))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         self.assertIn("run state is written only by ppl", self.deny_reason(result))
 
     def test_structured_write_into_runs_relative_to_the_session_cwd_is_denied(self):
         # rule: R-RUNS-WRITE-PROTECTION
-        result = ppl_guard.decide(payload(None, "Write",
-                                          {"file_path": "runs/DEMO-700/state.json"},
-                                          cwd=str(paths.home())))
+        result = decide(payload(None, "Write",
+                                {"file_path": "runs/DEMO-700/state.json"},
+                                cwd=str(paths.home())))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         self.assertIn("run state is written only by ppl", self.deny_reason(result))
 
@@ -1718,17 +1711,15 @@ class TestGuard(unittest.TestCase):
         link_repo = link_parent / "repo"
         link_repo.symlink_to(real_repo, target_is_directory=True)
         run.init("DEMO-705", "u", str(real_repo))
+        fixtures.bind_lane("DEMO-705", real_repo)
         store.write_json(paths.run_dir("DEMO-705") / "boundary.json",
                          {"write": ["src/**"], "forbid": []})
-        try:
-            result = ppl_guard.decide(payload(
-                "ppl-code-worker", "Edit",
-                {"file_path": str(link_repo / "outside" / "Foo.java")},
-                cwd=str(link_repo)))
-            self.assertIsNotNone(result)
-            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
-        finally:
-            run.set_active("DEMO-700")
+        result = decide(payload(
+            "ppl-code-worker", "Edit",
+            {"file_path": str(link_repo / "outside" / "Foo.java")},
+            cwd=str(link_repo)), ["--task", "DEMO-705"])
+        self.assertIsNotNone(result)
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     # --- finding 6: minor robustness fixes folded in alongside the above ---
 
@@ -1741,7 +1732,7 @@ class TestGuard(unittest.TestCase):
         # the downstream boundary check, masking a regression in this specific
         # exact-match fix.
         target = str(paths.run_dir("DEMO-700") / "evilcontrol.json")
-        self.assertIsNotNone(ppl_guard.decide(
+        self.assertIsNotNone(decide(
             payload(None, "Write", {"file_path": target})))
 
     def test_jira_check_does_not_raise_on_state_missing_stage_key(self):
@@ -1749,7 +1740,7 @@ class TestGuard(unittest.TestCase):
         stage_backup = state.pop("stage")
         run.save(state)
         try:
-            result = ppl_guard.decide(payload(
+            result = decide(payload(
                 None, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"}))
             self.assertIsNotNone(result)
         finally:
@@ -1763,7 +1754,7 @@ class TestGuard(unittest.TestCase):
 
     def test_code_worker_marking_its_own_finding_fixed_is_denied(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "ppl findings status --finding-id F1 --status fixed "
                         "--fix-link x --generation 1"}))
@@ -1771,20 +1762,20 @@ class TestGuard(unittest.TestCase):
 
     def test_a_role_may_not_accept_a_lesson(self):
         # rule: R-LESSONS-OWNER-ACCEPTS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash", {"command": "ppl lessons accept KEY-1.1"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_deleting_a_finding_is_denied(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "ppl findings delete --finding-id F1 --reason done"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_code_worker_recording_its_own_passing_evidence_is_denied(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "ppl evidence add --check build --result pass "
                         "--generation 1"}))
@@ -1792,36 +1783,36 @@ class TestGuard(unittest.TestCase):
 
     def test_code_worker_opening_its_own_done_gate_is_denied(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash", {"command": "ppl transition done"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_a_role_recording_the_merge_to_open_the_tracker_gate_is_denied(self):
         # rule: R-GUARD-PPL-CLI-DENIED
         for agent in ("ppl-code-worker", "ppl-review-responder"):
-            result = ppl_guard.decide(payload(
+            result = decide(payload(
                 agent, "Bash", {"command": "ppl merge observed --sha " + "a" * 40}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), agent)
 
     def test_code_worker_listing_findings_is_still_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "ppl findings list --task DEMO-700"})))
 
     def test_code_worker_running_ppl_show_is_still_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "ppl show --task DEMO-700"})))
 
     def test_the_deny_message_names_ppl_show_in_the_form_the_cage_allows(self):
         # rule: R-GUARD-PPL-CLI-DENIED
         # `ppl show` takes --task, not a positional id, and the cage reads
         # `show DEMO-700` as an unknown pair. The message names the form that passes.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash", {"command": "ppl transition done"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         self.assertIn("ppl show --task <id>", self.deny_reason(result))
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "ppl show --task DEMO-700"})))
-        positional = ppl_guard.decide(payload(
+        positional = decide(payload(
             "ppl-code-worker", "Bash", {"command": "ppl show DEMO-700"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(positional))
 
@@ -1829,7 +1820,7 @@ class TestGuard(unittest.TestCase):
         # ~/.ppl is the default data root, so a role listing it is ordinary
         for command in ("ls ~/.ppl", "cd ~/.ppl && ls", "ls -la ~/.ppl; echo done",
                         "ls /home/dev/.ppl | head"):
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Bash", {"command": command})), command)
 
     def test_a_ppl_invoked_by_path_is_still_denied(self):
@@ -1837,13 +1828,13 @@ class TestGuard(unittest.TestCase):
         # only a preceding dot is excluded: a path to the launcher is still ppl
         for command in ("bin/ppl transition done", "ppl transition done",
                         "~/antline/bin/ppl transition done", "./ppl transition done"):
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
 
     def test_orchestrator_with_no_role_may_still_run_ppl_transition_done(self):
         # the orchestrator (agent_type None) is not a ppl-* role and drives
         # ppl itself - this check must not reach it at all.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             None, "Bash", {"command": "ppl transition done"})))
 
     # --- round 2 review: .search() found only the FIRST "ppl ..." occurrence,
@@ -1853,7 +1844,7 @@ class TestGuard(unittest.TestCase):
 
     def test_a_readonly_call_does_not_hide_a_second_unsafe_one_after_and(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "ppl show --json && ppl findings status abc fixed "
                         "--fix-link x --generation 1"}))
@@ -1861,13 +1852,13 @@ class TestGuard(unittest.TestCase):
 
     def test_a_readonly_call_does_not_hide_a_second_unsafe_one_after_semicolon(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash", {"command": "ppl status; ppl transition done"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_a_readonly_findings_list_does_not_hide_a_findings_delete(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "ppl findings list && ppl findings delete abc --reason x"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -1876,7 +1867,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-PPL-CLI-DENIED
         # a flag ahead of the subcommand (--task before findings) does not
         # match the expected shape at all - that must not default to allow.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "ppl --task DEMO-1 findings status abc fixed"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -1888,33 +1879,33 @@ class TestGuard(unittest.TestCase):
 
     def test_python_dash_m_ppl_cli_invocation_is_denied(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "python3 -m ppl.cli findings status abc fixed"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_python_dash_m_ppl_invocation_without_dot_cli_is_denied(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash", {"command": "python3 -m ppl transition done"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_a_readonly_ppl_call_does_not_hide_a_python_dash_m_one(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "ppl show && python3 -m ppl.cli transition done"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_python_dash_m_ppl_read_only_lookup_is_still_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "python3 -m ppl.cli show --task DEMO-700"})))
 
     def test_git_stash_tag_containing_ppl_is_still_not_a_false_positive(self):
         # the false-positive guard from round 2 - "ppl" inside an unrelated
         # token (a git stash tag) must not itself be read as an invocation.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "git stash push -u -m ppl-700"})))
 
@@ -1924,13 +1915,13 @@ class TestGuard(unittest.TestCase):
     # R-TEST-WORKER-BASH-READS. ---
 
     def test_test_worker_may_read_a_test_source(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Read",
             {"file_path": "/tmp/repo/source/core/orders/src/test/java/FooTest.java"})))
 
     def test_test_worker_may_not_read_a_main_source(self):
         # rule: R-TEST-WORKER-READ-TOOLS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Read",
             {"file_path": "/tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -1939,12 +1930,12 @@ class TestGuard(unittest.TestCase):
         # rule: R-TEST-WORKER-READ-TOOLS
         # cwd is the repo root in this fixture, not a test path - an omitted
         # path must not be read as "unscoped, therefore allowed".
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Grep", {"pattern": "TODO"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_grep_scoped_to_a_test_directory_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Grep",
             {"pattern": "AC-1", "path": "/tmp/repo/source/core/orders/src/test"})))
 
@@ -1956,11 +1947,11 @@ class TestGuard(unittest.TestCase):
         for tool, tool_input in (("Grep", {"pattern": "x", "path": "source/core/orders"}),
                                  ("Glob", {"pattern": "*.java", "path": "source/core/orders/src/main"}),
                                  ("Read", {"file_path": "source/core/orders/Foo.java"})):
-            result = ppl_guard.decide(payload("ppl-test-worker", tool, tool_input, cwd="/tmp/repo"))
+            result = decide(payload("ppl-test-worker", tool, tool_input, cwd="/tmp/repo"))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), tool)
 
     def test_test_worker_relative_read_of_a_test_path_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Grep", {"pattern": "AC-1", "path": "source/core/orders/src/test"},
             cwd="/tmp/repo")))
 
@@ -1968,29 +1959,29 @@ class TestGuard(unittest.TestCase):
         # rule: R-TEST-WORKER-READ-TOOLS
         tool_call = payload("ppl-test-worker", "Read", {"file_path": "source/core/orders/Foo.java"})
         del tool_call["cwd"]
-        result = ppl_guard.decide(tool_call)
+        result = decide(tool_call)
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_glob_over_test_sources_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Glob",
             {"pattern": "**/*Test.java",
              "path": "/tmp/repo/source/core/orders/src/test"})))
 
     def test_test_worker_reading_the_brief_outside_the_repo_is_allowed(self):
         target = str(paths.run_dir("DEMO-700") / "brief.json")
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Read", {"file_path": target})))
 
     def test_test_worker_cat_of_main_source_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "cat /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_cat_of_a_test_source_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "cat /tmp/repo/source/core/orders/src/test/java/FooTest.java"})))
 
@@ -1998,13 +1989,13 @@ class TestGuard(unittest.TestCase):
         # rule: R-TEST-WORKER-BASH-READS
         # an unrestricted diff can surface any changed file, main sources
         # included - "no pathspec" is not "no risk".
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash", {"command": "git diff"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_git_show_of_a_main_source_object_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "git show HEAD:source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2015,14 +2006,14 @@ class TestGuard(unittest.TestCase):
         # derived allowlist at all (the role has no documented need for
         # either), so this denies unconditionally now, not only when
         # unrestricted.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "git diff -- source/core/orders/src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_grep_of_main_source_via_bash_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "grep -rn TODO /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2033,14 +2024,14 @@ class TestGuard(unittest.TestCase):
         # a flag with no value at all on grep/rg's own "-n" for line numbers)
         # - a shared value-flag set would misread "TODO" here as -n's value
         # and let the real path fall through as grep's own pattern instead.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "grep -n TODO /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_sed_dash_n_of_main_source_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "sed -n '10,20p' /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2049,7 +2040,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-TEST-WORKER-BASH-READS
         # "-e" supplies grep's pattern as a flag value instead of
         # positionally - the file argument must still be checked as a path.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "grep -e TODO /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2058,14 +2049,14 @@ class TestGuard(unittest.TestCase):
         # rule: R-TEST-WORKER-BASH-READS
         # a global git flag (-C <dir>) sits between "git" and "diff" - the
         # gates recipe itself uses "git -C <worktree> diff" verbatim.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash", {"command": "git -C /tmp/repo diff"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_head_dash_n_of_a_test_source_is_still_allowed(self):
         # regression guard: fixing grep's per-verb value-flags must not break
         # head/tail's own "-n <count>" reading a test source.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "head -n 20 /tmp/repo/source/core/orders/"
                         "src/test/java/FooTest.java"})))
@@ -2078,19 +2069,19 @@ class TestGuard(unittest.TestCase):
     # cannot parse, denies. ---
 
     def test_test_worker_mvn_install_shape_from_gates_recipe_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "mvn install -pl :cat-service -am -DskipTests "
                         "-Dmaven.gitcommitid.skip=true"})))
 
     def test_test_worker_mvn_checkstyle_shape_from_gates_recipe_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "mvn -pl :cat-service -am "
                         "-Dmaven.gitcommitid.skip=true checkstyle:check"})))
 
     def test_test_worker_mvn_verify_shape_from_gates_recipe_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "mvn -pl :cat-service -am "
                         "-Dmaven.gitcommitid.skip=true verify"})))
@@ -2101,7 +2092,7 @@ class TestGuard(unittest.TestCase):
         # could invoke a plugin goal like exec:exec), must not pass just
         # because it looks like an mvn invocation - exactly one of the four
         # derived goals must be present.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "mvn -pl :cat-service -am -Dexec.mainClass=Foo"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2159,11 +2150,11 @@ class TestGuard(unittest.TestCase):
         saved = snap.read_text(encoding="utf-8")
         snap.unlink()
         try:
-            result = ppl_guard.decide(payload("ppl-test-worker", "Bash",
-                                              {"command": "mvn -pl :m -am test"}))
+            result = decide(payload("ppl-test-worker", "Bash",
+                                    {"command": "mvn -pl :m -am test"}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
-            self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Bash",
-                                                       {"command": "git status"})))
+            self.assertIsNone(decide(payload("ppl-test-worker", "Bash",
+                                             {"command": "git status"})))
         finally:
             snap.write_text(saved, encoding="utf-8")
 
@@ -2173,8 +2164,8 @@ class TestGuard(unittest.TestCase):
         saved = snap.read_text(encoding="utf-8")
         snap.write_text("{not json", encoding="utf-8")
         try:
-            result = ppl_guard.decide(payload("ppl-test-worker", "Bash",
-                                              {"command": "mvn -pl :m -am test"}))
+            result = decide(payload("ppl-test-worker", "Bash",
+                                    {"command": "mvn -pl :m -am test"}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
             # the test globs come from the same file, so the deny names it
             self.assertIn("runs/DEMO-700/harness.json", self.deny_reason(result))
@@ -2213,8 +2204,8 @@ class TestGuard(unittest.TestCase):
                 snap.write_text(text, encoding="utf-8")
                 for command in commands:
                     with self.subTest(snapshot=text[:80], command=command):
-                        result = ppl_guard.decide(payload("ppl-test-worker", "Bash",
-                                                          {"command": command}))
+                        result = decide(payload("ppl-test-worker", "Bash",
+                                                {"command": command}))
                         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         finally:
             snap.write_text(saved, encoding="utf-8")
@@ -2229,35 +2220,35 @@ class TestGuard(unittest.TestCase):
         self.assertFalse(matcher.allows(["mvn", "-pl", ":m", "-am", "test", long_token]))
 
     def test_test_worker_git_status_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash", {"command": "git status"})))
 
     def test_test_worker_git_add_of_a_test_path_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "git add /tmp/repo/source/core/orders/"
                         "src/test/java/FooTest.java"})))
 
     def test_test_worker_git_add_of_a_main_source_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "git add /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_git_commit_with_a_message_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash", {"command": "git commit -m 'add tests'"})))
 
     def test_test_worker_ls_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash", {"command": "ls -la source"})))
 
     def test_test_worker_command_substitution_denies_the_whole_command(self):
         # rule: R-TEST-WORKER-BASH-READS
         # the one construct that could smuggle an unrelated read inside an
         # otherwise-allowed shape (here, a commit message).
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "git commit -m \"$(cat /tmp/repo/source/core/orders/Foo.java)\""}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2271,8 +2262,8 @@ class TestGuard(unittest.TestCase):
                         "mvn -pl :m -am test -Dx=>(cp${IFS}src/main/java/Foo.java"
                         "${IFS}src/test/java/Leak.java)"):
             with self.subTest(command=command):
-                result = ppl_guard.decide(payload("ppl-test-worker", "Bash",
-                                                  {"command": command}))
+                result = decide(payload("ppl-test-worker", "Bash",
+                                        {"command": command}))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     # --- The coordinator's own 18-attempt probe against the blocklist
@@ -2280,90 +2271,90 @@ class TestGuard(unittest.TestCase):
 
     def test_probe_nl_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "nl /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_tac_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "tac /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_cut_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "cut -d' ' -f1 /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_od_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "od -c /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_xxd_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "xxd /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_strings_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "strings /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_more_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "more /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_diff_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "diff /tmp/repo/source/core/orders/Foo.java /dev/null"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_git_log_dash_p_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash", {"command": "git log -p"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_git_blame_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "git blame /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_git_cat_file_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "git cat-file -p HEAD:source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_python_dash_c_reading_a_file_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "python3 -c \"print(open('source/Main.java').read())\""}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_probe_while_read_redirected_from_a_main_source_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "while read l; do echo $l; done < "
                         "/tmp/repo/source/core/orders/Foo.java"}))
@@ -2373,14 +2364,14 @@ class TestGuard(unittest.TestCase):
         # no file argument at all means grep is filtering piped stdin, not
         # reading a path - a definite classification, not an unclassifiable
         # one, so this is not covered by the conservative-deny default.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash", {"command": "echo hello | grep hello"})))
 
     def test_test_worker_bash_c_wrapper_around_cat_of_main_source_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
         # the literal word "cat" survives inside the wrapper's quoted string -
         # same doctrine as R-GUARD-PPL-CLI-DENIED's bash -c case in Task 6.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "bash -c 'cat /tmp/repo/source/core/orders/Foo.java'"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2389,7 +2380,7 @@ class TestGuard(unittest.TestCase):
         # the gates recipe's real command shapes must keep working - none of
         # them is one of the watched read verbs, and the log/rc paths are
         # outside the repo, matching the recipe's own mktemp -d convention.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "JAVA_HOME=/opt/jdk mvn -pl :cat-service -am "
                         "-Dtest=FooTest -DfailIfNoTests=false "
@@ -2400,7 +2391,7 @@ class TestGuard(unittest.TestCase):
         # "cat" sits inside "cat-service" with no word boundary after it -
         # must not be misread as the cat command, same trap as the
         # "ppl-700" stash tag in R-GUARD-PPL-CLI-DENIED.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "mvn -pl :cat-service -am test"})))
 
@@ -2411,7 +2402,7 @@ class TestGuard(unittest.TestCase):
         # the first segment already denies the whole command, so no
         # cwd-tracking is needed to catch the climb through ".." that would
         # follow it.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "cd source/core/orders/src/test && cat ../Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2420,7 +2411,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-TEST-WORKER-BASH-READS
         # shlex keeps the brace as one token that matches **/src/test/**, and
         # the shell expands it into a read of src/main.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash", {"command": "cat src/test/{x,../main/Foo.java}"}))
         reason = self.deny_reason(result)
         self.assertIn("BOUNDARY_VIOLATION", reason)
@@ -2429,12 +2420,12 @@ class TestGuard(unittest.TestCase):
     def test_code_worker_reading_a_test_source_is_not_restricted(self):
         # mirror decision, recorded in DESIGN as R-CODE-WORKER-READS-UNRESTRICTED:
         # the code worker is NOT denied reads of test sources.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Read",
             {"file_path": "/tmp/repo/source/core/orders/src/test/java/FooTest.java"})))
 
     def test_code_worker_cat_of_a_main_source_is_not_restricted_by_this_check(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "cat /tmp/repo/source/core/orders/Foo.java"})))
 
@@ -2449,14 +2440,14 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
         # the exact C1 repro: identical to test_code_worker_may_not_edit_a_test
         # above, but through Bash instead of Write.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "echo x > /tmp/repo/source/core/orders/src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_bash_redirect_into_a_main_source_is_denied_absolute(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-TEST-WORKER-MAIN
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "echo pwned > /tmp/repo/source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2465,7 +2456,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-TEST-WORKER-MAIN
         # the relative-path variant: the target is resolved against the
         # session's cwd, not merely matched as a literal string.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "echo pwned > source/core/orders/Foo.java"},
             cwd="/tmp/repo"))
@@ -2476,7 +2467,7 @@ class TestGuard(unittest.TestCase):
         # the orchestrator's Bash write boundary too - cwd is deliberately
         # outside the repo, matching R-UNROLED-REPO-WRITE's own "the target
         # path is the honest question, not the cwd" doctrine.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             None, "Bash",
             {"command": "echo x > /tmp/repo/source/core/orders/Foo.java"},
             cwd="/home/dev/some/other/project"))
@@ -2484,13 +2475,13 @@ class TestGuard(unittest.TestCase):
 
     def test_code_worker_bash_redirect_inside_boundary_is_still_allowed(self):
         # the recipe workers actually use must keep working.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "echo x > source/core/orders/Foo.java"},
             cwd="/tmp/repo")))
 
     def test_test_worker_bash_redirect_into_a_test_source_is_still_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "echo x > source/core/orders/src/test/java/FooTest.java"},
             cwd="/tmp/repo")))
@@ -2499,7 +2490,7 @@ class TestGuard(unittest.TestCase):
         # a role's Bash legitimately writes build logs and rc files outside
         # the repo (references/gates.md's own recipe) - only a target that
         # resolves INSIDE the repo is this check's business.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "mvn -pl :m -am test > /tmp/build.log 2>&1; "
                         "echo $? > /tmp/build.rc"},
@@ -2508,14 +2499,14 @@ class TestGuard(unittest.TestCase):
     def test_code_worker_cp_into_a_test_source_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
         # cp is not a redirect - the same boundary decision must still apply.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "cp /tmp/x.java source/core/orders/src/test/java/FooTest.java"},
             cwd="/tmp/repo"))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_code_worker_rm_outside_the_repo_is_unaffected(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "rm /tmp/scratch.txt"},
             cwd="/tmp/repo")))
 
@@ -2523,7 +2514,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY
         # GNU's optional attached suffix and BSD's mandatory separate one
         # cannot be told apart lexically - fail closed rather than guess.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "sed -i 's/a/b/' source/core/orders/Foo.java"},
             cwd="/tmp/repo"))
@@ -2533,7 +2524,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY
         # a command substitution could be hiding the real target of a
         # write-shaped construct - fail closed rather than skip the check.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "cp $(pwd)/x.java source/core/orders/Foo.java"},
             cwd="/tmp/repo"))
@@ -2541,31 +2532,38 @@ class TestGuard(unittest.TestCase):
 
     def test_unrelated_session_ambiguous_write_elsewhere_is_not_denied(self):
         # the fail-closed direction above must not leak into other projects:
-        # an ordinary session with no ppl-* role, working outside any run's
-        # repo, must not be denied a sed -i just because some run happens to
-        # be active on this machine.
-        self.assertIsNone(ppl_guard.decide(payload(
+        # an ordinary session in no lane must not be denied a sed -i just
+        # because some run has a lane on this machine.
+        self.assertIsNone(decide(payload(
             None, "Bash", {"command": "sed -i 's/a/b/' notes.txt"},
-            cwd="/home/dev/some/other/project")))
+            cwd="/home/dev/some/other/project"), ()))
+
+    def test_the_lanes_own_ambiguous_write_elsewhere_is_denied(self):
+        # rule: R-GUARD-BASH-WRITE-BOUNDARY
+        # in the lane every call is the run's, whatever the cwd, so a target the
+        # hook cannot resolve is denied rather than allowed
+        result = decide(payload(None, "Bash", {"command": "sed -i 's/a/b/' notes.txt"},
+                                cwd="/home/dev/some/other/project"))
+        self.assertIn("could not be resolved", self.deny_reason(result))
 
     def test_code_worker_bash_write_to_a_forbidden_path_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-FORBIDDEN-PATHS
         run.init("DEMO-707", "u", "/tmp/repo")
+        fixtures.bind_lane("DEMO-707", "/tmp/repo")
         store.write_json(paths.run_dir("DEMO-707") / "boundary.json",
                          {"write": ["source/**"], "forbid": ["source/secrets/**"]})
-        try:
-            result = ppl_guard.decide(payload(
-                "ppl-code-worker", "Bash",
-                {"command": "echo x > source/secrets/key.pem"}, cwd="/tmp/repo"))
-            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
-        finally:
-            run.set_active("DEMO-700")
+        result = decide(payload(
+            "ppl-code-worker", "Bash",
+            {"command": "echo x > source/secrets/key.pem"}, cwd="/tmp/repo"),
+            ["--task", "DEMO-707"])
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+        self.assertIn("forbidden", self.deny_reason(result))
 
     def test_code_worker_bash_write_outside_the_write_boundary_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-BOUNDARY
         # a path that is neither a test source nor forbidden, but simply does
         # not match boundary.write ("source/core/orders/**"), through Bash.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "echo x > source/some-other-module/Foo.java"},
             cwd="/tmp/repo"))
@@ -2578,7 +2576,7 @@ class TestGuard(unittest.TestCase):
 
     def test_code_worker_bash_touch_of_a_test_source_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "touch source/core/orders/src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2587,7 +2585,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
         # truncate -s 0 destroys a file's content in place - a real write,
         # not a metadata touch.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "truncate -s 0 source/core/orders/"
                         "src/test/java/FooTest.java"}))
@@ -2599,7 +2597,7 @@ class TestGuard(unittest.TestCase):
         # the source argument instead would be a false deny that looks like
         # a pass, so this pins the destination specifically: /etc/passwd
         # (the symlink's target) is not what gets checked or denied here.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "ln -sf /etc/passwd source/core/orders/"
                         "src/test/java/FooTest.java"}))
@@ -2609,14 +2607,14 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
         # install writes its LAST argument, like cp/mv - /dev/null here is
         # the source, not the checked path.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "install -m 644 /dev/null source/core/orders/"
                         "src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_code_worker_bash_touch_inside_boundary_is_still_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "touch source/core/orders/Foo.java"})))
 
@@ -2624,7 +2622,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY
         # a single positional argument leaves the real linkname implicit
         # (cwd + basename(target)) - fail closed rather than guess it.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "ln -s source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2636,26 +2634,26 @@ class TestGuard(unittest.TestCase):
 
     def test_test_worker_rg_with_no_path_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash", {"command": "rg 'class Main'"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_rg_with_a_flag_and_no_path_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash", {"command": "rg -n pwn"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_grep_dash_r_with_no_path_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash", {"command": "grep -r pwn"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_grep_bundled_dash_rn_with_no_path_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
         # "-rn" bundles "-r" with "-n" - "-r" is not only ever standalone.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash", {"command": "grep -rn pwn"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
@@ -2667,19 +2665,19 @@ class TestGuard(unittest.TestCase):
         # prove the bundling check does anything. Feeding it through a real
         # pipe removes that confound - only recognising "-r" inside "-rn"
         # stops this from being misread as a genuine pipe filter.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash", {"command": "echo x | grep -rn pwn"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_grep_dash_capital_r_with_no_path_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash", {"command": "grep -R pwn"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_grep_long_include_and_dash_r_with_no_path_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "grep --include=*.java -r class"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2687,13 +2685,13 @@ class TestGuard(unittest.TestCase):
     def test_test_worker_genuine_pipe_filter_with_no_path_is_still_allowed(self):
         # regression guard: the fix must not touch the actual pipe-filter
         # case the original allow test was built on.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash", {"command": "echo hello | grep hello"})))
 
     def test_test_worker_rg_with_an_explicit_test_path_is_still_allowed(self):
         # regression guard: an explicit path operand still goes through the
         # ordinary path-scoping check, unaffected by the recursive-flag fix.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "rg TODO /tmp/repo/source/core/orders/"
                         "src/test/java/FooTest.java"})))
@@ -2711,21 +2709,21 @@ class TestGuard(unittest.TestCase):
 
     def test_code_worker_bash_ampersand_redirect_into_a_test_source_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "echo x &> source/core/orders/src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_code_worker_bash_ampersand_append_into_a_test_source_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "echo x &>> source/core/orders/src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_code_worker_bash_glued_ampersand_redirect_into_a_test_source_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "echo x &>source/core/orders/src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2734,7 +2732,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
         # `>& file` used to deny by accident with "&" as the checked path - a
         # false deny that read as coverage. The file is the target.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "echo x >& source/core/orders/src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2744,14 +2742,14 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-TEST-WORKER-MAIN
         # echo itself is on the test worker's read allowlist, so only the
         # write-boundary half stands between this and a main source.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "echo pwned &> source/core/orders/Foo.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_unroled_bash_ampersand_redirect_into_the_run_repo_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-UNROLED-REPO-WRITE
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             None, "Bash", {"command": "echo x &> /tmp/repo/source/core/orders/Foo.java"},
             cwd="/home/dev/some/other/project"))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2759,16 +2757,16 @@ class TestGuard(unittest.TestCase):
     def test_code_worker_bash_ampersand_redirect_of_build_output_is_still_allowed(self):
         # `&>` is exactly what a worker types to capture a build log, and a
         # target inside the write boundary is still inside it.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "mvn -pl :m -am test &> /tmp/build.log; echo $? > /tmp/build.rc"})))
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "echo x &> source/core/orders/Foo.java"})))
 
     def test_test_worker_mvn_with_ampersand_redirect_is_still_allowed(self):
         # the read allowlist strips `&> file` like `> file 2>&1` before classifying
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "mvn -pl :m -am -Dtest=FooTest test &> /tmp/focused.log; "
                         "echo $? > /tmp/focused.rc"})))
@@ -2777,7 +2775,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-REVIEW-RESPONDER-BASH-SHAPES
         # `>|` is stripped like `>` before the test worker's shape is matched,
         # and the read-only responder may send it nowhere but /dev/null
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-test-worker", "Bash",
             {"command": "mvn -pl :m -am -Dtest=FooTest test >| /tmp/focused.log 2>&1; "
                         "echo $? >| /tmp/focused.rc"})))
@@ -2788,10 +2786,10 @@ class TestGuard(unittest.TestCase):
         snap.write_text(json.dumps(doc), encoding="utf-8")
         try:
             for command in (RESPONDER_DIFF + " >| /tmp/x", RESPONDER_DIFF + " >|/tmp/x"):
-                result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
-                                                  {"command": command}))
+                result = decide(payload("ppl-review-responder", "Bash",
+                                        {"command": command}))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-review-responder", "Bash", {"command": RESPONDER_DIFF + " >| /dev/null"})))
         finally:
             snap.write_text(saved, encoding="utf-8")
@@ -2802,30 +2800,30 @@ class TestGuard(unittest.TestCase):
         test_source = "source/core/orders/src/test/java/FooTest.java"
         for command in ("mv %s /tmp/x" % test_source,
                         "git mv %s source/core/orders/Bar.java" % test_source):
-            result = ppl_guard.decide(payload("ppl-code-worker", "Bash", {"command": command}))
+            result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             self.assertIn("test", self.deny_reason(result), command)
 
     def test_moving_a_main_source_or_a_file_outside_the_repo_is_allowed(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "git mv source/core/orders/src/main/java/Foo.java "
                         "source/core/orders/src/main/java/Bar.java"})))
         for agent, cwd in ((None, "/tmp/elsewhere"), (None, "/tmp/repo"),
                            ("ppl-code-worker", "/tmp/repo")):
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 agent, "Bash", {"command": "mv /tmp/a /tmp/b"}, cwd=cwd)), (agent, cwd))
 
     def test_code_worker_bash_tilde_redirect_resolves_to_home_not_cwd(self):
         # `~/x` is $HOME/x - resolving it against cwd used to land it inside
         # the repo and deny a write that is outside it.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Bash", {"command": "echo x > ~/ppl-notes.txt"})))
 
     def test_code_worker_git_checkout_of_a_test_source_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
         # `git checkout <ref> -- <path>` overwrites exactly that path from history
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "git checkout origin/master -- "
                         "source/core/orders/src/test/java/FooTest.java"}))
@@ -2833,7 +2831,7 @@ class TestGuard(unittest.TestCase):
 
     def test_code_worker_git_restore_of_a_test_source_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "git restore --source=HEAD~1 "
                         "source/core/orders/src/test/java/FooTest.java"}))
@@ -2841,7 +2839,7 @@ class TestGuard(unittest.TestCase):
 
     def test_code_worker_git_rm_of_a_test_source_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "git rm -q source/core/orders/src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2849,7 +2847,7 @@ class TestGuard(unittest.TestCase):
     def test_code_worker_git_mv_onto_a_test_source_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
         # like mv/cp/install: the LAST positional is what gets written
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "git mv source/core/orders/Foo.java "
                         "source/core/orders/src/test/java/FooTest.java"}))
@@ -2858,7 +2856,7 @@ class TestGuard(unittest.TestCase):
     def test_code_worker_git_dash_c_relocates_the_rm_target(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
         # `git -C <dir>` makes every path operand relative to <dir>, from any cwd
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "git -C /tmp/repo/source rm core/orders/src/test/java/FooTest.java"},
             cwd="/tmp/somewhere-else"))
@@ -2869,7 +2867,7 @@ class TestGuard(unittest.TestCase):
         # the paths a diff writes are inside the diff, not on the command
         # line - nothing lexical can name them, so a role's `git apply` fails
         # closed like any other target this cannot pin down.
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash", {"command": "git apply /tmp/evil.diff"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         self.assertIn("could not be resolved", self.deny_reason(result))
@@ -2878,20 +2876,20 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY
         # without `--` the operand may be a ref, and switching refs rewrites
         # the whole tree
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash", {"command": "git checkout origin/master"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_code_worker_rsync_onto_a_test_source_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY / R-ROLE-CODE-WORKER-TESTS
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash",
             {"command": "rsync -a /tmp/x.java source/core/orders/src/test/java/FooTest.java"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_code_worker_patch_is_denied_as_unresolvable(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-code-worker", "Bash", {"command": "patch -p1 < /tmp/evil.diff"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
@@ -2904,14 +2902,14 @@ class TestGuard(unittest.TestCase):
                         "git apply --check /tmp/x.diff",
                         "git checkout -- source/core/orders/Foo.java"):
             with self.subTest(command=command):
-                self.assertIsNone(ppl_guard.decide(payload(
+                self.assertIsNone(decide(payload(
                     "ppl-code-worker", "Bash", {"command": command})))
 
     def test_orchestrator_stage_one_worktree_setup_is_still_allowed(self):
         # SKILL.md Stage 1, verbatim shape: run from the MAIN checkout, beside
         # the run's repo. `git worktree add` is not a shape this parses at all,
         # and nothing here may start denying the documented setup.
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             None, "Bash",
             {"command": "cd /home/dev/src/project && git fetch origin master "
                         "&& git worktree add ../project-DEMO-700 -b DEMO-700-slug "
@@ -2961,7 +2959,7 @@ class TestGuard(unittest.TestCase):
             # documented layout) AND from inside it
             for cwd in ("/home/dev/ppl-workspace", "/tmp/repo"):
                 with self.subTest(command=command, cwd=cwd):
-                    self.assertIsNone(ppl_guard.decide(payload(
+                    self.assertIsNone(decide(payload(
                         None, "Bash", {"command": command}, cwd=cwd)))
             # the test worker runs the build/test lines itself. The renderer
             # puts the harness [env] in front of every gate line.
@@ -2969,7 +2967,7 @@ class TestGuard(unittest.TestCase):
             if bare.split()[0] in argv0s:
                 checked += 1
                 with self.subTest(command=command, role="ppl-test-worker"):
-                    self.assertIsNone(ppl_guard.decide(payload(
+                    self.assertIsNone(decide(payload(
                         "ppl-test-worker", "Bash", {"command": command}, cwd="/tmp/repo")))
         self.assertGreaterEqual(checked, 4, substituted)
 
@@ -3001,7 +2999,7 @@ class TestGuard(unittest.TestCase):
             self.assertIsNone(re.search(r"<[A-Za-z]", command), command)
             for cwd in ("/home/dev/ppl-workspace", "/tmp/repo"):
                 with self.subTest(command=command, cwd=cwd):
-                    self.assertIsNone(ppl_guard.decide(payload(
+                    self.assertIsNone(decide(payload(
                         None, "Bash", {"command": command}, cwd=cwd)))
 
     # --- Forge denials come from the adapter the run's harness snapshot names. ---
@@ -3017,22 +3015,17 @@ class TestGuard(unittest.TestCase):
             for tool in ("mcp__Corp-GitLab__resolve_merge_request_thread",
                          "mcp__Corp-GitLab__merge_merge_request",
                          "mcp__Corp-GitLab__approve_merge_request"):
-                result = ppl_guard.decide(payload(None, tool, {}, cwd="/tmp/repo"))
+                result = decide(payload(None, tool, {}, cwd="/tmp/repo"))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), tool)
         finally:
             snap.write_text(saved, encoding="utf-8")
 
     def test_without_a_run_both_adapters_denials_apply(self):
         # rule: R-FORGE-DENIALS-FROM-ADAPTER
-        active = paths.active_file()
-        saved = active.read_text(encoding="utf-8")
-        active.unlink()
-        try:
-            for tool in ("mcp__GitLab-MCP__merge_merge_request", "mcp__github__merge_pull_request"):
-                result = ppl_guard.decide(payload(None, tool, {}, cwd="/elsewhere"))
-                self.assertIsNotNone(result, tool)
-        finally:
-            active.write_text(saved, encoding="utf-8")
+        # a session in no lane has no run, so no snapshot narrows the union
+        for tool in ("mcp__GitLab-MCP__merge_merge_request", "mcp__github__merge_pull_request"):
+            result = decide(payload(None, tool, {}, cwd="/elsewhere"), ())
+            self.assertIsNotNone(result, tool)
 
     def test_github_merge_approve_resolve_bash_are_denied_for_everyone(self):
         # rule: R-FORGE-GH-NO-APPROVE-MERGE
@@ -3048,11 +3041,11 @@ class TestGuard(unittest.TestCase):
                     ("gh api graphql -f query='mutation{resolveReviewThread(input:{})}'",
                      "only the remark author may resolve a thread")):
                 for agent in (None, "ppl-review-responder"):
-                    reason = self.deny_reason(ppl_guard.decide(
+                    reason = self.deny_reason(decide(
                         payload(agent, "Bash", {"command": command})))
                     self.assertIn("BOUNDARY_VIOLATION", reason, command)
                     self.assertIn(why, reason, command)
-            self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": "gh pr view 7"})))
+            self.assertIsNone(decide(payload(None, "Bash", {"command": "gh pr view 7"})))
         finally:
             snap.write_text(saved, encoding="utf-8")
 
@@ -3063,7 +3056,7 @@ class TestGuard(unittest.TestCase):
         snapshot = ppl_guard.load_snapshot("DEMO-700")
         self.assertEqual(snapshot["forge"]["kind"], "gitlab")
         for cwd in ("/tmp/repo", "/elsewhere"):
-            result = ppl_guard.decide(payload(None, "Bash", {"command": "gh pr merge 7"}, cwd=cwd))
+            result = decide(payload(None, "Bash", {"command": "gh pr merge 7"}, cwd=cwd))
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), cwd)
 
     def _responder_with_github_forge(self):
@@ -3075,7 +3068,7 @@ class TestGuard(unittest.TestCase):
         self.addCleanup(snap.write_text, saved, encoding="utf-8")
 
     def _responder_bash(self, command):
-        return ppl_guard.decide(payload("ppl-review-responder", "Bash", {"command": command}))
+        return decide(payload("ppl-review-responder", "Bash", {"command": command}))
 
     def test_the_responder_may_git_diff_two_shas(self):
         # rule: R-REVIEW-RESPONDER-BASH-SHAPES
@@ -3157,7 +3150,7 @@ class TestGuard(unittest.TestCase):
 
     def test_gitlab_review_responder_has_no_bash_at_all(self):
         # rule: R-REVIEW-RESPONDER-BASH-SHAPES
-        result = ppl_guard.decide(payload("ppl-review-responder", "Bash", {"command": "ls"}))
+        result = decide(payload("ppl-review-responder", "Bash", {"command": "ls"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         self.assertIn("ppl-review-responder may run only the forge's read commands: ls",
                       self.deny_reason(result))
@@ -3177,13 +3170,13 @@ class TestGuard(unittest.TestCase):
                             RESPONDER_DIFF + " 2> /tmp/e", RESPONDER_DIFF + " 1> /tmp/x",
                             RESPONDER_DIFF + " &> /tmp/x", RESPONDER_DIFF + " >/tmp/x",
                             RESPONDER_DIFF + " > /tmp/x 2>&1", RESPONDER_DIFF + " > /dev/null > /tmp/x"):
-                result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
-                                                  {"command": command}))
+                result = decide(payload("ppl-review-responder", "Bash",
+                                        {"command": command}))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), command)
             for command in (RESPONDER_DIFF + " 2>&1", RESPONDER_DIFF + " 2>/dev/null",
                             RESPONDER_DIFF + " > /dev/null 2>&1"):
-                self.assertIsNone(ppl_guard.decide(payload("ppl-review-responder", "Bash",
-                                                           {"command": command})), command)
+                self.assertIsNone(decide(payload("ppl-review-responder", "Bash",
+                                                 {"command": command})), command)
         finally:
             snap.write_text(saved, encoding="utf-8")
 
@@ -3222,17 +3215,17 @@ class TestGuard(unittest.TestCase):
                 snap.write_text(json.dumps(doc), encoding="utf-8")
                 with self.subTest(forge=forge):
                     for tool in ppl_guard.DENIED_TOOLS:
-                        result = ppl_guard.decide(payload(None, tool, {}))
+                        result = decide(payload(None, tool, {}))
                         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), tool)
-                    result = ppl_guard.decide(payload("ppl-review-responder", "Bash",
-                                                      {"command": RESPONDER_DIFF}))
+                    result = decide(payload("ppl-review-responder", "Bash",
+                                            {"command": RESPONDER_DIFF}))
                     self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         finally:
             snap.write_text(saved, encoding="utf-8")
 
     def test_an_internal_error_denies_a_role_and_still_allows_an_unroled_session(self):
         # rule: R-GUARD-INTERNAL-ERROR-DENIES-ROLES
-        def broken(_payload):
+        def broken(_payload, _argv=()):
             raise RuntimeError("boom")
 
         outputs = {}
@@ -3256,7 +3249,7 @@ class TestGuard(unittest.TestCase):
         # rule: R-GUARD-INTERNAL-ERROR-DENIES-ROLES
         from ppl import routing
 
-        def broken(_payload):
+        def broken(_payload, _argv=()):
             raise RuntimeError("boom")
 
         for agent in routing.REQUIRED_ROLES:
@@ -3271,7 +3264,7 @@ class TestGuard(unittest.TestCase):
 
     def test_brief_challenger_may_not_run_a_state_changing_ppl_command(self):
         # rule: R-GUARD-PPL-CLI-DENIED
-        result = ppl_guard.decide(payload(
+        result = decide(payload(
             "ppl-brief-challenger", "Bash", {"command": "ppl brief challenge report.json"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
@@ -3281,7 +3274,7 @@ class TestGuard(unittest.TestCase):
             def write(self, _text):
                 raise OSError("stderr is gone")
 
-        def broken(_payload):
+        def broken(_payload, _argv=()):
             raise RuntimeError("boom")
 
         stdout = io.StringIO()

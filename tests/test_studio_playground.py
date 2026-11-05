@@ -221,7 +221,7 @@ class TestPlayground(PlaygroundTestCase):
         real_run = subprocess.run
 
         def stalled(command, **kwargs):
-            if command[-1].endswith("ppl_guard.py"):
+            if command[1].endswith("ppl_guard.py"):
                 raise subprocess.TimeoutExpired(command, kwargs["timeout"])
             return real_run(command, **kwargs)
 
@@ -282,12 +282,13 @@ class TestPlayground(PlaygroundTestCase):
                              harness.snapshot(harness.load(str(folder))))
             store.write_json(paths.run_dir(playground.TASK) / "boundary.json",
                              {"write": ["**"], "forbid": []})
+            fixtures.bind_lane(playground.TASK, self.repo, harness="demo")
         previous = os.getcwd()
         os.chdir(self.repo)
         try:
             answer = ppl_guard.decide({"hook_event_name": "PreToolUse", "agent_type": role,
                                        "tool_name": tool, "tool_input": tool_input,
-                                       "cwd": str(self.repo)})
+                                       "cwd": str(self.repo)}, ["--task", playground.TASK])
         finally:
             os.chdir(previous)
         return "allow" if answer is None else "deny"
@@ -363,7 +364,7 @@ class TestPlayground(PlaygroundTestCase):
         real_run = subprocess.run
 
         def stalled(command, **kwargs):
-            if command[-1].endswith("ppl_guard.py"):
+            if command[1].endswith("ppl_guard.py"):
                 raise subprocess.TimeoutExpired(command, kwargs["timeout"])
             return real_run(command, **kwargs)
 

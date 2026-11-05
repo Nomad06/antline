@@ -1,10 +1,11 @@
 """Run as `python3 -m ppl.studio.playground_child` with PPL_HOME pointing at a
-throwaway directory: it builds the fake active run the playground's hook
-call reads. Reads {"task", "repo", "snapshot", "boundary"} as JSON on stdin."""
+throwaway directory: it builds the fake run, and the lane that binds the
+playground's hook call to it. Reads {"task", "repo", "snapshot", "boundary"} as
+JSON on stdin."""
 import json
 import sys
 
-from .. import paths, run, store
+from .. import lanes, paths, run, store
 
 
 def main():
@@ -14,6 +15,8 @@ def main():
     folder = paths.run_dir(spec["task"])
     store.write_json(folder / "harness.json", spec["snapshot"])
     store.write_json(folder / "boundary.json", spec["boundary"])
+    lanes.claim(spec["task"], spec["snapshot"]["name"], "0" * 40, spec["repo"], spec["repo"],
+                "00000000-0000-4000-8000-000000000000", 1, 1)
     return 0
 
 

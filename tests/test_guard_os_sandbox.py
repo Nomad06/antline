@@ -33,6 +33,8 @@ BRANCH = "gh-7-cart-total"
 GH = "/opt/pin/gh"
 GIT = "/opt/pin/git"
 PPL = "/opt/pin/ppl"
+# The hook's own command line in GH-7's lane session, as the lane's settings render it.
+LANE = ["--task", TASK]
 
 
 def real(path):
@@ -79,6 +81,7 @@ def setUpModule():
     fixtures.install_variant("example-generic", "gh-issues", **fixtures.GITHUB_ISSUES)
     store.write_json(paths.run_dir(TASK) / "harness.json",
                      harness.snapshot(harness.load("gh-issues")))
+    fixtures.bind_lane(TASK, REPO, harness="gh-issues")
     store.write_json(facts_path(), facts_doc())
     (paths.home() / "scratch" / TASK).mkdir(parents=True, exist_ok=True)
     for name in ("pr-body.md", "note.md", "reply.md"):
@@ -107,16 +110,25 @@ def pr_create():
 
 
 class OsSandboxCase(unittest.TestCase):
+    # GH-7's lane session, or one in no lane inside no_lane()
+    argv = LANE
+
     def setUp(self):
-        run.set_active(TASK)
         store.write_json(facts_path(), facts_doc())
 
     def deny_reason(self, result):
         self.assertIsNotNone(result, "the call was allowed")
         return result["hookSpecificOutput"]["permissionDecisionReason"]
 
+    def hook(self, call):
+        return ppl_guard.decide(call, self.argv)
+
+    def bound_state(self):
+        """The guard's reader of the run the session is bound to, as escape.decide takes it."""
+        return ppl_guard.bound_state(lanes.binding(self.argv))
+
     def decide(self, command, agent=None, cwd=WS):
-        return ppl_guard.decide(flagged(agent, command, cwd))
+        return self.hook(flagged(agent, command, cwd))
 
     @contextlib.contextmanager
     def facts_text(self, text):
@@ -131,12 +143,13 @@ class OsSandboxCase(unittest.TestCase):
             store.write_json(facts_path(), facts_doc())
 
     @contextlib.contextmanager
-    def no_active_run(self):
-        paths.active_file().unlink()
+    def no_lane(self):
+        """A session in no lane: its hooks carry no --task, so no run is bound."""
+        self.argv = ()
         try:
             yield
         finally:
-            run.set_active(TASK)
+            self.argv = LANE
 
     @contextlib.contextmanager
     def run_state(self, **changes):
@@ -159,7 +172,7 @@ class TestRoleEscape(OsSandboxCase):
 
     def test_a_role_is_denied_even_without_a_run_or_facts(self):
         # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
-        with self.facts_text(None), self.no_active_run():
+        with self.facts_text(None), self.no_lane():
             for agent in ("ppl-verifier", "ppl-review-responder"):
                 with self.subTest(agent=agent):
                     result = self.decide(pr_create(), agent=agent, cwd=OTHER)
@@ -167,8 +180,8 @@ class TestRoleEscape(OsSandboxCase):
 
     def test_a_role_is_denied_before_any_file_is_read(self):
         # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
-        with mock.patch.object(ppl_guard, "active_state", side_effect=AssertionError), \
-                mock.patch.object(ppl_guard, "_active_task_id", side_effect=AssertionError), \
+        with mock.patch.object(lanes, "binding", side_effect=AssertionError), \
+                mock.patch.object(ppl_guard, "bound_state", side_effect=AssertionError), \
                 mock.patch.object(escape, "load_facts", side_effect=AssertionError):
             result = self.decide("ls", agent="ppl-test-worker")
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -187,12 +200,12 @@ class TestRoleEscape(OsSandboxCase):
 
     def test_a_subagent_elsewhere_is_left_alone(self):
         # with neither the guard facts nor an active run, nothing is the pipeline's
-        with self.facts_text(None), self.no_active_run():
+        with self.facts_text(None), self.no_lane():
             self.assertIsNone(self.decide("ls", agent="general-purpose", cwd=OTHER))
             self.assertIsNone(self.decide("ls", cwd=OTHER))
             call = flagged(None, "ls", OTHER)
             call["agent_id"] = "a1"
-            self.assertIsNone(ppl_guard.decide(call))
+            self.assertIsNone(self.hook(call))
 
     def test_a_subagent_anywhere_is_denied_while_facts_or_a_run_exist(self):
         # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
@@ -200,12 +213,12 @@ class TestRoleEscape(OsSandboxCase):
         with self.subTest(facts=True, run=True):
             result = self.decide("ls", agent="general-purpose", cwd=OTHER)
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
-        with self.subTest(facts=True, run=False), self.no_active_run():
+        with self.subTest(facts=True, run=False), self.no_lane():
             result = self.decide("ls", agent="Explore", cwd=OTHER)
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
         with self.subTest(facts=False, run=True), self.facts_text(None):
             result = self.decide("ls", agent="general-purpose", cwd=OTHER)
-            self.assertIsNotNone(ppl_guard.decide(flagged("general-purpose", "ls", OTHER)))
+            self.assertIsNotNone(self.hook(flagged("general-purpose", "ls", OTHER)))
             self.assertIn("ppl harness apply", self.deny_reason(result))
         with self.subTest(repo="elsewhere"), self.run_state(repo=OTHER):
             result = self.decide(pr_create(), agent="general-purpose", cwd=WS)
@@ -217,7 +230,7 @@ class TestRoleEscape(OsSandboxCase):
             call = flagged(None, pr_create())
             call["agent_id"] = agent_id
             with self.subTest(agent_id=agent_id):
-                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(ppl_guard.decide(call)))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.hook(call)))
 
     def test_an_unflagged_role_call_is_not_touched_by_escape(self):
         for flag in (None, False):
@@ -226,7 +239,7 @@ class TestRoleEscape(OsSandboxCase):
                 tool_input["dangerouslyDisableSandbox"] = flag
             with self.subTest(flag=flag), \
                     mock.patch.object(escape, "decide", side_effect=AssertionError) as checked:
-                self.assertIsNone(ppl_guard.decide(payload("ppl-code-worker", "Bash", tool_input)))
+                self.assertIsNone(self.hook(payload("ppl-code-worker", "Bash", tool_input)))
                 checked.assert_not_called()
 
     def test_any_tool_carrying_the_flag_is_flagged(self):
@@ -236,9 +249,9 @@ class TestRoleEscape(OsSandboxCase):
                                                      "dangerouslyDisableSandbox": True}, REPO)
             with self.subTest(tool=tool):
                 self.assertTrue(escape.flagged(call))
-                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(ppl_guard.decide(call)))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.hook(call)))
                 orchestrator = dict(call, agent_type=None, cwd=WS)
-                self.assertIsNotNone(ppl_guard.decide(orchestrator))
+                self.assertIsNotNone(self.hook(orchestrator))
                 del call["tool_input"]["dangerouslyDisableSandbox"]
                 self.assertFalse(escape.flagged(call))
 
@@ -246,7 +259,7 @@ class TestRoleEscape(OsSandboxCase):
         # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
         for value in ("true", 1, "yes"):
             with self.subTest(value=value):
-                result = ppl_guard.decide(payload(
+                result = self.hook(payload(
                     "ppl-code-worker", "Bash", {"command": "ls", "dangerouslyDisableSandbox": value}))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
@@ -261,7 +274,7 @@ class TestFailClosed(OsSandboxCase):
 
     def test_an_exception_on_a_flagged_call_denies(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
-        def broken(_payload):
+        def broken(_payload, _argv=()):
             raise RuntimeError("boom")
 
         for agent in (None, "general-purpose", ["x"]):
@@ -276,7 +289,7 @@ class TestFailClosed(OsSandboxCase):
                 self.assertIn("RuntimeError", reason)
 
     def test_an_unflagged_unroled_call_keeps_the_internal_error_allow(self):
-        def broken(_payload):
+        def broken(_payload, _argv=()):
             raise RuntimeError("boom")
 
         stdout = io.StringIO()
@@ -328,7 +341,7 @@ class TestFailClosed(OsSandboxCase):
                 self.assertIn("OWNER_DECISION", self.deny_reason(result))
                 self.assertIn("ppl harness apply", self.deny_reason(result))
         # with no run active too: the guard cannot tell what is pipeline-scoped
-        with self.facts_text("{not json"), self.no_active_run():
+        with self.facts_text("{not json"), self.no_lane():
             self.assertIn("ppl harness apply", self.deny_reason(self.decide("ls", cwd=OTHER)))
 
     def test_unreadable_run_state_denies_a_flagged_call(self):
@@ -370,7 +383,7 @@ class TestOrchestratorShape(OsSandboxCase):
     def test_the_orchestrator_anywhere_meets_the_shape_check(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide("ls", cwd=OTHER)))
-        with self.no_active_run():
+        with self.no_lane():
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide("ls", cwd=OTHER)))
             self.assertIsNone(self.decide(GH + " auth status", cwd=WS))
         with self.facts_text(None):
@@ -545,7 +558,7 @@ class TestOrchestratorShape(OsSandboxCase):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
         call = flagged(None, pr_create())
         del call["cwd"]
-        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(ppl_guard.decide(call)))
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.hook(call)))
 
     def test_pr_create_against_another_repo_is_denied(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
@@ -728,7 +741,7 @@ class TestOrchestratorShape(OsSandboxCase):
                         "ppl tracker fetch --task GH-7"):
             with self.subTest(command=command):
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
-        with self.no_active_run():
+        with self.no_lane():
             result = self.decide(PPL + " tracker fetch --task GH-7")
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
@@ -753,7 +766,7 @@ class TestOrchestratorShape(OsSandboxCase):
             reason = self.deny_reason(self.decide(PPL + " lane close", cwd=REPO))
             self.assertIn("BOUNDARY_VIOLATION", reason)
             self.assertIn(real(start), reason)
-        with self.no_active_run():
+        with self.no_lane():
             with self.facts_text(json.dumps(facts_doc(workspace=real(start)))):
                 self.assertIsNone(self.decide(PPL + " lane close", cwd=real(start)))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(
@@ -776,7 +789,7 @@ class TestOrchestratorShape(OsSandboxCase):
     def test_decide_takes_a_run_state_value_as_well_as_the_reader(self):
         call = flagged(None, pr_create())
         self.assertIsNone(escape.decide(call, paths.home(), run.load(TASK)))
-        self.assertIsNone(escape.decide(call, paths.home(), ppl_guard.active_state))
+        self.assertIsNone(escape.decide(call, paths.home(), self.bound_state))
         # with no run, the run's branch and scratch directory are unknown
         self.assertIsNotNone(escape.decide(call, paths.home(), None))
 
@@ -784,7 +797,7 @@ class TestOrchestratorShape(OsSandboxCase):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
         command = GH + " issue comment 7 -R o/r --body-file " + scratch_file("note.md")
         self.assertIsNone(escape.decide(flagged(None, command), paths.home(),
-                                        ppl_guard.active_state))
+                                        self.bound_state))
         result = self.decide(command)
         self.assertIn("OWNER_DECISION", self.deny_reason(result))
         self.assertIn("merge", self.deny_reason(result))
@@ -830,7 +843,8 @@ class TestNoBlockingRead(OsSandboxCase):
         """main() in its own process, as Claude Code runs it, held to a bound."""
         env = dict(os.environ, PPL_HOME=str(paths.home()))
         try:
-            done = subprocess.run([sys.executable, str(GUARD)], input=json.dumps(call),
+            done = subprocess.run([sys.executable, str(GUARD)] + list(self.argv),
+                                  input=json.dumps(call),
                                   capture_output=True, text=True, env=env,
                                   timeout=HOOK_BOUND_SECONDS)
         except subprocess.TimeoutExpired:
@@ -838,9 +852,9 @@ class TestNoBlockingRead(OsSandboxCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         return json.loads(done.stdout) if done.stdout.strip() else None
 
-    def test_a_fifo_at_active_does_not_hold_a_role_escape_deny(self):
+    def test_a_fifo_registry_does_not_hold_a_role_escape_deny(self):
         # rule: R-OS-SANDBOX-ROLE-NO-ESCAPE
-        with self.fifo_at(paths.active_file()):
+        with self.fifo_at(lanes.registry_path()):
             result = self.run_hook(flagged("ppl-code-worker", "ls"))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
@@ -852,7 +866,7 @@ class TestNoBlockingRead(OsSandboxCase):
 
     def test_a_fifo_run_file_denies_the_orchestrator_without_blocking(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
-        for path in (paths.active_file(), run.state_path(TASK)):
+        for path in (lanes.registry_path(), run.state_path(TASK)):
             with self.subTest(path=path.name), self.fifo_at(path):
                 result = self.run_hook(flagged(None, pr_create()))
                 self.assertIn("OWNER_DECISION", self.deny_reason(result))
@@ -862,13 +876,13 @@ class TestNoBlockingRead(OsSandboxCase):
     def test_run_files_that_are_not_regular_are_refused_without_blocking(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
         from ppl.errors import PplError
-        with self.fifo_at(paths.active_file()), within(5):
+        with self.fifo_at(lanes.registry_path()), within(5):
             with self.assertRaises(PplError):
-                run.active()
+                lanes.read()
         with self.fifo_at(run.state_path(TASK)), within(5):
             with self.assertRaises(PplError):
                 store.read_json(run.state_path(TASK))
-        self.assertEqual(run.active(), TASK)
+        self.assertEqual(lanes.entry(TASK)["task"], TASK)
         self.assertEqual(run.load(TASK)["task_id"], TASK)
 
 
@@ -896,44 +910,45 @@ class TestHugeRunFile(OsSandboxCase):
         """main() in this process, as the hook runs it, with how long it took."""
         stdout = io.StringIO()
         with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(call))), \
+                mock.patch.object(sys, "argv", [str(GUARD)] + list(self.argv)), \
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
             started = time.monotonic()
             self.assertEqual(ppl_guard.main(), 0)
             took = time.monotonic() - started
         return (json.loads(stdout.getvalue()) if stdout.getvalue() else None), took
 
-    def test_a_huge_active_file_leaves_a_role_write_decided_within_a_second(self):
+    def test_a_huge_registry_leaves_a_role_write_decided_within_a_second(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
         call = payload("ppl-code-worker", "Write", {"file_path": OTHER + "/x.txt",
                                                     "content": "x"}, REPO)
-        with self.huge(paths.active_file()):
+        with self.huge(lanes.registry_path()):
             result, took = self.main_decision(call)
         self.assertLess(took, 1)
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
-    def test_a_huge_active_file_leaves_a_role_flagged_call_decided_within_a_second(self):
+    def test_a_huge_registry_leaves_a_role_flagged_call_decided_within_a_second(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
-        with self.huge(paths.active_file()):
+        with self.huge(lanes.registry_path()):
             result, took = self.main_decision(flagged("ppl-code-worker", "ls", REPO))
         self.assertLess(took, 1)
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
-    def test_a_huge_active_file_denies_an_explore_flagged_call_within_a_second(self):
+    def test_a_huge_registry_denies_an_explore_flagged_call_within_a_second(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
-        # the refused read is a deny with its reason, never "no active run"
-        with self.huge(paths.active_file()):
+        # the refused read is a deny with its reason, never "no lane"
+        with self.huge(lanes.registry_path()):
             result, took = self.main_decision(flagged("Explore", "ls", OTHER))
         self.assertLess(took, 1)
         self.assertIn("OWNER_DECISION", self.deny_reason(result))
-        self.assertIn("ACTIVE", self.deny_reason(result))
+        self.assertIn("lanes.json", self.deny_reason(result))
 
-    def test_a_flagged_call_against_a_huge_active_file_writes_nothing_to_stderr(self):
+    def test_a_flagged_call_against_a_huge_registry_writes_nothing_to_stderr(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
         env = dict(os.environ, PPL_HOME=str(paths.home()))
-        with self.huge(paths.active_file()):
+        with self.huge(lanes.registry_path()):
             for agent in (None, "Explore"):
                 with self.subTest(agent=agent):
-                    done = subprocess.run([sys.executable, str(GUARD)],
+                    done = subprocess.run([sys.executable, str(GUARD)] + list(self.argv),
                                           input=json.dumps(flagged(agent, pr_create())),
                                           capture_output=True, text=True, env=env,
                                           timeout=HOOK_BOUND_SECONDS)
@@ -962,9 +977,9 @@ class TestHugeRunFile(OsSandboxCase):
             with self.assertRaises(PplError) as caught:
                 run.load(TASK, limit=store.HOOK_READ_LIMIT)
             self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
-        with self.huge(paths.active_file()), within(5):
+        with self.huge(lanes.registry_path()), within(5):
             with self.assertRaises(PplError):
-                run.active(limit=store.HOOK_READ_LIMIT)
+                lanes.read(limit=store.HOOK_READ_LIMIT)
         self.assertEqual(store.HOOK_READ_LIMIT, 1024 * 1024)
 
     def test_the_cap_is_the_hooks_alone(self):
@@ -989,9 +1004,10 @@ class TestHugeRunFile(OsSandboxCase):
                                                       "content": "x"}, REPO))
         for call in calls:
             with self.subTest(tool=call["tool_name"]), \
-                    mock.patch.object(ppl_guard.run, "active", return_value=TASK) as active:
-                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(ppl_guard._decide(call)))
-                self.assertFalse(active.called, "ACTIVE was read first")
+                    mock.patch.object(lanes, "read", wraps=lanes.read) as registry:
+                self.assertIn("BOUNDARY_VIOLATION",
+                              self.deny_reason(ppl_guard._decide(call, self.argv)))
+                self.assertFalse(registry.called, "the lane registry was read first")
 
 
 class TestPlainArgv(unittest.TestCase):
@@ -1181,7 +1197,7 @@ class GitShapes(OsSandboxCase):
             with self.subTest(url=url):
                 self.assertIsNone(self.decide(self.fetch("origin", "main")))
         # a fetch reads the guard facts only, so it needs no run
-        with self.no_active_run():
+        with self.no_lane():
             self.assertIsNone(self.decide(self.fetch("origin", "main")))
 
     def test_a_fetch_without_no_recurse_submodules_is_denied(self):
@@ -1521,7 +1537,7 @@ class GitShapes(OsSandboxCase):
 
     def test_a_push_with_no_active_run_is_denied(self):
         # rule: R-OS-SANDBOX-GIT-CONFIG
-        with self.no_active_run():
+        with self.no_lane():
             for words in (("origin", SPEC), ("origin", "--delete", HEAD_REF)):
                 with self.subTest(words=words):
                     reason = self.deny_reason(self.decide(self.push(*words)))
@@ -1566,7 +1582,7 @@ class GitShapes(OsSandboxCase):
         # git says "fatal: ref HEAD is not a symbolic ref" on a detached HEAD
         git(self.repo, "checkout", "-q", "--detach")
         env = dict(os.environ, PPL_HOME=str(paths.home()))
-        done = subprocess.run([sys.executable, str(GUARD)],
+        done = subprocess.run([sys.executable, str(GUARD)] + list(self.argv),
                               input=json.dumps(flagged(None, self.push("origin", SPEC))),
                               capture_output=True, text=True, env=env, timeout=HOOK_BOUND_SECONDS)
         self.assertEqual(done.stderr, "")
@@ -1789,7 +1805,7 @@ class ProtectedPathCase(OsSandboxCase):
 
     def edit(self, target, agent=None, tool="Edit", key="file_path", cwd=OTHER, **extra):
         tool_input = dict({key: target, "old_string": "a", "new_string": "b"}, **extra)
-        return ppl_guard.decide(payload(agent, tool, tool_input, cwd))
+        return self.hook(payload(agent, tool, tool_input, cwd))
 
     def assert_protected(self, reason):
         self.assertIn("BOUNDARY_VIOLATION", reason)
@@ -1807,7 +1823,7 @@ class TestProtectedPaths(ProtectedPathCase):
         gitconfig = self.at(".gitconfig")
         self.assert_protected(self.deny_reason(self.edit(gitconfig, agent="ppl-code-worker")))
         # with no run active either, the facts alone put the role in scope
-        with self.no_active_run():
+        with self.no_lane():
             self.assert_protected(self.deny_reason(self.edit(gitconfig, agent="ppl-code-worker")))
 
     def test_the_orchestrator_cannot_edit_the_gh_config(self):
@@ -1817,7 +1833,7 @@ class TestProtectedPaths(ProtectedPathCase):
             with self.subTest(tool=tool):
                 self.assert_protected(self.deny_reason(self.edit(hosts, tool=tool, key=key)))
         # the facts alone put the session in scope, whatever the run
-        with self.subTest(run=False), self.no_active_run():
+        with self.subTest(run=False), self.no_lane():
             self.assert_protected(self.deny_reason(self.edit(hosts)))
 
     def test_a_symlink_into_ssh_is_denied(self):
@@ -1855,7 +1871,7 @@ class TestProtectedPaths(ProtectedPathCase):
                 self.assert_protected(self.deny_reason(self.edit(path, cwd=cwd)))
 
     def test_an_edit_outside_the_pipeline_scope_is_left_alone(self):
-        with self.facts_text(None), self.no_active_run():
+        with self.facts_text(None), self.no_lane():
             for agent in (None, "general-purpose"):
                 with self.subTest(agent=agent):
                     self.assertIsNone(self.edit(self.at(".gitconfig"), agent=agent))
@@ -1963,8 +1979,11 @@ class TestProtectedPaths(ProtectedPathCase):
                 for agent in (None, "general-purpose"):
                     with self.subTest(path=path, agent=agent):
                         self.assertIsNone(self.edit(path, agent=agent, tool="Write"))
-            with self.no_active_run():
-                self.assertIsNone(self.edit(self.at(".gitconfig"), agent="ppl-code-worker"))
+            with self.no_lane():
+                self.assertIsNone(self.edit(self.at(".gitconfig")))
+                # a role outside a lane is refused whatever it edits, facts or none
+                reason = self.deny_reason(self.edit(self.at(".gitconfig"), agent="ppl-code-worker"))
+                self.assertIn("ppl roles run only inside a lane session", reason)
             # the older rules still hold an edit tool: a role outside the run's repo, and run state
             reason = self.deny_reason(self.edit(self.at(".gitconfig"), agent="ppl-code-worker"))
             self.assertIn("may write only inside run %s's repo" % TASK, reason)
@@ -1999,7 +2018,7 @@ class TestProtectedPaths(ProtectedPathCase):
     def test_unreadable_facts_deny_every_edit(self):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS
         for text in ("{not json", "[]"):
-            with self.facts_text(text), self.no_active_run():
+            with self.facts_text(text), self.no_lane():
                 for path in (scratch_file("new-body.md"),
                              self.at(".claude/projects/x/memory/m.md")):
                     with self.subTest(text=text, path=path):
@@ -2156,7 +2175,7 @@ class TestProtectedPaths(ProtectedPathCase):
 
 class TestGithubMcp(OsSandboxCase):
     def call(self, tool, agent="ppl-code-worker", cwd=REPO):
-        return ppl_guard.decide(payload(agent, tool, {"owner": "o", "repo": "r"}, cwd))
+        return self.hook(payload(agent, tool, {"owner": "o", "repo": "r"}, cwd))
 
     def assert_github_mcp_denied(self, reason):
         self.assertIn("BOUNDARY_VIOLATION", reason)
@@ -2184,7 +2203,7 @@ class TestGithubMcp(OsSandboxCase):
                 result = self.call("mcp__github__create_pull_request", agent)
                 self.assert_github_mcp_denied(self.deny_reason(result))
         # global: no run, no facts and any cwd
-        with self.facts_text(None), self.no_active_run():
+        with self.facts_text(None), self.no_lane():
             result = self.call("mcp__github__get_file_contents", cwd=OTHER)
             self.assert_github_mcp_denied(self.deny_reason(result))
 
@@ -2231,7 +2250,7 @@ class TestGithubMcp(OsSandboxCase):
 
 class TestWebFetchGithub(OsSandboxCase):
     def fetch(self, url, agent="ppl-verifier"):
-        return ppl_guard.decide(payload(agent, "WebFetch", {"url": url, "prompt": "summarize"},
+        return self.hook(payload(agent, "WebFetch", {"url": url, "prompt": "summarize"},
                                         REPO))
 
     def assert_webfetch_denied(self, reason):
@@ -2244,7 +2263,7 @@ class TestWebFetchGithub(OsSandboxCase):
                     "http://gist.github.com/x"):
             with self.subTest(url=url):
                 self.assert_webfetch_denied(self.deny_reason(self.fetch(url)))
-        with self.facts_text(None), self.no_active_run():
+        with self.facts_text(None), self.no_lane():
             result = self.fetch("https://github.com/o/r", agent="ppl-briefer")
             self.assert_webfetch_denied(self.deny_reason(result))
 
@@ -2273,7 +2292,7 @@ class TestWebFetchGithub(OsSandboxCase):
                 self.assertIsNone(self.fetch(url))
 
     def test_the_orchestrator_may_webfetch_github(self):
-        self.assertIsNone(ppl_guard.decide(payload(None, "WebFetch",
+        self.assertIsNone(self.hook(payload(None, "WebFetch",
                                                    {"url": "https://github.com/o/r",
                                                     "prompt": "summarize"}, WS)))
 

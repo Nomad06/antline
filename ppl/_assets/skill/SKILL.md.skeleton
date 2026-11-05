@@ -89,8 +89,9 @@ parks the run with `FORMAT_RETRY_EXHAUSTED` on the second and refuses a third ca
 code before reading its input [R-REFUSAL-RETRY-CAP].
 
 **Run `ppl doctor` here too, before you lean on anything in this skill that talks about a
-hook stopping a tool call.** The guard hook is not armed by default, and nothing about
-starting a run arms it on its own [R-GUARD-NOT-ARMED n/a]. `ppl doctor` prints a JSON line
+hook stopping a tool call.** The guard hook is armed only in the session `ppl lane` started
+for this run, and a session resumed by hand without the lane flags has none
+[R-LANE-BARE-RESUME n/a]. `ppl doctor` prints a JSON line
 with a `registration` and a `matcher` field. `registration` `local` (this directory's
 `.claude/settings.local.json` only) with `matcher` `ok` is the isolated, recommended state:
 the present-tense hook claims in this skill hold for this run. On any other reading -

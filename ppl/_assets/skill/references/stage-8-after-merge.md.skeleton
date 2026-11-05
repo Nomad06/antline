@@ -11,11 +11,11 @@ Then reflect: `references/reflection.md`.
 registered** (`local`, or an accepted `global`/`both`) **for this session** - the hook denies
 every tracker write unless the active run's stage is `merge_watch` and `ppl merge observed`
 has recorded the merge: a write tool of an MCP tracker [R-JIRA-GATE], a `gh issue` write
-of a CLI tracker [R-TRACKER-CLI-GATE] [R-GUARD-NOT-ARMED n/a]. If `ppl doctor` reported
+of a CLI tracker [R-TRACKER-CLI-GATE] [R-LANE-BARE-RESUME n/a]. If `ppl doctor` reported
 `none` or `unknown`, this section is a rule you keep by discipline, not a cage: the run's
 stage and the recorded merge make no difference to whether the write physically goes
 through, and `OWNER_DECISION` has nothing to print because nothing ran a check to produce it
-[R-GUARD-NOT-ARMED n/a]. Check `ppl doctor` before trusting either reading rather than
+[R-LANE-BARE-RESUME n/a]. Check `ppl doctor` before trusting either reading rather than
 assuming the more comfortable one. When it IS armed, a tracker write before that point is
 denied outright (its reason starts with `OWNER_DECISION`) - do not try the write again
 hoping the hook missed it [R-JIRA-GATE] [R-TRACKER-CLI-GATE]. Finish the close-out instead, once the

@@ -10,7 +10,7 @@ EVERY_ROLE = frozenset({
     "active run", "active run, any ppl-* role", "guard hook", "active run, scoped as in 5.4",
     "active or no run, a ppl role in boundary.ROLE_RULES",
     "active run whose state.json is missing, corrupt or malformed",
-    "active run, scoped by role, target path, cwd, or the isolated broadening",
+    "lane session", "session in no lane, every role",
     "every PreToolUse call carrying a role", "every hook call, under an interpreter older than 3.11",
 })
 WRITING = tuple(role for role, rule in boundary.ROLE_RULES.items() if rule["may_write"])

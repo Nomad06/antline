@@ -8,7 +8,7 @@ when you pass it at dispatch [R-ROUTING-BY-RISK]. It writes directly inside `all
 else [R-ROLE-CODE-WORKER-BOUNDARY] - **if `ppl doctor` reported the hook registered**
 (`local`, or an accepted `global`/`both`). If it reported `none` or `unknown`, nothing
 stops this worker from writing outside `allowed_write_paths` except the brief you dispatched
-it with [R-GUARD-NOT-ARMED n/a]; review its diff against the boundary yourself before
+it with [R-LANE-BARE-RESUME n/a]; review its diff against the boundary yourself before
 committing. Commit its work.
 
 The tests half of this stage follows in `references/stage-3-tests.md`, with a different agent.

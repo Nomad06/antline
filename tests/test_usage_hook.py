@@ -20,11 +20,14 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 HOOKS = Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"
 sys.path.insert(0, str(HOOKS))
 
+import fixtures
 from ppl import paths, run, store, usage
 import ppl_python_floor
 import ppl_usage
 
 TASK = "DEMO-900"
+# The hook's own command line in TASK's lane session, as the lane's settings render it.
+LANE = ["--task", TASK]
 OPUS = "claude-opus-5-5"
 HAIKU = "claude-haiku-5-5"
 TS = "2099-01-01T00:00:00.000Z"
@@ -59,8 +62,9 @@ class TestUsageHook(unittest.TestCase):
         os.environ["PPL_HOME"] = self._home
 
     def start(self):
-        """Creates the run and returns the `at` of its init event."""
+        """Creates the run and its lane and returns the `at` of its init event."""
         run.init(TASK, "u", "/tmp/repo")
+        fixtures.bind_lane(TASK, "/tmp/repo")
         return next(e["at"] for e in store.read_log(TASK) if e.get("event") == "init")
 
     def payload(self, **changes):
@@ -81,6 +85,7 @@ class TestUsageHook(unittest.TestCase):
     def main(self, payload):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch.object(sys, "argv", ["ppl_usage.py"] + LANE), \
                 mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
             code = ppl_usage.main()
         return code, out.getvalue(), err.getvalue()
@@ -90,7 +95,8 @@ class TestUsageHook(unittest.TestCase):
         self.start()
         write_lines(self.role_path, [line("m1", OPUS, 10), line("m1", OPUS, 10),
                                      line("m2", HAIKU, 3)])
-        result = ppl_usage.on_stop(self.payload(transcript_path=str(self.dir / "missing.jsonl")))
+        result = ppl_usage.on_stop(self.payload(transcript_path=str(self.dir / "missing.jsonl")),
+                                   LANE)
         self.assertIsNone(result)
         events = self.usage_events()
         self.assertEqual(len(events), 1, events)
@@ -107,10 +113,10 @@ class TestUsageHook(unittest.TestCase):
         write_lines(self.role_path, [line("m1", OPUS, 10)])
         for given, kept in (("medium", "medium"), ({"level": "low"}, "low"), (5, None),
                             ({"other": "x"}, None)):
-            ppl_usage.on_stop(self.payload(effort=given, agent_id="a-%s" % kept))
+            ppl_usage.on_stop(self.payload(effort=given, agent_id="a-%s" % kept), LANE)
             self.assertEqual(self.usage_events()[-1]["effort"], kept, given)
         ppl_usage.on_stop({k: v for k, v in self.payload(agent_id="a-none").items()
-                           if k != "effort"})
+                           if k != "effort"}, LANE)
         self.assertIsNone(self.usage_events()[-1]["effort"])
 
     def test_a_non_role_agent_is_ignored(self):
@@ -118,18 +124,19 @@ class TestUsageHook(unittest.TestCase):
         write_lines(self.role_path, [line("m1", OPUS, 10)])
         write_lines(self.main_path, [line("o1", OPUS, 10)])
         for agent in ("general-purpose", "Explore", "ppl-imposter", None):
-            self.assertIsNone(ppl_usage.on_stop(self.payload(agent_type=agent)))
+            self.assertIsNone(ppl_usage.on_stop(self.payload(agent_type=agent), LANE))
         self.assertEqual(self.usage_events(), [])
         self.assertFalse((paths.run_dir(TASK) / "usage.json").exists())
 
     def test_no_active_run_is_ignored(self):
         write_lines(self.role_path, [line("m1", OPUS, 10)])
         paths.runs_dir().mkdir(parents=True, exist_ok=True)
-        for active in ("\n", TASK + "\n"):
-            # the second is a stale pointer to a run whose state is gone
-            paths.active_file().write_text(active, encoding="utf-8")
-            self.assertIsNone(ppl_usage.on_stop(self.payload()))
-            self.assertEqual(sorted(p.name for p in paths.runs_dir().iterdir()), ["ACTIVE"])
+        # no lane, a lane the registry does not hold, then a lane whose run's state is gone
+        for argv, registered in (((), False), (LANE, False), (LANE, True)):
+            if registered:
+                fixtures.bind_lane(TASK, "/tmp/repo")
+            self.assertIsNone(ppl_usage.on_stop(self.payload(), argv))
+            self.assertEqual(list(paths.runs_dir().iterdir()), [])
 
     def test_a_missing_transcript_logs_an_error_event_and_prints_nothing(self):
         # rule: R-USAGE-HOOK-CANNOT-BLOCK
@@ -148,7 +155,7 @@ class TestUsageHook(unittest.TestCase):
         write_lines(self.role_path, [line("m%d" % i, OPUS, 1) for i in range(5)])
         self.assertIs(ppl_usage.usage, usage)
         with mock.patch.object(usage, "MAX_TRANSCRIPT_BYTES", 100):
-            ppl_usage.on_stop(self.payload())
+            ppl_usage.on_stop(self.payload(), LANE)
         events = self.usage_events()
         self.assertEqual([e.get("error") for e in events], ["transcript_too_large"])
 
@@ -162,7 +169,7 @@ class TestUsageHook(unittest.TestCase):
             line("o2", OPUS, 7, ts=shifted(at, 60)),
             line("o3", OPUS, 50, ts=shifted(at, 60), sidechain=True)])
         write_lines(self.role_path, [line("m1", OPUS, 10)])
-        ppl_usage.on_stop(self.payload())
+        ppl_usage.on_stop(self.payload(), LANE)
         events = self.orchestrator_events()
         self.assertEqual(len(events), 1, self.usage_events())
         self.assertEqual(events[0]["agent_id"], "orchestrator:s1")
@@ -176,11 +183,11 @@ class TestUsageHook(unittest.TestCase):
         at = self.start()
         write_lines(self.main_path, [line("o1", OPUS, 7, ts=shifted(at, 60))])
         write_lines(self.role_path, [line("m1", OPUS, 10)])
-        ppl_usage.on_stop(self.payload())
+        ppl_usage.on_stop(self.payload(), LANE)
         first = self.orchestrator_events()[-1]["models"]
         write_lines(self.main_path, [line("o2", OPUS, 5, ts=shifted(at, 120)),
                                      line("o3", HAIKU, 2, ts=shifted(at, 120))], mode="a")
-        ppl_usage.on_stop(self.payload(agent_id="a2"))
+        ppl_usage.on_stop(self.payload(agent_id="a2"), LANE)
         events = self.orchestrator_events()
         self.assertEqual(len(events), 2, events)
         second = events[-1]["models"]
@@ -192,16 +199,16 @@ class TestUsageHook(unittest.TestCase):
         self.assertEqual(stored["orchestrator"][str(self.main_path)]["offset"],
                          self.main_path.stat().st_size)
         # nothing new in the main transcript: no orchestrator event
-        ppl_usage.on_stop(self.payload(agent_id="a3"))
+        ppl_usage.on_stop(self.payload(agent_id="a3"), LANE)
         self.assertEqual(len(self.orchestrator_events()), 2)
 
     def test_the_same_agent_stopping_twice_is_counted_at_its_newest_totals(self):
         # a subagent continued through SendMessage stops again with the same id
         self.start()
         write_lines(self.role_path, [line("m1", OPUS, 10)])
-        ppl_usage.on_stop(self.payload())
+        ppl_usage.on_stop(self.payload(), LANE)
         write_lines(self.role_path, [line("m2", OPUS, 5)], mode="a")
-        ppl_usage.on_stop(self.payload())
+        ppl_usage.on_stop(self.payload(), LANE)
         got = usage.run_usage(paths.run_dir(TASK))
         self.assertEqual(got["ppl-code-worker"][OPUS]["output"], 15)
 
@@ -270,6 +277,7 @@ class TestUsageHook(unittest.TestCase):
                 worker = threading.Thread(
                     target=lambda: result.setdefault("code", ppl_usage.main()), daemon=True)
                 with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(self.payload()))), \
+                        mock.patch.object(sys, "argv", ["ppl_usage.py"] + LANE), \
                         mock.patch.object(sys, "stdout", out), \
                         mock.patch.object(sys, "stderr", err):
                     started = time.monotonic()
@@ -303,7 +311,7 @@ class TestUsageHook(unittest.TestCase):
         at = self.start()
         write_lines(self.role_path, [line("m1", OPUS, 10)])
         write_lines(self.main_path, [line("o1", OPUS, 7, ts=shifted(at, 60))])
-        ppl_usage.on_stop(self.payload())
+        ppl_usage.on_stop(self.payload(), LANE)
         usage_file = paths.run_dir(TASK) / "usage.json"
         kept = store.read_json(usage_file)["orchestrator"][str(self.main_path)]["offset"]
         self.assertEqual(kept, self.main_path.stat().st_size)
@@ -318,13 +326,13 @@ class TestUsageHook(unittest.TestCase):
         self.assertEqual(store.read_json(usage_file)["orchestrator"][str(self.main_path)]
                          ["offset"], kept)
         # the next stop in time picks the lines up where the late one left them
-        ppl_usage.on_stop(self.payload(agent_id="a3"))
+        ppl_usage.on_stop(self.payload(agent_id="a3"), LANE)
         self.assertEqual(self.orchestrator_events()[-1]["models"][OPUS]["output"], 12)
 
     def test_invalid_payloads_are_ignored(self):
         self.start()
         for payload in (None, 42, [], "x"):
-            self.assertIsNone(ppl_usage.on_stop(payload))
+            self.assertIsNone(ppl_usage.on_stop(payload, LANE))
         self.assertEqual(self.usage_events(), [])
 
 
