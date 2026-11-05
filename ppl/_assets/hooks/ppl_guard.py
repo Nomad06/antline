@@ -2504,51 +2504,83 @@ def _is_ppl_command(words):
             and words[i + 2:i + 3] in (["ppl"], ["ppl.cli"]))
 
 
+def _spells_ppl(command, segments):
+    """True when `command` may run ppl under a wrapper the write walk does not unwrap
+    (timeout, xargs, sudo, find -exec, stdbuf, an env -S string): ppl spelled in the raw text
+    (PPL_INVOCATION_RE), or a word shlex reads as ppl or ppl.cli by any path, or -m ppl[.cli],
+    anywhere in a segment the walk split."""
+    if PPL_INVOCATION_RE.search(command):
+        return True
+    for tokens, _, _ in segments:
+        for index, word in enumerate(tokens or ()):
+            if _verb_name(word) in ("ppl", "ppl.cli"):
+                return True
+            if word == "-m" and tokens[index + 1:index + 2] in (["ppl"], ["ppl.cli"]):
+                return True
+    return False
+
+
+def _whole_word(task, text):
+    return re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(task), text)
+
+
 def _task_named(command, segments, tasks):
-    """The task of `tasks` that `command` names: a word of its own or the value of an
-    assignment or of an option (PPL_TASK=<id>, --task=<id>), as the write walk split each
-    segment into words. Where it could not, a command with a substitution or a segment it
-    cannot split, any whole word of the raw text counts."""
-    readable = bool(segments) and all(tokens is not None for tokens, _, _ in segments)
-    if readable:
-        for tokens, _, _ in segments:
-            for word in tokens:
-                value = word.rpartition("=")[2]
-                if value in tasks:
-                    return value
-        return None
+    """The task of `tasks` that `command` mentions: a word the write walk split, of its own or
+    as the value of an assignment or an option (--task=<id>), or a whole word anywhere in the
+    raw text, free text and quoted strings included."""
+    for tokens, _, _ in segments:
+        for word in tokens or ():
+            value = word.rpartition("=")[2]
+            if value in tasks:
+                return value
     for task in sorted(tasks):
-        if re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(task), command):
+        if _whole_word(task, command):
+            return task
+    return None
+
+
+def _task_assigned(command, segments, tasks):
+    """The task of `tasks` a PPL_TASK assignment names anywhere in `command`, as a word the
+    write walk split (PPL_TASK=<id> before a command, after env, in an export) or in the raw
+    text."""
+    for tokens, _, _ in segments:
+        for word in tokens or ():
+            if word.startswith("PPL_TASK=") and word[len("PPL_TASK="):] in tasks:
+                return word[len("PPL_TASK="):]
+    for task in sorted(tasks):
+        if re.search(r"PPL_TASK=[\"']?%s(?![A-Za-z0-9_])" % re.escape(task), command):
             return task
     return None
 
 
 def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
-    """("BOUNDARY_VIOLATION", reason) when a Bash command of a session bound to a lane runs
+    """("BOUNDARY_VIOLATION", reason) when a Bash command of a session bound to a lane may run
     ppl on another lane's run, else None [R-LANE-CROSS-TASK], for the orchestrator and every
-    role alike:
-    - the command names a task that has another lane in the registry, as --task <id>,
-      --task=<id>, a positional <id>, PPL_TASK=<id> before ppl, after env or in an export;
-    - ppl runs in a directory inside another lane's start directory or worktree, where a bare
+    role alike. It fails closed on what the write walk cannot read:
+    - a PPL_TASK assignment anywhere in the command naming a task another registry entry
+      holds, ppl or no ppl;
+    - a command that runs or spells ppl (a segment the walk reads as ppl, ppl spelled in the
+      raw text, or a word shlex reads as ppl, behind any wrapper) and mentions such a task
+      anywhere, as --task <id>, --task=<id>, a positional <id>, or as a whole word of free
+      text;
+    - ppl run in a directory inside another lane's start directory or worktree, where a bare
       ppl with no PPL_TASK takes that lane's run (cli.resolve_task reads lanes.for_path), the
       cwd followed through cd, pushd, popd and env -C as the write walk follows it, and the
-      session's own cwd where the walk cannot read the command.
+      session's own cwd where the walk recognises no ppl segment.
     A task with no lane is no other lane's run: a pending reflection names a destroyed run's
     task. `lanes_list` is the registry as read for this call: None, it could not be read, and
-    a command that runs ppl gets ("OWNER_DECISION", why)."""
+    a command that may run ppl or sets PPL_TASK gets ("OWNER_DECISION", why)."""
     if not (isinstance(command, str) and binding.task and not binding.problem):
         return None
     segments = []
     _bash_write_targets(command, cwd if isinstance(cwd, str) else None, segments)
     places = [where for tokens, start, where in segments
               if tokens is not None and _is_ppl_command(tokens[start:])]
-    if not places:
-        # a command the walk read whole runs no ppl, and one it could not is read by its
-        # literal spelling
-        readable = bool(segments) and all(tokens is not None for tokens, _, _ in segments)
-        if readable or not PPL_INVOCATION_RE.search(command):
-            return None
-        places = [cwd if isinstance(cwd, str) else None]
+    invoked = bool(places) or _spells_ppl(command, segments)
+    assigns = "PPL_TASK" in command or any(
+        word.startswith("PPL_TASK=") for tokens, _, _ in segments for word in tokens or ())
+    if not (invoked or assigns):
+        return None
     if lanes_list is None:
         return ("OWNER_DECISION",
                 "lane %s's registry cannot be read now, so a ppl command cannot be placed "
@@ -2556,13 +2588,23 @@ def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
                 "resume %s" % (binding.task, binding.task))
     others = [item for item in lanes_list if isinstance(item, dict)
               and isinstance(item.get("task"), str) and item.get("task") != binding.task]
-    named = _task_named(command, segments, set(item["task"] for item in others))
+    tasks = set(item["task"] for item in others)
+    assigned = _task_assigned(command, segments, tasks)
+    if assigned:
+        return ("BOUNDARY_VIOLATION",
+                "lane %s may not set PPL_TASK to %s, another lane's run: a lane drives only its "
+                "own run, and ppl reads PPL_TASK, which ppl lane set to %s"
+                % (binding.task, assigned, binding.task))
+    if not invoked:
+        return None
+    named = _task_named(command, segments, tasks)
     if named:
         return ("BOUNDARY_VIOLATION",
                 "lane %s may not run ppl on run %s, which is another lane's: a lane drives only "
-                "its own run, so name %s or leave the task out (ppl reads PPL_TASK)"
-                % (binding.task, named, binding.task))
-    for where in places:
+                "its own run, and a command that runs ppl may not name %s anywhere, so name %s "
+                "or leave the task out (ppl reads PPL_TASK)"
+                % (binding.task, named, named, binding.task))
+    for where in places or [cwd if isinstance(cwd, str) else None]:
         # the lane's own directories are its own, whatever else a registry entry names there
         if not where or (binding.entry and lanes.holding([binding.entry], where)):
             continue

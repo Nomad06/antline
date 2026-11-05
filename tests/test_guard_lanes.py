@@ -676,15 +676,42 @@ class TestLaneProtection(LaneCase):
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn(theirs, reason)
 
+    def test_ppl_behind_a_wrapper_the_walk_does_not_unwrap_is_still_judged(self):
+        # rule: R-LANE-CROSS-TASK
+        # R30: the walk does not unwrap timeout, xargs, sudo, find -exec, stdbuf or an
+        # env -S string, so a command that spells ppl anywhere, or runs it under any name
+        # shlex reads, is held to every literal mention of another lane's task, free text
+        # included, and a PPL_TASK naming another lane is denied wherever it stands
+        theirs = LANE_B
+        for command in ("timeout 5 ppl show --task %s" % theirs,
+                        "echo %s | xargs ppl show --task" % theirs,
+                        "sudo ppl show --task %s" % theirs,
+                        "find . -maxdepth 0 -exec ppl show --task %s \\;" % theirs,
+                        "env -S 'ppl show --task %s'" % theirs,
+                        "stdbuf -o0 ppl show --task %s" % theirs,
+                        "timeout 5 'ppl' show --task %s" % theirs,
+                        "ppl findings add --title 'same cause as %s'" % theirs,
+                        "export PPL_TASK=%s" % theirs, "PPL_TASK=%s timeout 5 make" % theirs):
+            for agent in (None, "ppl-verifier"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    if agent is None:
+                        self.assertIn(theirs, reason)
+        # the lane's own task behind a wrapper is its own
+        for command in ("timeout 5 ppl show --task %s" % LANE_A, "sudo ppl show",
+                        "env -S 'ppl show --task %s'" % LANE_A):
+            with self.subTest(own=command):
+                self.assertIsNone(self.bash(command))
+
     def test_ppl_with_its_own_task_is_allowed(self):
         # a task with no lane is no other lane's run: a pending reflection names a destroyed
-        # run's task, and a lane's free text may name another lane's
+        # run's task, and a command that runs no ppl may name another lane's
         own, worktree = LANE_A, self.worktree[LANE_A]
         for command in ("ppl show --task %s" % own, "ppl show --task=%s" % own,
                         "PPL_TASK=%s ppl show" % own, "ppl show", "cd %s && ppl show" % worktree,
                         "ppl lessons record --task LANE-5000 --file /tmp/lessons.json",
-                        "ppl findings add --title 'same cause as %s'" % LANE_B,
-                        "echo %s" % LANE_B):
+                        "echo %s" % LANE_B, "git log --grep %s" % LANE_B):
             with self.subTest(command=command):
                 self.assertIsNone(self.bash(command))
         for command in ("ppl show --task %s" % own, "ppl show"):
