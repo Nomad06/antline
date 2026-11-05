@@ -108,16 +108,19 @@ class Prompter:
         return value.lower() if choices else value
 
 
-def hook_entries(code_root):
+def hook_entries(code_root, task_id=None):
     """The PreToolUse guard entry, the SubagentStart dispatch entry and the
     SubagentStop usage entry, each on an absolute path into the assets
     directory of the installed package or the clone, run by the interpreter
-    running this setup. Bare python3 is whatever the PATH Claude Code spawns
+    running this setup. With `task_id` each command ends in ` --task <id>`, the run a lane's
+    hooks belong to. Bare python3 is whatever the PATH Claude Code spawns
     hooks with finds first, and one older than 3.11 cannot run the hooks."""
     hooks_dir = Path(os.path.abspath(code_root)) / "hooks"
 
     def entry(matcher, script):
         command = "%s %s" % (shlex.quote(sys.executable), shlex.quote(str(hooks_dir / script)))
+        if task_id is not None:
+            command += " --task %s" % shlex.quote(task_id)
         return {"matcher": matcher,
                 "hooks": [{"type": "command", "command": command, "timeout": _HOOK_TIMEOUT_SECONDS}]}
     return {"PreToolUse": entry(doctor.RECOMMENDED_MATCHER, doctor.GUARD_MARKER),

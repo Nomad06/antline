@@ -34,13 +34,16 @@ _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # verdict.REQUIRED_CHECKS names it, the done gate wants a pass receipt for it.
 FOCUSED_TESTS_GATE = "focused-tests"
 TEST_CLASS_PLACEHOLDER = "<test_class>"
+# The lane number, put in place of this marker when a lane's skill is rendered (the number is
+# known then), in the gate commands and [env] values. Rendered without a lane it stays as written.
+LANE_PLACEHOLDER = "<lane>"
 # What the orchestrator fills in a gate command at run time: the focused test's
 # name and the placeholders of the rendered recipe (_RC_IDIOM, _EVIDENCE and the
 # `git -C <worktree>` line). A project placeholder such as example-maven's
 # <module> is accepted when skill/gates.md or skill/extra-gates.md names it,
 # since those fragments are where the orchestrator reads what to put there.
 RUN_TIME_PLACEHOLDERS = (TEST_CLASS_PLACEHOLDER, "<worktree>", "<TASK-ID>", "<SHA>",
-                         "<GENERATION>")
+                         "<GENERATION>", LANE_PLACEHOLDER)
 _PLACEHOLDER_RE = re.compile(r"<[A-Za-z_][A-Za-z0-9_-]*>")
 _PLACEHOLDER_FRAGMENTS = ("skill/gates.md", "skill/extra-gates.md")
 SKILL_FRAGMENTS = ("skill/gates.md", "skill/baseline.md", "skill/extra-gates.md",
@@ -655,18 +658,18 @@ _UNKNOWN_REPO = "<owner/name>"
 _UNKNOWN_WORKSPACE = "<workspace>"
 
 
-def _gate_recipes(doc):
+def _gate_recipes(doc, lane=None):
     """The harness gates in their log-and-rc shape. Under the OS sandbox profile the
     orchestrator's session stays in the workspace its gh and ppl calls run from, so each gate
     changes into the worktree in a subshell, which leaves the session where it is."""
-    env = " ".join("%s=%s" % (key, shlex.quote(value))
+    env = " ".join("%s=%s" % (key, shlex.quote(_lane_filled(value, lane)))
                    for key, value in sorted((doc.get("env") or {}).items()))
     run_dir = "%s/<TASK-ID>" % os_sandbox.scratch_root()
     lines = ["mkdir -p %s" % run_dir, "git -C <worktree> rev-parse HEAD", ""]
     in_worktree = os_sandbox.needed(doc)
     for gate in doc.get("gate") or []:
         name = gate["name"]
-        command = ("%s %s" % (env, gate["command"])).strip()
+        command = ("%s %s" % (env, _lane_filled(gate["command"], lane))).strip()
         if in_worktree:
             command = "(cd <worktree> && %s)" % command
         lines.append("# %s" % name)
@@ -677,13 +680,17 @@ def _gate_recipes(doc):
     return "\n".join(lines).rstrip()
 
 
-def _fragment_file(doc, name):
+def _lane_filled(text, lane):
+    return text if lane is None else text.replace(LANE_PLACEHOLDER, str(lane))
+
+
+def _fragment_file(doc, name, lane=None):
     path = Path(doc["_dir"]) / "skill" / ("%s.md" % name)
     if not path.is_file():
         return ""
     text = path.read_text(encoding="utf-8").strip()
-    return (text.replace(_DEFAULT_BRANCH_PLACEHOLDER, doc["repo"]["default_branch"])
-            .replace(_SCRATCH_PLACEHOLDER, str(os_sandbox.scratch_root())))
+    return _lane_filled(text.replace(_DEFAULT_BRANCH_PLACEHOLDER, doc["repo"]["default_branch"])
+                        .replace(_SCRATCH_PLACEHOLDER, str(os_sandbox.scratch_root())), lane)
 
 
 def _os_values(doc, pins, workspace):
@@ -746,7 +753,7 @@ def _os_values(doc, pins, workspace):
     return values
 
 
-def _values(doc, pins=None, workspace=None):
+def _values(doc, pins=None, workspace=None, lane=None):
     forge = forges.get(doc["forge"]["kind"])
     skills = (doc.get("knowledge") or {}).get("skills") or []
     repo = doc["repo"]
@@ -789,15 +796,15 @@ def _values(doc, pins=None, workspace=None):
         ("harness", "default-branch"): repo["default_branch"],
         ("harness", "scratch"): str(os_sandbox.scratch_root()),
         ("harness", "worktrees"): repo.get("worktrees") or (repo["path"].rstrip("/") + "/.worktrees"),
-        ("harness", "gates"): _fragment_file(doc, "gates"),
+        ("harness", "gates"): _fragment_file(doc, "gates", lane),
         # One line: the baseline sentence also fills a table cell.
-        ("harness", "baseline"): " ".join(_fragment_file(doc, "baseline").split()) or _DEFAULT_BASELINE,
-        ("harness", "gate-recipes"): _gate_recipes(doc),
+        ("harness", "baseline"): " ".join(_fragment_file(doc, "baseline", lane).split()) or _DEFAULT_BASELINE,
+        ("harness", "gate-recipes"): _gate_recipes(doc, lane),
         # Project-specific recipe steps with their evidence lines, spliced in
         # as written. A marker inside the fragment is refused, not resolved.
-        ("harness", "extra-gates"): _fragment_file(doc, "extra-gates"),
+        ("harness", "extra-gates"): _fragment_file(doc, "extra-gates", lane),
         # One line: it ends a sentence of the closing section.
-        ("harness", "tracker-close"): (" ".join(_fragment_file(doc, "tracker-close").split())
+        ("harness", "tracker-close"): (" ".join(_fragment_file(doc, "tracker-close", lane).split())
                                        or DEFAULT_TRACKER_CLOSE),
         ("harness", "lessons"): memory.section(doc.get("_memory") or [], "orchestrator"),
         ("knowledge", "skills"): (", ".join("`%s`" % s for s in skills) if skills
@@ -824,15 +831,16 @@ def _with_frontmatter(text, skill_name):
     return head + sep + SKILL_NOTICE + "\n" + tail
 
 
-def render_skill(doc, skill_name="pipeline", pins=None, workspace=None):
+def render_skill(doc, skill_name="pipeline", pins=None, workspace=None, lane=None):
     """relative path -> text of every file of the skill, nothing written.
     Refuses SCHEMA_INVALID on an include marker it cannot resolve, so a
     marker never reaches the disk. `pins` are the binaries apply pinned, looked
     up on PATH when it is None and the harness needs the OS sandbox profile,
-    and `workspace` the [claude] workspace, read from the config when None."""
+    `workspace` the [claude] workspace, read from the config when None, and `lane` the lane
+    number a lane's render puts in place of <lane> in the gates and [env] values."""
     if not _NAME_RE.match(skill_name or ""):
         raise PplError("SCHEMA_INVALID", "skill name %r is not a plain directory name" % skill_name)
-    values = _values(doc, pins, workspace)
+    values = _values(doc, pins, workspace, lane)
     root = paths.root() / "skill"
     rendered = {}
     for path in sorted(root.rglob("*")):

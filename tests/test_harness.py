@@ -1691,6 +1691,12 @@ class TestRenderSkill(HarnessTestCase):
         fixtures.install_harness(name, as_name=installed)
         return harness.render_skill(harness.load(installed or name))
 
+    def test_lane_placeholder_renders_the_lane_number(self):
+        fixtures.install_variant("example-maven", "laned", env={"PORT": "80<lane>"})
+        doc = harness.load("laned")
+        self.assertIn("PORT=802", harness.render_skill(doc, lane=2)["references/gates.md"])
+        self.assertIn("PORT='80<lane>'", harness.render_skill(doc)["references/gates.md"])
+
     def test_orchestrator_lessons_render_into_the_skill(self):
         fixtures.install_harness("example-maven")
         write_memory("example-maven", [lesson_row(

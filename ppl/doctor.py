@@ -866,9 +866,11 @@ def forge_report(env=None):
     return result
 
 
-def _server_names(doc):
+def _servers(doc):
     servers = doc.get("mcpServers") if isinstance(doc, dict) else None
-    return [name for name in servers if isinstance(name, str)] if isinstance(servers, dict) else []
+    if not isinstance(servers, dict):
+        return {}
+    return {name: config for name, config in servers.items() if isinstance(name, str)}
 
 
 def _json_object(path):
@@ -879,27 +881,34 @@ def _json_object(path):
     return doc if isinstance(doc, dict) else None
 
 
-def mcp_server_names(cwd=None, claude_json=None):
-    """The names, never a command, args or env, of every MCP server a session launched in the
-    workspace sees: its .mcp.json, ~/.claude.json (top level and the workspace's project
-    entry) and the mcpServers of the user, project and local settings files."""
+def mcp_servers(cwd=None, claude_json=None):
+    """{name: config} of every MCP server a session launched in the workspace sees: its
+    .mcp.json, ~/.claude.json (top level and the workspace's project entry) and the mcpServers
+    of the user, project and local settings files. A name found twice keeps the entry of the
+    highest source: the ~/.claude.json project entry, then .mcp.json, then the ~/.claude.json
+    top level, then the settings files."""
     base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
     cwd = str(base)
     claude_json = Path(claude_json) if claude_json else claude_home().parent / ".claude.json"
-    names = []
-    for doc in (_json_object(base / ".mcp.json"),
-                _json_object(global_settings_path()),
+    found = {}
+    for doc in (_json_object(global_settings_path()),
                 _json_object(base / ".claude" / "settings.json"),
                 _json_object(local_settings_path(cwd))):
-        names += _server_names(doc)
+        found.update(_servers(doc))
     user = _json_object(claude_json)
     if user is not None:
-        names += _server_names(user)
-        projects = user.get("projects")
-        if isinstance(projects, dict):
-            for key in dict.fromkeys((str(base), os.path.realpath(base))):
-                names += _server_names(projects.get(key))
-    return sorted(dict.fromkeys(names))
+        found.update(_servers(user))
+    found.update(_servers(_json_object(base / ".mcp.json")))
+    projects = user.get("projects") if user is not None else None
+    if isinstance(projects, dict):
+        for key in dict.fromkeys((str(base), os.path.realpath(base))):
+            found.update(_servers(projects.get(key)))
+    return found
+
+
+def mcp_server_names(cwd=None, claude_json=None):
+    """The names, never a command, args or env, of every server mcp_servers finds."""
+    return sorted(mcp_servers(cwd, claude_json))
 
 
 def mcp_servers_warning(cwd=None, claude_json=None):
