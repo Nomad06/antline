@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
+import fixtures
 import panel_client
 import ppl_guard
 from ppl import config, harness, paths, run, store, tomlout
@@ -24,6 +25,7 @@ MAIN_SOURCE = "source/core/orders/src/main/java/Foo.java"
 
 class PlaygroundTestCase(panel_client.StudioTestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         super().setUp()
         config.ensure()
         self.repo = panel_client.make_repo({"Makefile": "test:\n\ttrue\n", MAIN_SOURCE: "class Foo {}\n"})

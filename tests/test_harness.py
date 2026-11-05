@@ -34,6 +34,7 @@ def write_memory(name, rows):
 
 class HarnessTestCase(unittest.TestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         self._home = os.environ.get("PPL_HOME")
         os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
@@ -563,6 +564,9 @@ class TestListAndAdd(HarnessTestCase):
         target = harness.add(str(source), name="mine")
         self.assertEqual(target, paths.harness_dir("mine"))
         self.assertTrue((target / "harness.toml").is_file())
+        count = subprocess.run(["git", "-C", str(target), "rev-list", "--count", "HEAD"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(count, "1")
         self.assertEqual(harness.load("mine")["harness"]["name"], "example-generic")
 
     def test_add_refuses_an_existing_name(self):

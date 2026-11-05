@@ -29,6 +29,7 @@ def ok_forge(*args, **kwargs):
 
 class WizardTestCase(panel_client.StudioTestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         super().setUp()
         # the wizard renders into the workspace it configures, as a user's run does
         os.environ.pop("PPL_AGENTS_DIR", None)

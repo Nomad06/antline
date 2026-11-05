@@ -12,6 +12,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+import fixtures
 import panel_client
 from ppl import cli, config, harness, paths, routing
 from ppl.errors import PplError
@@ -22,6 +23,7 @@ GATES = "harness:demo:skill/gates.md"
 
 class FilesTestCase(panel_client.StudioTestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         super().setUp()
         config.ensure()
         harness.add(str(paths.defaults_dir() / "harnesses" / "example-generic"), name="demo")

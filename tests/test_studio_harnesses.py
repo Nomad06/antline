@@ -9,6 +9,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+import fixtures
 import panel_client
 from ppl import config, harness, os_sandbox, paths
 from ppl.studio import drafts, files
@@ -18,6 +19,7 @@ EXAMPLE = str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "default
 
 class HarnessApiTestCase(panel_client.StudioTestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         super().setUp()
         config.ensure()
         harness.add(EXAMPLE, name="demo")

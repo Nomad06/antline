@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+import fixtures
 import panel_client
 from ppl import config, harness, lessons, memory, paths, routing, store
 from ppl.studio import files
@@ -15,6 +16,7 @@ APPLY = "run ppl harness apply demo to render it"
 
 class LessonsApiCase(panel_client.StudioTestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         super().setUp()
         config.ensure()
         harness.add(str(paths.defaults_dir() / "harnesses" / "example-generic"), name="demo")

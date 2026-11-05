@@ -4,7 +4,9 @@ import os
 import shutil
 import subprocess
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 import tmphome
 from ppl import paths, tomlout
@@ -149,3 +151,15 @@ def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
     kept = [item for item in lanes.read() if item.get("task") != task_id]
     store.write_json(lanes.registry_path(), {"version": 1, "lanes": kept + [record]})
     return record
+
+
+@contextmanager
+def git_identity():
+    """Give git a test-only identity (and no signing) through the environment, so a
+    plain directory can be imported as a harness without the developer's or CI's
+    global git config. Never used for this project's own commits."""
+    config = Path(tmphome.mkdtemp(prefix="pplgitcfg-")) / "gitconfig"
+    config.write_text("[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n",
+                      encoding="utf-8")
+    with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1"}):
+        yield

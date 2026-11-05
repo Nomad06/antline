@@ -120,6 +120,11 @@ class Sandbox:
         for rel, text in fragments.items():
             (source / rel).parent.mkdir(parents=True, exist_ok=True)
             (source / rel).write_text(text, encoding="utf-8")
+        # a committed repository, so `harness add` keeps it as it is and imports nothing under
+        # the sandbox's empty git config
+        self.git("init", "-q", "-b", "main", cwd=source)
+        self.git("add", "-A", cwd=source)
+        self.git("commit", "-q", "-m", "demo harness", cwd=source)
         # first on PATH, so harness apply pins these and never a ppl or gh installed elsewhere
         for name, text in (("gh", sample.gh_source()), ("ppl", sample.ppl_source())):
             target = self.bin / name

@@ -15,6 +15,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 
+import fixtures
 from ppl import cli, config, harness, models, os_sandbox, paths, setup
 from ppl.errors import PplError
 
@@ -36,6 +37,7 @@ def ok_forge(*args, **kwargs):
 
 class SetupTestCase(unittest.TestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         self._home = os.environ.get("PPL_HOME")
         os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
         # Another module sets these at import time, and the dirs are read

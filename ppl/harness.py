@@ -14,7 +14,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from . import boundary, escape, forges, memory, os_sandbox, paths, routing, sequences, trackers
+from . import boundary, escape, forges, lane_harness, memory, os_sandbox, paths, routing, sequences, trackers
 from .errors import PplError
 
 FORMAT = 1
@@ -546,6 +546,7 @@ def add(source, name=None, staging=False):
             _clone(name, source, target)
         else:
             _copy(name, source, target)
+            lane_harness.import_directory(target, name)
         load(str(target))
     except PplError:
         shutil.rmtree(target, ignore_errors=True)
