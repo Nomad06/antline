@@ -59,6 +59,7 @@ KNOWN_KEYS = {
     "tests": ("sources",),
     "os_sandbox": ("enabled", "allowed_domains", "allow_write", "allow_ssh_read"),
     "knowledge": ("skills", "extra_tools"),
+    "lanes": ("max",),
     "env": None,
     "gate": ("name", "command"),
     "guard": ("shape",),
@@ -378,6 +379,7 @@ def validate(doc, source):
         if not _strings(knowledge.get(key, [])):
             _fail(source, "knowledge.%s must be a list of strings" % key)
     _check_granted_tools(doc, knowledge, source)
+    lanes_max(doc)
     env = doc.get("env") or {}
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         _fail(source, "[env] must be a table of string values")
@@ -410,6 +412,18 @@ def validate(doc, source):
                         "a harness by the directory name"
                         % (doc["harness"]["name"], installed_name(doc)))
     return warnings
+
+
+def lanes_max(doc):
+    """[lanes] max, how many lanes of this harness may run at once: an integer 1..9, 1 when
+    absent."""
+    table = doc.get("lanes") or {}
+    if not isinstance(table, dict):
+        _fail("harness", "[lanes] must be a table")
+    value = table.get("max", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 9:
+        _fail(doc.get("_dir") or "harness", "lanes.max must be an integer from 1 to 9")
+    return value
 
 
 def shape_rows(doc, source="harness"):
@@ -555,6 +569,7 @@ def snapshot(doc):
             "tracker": copy.deepcopy(doc["tracker"]),
             "forge": copy.deepcopy(doc["forge"]),
             "os_sandbox": {"needed": os_sandbox.needed(doc)},
+            "lanes": {"max": lanes_max(doc)},
             "shapes": shape_rows(doc),
             "tests": {"sources": list((doc.get("tests") or {}).get("sources")
                                       or boundary.TEST_PATTERNS)},

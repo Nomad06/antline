@@ -101,6 +101,27 @@ def lessons_reflect():
     return value
 
 
+LANE_KEYS = ("max",)
+
+
+def lanes_max():
+    """[lanes] max, how many task windows may run at once on this machine: an integer
+    1..9, 3 when absent. An unknown key, a bool or a string is refused, the [budgets]
+    pattern: a misspelt limit must not leave the machine on the default unseen."""
+    table = _section(load(), "lanes")
+    unknown = sorted(key for key in table if key not in LANE_KEYS)
+    if unknown:
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: [lanes] has the unknown key %s, the known key is %s"
+                       % (paths.config_file(), ", ".join(unknown), ", ".join(LANE_KEYS)))
+    value = table.get("max", 3)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 9:
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: lanes.max must be an integer from 1 to 9"
+                       % paths.config_file())
+    return value
+
+
 def _dir_setting(key, env_var, fallback):
     """The environment wins over config, so a test or a one-off render
     (PPL_AGENTS_DIR=... ppl harness apply) never writes into the real dir."""

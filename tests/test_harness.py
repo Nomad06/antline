@@ -185,6 +185,21 @@ class TestStrictValidation(HarnessTestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
+    def test_a_lanes_table_with_max_is_accepted(self):
+        name = self.mutate("example-generic", "[env]", "[lanes]\nmax = 4\n\n[env]")
+        doc = harness.load(name)
+        self.assertEqual(harness.validate(doc, name), [])
+        self.assertEqual(harness.lanes_max(doc), 4)
+        self.assertEqual(harness.snapshot(doc)["lanes"], {"max": 4})
+
+    def test_lanes_max_zero_is_refused(self):
+        name = self.mutate("example-generic", "[env]", "[lanes]\nmax = 0\n\n[env]")
+        self.assertIn("lanes.max", self.refused(name))
+
+    def test_lanes_max_defaults_to_one(self):
+        fixtures.install_harness("example-generic")
+        self.assertEqual(harness.lanes_max(harness.load("example-generic")), 1)
+
     def test_a_gate_placeholder_the_orchestrator_cannot_fill_is_refused(self):
         # rule: R-HARNESS-UNKNOWN-KEY
         name = self.mutate("example-generic", 'command = "make build"',
@@ -1530,8 +1545,8 @@ class TestSnapshotAndApplied(HarnessTestCase):
         fixtures.install_harness("example-maven")
         doc = harness.load("example-maven")
         snap = harness.snapshot(doc)
-        self.assertEqual(set(snap), {"format", "name", "task", "tracker", "forge", "os_sandbox", "shapes",
-                                    "tests", "memory"})
+        self.assertEqual(set(snap), {"format", "name", "task", "tracker", "forge", "os_sandbox", "lanes",
+                                    "shapes", "tests", "memory"})
         self.assertEqual(snap["format"], harness.FORMAT)
         self.assertEqual(snap["name"], "example-maven")
         self.assertEqual(snap["task"], {"key_pattern": doc["task"]["key_pattern"]})

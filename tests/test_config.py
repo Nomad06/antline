@@ -96,6 +96,29 @@ class TestConfig(unittest.TestCase):
                 self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
                 self.assertIn("lessons.reflect", caught.exception.message)
 
+    def test_lanes_max_defaults_to_three(self):
+        self.assertEqual(config.lanes_max(), 3)
+        self.write("[lanes]\n")
+        self.assertEqual(config.lanes_max(), 3)
+        self.write("[lanes]\nmax = 9\n")
+        self.assertEqual(config.lanes_max(), 9)
+
+    def test_lanes_max_outside_one_to_nine_is_refused(self):
+        for value in ("0", "10", '"3"', "true"):
+            with self.subTest(value=value):
+                self.write("[lanes]\nmax = %s\n" % value)
+                with self.assertRaises(PplError) as caught:
+                    config.lanes_max()
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                self.assertIn("lanes.max", caught.exception.message)
+
+    def test_an_unknown_lanes_key_is_refused_naming_max(self):
+        self.write("[lanes]\nmaxx = 2\n")
+        with self.assertRaises(PplError) as caught:
+            config.lanes_max()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("unknown key maxx", caught.exception.message)
+        self.assertIn("the known key is max", caught.exception.message)
 
 
 class TestWrite(unittest.TestCase):
