@@ -18,7 +18,7 @@ HOOKS = Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"
 sys.path.insert(0, str(HOOKS))
 
 import fixtures
-from ppl import control, lanes, paths, run, store
+from ppl import control, harness, lanes, os_sandbox, paths, run, store
 import ppl_dispatch
 import ppl_guard
 import ppl_usage
@@ -416,6 +416,224 @@ class TestTheOtherHooksBind(LaneCase):
         used = {task: run.load(task)["budgets"]["dispatch_used"]
                 for task in (LANE_A, LANE_B, UNREGISTERED)}
         self.assertEqual(used, {LANE_A: 0, LANE_B: 1, UNREGISTERED: 0})
+
+
+def real(path):
+    return os.path.realpath(str(path))
+
+
+def edit_input(tool, target):
+    key = "notebook_path" if tool == "NotebookEdit" else "file_path"
+    return {key: target, "old_string": "a", "new_string": "b", "content": "x\n"}
+
+
+class TestLaneProtection(LaneCase):
+    """A lane's own session files, and the other lanes' work, are out of a lane's reach. Two
+    lanes on one project checkout, each with its worktree under the checkout's .worktrees, as
+    ppl lane lays them out by default, and each past ppl init."""
+
+    def setUp(self):
+        super().setUp()
+        self.checkout = real(tmphome.mkdtemp(prefix="pplcheckout-"))
+        os.makedirs(os.path.join(self.checkout, ".git"))
+        self.worktree = {}
+        for number, task in ((1, LANE_A), (2, LANE_B)):
+            worktree = os.path.join(self.checkout, ".worktrees", "shop-" + task)
+            os.makedirs(os.path.join(worktree, "src"))
+            run.init(task, "u", worktree)
+            fixtures.bind_lane(task, self.checkout, worktree=worktree, lane=number)
+            self.worktree[task] = worktree
+
+    def decide(self, agent, tool, tool_input, cwd=None, task=LANE_A):
+        cwd = str(lanes.start_dir(task)) if cwd is None else cwd
+        return ppl_guard.decide(payload(agent, tool, tool_input, cwd), argv(task))
+
+    def bash(self, command, agent=None, cwd=None, task=LANE_A):
+        return self.decide(agent, "Bash", {"command": command}, cwd, task)
+
+    def test_edit_and_write_into_the_start_directory_are_denied_for_everyone(self):
+        # rule: R-LANE-START-DIR-PROTECTED
+        # R27: the harness needs no OS sandbox, so no facts file names the start directory,
+        # and it is protected all the same: the lane's own, another lane's, and the registry
+        own, other = lanes.start_dir(LANE_A), lanes.start_dir(LANE_B)
+        self.assertFalse((own / os_sandbox.FACTS_FILE).exists())
+        targets = [str(start / rel) for start in (own, other)
+                   for rel in ("settings.json", "plugin/skills/pipeline/SKILL.md",
+                               os_sandbox.FACTS_FILE)]
+        targets.append(str(lanes.registry_path()))
+        for agent in (None, "ppl-code-worker", "general-purpose"):
+            for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+                for target in targets:
+                    with self.subTest(agent=agent, tool=tool, target=target):
+                        result = self.decide(agent, tool, edit_input(tool, target))
+                        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                        self.assertIn("ppl lane keeps", self.deny_reason(result))
+        # a write-shaped Bash too, relative to the start directory the session stands in, and
+        # a removal that takes the start directories with it
+        for command in ("echo x > settings.json", "echo x > %s/settings.json" % own,
+                        "cp /tmp/x %s/mcp.json" % other, "sed -n p x && tee %s/agents.json"
+                        % own, "rm -rf %s" % own.parent, "mv %s /tmp/gone" % other):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    result = self.bash(command, agent=agent)
+                    self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                    self.assertIn("ppl lane keeps", self.deny_reason(result))
+        # a session in no lane meets it as well, and one that changes nothing there is free
+        result = ppl_guard.decide(payload(None, "Write", {"file_path": str(own / "settings.json")},
+                                          str(own)))
+        self.assertIn("ppl lane keeps", self.deny_reason(result))
+        self.assertIsNone(self.bash("cat settings.json"))
+        self.assertIsNone(self.decide(None, "Read", {"file_path": str(own / "settings.json")}))
+
+    def test_a_write_into_another_lanes_worktree_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # a lane on another project too, whose worktree lies in no checkout of lane A's
+        elsewhere = real(tmphome.mkdtemp(prefix="pplcheckout-"))
+        theirs_c = os.path.join(elsewhere, ".worktrees", "web-LANE-5103")
+        os.makedirs(theirs_c)
+        run.init("LANE-5103", "u", theirs_c)
+        fixtures.bind_lane("LANE-5103", elsewhere, worktree=theirs_c, lane=3)
+        for owner, worktree in ((LANE_B, self.worktree[LANE_B]), ("LANE-5103", theirs_c)):
+            target = worktree + "/src/App.java"
+            calls = [(tool, edit_input(tool, target))
+                     for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit")]
+            calls += [("Bash", {"command": command}) for command in (
+                "echo x > %s" % target, "cd %s && echo x > src/App.java" % worktree,
+                "cp /tmp/App.java %s" % target, "git -C %s checkout HEAD -- src/App.java"
+                % worktree, "rm -rf %s" % worktree)]
+            for agent in (None, "ppl-code-worker", "general-purpose"):
+                for tool, tool_input in calls:
+                    with self.subTest(owner=owner, agent=agent, tool=tool,
+                                      what=str(tool_input)[:60]):
+                        reason = self.deny_reason(self.decide(agent, tool, tool_input))
+                        self.assertIn("BOUNDARY_VIOLATION", reason)
+                        self.assertIn("lane %s's worktree" % owner, reason)
+        # lane B is held to the same, the other way round
+        result = self.decide(None, "Write", edit_input("Write", self.worktree[LANE_A] + "/x"),
+                             task=LANE_B)
+        self.assertIn("lane %s's worktree" % LANE_A, self.deny_reason(result))
+
+    def test_a_write_into_the_project_checkout_outside_the_lane_worktree_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R26: the checkout the worktrees branch from is no lane's to write, its .git
+        # included, before ppl init and after, for every session
+        fixtures.bind_lane("LANE-5104", self.checkout,
+                           worktree=os.path.join(self.checkout, ".worktrees", "shop-LANE-5104"),
+                           lane=3)
+        for task in (LANE_A, "LANE-5104"):
+            for agent in (None, "general-purpose"):
+                for tool, tool_input in (
+                        ("Write", edit_input("Write", self.checkout + "/README.md")),
+                        ("Edit", edit_input("Edit", self.checkout + "/src/App.java")),
+                        ("Bash", {"command": "echo x >> %s/.git/config" % self.checkout}),
+                        ("Bash", {"command": "cd %s && touch notes.md" % self.checkout})):
+                    with self.subTest(task=task, agent=agent, tool=tool):
+                        reason = self.deny_reason(self.decide(agent, tool, tool_input,
+                                                              task=task))
+                        self.assertIn("BOUNDARY_VIOLATION", reason)
+                        self.assertIn("project checkout %s" % self.checkout, reason)
+        # a role, whose Bash is otherwise free outside its run's repo
+        result = self.bash("echo x > %s/build.log" % self.checkout, agent="ppl-code-worker")
+        self.assertIn("project checkout", self.deny_reason(result))
+        # the lane's own worktree lies in the checkout, and this check leaves it to the run's
+        # own write boundary (R-UNROLED-REPO-WRITE)
+        reason = self.deny_reason(self.decide(None, "Write", edit_input(
+            "Write", self.worktree[LANE_A] + "/src/App.java")))
+        self.assertIn("inside run %s's repo" % LANE_A, reason)
+        self.assertNotIn("project checkout", reason)
+        self.assertIsNone(self.decide(None, "Write", edit_input("Write", "/tmp/elsewhere/n.md")))
+
+    def test_a_write_into_another_lanes_worktree_through_a_symlink_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Review Focus 4: lane B, on another project, is recorded through a symlinked parent
+        # and the write names the real path, then the other way round
+        project = real(tmphome.mkdtemp(prefix="pplproject-"))
+        theirs = os.path.join(project, ".worktrees", "web-" + LANE_B)
+        os.makedirs(theirs)
+        alias = os.path.join(real(tmphome.mkdtemp(prefix="pplalias-")), "project")
+        os.symlink(project, alias)
+        through = os.path.join(alias, ".worktrees", "web-" + LANE_B)
+        for recorded, written in ((through, theirs), (theirs, through)):
+            fixtures.bind_lane(LANE_B, os.path.dirname(os.path.dirname(recorded)),
+                               worktree=recorded, lane=2)
+            for tool, tool_input in (
+                    ("Write", edit_input("Write", written + "/src/App.java")),
+                    ("Bash", {"command": "echo x > %s/src/App.java" % written}),
+                    ("Bash", {"command": "cd %s && rm -rf src" % written})):
+                with self.subTest(recorded=recorded, tool=tool):
+                    reason = self.deny_reason(self.decide(None, tool, tool_input))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("lane %s's worktree" % LANE_B, reason)
+
+    def test_ppl_with_another_lanes_task_is_denied(self):
+        # rule: R-LANE-CROSS-TASK
+        theirs, worktree = LANE_B, self.worktree[LANE_B]
+        start = str(lanes.start_dir(LANE_B))
+        commands = ("ppl show --task %s" % theirs, "ppl show --task=%s" % theirs,
+                    "PPL_TASK=%s ppl show" % theirs, "env PPL_TASK=%s ppl show" % theirs,
+                    "export PPL_TASK=%s; ppl show" % theirs,
+                    "ppl findings list --task '%s'" % theirs,
+                    "python3 -m ppl show --task %s" % theirs,
+                    "/opt/pin/bin/ppl show --task %s" % theirs,
+                    "ppl show --task $(echo %s)" % theirs,
+                    # bare ppl takes its run from a cwd inside a lane once PPL_TASK is gone
+                    "cd %s && PPL_TASK= ppl show" % worktree,
+                    "cd %s/src; env -u PPL_TASK ppl show" % worktree,
+                    "env -C %s ppl show" % start, "pushd %s && ppl show" % start)
+        for agent in (None, "ppl-verifier"):
+            for command in commands:
+                with self.subTest(agent=agent, command=command):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    if agent is None:
+                        self.assertIn(theirs, reason)
+        # a shell that already stands in the other lane
+        for cwd in (worktree, start):
+            with self.subTest(cwd=cwd):
+                reason = self.deny_reason(self.bash("ppl show", cwd=cwd))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn(theirs, reason)
+
+    def test_ppl_with_its_own_task_is_allowed(self):
+        # a task with no lane is no other lane's run: a pending reflection names a destroyed
+        # run's task, and a lane's free text may name another lane's
+        own, worktree = LANE_A, self.worktree[LANE_A]
+        for command in ("ppl show --task %s" % own, "ppl show --task=%s" % own,
+                        "PPL_TASK=%s ppl show" % own, "ppl show", "cd %s && ppl show" % worktree,
+                        "ppl lessons record --task LANE-5000 --file /tmp/lessons.json",
+                        "ppl findings add --title 'same cause as %s'" % LANE_B,
+                        "echo %s" % LANE_B):
+            with self.subTest(command=command):
+                self.assertIsNone(self.bash(command))
+        for command in ("ppl show --task %s" % own, "ppl show"):
+            with self.subTest(role=command):
+                self.assertIsNone(self.bash(command, agent="ppl-verifier", cwd=worktree))
+
+    def test_gh_from_the_start_directory_is_allowed_and_from_the_worktree_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # the lane's own facts, as ppl lane renders them: the start directory is where gh
+        # runs, and the lane's worktree is in its write scope
+        fixtures.install_variant("example-generic", "gh-lane",
+                                 repo={"path": self.checkout, "default_branch": "main",
+                                       "worktrees": self.checkout + "/.worktrees"},
+                                 **fixtures.GITHUB_ISSUES)
+        pins = {name: {"path": "/opt/pin/bin/" + name, "realpath": real("/opt/pin/bin/" + name)}
+                for name in ("gh", "git", "ppl")}
+        start = lanes.start_dir(LANE_A)
+        facts = os_sandbox.facts(harness.load("gh-lane"), start, pins,
+                                 worktree=self.worktree[LANE_A])
+        store.write_json(start / os_sandbox.FACTS_FILE, facts)
+        command = {"command": pins["gh"]["path"] + " auth status",
+                   "dangerouslyDisableSandbox": True}
+        for cwd in (str(start), real(start)):
+            with self.subTest(cwd=cwd):
+                self.assertIsNone(self.decide(None, "Bash", command, cwd))
+        for cwd in (self.worktree[LANE_A], self.worktree[LANE_A] + "/src", self.checkout,
+                    str(lanes.start_dir(LANE_B))):
+            with self.subTest(cwd=cwd):
+                reason = self.deny_reason(self.decide(None, "Bash", command, cwd))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn(real(start), reason)
 
 
 if __name__ == "__main__":

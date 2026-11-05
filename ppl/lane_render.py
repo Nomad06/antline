@@ -117,9 +117,11 @@ def _write_private(path, text):
     os.chmod(str(path), 0o600)
 
 
-def _settings(doc, task_id, start):
+def _settings(doc, task_id, start, worktree):
     """(settings, facts, pins): the settings document and what the sandbox facts are made from,
-    None for both when the harness needs no profile."""
+    None for both when the harness needs no profile. The profile lets the lane's Bash write its
+    own `worktree` and the checkout's .git, never the checkout's working tree or another
+    lane's worktree (os_sandbox.write_scope)."""
     hooks = {event: [entry] for event, entry in setup.hook_entries(paths.root(), task_id).items()}
     settings = {"hooks": hooks}
     if not os_sandbox.needed(doc):
@@ -128,10 +130,10 @@ def _settings(doc, task_id, start):
     problem = os_sandbox.layout_problem(doc, start) or os_sandbox.repo_problem(doc)
     if problem:
         raise PplError("SETUP_INCOMPLETE", problem)
-    prof = os_sandbox.profile(doc, start, pin_map)
+    prof = os_sandbox.profile(doc, start, pin_map, worktree)
     settings["sandbox"] = prof["sandbox"]
     settings["permissions"] = {"allow": prof["allow"]}
-    facts = os_sandbox.facts(doc, start, pin_map)
+    facts = os_sandbox.facts(doc, start, pin_map, worktree)
     facts["written_sandbox"] = prof["sandbox"]
     facts["written_allow"] = prof["allow"]
     return settings, facts, pin_map
@@ -146,7 +148,7 @@ def render(doc, task_id, lane, start, worktree, routing_config, mcp_source):
     paths.check_task_id(task_id)
     agents_text = _agents_json(doc, routing_config)
     mcp = _mcp_config(doc, mcp_source)
-    settings, facts, pin_map = _settings(doc, task_id, start)
+    settings, facts, pin_map = _settings(doc, task_id, start, worktree)
     skill = harness.render_skill(doc, pins=pin_map, workspace=str(start), lane=lane)
     start.mkdir(parents=True, exist_ok=True)
 

@@ -122,10 +122,13 @@ def _read_json(path):
         raise ValueError("%s cannot be read: %s" % (path, type(err).__name__))
 
 
-def load_facts(home):
-    """The parsed `home`/os_sandbox.json, None when it is absent. Raises ValueError when it
-    cannot be read or is of the wrong shape."""
-    path = os.path.join(str(home), FACTS_FILE)
+def load_facts(path):
+    """The parsed facts file at `path` (a lane's <start>/os_sandbox.json, or outside any lane
+    PPL_HOME/os_sandbox.json), None when it is absent or `path` is None. Raises ValueError when
+    it cannot be read or is of the wrong shape."""
+    if path is None:
+        return None
+    path = str(path)
     try:
         doc = _read_json(path)
     except FileNotFoundError:
@@ -280,12 +283,14 @@ def webfetch_github(tool_input):
     return any(_is_github_host(host) for host in hosts)
 
 
-def decide(payload, home, state):
+def decide(payload, facts_file, state):
     """None to let a flagged call go on to the guard's other checks, else (code, reason).
-    `state` is the guard's bound_state reader, a callable answering (task_id, run state or
-    None) for the run the hook's own command line binds it to, and raising when that lane
-    cannot be confirmed. It is called only past the role checks so a ppl-* role is refused
-    before any file is read. A run state already read, or None, is taken as well.
+    `facts_file` is the path of the guard facts the session runs under (load_facts), read
+    only past the role checks and the binding. `state` is the guard's bound_state reader, a
+    callable answering (task_id, run state or None) for the run the hook's own command line
+    binds it to, and raising when that lane cannot be confirmed. It is called only past the
+    role checks so a ppl-* role is refused before any file is read. A run state already read,
+    or None, is taken as well.
 
     While the guard facts exist or the session is bound to a run, every flagged call is the
     pipeline's whatever its cwd, since a cwd and the run's recorded repo are both in a role's
@@ -316,7 +321,7 @@ def decide(payload, home, state):
         run_state = state if isinstance(state, dict) else None
         task_id = (run_state or {}).get("task_id")
     try:
-        facts = load_facts(home)
+        facts = load_facts(facts_file)
     except ValueError as err:
         return ("OWNER_DECISION",
                 "the guard's OS sandbox facts are unusable (%s), so a command outside the OS "
@@ -551,21 +556,21 @@ def _value_problem(kind, flag, value, facts, state):
 
 def _cwd_problem(name, cwd, facts):
     """gh, and ppl whose own gh and git calls inherit the cwd, never load a repo a role can
-    write, so they run only from the workspace or a directory under it, which the profile
-    write-denies, and never from inside a write scope entry. Being outside the write scope is
-    not enough: a temp directory is sandbox-writable and in no entry. The reason names the
-    workspace, the directory the skill runs them from."""
+    write, so they run only from the facts' workspace, the lane's start directory, or a
+    directory under it, which the profile write-denies, and never from inside a write scope
+    entry. Being outside the write scope is not enough: a temp directory is sandbox-writable
+    and in no entry. The reason names the start directory, where the skill runs them from."""
     if not (isinstance(cwd, str) and os.path.isabs(cwd)):
         return ("%s runs only from a known directory, and this call names no cwd: run it from "
-                "the workspace %s" % (name, facts["workspace"]))
+                "the lane's start directory %s" % (name, facts["workspace"]))
     if not _inside(cwd, facts["workspace"]):
-        return ("%s runs only from the workspace %s or a directory under it, which no "
-                "sandboxed command can write, and %s is not one: cd to the workspace and run "
-                "it from there" % (name, facts["workspace"], cwd))
+        return ("%s runs only from the lane's start directory %s or a directory under it, "
+                "which no sandboxed command can write, and %s is not one: cd to the start "
+                "directory and run it from there" % (name, facts["workspace"], cwd))
     for entry in facts["write_scope"]:
         if _inside(cwd, entry):
             return ("%s runs only from a directory no sandboxed command can write, and %s is "
-                    "inside %s: cd to the workspace %s and run it from there"
+                    "inside %s: cd to the lane's start directory %s and run it from there"
                     % (name, cwd, entry, facts["workspace"]))
     return None
 

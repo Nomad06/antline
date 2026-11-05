@@ -116,20 +116,25 @@ def binding(argv, limit=READ_LIMIT):
 
 
 def _contains(directory, target):
-    if not directory:
+    if not directory or not isinstance(directory, str):
         return False
-    root = os.path.realpath(str(directory))
+    root = os.path.realpath(directory)
     return target == root or target.startswith(root.rstrip(os.sep) + os.sep)
 
 
-def for_path(path, limit=READ_LIMIT):
-    """The entry whose start directory or worktree holds `path`, compared by realpath so a
-    symlinked parent (/tmp, /private/tmp) does not hide it."""
+def holding(entries, path):
+    """The entry of `entries` whose start directory or worktree holds `path`, compared by
+    realpath so a symlinked parent (/tmp, /private/tmp) does not hide it, else None."""
     target = os.path.realpath(str(path))
-    for item in read(limit):
+    for item in entries:
         if _contains(item.get("start_dir"), target) or _contains(item.get("worktree"), target):
             return item
     return None
+
+
+def for_path(path, limit=READ_LIMIT):
+    """The registered entry whose start directory or worktree holds `path` (holding)."""
+    return holding(read(limit), path)
 
 
 @contextmanager

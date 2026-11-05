@@ -52,8 +52,9 @@ class LaneRenderCase(unittest.TestCase):
         start = lanes.start_dir(TASK)
         return harness.load(start / "harness" / name), start
 
-    def render(self, doc, start, source=SOURCE, routing_config=None):
-        return lane_render.render(doc, TASK, 2, start, start.parent, routing_config
+    def render(self, doc, start, source=SOURCE, routing_config=None, worktree=None):
+        worktree = worktree or Path(tmphome.mkdtemp(prefix="pplworktree-"))
+        return lane_render.render(doc, TASK, 2, start, worktree, routing_config
                                   or routing.load(), source)
 
     def sandboxed(self):
@@ -81,6 +82,25 @@ class TestSettings(LaneRenderCase):
         self.assertEqual((facts["lane"], facts["task"]), (2, TASK))
         self.assertEqual(facts["written_sandbox"], settings["sandbox"])
         self.assertEqual(facts["written_allow"], settings["permissions"]["allow"])
+
+    def test_the_profile_lets_bash_write_only_its_own_worktree_and_the_checkouts_git(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R25: a lane's sandboxed Bash writes neither the project checkout's working tree nor
+        # another lane's worktree, and git in its own worktree writes under the checkout's .git
+        doc, start = self.sandboxed()
+        worktree = Path(tmphome.mkdtemp(prefix="pplworktree-"))
+        result = self.render(doc, start, worktree=worktree)
+        settings = json.loads(result["settings"].read_text(encoding="utf-8"))
+        allow = settings["sandbox"]["filesystem"]["allowWrite"]
+        checkout = os_sandbox.checkout(doc)
+        self.assertIn(os.path.realpath(worktree), allow)
+        self.assertIn(os.path.join(checkout, ".git"), allow)
+        self.assertNotIn(checkout, allow)
+        self.assertNotIn(os.path.realpath(doc["repo"]["worktrees"]), allow)
+        for name in ("runs", "labels", "scratch"):
+            self.assertIn(os.path.realpath(paths.home() / name), allow)
+        facts = json.loads(result["facts"].read_text(encoding="utf-8"))
+        self.assertEqual(facts["write_scope"], allow)
 
     def test_a_harness_without_the_os_sandbox_gets_no_profile_and_no_facts(self):
         doc, start = self.lane()

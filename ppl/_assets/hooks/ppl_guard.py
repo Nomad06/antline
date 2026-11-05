@@ -39,7 +39,8 @@ if not _PPL_FILE or not Path(_PPL_FILE).resolve().is_relative_to(_PACKAGE_PARENT
     sys.stderr.write("ppl_guard: imported ppl from %s, not the one beside this hook in %s\n"
                      % (_PPL_FILE, _PACKAGE_PARENT))
 
-from ppl import boundary, control, escape, gitfacts, lanes, paths, run, store, trackers
+from ppl import (boundary, control, escape, escape_paths, gitfacts, lanes, paths, run, store,
+                 trackers)
 from ppl import forges as _forges
 from ppl.errors import PplError
 from ppl.trackers import jira as _jira
@@ -904,16 +905,34 @@ def github_mcp_prefixes(task_id):
     return escape.forge_github_prefixes(forge_from_snapshot(task_id)[1])
 
 
-def protected_edit_denial(payload):
+def facts_file(argv):
+    """The guard facts the session of the hook whose command line is `argv` runs under: in a
+    lane, the os_sandbox.json ppl lane renders into its start directory, lanes.start_dir of
+    the --task the command line names, where every registry entry records it; in no lane,
+    PPL_HOME/os_sandbox.json, which ppl harness apply writes. None for a command line that
+    binds no lane cleanly, whose calls lane_denial refuses. Found from argv alone, so neither
+    the registry nor a run file is read for it, and one a role made huge or unreadable holds
+    no edit back."""
+    try:
+        task = lanes.hook_task(argv)
+    except Exception:
+        return None
+    if task is None:
+        return paths.home() / escape.FACTS_FILE
+    return lanes.start_dir(task) / escape.FACTS_FILE
+
+
+def protected_edit_denial(payload, argv=()):
     """(code, reason) when an edit tool call may not write its target, else None: while the
-    guard facts exist it writes only inside the OS sandbox's write scope and Claude Code's
-    projects and plans directories, and never a protected path [R-OS-SANDBOX-PROTECTED-PATHS].
-    Facts that cannot be read put every session in scope with no write scope to check, so
-    every edit is refused until `ppl harness apply` repairs them. No run file is read: the
-    check holds only while the facts exist, which an active run does not change."""
+    guard facts of the session (facts_file) exist it writes only inside the OS sandbox's write
+    scope and Claude Code's projects and plans directories, and never a protected path, a
+    lane's whole start directory among them [R-OS-SANDBOX-PROTECTED-PATHS]. Facts that cannot
+    be read put every session in scope with no write scope to check, so every edit is refused
+    until they are repaired. No run file is read: the check holds only while the facts exist,
+    which an active run does not change."""
     home = paths.home()
     try:
-        facts = escape.load_facts(home)
+        facts = escape.load_facts(facts_file(argv))
     except ValueError as err:
         return ("OWNER_DECISION",
                 "the guard's OS sandbox facts are unusable (%s), so an edit tool's target cannot "
@@ -1727,7 +1746,7 @@ def _placed_in_directory(files, cwd, slash_is_contents):
     return placed
 
 
-def _segment_write_targets(tokens, segment, cwd, dirstack, targets):
+def _segment_write_targets(tokens, segment, cwd, dirstack, targets, commands=None):
     """Append the write targets of one segment's `tokens` to `targets`, and
     return the shell's cwd after it: `cd` and `pushd` move it, `popd` pops
     `dirstack`. Wrapper verbs (`env`, `command`, `builtin`, `exec`, `nohup`,
@@ -1735,7 +1754,9 @@ def _segment_write_targets(tokens, segment, cwd, dirstack, targets):
     `env -C` moves only the command env runs: a redirect on the segment is the
     shell's own and stays on the shell's cwd, the one the segment starts in,
     a cd's own redirect included. Redirects are split off the raw body before
-    the tokens reach here, see _bash_write_targets."""
+    the tokens reach here, see _bash_write_targets. With `commands`, the
+    segment is appended to it as (tokens, index of the command its wrappers
+    run, the cwd that command runs in)."""
     i = 0
     while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
         i += 1
@@ -1756,6 +1777,8 @@ def _segment_write_targets(tokens, segment, cwd, dirstack, targets):
             if BASH_WRITE_SHAPES.search(segment):
                 targets.append((None, cwd, False))
             i = len(tokens)
+    if commands is not None:
+        commands.append((tokens, i, arg_cwd))
     verb = _verb_name(tokens[i]) if i < len(tokens) else ""
     if i < len(tokens) and verb != tokens[i]:
         in_shell = False
@@ -1927,7 +1950,7 @@ def _close_groups(tail, cwd, list_cwd, base_cwd, groups, open_cwds, targets):
     return cwd, list_cwd
 
 
-def _bash_write_targets(command, base_cwd):
+def _bash_write_targets(command, base_cwd, commands=None):
     """(raw, cwd, removal) for every path a write-shaped Bash construct in
     `command` targets: the cwd in effect at that point, and whether the
     construct removes the path (rm, a mv or git mv source, git rm, the
@@ -1940,7 +1963,10 @@ def _bash_write_targets(command, base_cwd):
     found but its target could not be identified at all (see the module
     comment above) - the caller must treat that the same as a target that
     fails to resolve: deny, not skip. A `sh -c` or `bash -c` string is one
-    opaque word: nothing inside it is read.
+    opaque word: nothing inside it is read. With `commands`, every segment the
+    walk reads is appended to it (see _segment_write_targets), one it cannot
+    split into words as (None, 0, its cwd), and a command holding a `$(` or a
+    backtick appends nothing.
     """
     if "$(" in command or "`" in command:
         if BASH_WRITE_SHAPES.search(command):
@@ -1963,6 +1989,8 @@ def _bash_write_targets(command, base_cwd):
         if tokens is None:
             if BASH_WRITE_SHAPES.search(segment):
                 targets.append((None, cwd, False))
+            if commands is not None:
+                commands.append((None, 0, cwd))
             if background:
                 cwd = list_cwd
             continue
@@ -1974,7 +2002,7 @@ def _bash_write_targets(command, base_cwd):
         # a cd's own redirect is the shell's, opened in the pre-cd cwd
         targets.extend((target, cwd, False) for target in redirects)
         if tokens:
-            cwd = _segment_write_targets(tokens, segment, cwd, dirstack, targets)
+            cwd = _segment_write_targets(tokens, segment, cwd, dirstack, targets, commands)
         if tail:
             cwd, list_cwd = _close_groups(tail, cwd, list_cwd, base_cwd, groups,
                                           open_cwds, targets)
@@ -2322,6 +2350,216 @@ def lane_denial(binding, agent, tool):
     return None
 
 
+def _lane_files(binding, lanes_list):
+    """What ppl lane writes for the lanes and no session does: PPL_HOME/lanes, where it makes
+    every start directory, the registry and its lock, and each start directory a registry
+    entry records, the bound lane's included, whatever the facts say [R-LANE-START-DIR-PROTECTED].
+    A start directory holds the session's settings (its hooks and sandbox profile), skill
+    plugin, agents, MCP config and guard facts, all under the session's cwd, where acceptEdits
+    takes an edit unasked."""
+    home = paths.home()
+    roots = [str(home / "lanes"), str(lanes.registry_path()), str(home / lanes.LOCK_FILE)]
+    for item in list(lanes_list or []) + ([binding.entry] if binding.entry else []):
+        start = item.get("start_dir") if isinstance(item, dict) else None
+        if isinstance(start, str) and os.path.isabs(start):
+            roots.append(start)
+    return roots
+
+
+def _lane_write_forms(tool, tool_input, cwd):
+    """(forms, real forms, removal) for every path the call writes, as escape_paths.landing
+    places it: each path key of an edit tool, and each target of a write-shaped Bash
+    (_bash_write_targets) it can resolve. A Bash target it cannot resolve is left to
+    bash_write_boundary_deny, which denies one in a lane, and a relative edit path with no
+    absolute cwd, which Claude Code does not take, is not placed."""
+    placed = []
+    if tool in WRITE_TOOLS:
+        raws = [(tool_input.get(key), cwd, False) for key in READ_PATH_KEYS]
+    elif tool == "Bash" and isinstance(tool_input.get("command"), str):
+        raws = [(raw, seg_cwd, removal)
+                for raw, seg_cwd, removal in _bash_write_targets(tool_input["command"], cwd)
+                if raw and _resolve_path_against_cwd(raw, seg_cwd)]
+    else:
+        raws = []
+    for raw, at, removal in raws:
+        if not isinstance(raw, str) or not raw:
+            continue
+        forms = escape_paths.landing(raw, at if isinstance(at, str) else None)
+        if forms:
+            placed.append((forms[0], forms[1], removal))
+    return placed
+
+
+def _takes(real_forms, removal, roots):
+    """The root of `roots` a removal of one of `real_forms` takes with it, else None."""
+    if not removal:
+        return None
+    for root in roots:
+        if any(escape_paths.inside(os.path.realpath(root), [form]) for form in real_forms):
+            return os.path.realpath(root)
+    return None
+
+
+def cross_lane_denial(payload, binding, lanes_list):
+    """("BOUNDARY_VIOLATION", reason) when a call writes where no session of this lane may,
+    else None. Every path key of an edit tool and every target of a write-shaped Bash is
+    placed through every link, in any letter case and by device and inode (escape_paths), and
+    a removal counts for what it takes with it:
+    - any session, in a lane or not: a lane's files, every start directory and the registry
+      (_lane_files) [R-LANE-START-DIR-PROTECTED];
+    - a session bound to a lane: another lane's worktree, and a project checkout a lane works
+      on, outside the bound lane's own worktree [R-LANE-CROSS-WRITE]. The lanes branch from
+      that checkout, and git in a worktree writes only its .git, which ppl's own git reaches.
+    `lanes_list` is the registry as read for this call, None when it could not be read: a
+    bound session then gets ("OWNER_DECISION", why) for a write, since another lane's work
+    cannot be placed."""
+    tool = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    placed = _lane_write_forms(tool, tool_input, payload.get("cwd"))
+    if not placed:
+        return None
+    agent = payload.get("agent_type")
+    who = agent if isinstance(agent, str) and agent else "a session with no role"
+    files = _lane_files(binding, lanes_list)
+    for forms, real_forms, removal in placed:
+        root = escape_paths.hit(forms, files) or _takes(real_forms, removal, files)
+        if root:
+            return ("BOUNDARY_VIOLATION",
+                    "%s may not write %s: it is or lies under %s, where ppl lane keeps the "
+                    "lanes' session files (each lane's settings, hooks, skill plugin, agents, MCP "
+                    "config and guard facts) and the lane registry, which no session writes"
+                    % (who, forms[0], root))
+    entry = binding.entry
+    if not (binding.task and isinstance(entry, dict)):
+        return None
+    if lanes_list is None:
+        return ("OWNER_DECISION",
+                "lane %s's registry cannot be read now, so a write cannot be placed against the "
+                "other lanes' work: repair PPL_HOME/lanes.json, then run ppl lane resume %s"
+                % (binding.task, binding.task))
+    own = entry.get("worktree")
+    own = [own] if isinstance(own, str) and os.path.isabs(own) else []
+    others = [item for item in lanes_list
+              if isinstance(item, dict) and item.get("task") != binding.task]
+    for forms, real_forms, removal in placed:
+        for form in real_forms:
+            # where the write lands decides: in the lane's own worktree it is the run's own
+            # boundary's to judge, a link there to elsewhere lands elsewhere
+            if own and escape_paths.inside(form, own):
+                continue
+            for item in others:
+                worktree = item.get("worktree")
+                if not (isinstance(worktree, str) and os.path.isabs(worktree)):
+                    continue
+                if escape_paths.hit([form], [worktree]) or _takes([form], removal, [worktree]):
+                    return ("BOUNDARY_VIOLATION",
+                            "%s may not write %s: it lies in lane %s's worktree %s, and lane %s "
+                            "writes only its own" % (who, forms[0], item.get("task"), worktree,
+                                                     binding.task))
+            for item in [entry] + others:
+                checkout = item.get("repo")
+                root = (escape_paths.hit([form], [checkout])
+                        if isinstance(checkout, str) and os.path.isabs(checkout) else None)
+                if root:
+                    return ("BOUNDARY_VIOLATION",
+                            "%s may not write %s: it lies in the project checkout %s outside "
+                            "lane %s's worktree %s. The lanes branch from that checkout, and a "
+                            "lane writes only its own worktree"
+                            % (who, forms[0], root, binding.task,
+                               own[0] if own else "(none recorded)"))
+    return None
+
+
+# A word that is an assignment, an empty one included: `PPL_TASK= ppl` runs ppl.
+_ASSIGNMENT_WORD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _is_ppl_command(words):
+    """True when `words`, a command with its wrappers taken off, runs the ppl CLI: ppl or
+    ppl.cli spelled by any path, or python -m ppl[.cli], past any assignment before it."""
+    i = 0
+    while i < len(words) and _ASSIGNMENT_WORD_RE.match(words[i]):
+        i += 1
+    if i >= len(words):
+        return False
+    verb = _verb_name(words[i])
+    if verb in ("ppl", "ppl.cli"):
+        return True
+    return (verb.startswith("python") and words[i + 1:i + 2] == ["-m"]
+            and words[i + 2:i + 3] in (["ppl"], ["ppl.cli"]))
+
+
+def _task_named(command, segments, tasks):
+    """The task of `tasks` that `command` names: a word of its own or the value of an
+    assignment or of an option (PPL_TASK=<id>, --task=<id>), as the write walk split each
+    segment into words. Where it could not, a command with a substitution or a segment it
+    cannot split, any whole word of the raw text counts."""
+    readable = bool(segments) and all(tokens is not None for tokens, _, _ in segments)
+    if readable:
+        for tokens, _, _ in segments:
+            for word in tokens:
+                value = word.rpartition("=")[2]
+                if value in tasks:
+                    return value
+        return None
+    for task in sorted(tasks):
+        if re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(task), command):
+            return task
+    return None
+
+
+def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
+    """("BOUNDARY_VIOLATION", reason) when a Bash command of a session bound to a lane runs
+    ppl on another lane's run, else None [R-LANE-CROSS-TASK], for the orchestrator and every
+    role alike:
+    - the command names a task that has another lane in the registry, as --task <id>,
+      --task=<id>, a positional <id>, PPL_TASK=<id> before ppl, after env or in an export;
+    - ppl runs in a directory inside another lane's start directory or worktree, where a bare
+      ppl with no PPL_TASK takes that lane's run (cli.resolve_task reads lanes.for_path), the
+      cwd followed through cd, pushd, popd and env -C as the write walk follows it, and the
+      session's own cwd where the walk cannot read the command.
+    A task with no lane is no other lane's run: a pending reflection names a destroyed run's
+    task. `lanes_list` is the registry as read for this call: None, it could not be read, and
+    a command that runs ppl gets ("OWNER_DECISION", why)."""
+    if not (isinstance(command, str) and binding.task and not binding.problem):
+        return None
+    segments = []
+    _bash_write_targets(command, cwd if isinstance(cwd, str) else None, segments)
+    places = [where for tokens, start, where in segments
+              if tokens is not None and _is_ppl_command(tokens[start:])]
+    if not places:
+        if not PPL_INVOCATION_RE.search(command):
+            return None
+        places = [cwd if isinstance(cwd, str) else None]
+    if lanes_list is None:
+        return ("OWNER_DECISION",
+                "lane %s's registry cannot be read now, so a ppl command cannot be placed "
+                "against the other lanes' runs: repair PPL_HOME/lanes.json, then run ppl lane "
+                "resume %s" % (binding.task, binding.task))
+    others = [item for item in lanes_list if isinstance(item, dict)
+              and isinstance(item.get("task"), str) and item.get("task") != binding.task]
+    named = _task_named(command, segments, set(item["task"] for item in others))
+    if named:
+        return ("BOUNDARY_VIOLATION",
+                "lane %s may not run ppl on run %s, which is another lane's: a lane drives only "
+                "its own run, so name %s or leave the task out (ppl reads PPL_TASK)"
+                % (binding.task, named, binding.task))
+    for where in places:
+        # the lane's own directories are its own, whatever else a registry entry names there
+        if not where or (binding.entry and lanes.holding([binding.entry], where)):
+            continue
+        holder = lanes.holding(others, where)
+        if holder:
+            return ("BOUNDARY_VIOLATION",
+                    "lane %s may not run ppl from %s, inside lane %s's start directory or "
+                    "worktree, where a bare ppl takes run %s: run it from lane %s's own "
+                    "directories" % (binding.task, where, holder["task"], holder["task"],
+                                     binding.task))
+    return None
+
+
 def _decide(payload, argv=()):
     """The decision on one tool call, for the hook whose command line is `argv`."""
     if not isinstance(payload, dict):
@@ -2345,7 +2583,7 @@ def _decide(payload, argv=()):
     # refused from the call alone. One the escape check lets through still meets every
     # check below, the tracker gate and the forge denials included.
     if escape.flagged(payload):
-        refusal = escape.decide(payload, paths.home(), lambda: bound_state(binding()))
+        refusal = escape.decide(payload, facts_file(argv), lambda: bound_state(binding()))
         if refusal:
             return deny(*refusal)
 
@@ -2371,7 +2609,7 @@ def _decide(payload, argv=()):
     # gh, git or ppl reads, for roles and the orchestrator alike, before any run file is read.
     # Every path key of the call is checked, not only the one target_path takes.
     if tool in WRITE_TOOLS:
-        refusal = protected_edit_denial(payload)
+        refusal = protected_edit_denial(payload, argv)
         if refusal:
             return deny(*refusal)
 
@@ -2446,6 +2684,22 @@ def _decide(payload, argv=()):
         return refusal
     if binding().problem:
         return None
+
+    # R-LANE-START-DIR-PROTECTED, R-LANE-CROSS-WRITE, R-LANE-CROSS-TASK: before the bound
+    # run's state is read, so a lane before ppl init is held to them as after it, and the
+    # start directories for a session in no lane too. The registry is read for the other
+    # lanes, the binding having read only this lane's entry.
+    if tool in WRITE_TOOLS or tool == "Bash":
+        try:
+            listed = lanes.read(_READ_LIMIT)
+        except Exception:
+            listed = None
+        refusal = cross_lane_denial(payload, binding(), listed)
+        if refusal is None and tool == "Bash":
+            refusal = ppl_task_mismatch(tool_input.get("command"), binding(), listed,
+                                        payload.get("cwd"))
+        if refusal:
+            return deny(*refusal)
 
     task_id, state = bound_state(binding())
     if state is None:

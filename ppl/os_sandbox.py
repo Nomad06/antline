@@ -84,10 +84,20 @@ def _repo(doc):
     return checkout, worktrees
 
 
-def write_scope(doc):
-    """Where a sandboxed command may write, each entry resolved."""
+def write_scope(doc, worktree=None):
+    """Where a sandboxed command may write, each entry resolved. For a lane, given its
+    `worktree`: runs, labels and scratch, the checkout's .git, where git in a worktree writes
+    its objects, refs and worktrees/<name>, and the lane's own worktree, so no lane's Bash
+    writes the checkout's working tree or another lane's worktree. runs/ stays whole: ppl init
+    makes runs/<task> and still writes runs/ACTIVE there, and a local destroy moves the run
+    into runs/_archive. With no worktree, outside a lane: the whole checkout and the whole
+    worktrees root. [os_sandbox] allow_write is added to either."""
     checkout, worktrees = _repo(doc)
-    scope = [paths.home() / "runs", paths.home() / "labels", scratch_root(), checkout, worktrees]
+    scope = [paths.home() / "runs", paths.home() / "labels", scratch_root()]
+    if worktree is None:
+        scope.extend([checkout, worktrees])
+    else:
+        scope.extend([os.path.join(_real(checkout), ".git"), worktree])
     scope.extend(_table(doc).get("allow_write") or [])
     return [_real(entry) for entry in scope]
 
@@ -159,9 +169,11 @@ def workspace_dir(workspace):
     return _real(workspace)
 
 
-def facts(doc, workspace, pin_map):
-    """The slice the guard reads, the shape of PPL_HOME/os_sandbox.json. deny_write is the
-    profile's denyWrite, `realpath`-ed, which the guard holds edit tools to as well."""
+def facts(doc, workspace, pin_map, worktree=None):
+    """The slice the guard reads, the shape of os_sandbox.json: a lane's, with its start
+    directory as `workspace` and its own `worktree` in the write scope, or PPL_HOME's.
+    deny_write is the profile's denyWrite, `realpath`-ed, which the guard holds edit tools to
+    as well."""
     _, worktrees = _repo(doc)
     forge_repo, tracker_repo = repos(doc)
     return {"version": 1,
@@ -172,7 +184,7 @@ def facts(doc, workspace, pin_map):
             "forge_repo": forge_repo,
             "tracker_repo": tracker_repo,
             "scratch": _real(scratch_root()),
-            "write_scope": write_scope(doc),
+            "write_scope": write_scope(doc, worktree),
             "deny_write": list(dict.fromkeys(os.path.realpath(entry)
                                              for entry in deny_write(workspace, pin_map))),
             "pins": {name: dict(pin_map[name]) for name in PIN_NAMES}}
@@ -265,8 +277,9 @@ def deny_read(doc):
     return entries
 
 
-def profile(doc, workspace, pin_map):
-    """The sandbox settings block and the permissions.allow entries ppl owns."""
+def profile(doc, workspace, pin_map, worktree=None):
+    """The sandbox settings block and the permissions.allow entries ppl owns, for a lane
+    whose own `worktree` is given or for the workspace (write_scope)."""
     denied = deny_write(workspace, pin_map)
     sandbox = {"enabled": True,
                "failIfUnavailable": True,
@@ -274,7 +287,7 @@ def profile(doc, workspace, pin_map):
                "network": {"deniedDomains": list(DENIED_DOMAINS),
                            "deniedDomainReasons": {d: DENY_REASON for d in DENIED_DOMAINS},
                            "allowedDomains": list(_table(doc).get("allowed_domains") or [])},
-               "filesystem": {"allowWrite": write_scope(doc), "denyWrite": denied,
+               "filesystem": {"allowWrite": write_scope(doc, worktree), "denyWrite": denied,
                               "denyRead": deny_read(doc)}}
     return {"sandbox": sandbox, "allow": _allow_entries(doc, pin_map)}
 

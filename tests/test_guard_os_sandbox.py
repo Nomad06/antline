@@ -27,7 +27,11 @@ import ppl_guard
 
 TASK = "GH-7"
 REPO = "/tmp/ghrepo"
-WS = "/tmp/ws"
+# GH-7's lane start directory, the session's cwd and where its guard facts live. It lies under
+# the data root, which under discover is the last imported module's, so setUpModule sets it.
+WS = None
+# A payload's default cwd: the lane's start directory, read when the payload is built.
+START = object()
 OTHER = "/tmp/other"
 BRANCH = "gh-7-cart-total"
 GH = "/opt/pin/gh"
@@ -46,7 +50,7 @@ def scratch_file(name):
 
 
 def facts_doc(**overrides):
-    """What harness.apply writes for a GitHub harness whose checkout is the run's repo."""
+    """What ppl lane renders for a GitHub harness whose checkout is the run's repo."""
     home = paths.home()
     doc = {"version": 1,
            "workspace": real(WS),
@@ -68,10 +72,30 @@ def facts_doc(**overrides):
 
 
 def facts_path():
+    """The lane's own facts, <start>/os_sandbox.json, which GH-7's lane session reads."""
+    return Path(WS) / os_sandbox.FACTS_FILE
+
+
+def home_facts_path():
+    """PPL_HOME/os_sandbox.json, which a session in no lane reads while harness apply writes
+    it."""
     return paths.home() / os_sandbox.FACTS_FILE
 
 
+def store_facts(doc=None, text=None):
+    """The same facts in the lane and in the data root, so a session in no lane and GH-7's
+    lane session see one set. Both are removed when neither `doc` nor `text` is given."""
+    for path in (facts_path(), home_facts_path()):
+        if doc is not None:
+            store.write_json(path, doc)
+        elif text is not None:
+            path.write_text(text, encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+
+
 def setUpModule():
+    global WS
     if not run.state_path(TASK).exists():
         run.init(TASK, "https://github.com/o/r/issues/7", REPO)
     state = run.load(TASK)
@@ -82,7 +106,8 @@ def setUpModule():
     store.write_json(paths.run_dir(TASK) / "harness.json",
                      harness.snapshot(harness.load("gh-issues")))
     fixtures.bind_lane(TASK, REPO, harness="gh-issues")
-    store.write_json(facts_path(), facts_doc())
+    WS = str(lanes.start_dir(TASK))
+    store_facts(facts_doc())
     (paths.home() / "scratch" / TASK).mkdir(parents=True, exist_ok=True)
     for name in ("pr-body.md", "note.md", "reply.md"):
         Path(scratch_file(name)).write_text("text\n", encoding="utf-8")
@@ -90,16 +115,16 @@ def setUpModule():
 
 def tearDownModule():
     """The data root is shared under discover, so the facts and the scratch files go."""
-    facts_path().unlink(missing_ok=True)
+    store_facts()
     shutil.rmtree(str(paths.home() / "scratch" / TASK), ignore_errors=True)
 
 
-def payload(agent, tool, tool_input, cwd=WS):
+def payload(agent, tool, tool_input, cwd=START):
     return {"hook_event_name": "PreToolUse", "agent_type": agent,
-            "tool_name": tool, "tool_input": tool_input, "cwd": cwd}
+            "tool_name": tool, "tool_input": tool_input, "cwd": WS if cwd is START else cwd}
 
 
-def flagged(agent, command, cwd=WS):
+def flagged(agent, command, cwd=START):
     return payload(agent, "Bash", {"command": command, "dangerouslyDisableSandbox": True}, cwd)
 
 
@@ -114,7 +139,7 @@ class OsSandboxCase(unittest.TestCase):
     argv = LANE
 
     def setUp(self):
-        store.write_json(facts_path(), facts_doc())
+        store_facts(facts_doc())
 
     def deny_reason(self, result):
         self.assertIsNotNone(result, "the call was allowed")
@@ -127,20 +152,17 @@ class OsSandboxCase(unittest.TestCase):
         """The guard's reader of the run the session is bound to, as escape.decide takes it."""
         return ppl_guard.bound_state(lanes.binding(self.argv))
 
-    def decide(self, command, agent=None, cwd=WS):
+    def decide(self, command, agent=None, cwd=START):
         return self.hook(flagged(agent, command, cwd))
 
     @contextlib.contextmanager
     def facts_text(self, text):
         """os_sandbox.json replaced by `text`, or removed when `text` is None."""
-        if text is None:
-            facts_path().unlink()
-        else:
-            facts_path().write_text(text, encoding="utf-8")
+        store_facts(text=text)
         try:
             yield
         finally:
-            store.write_json(facts_path(), facts_doc())
+            store_facts(facts_doc())
 
     @contextlib.contextmanager
     def no_lane(self):
@@ -549,8 +571,8 @@ class TestOrchestratorShape(OsSandboxCase):
                 result = self.decide(pr_create(), cwd=cwd)
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
                 self.assertIn("write", self.deny_reason(result))
-        # an [os_sandbox] allow_write entry that holds the workspace
-        scope = facts_doc()["write_scope"] + [real("/tmp")]
+        # an [os_sandbox] allow_write entry that holds the lane's start directory
+        scope = facts_doc()["write_scope"] + [real(os.path.dirname(WS))]
         with self.facts_text(json.dumps(facts_doc(write_scope=scope))):
             self.assertIn("write", self.deny_reason(self.decide(pr_create(), cwd=WS)))
 
@@ -747,30 +769,29 @@ class TestOrchestratorShape(OsSandboxCase):
 
     def test_ppl_lane_close_from_the_start_directory_is_allowed(self):
         # lane close writes PPL_HOME/lanes.json, outside every write scope, so the orchestrator
-        # runs it outside the sandbox from the lane's start directory, for its own run only
+        # runs it outside the sandbox from the lane's start directory, for its own run only.
+        # The lane's own facts name that directory, as ppl lane renders them (R5)
         start = lanes.start_dir(TASK)
-        start.mkdir(parents=True, exist_ok=True)
-        self.addCleanup(shutil.rmtree, str(start), True)
-        with self.facts_text(json.dumps(facts_doc(workspace=real(start)))):
-            for command in (PPL + " lane close", PPL + " lane close GH-7",
-                            PPL + " lane close --task GH-7", PPL + " lane close --task=GH-7"):
-                with self.subTest(command=command):
-                    self.assertIsNone(self.decide(command, cwd=real(start)))
-            for command in (PPL + " lane close GH-8", PPL + " lane close --task GH-8",
-                            PPL + " lane close GH-7 GH-7", PPL + " lane close --force",
-                            PPL + " lane resume GH-7", PPL + " lane list",
-                            PPL + " lane https://github.com/o/r/issues/8"):
-                with self.subTest(command=command):
-                    self.assertIn("BOUNDARY_VIOLATION",
-                                  self.deny_reason(self.decide(command, cwd=real(start))))
-            reason = self.deny_reason(self.decide(PPL + " lane close", cwd=REPO))
-            self.assertIn("BOUNDARY_VIOLATION", reason)
-            self.assertIn(real(start), reason)
+        self.assertEqual(escape.load_facts(start / escape.FACTS_FILE)["workspace"], real(start))
+        for command in (PPL + " lane close", PPL + " lane close GH-7",
+                        PPL + " lane close --task GH-7", PPL + " lane close --task=GH-7"):
+            for cwd in (str(start), real(start)):
+                with self.subTest(command=command, cwd=cwd):
+                    self.assertIsNone(self.decide(command, cwd=cwd))
+        for command in (PPL + " lane close GH-8", PPL + " lane close --task GH-8",
+                        PPL + " lane close GH-7 GH-7", PPL + " lane close --force",
+                        PPL + " lane resume GH-7", PPL + " lane list",
+                        PPL + " lane https://github.com/o/r/issues/8"):
+            with self.subTest(command=command):
+                self.assertIn("BOUNDARY_VIOLATION",
+                              self.deny_reason(self.decide(command, cwd=real(start))))
+        reason = self.deny_reason(self.decide(PPL + " lane close", cwd=REPO))
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn(real(start), reason)
         with self.no_lane():
-            with self.facts_text(json.dumps(facts_doc(workspace=real(start)))):
-                self.assertIsNone(self.decide(PPL + " lane close", cwd=real(start)))
-                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(
-                    self.decide(PPL + " lane close --task GH-7", cwd=real(start))))
+            self.assertIsNone(self.decide(PPL + " lane close", cwd=real(start)))
+            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(
+                self.decide(PPL + " lane close --task GH-7", cwd=real(start))))
 
     def test_ppl_init_unsandboxed_is_denied(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
@@ -788,15 +809,15 @@ class TestOrchestratorShape(OsSandboxCase):
 
     def test_decide_takes_a_run_state_value_as_well_as_the_reader(self):
         call = flagged(None, pr_create())
-        self.assertIsNone(escape.decide(call, paths.home(), run.load(TASK)))
-        self.assertIsNone(escape.decide(call, paths.home(), self.bound_state))
+        self.assertIsNone(escape.decide(call, facts_path(), run.load(TASK)))
+        self.assertIsNone(escape.decide(call, facts_path(), self.bound_state))
         # with no run, the run's branch and scratch directory are unknown
-        self.assertIsNotNone(escape.decide(call, paths.home(), None))
+        self.assertIsNotNone(escape.decide(call, facts_path(), None))
 
     def test_tracker_gate_still_applies_to_an_allowed_issue_comment_before_merge(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
         command = GH + " issue comment 7 -R o/r --body-file " + scratch_file("note.md")
-        self.assertIsNone(escape.decide(flagged(None, command), paths.home(),
+        self.assertIsNone(escape.decide(flagged(None, command), facts_path(),
                                         self.bound_state))
         result = self.decide(command)
         self.assertIn("OWNER_DECISION", self.deny_reason(result))
@@ -1030,8 +1051,8 @@ class TestEscapeFacts(unittest.TestCase):
         self.assertEqual(escape.FACTS_FILE, os_sandbox.FACTS_FILE)
 
     def test_load_facts_reads_what_apply_writes(self):
-        self.assertIsNone(escape.load_facts(paths.home() / "no-such-dir"))
-        self.assertEqual(escape.load_facts(paths.home())["pins"]["gh"]["path"], GH)
+        self.assertIsNone(escape.load_facts(paths.home() / "no-such-dir" / escape.FACTS_FILE))
+        self.assertEqual(escape.load_facts(facts_path())["pins"]["gh"]["path"], GH)
 
 
 GIT_BIN = shutil.which("git") or "/usr/bin/git"
@@ -1100,7 +1121,7 @@ class GitShapes(OsSandboxCase):
 
     def write_facts(self, git_path=GIT_BIN, **overrides):
         pins = dict(facts_doc()["pins"], git={"path": git_path, "realpath": real(git_path)})
-        store.write_json(facts_path(), facts_doc(checkout=self.checkout, pins=pins, **overrides))
+        store_facts(facts_doc(checkout=self.checkout, pins=pins, **overrides))
 
     def command(self, directory, *words, git_path=GIT_BIN):
         return " ".join([git_path] + list(PINNED_CONFIG) + ["-C", directory] + list(words))
@@ -1180,7 +1201,7 @@ class GitShapes(OsSandboxCase):
                          "\tdefault = upstream\n[url \"%s\"]\n"
                          "\tinsteadOf = https://github.com/o/r.git\n" % forge)
         argv = escape.plain_argv(self.push("origin", SPEC))
-        self.assertIsNone(escape_git.git_shape(argv, escape.load_facts(paths.home()),
+        self.assertIsNone(escape_git.git_shape(argv, escape.load_facts(facts_path()),
                                                run.load(TASK)))
         # the stand-in is a local path, which the pinned words refuse, so the file transport
         # is let through here as the network one is for the real forge
@@ -1418,7 +1439,7 @@ class GitShapes(OsSandboxCase):
         def never(argv, **kwargs):
             raise AssertionError("git ran: %r" % (argv,))
 
-        facts = escape.load_facts(paths.home())
+        facts = escape.load_facts(facts_path())
         for command, part in (
                 (self.command(self.checkout, "push", *(PUSH_FLAGS + ("origin", SPEC))),
                  "run's repo"),
@@ -1553,7 +1574,7 @@ class GitShapes(OsSandboxCase):
             timeouts.append(kwargs.get("timeout"))
             raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
 
-        facts = escape.load_facts(paths.home())
+        facts = escape.load_facts(facts_path())
         for command in (self.push("origin", SPEC), self.fetch("origin", "main")):
             with self.subTest(command=command):
                 result = escape_git.git_shape(escape.plain_argv(command), facts, run.load(TASK),
@@ -1975,10 +1996,14 @@ class TestProtectedPaths(ProtectedPathCase):
         with self.facts_text(None):
             for path in (self.at(".gitconfig"), self.at(".ssh/config"),
                          self.at(".claude/hooks/x.sh"), os.path.join(self.outside, "notes.md"),
-                         WS + "/.claude/settings.local.json", " " + self.at(".gitconfig")):
+                         " " + self.at(".gitconfig")):
                 for agent in (None, "general-purpose"):
                     with self.subTest(path=path, agent=agent):
                         self.assertIsNone(self.edit(path, agent=agent, tool="Write"))
+            # the lane's start directory is protected all the same, keyed on the lane, not on
+            # the facts [R-LANE-START-DIR-PROTECTED]
+            reason = self.deny_reason(self.edit(WS + "/settings.json", tool="Write"))
+            self.assertIn("ppl lane keeps", reason)
             with self.no_lane():
                 self.assertIsNone(self.edit(self.at(".gitconfig")))
                 # a role outside a lane is refused whatever it edits, facts or none
@@ -2008,11 +2033,14 @@ class TestProtectedPaths(ProtectedPathCase):
         for label, doc in (("recorded", recorded), ("computed", facts_doc(pins=pins,
                                                                           write_scope=scope))):
             with self.facts_text(json.dumps(doc)):
-                for path in (os.path.join(pin_dir, "newtool"), WS + "/notes.md"):
-                    with self.subTest(facts=label, path=path):
-                        reason = self.deny_reason(self.edit(path, tool="Write"))
-                        self.assertIn("BOUNDARY_VIOLATION", reason)
-                        self.assertIn(DENY_WRITE, reason)
+                with self.subTest(facts=label):
+                    reason = self.deny_reason(self.edit(os.path.join(pin_dir, "newtool"),
+                                                        tool="Write"))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn(DENY_WRITE, reason)
+                    # the whole start directory is a protected path as well, named as one
+                    self.assert_protected(self.deny_reason(self.edit(WS + "/notes.md",
+                                                                     tool="Write")))
                 self.assertIsNone(self.edit(scratch_file("other.md"), tool="Write"))
 
     def test_unreadable_facts_deny_every_edit(self):
@@ -2036,8 +2064,13 @@ class TestProtectedPaths(ProtectedPathCase):
 
     def test_the_workspace_claude_dir_the_pins_and_ppl_files_are_protected(self):
         # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # rule: R-LANE-START-DIR-PROTECTED
         home = paths.home()
-        for path in (WS + "/.claude/settings.local.json", WS + "/.claude/new/x", GH, GIT, PPL,
+        # the whole lane start directory, the session's own settings, skill and facts in it
+        for path in (WS + "/.claude/settings.local.json", WS + "/.claude/new/x",
+                     WS + "/settings.json", WS + "/plugin/skills/pipeline/SKILL.md",
+                     WS + "/" + os_sandbox.FACTS_FILE, WS + "/mcp.json", WS + "/notes.md",
+                     GH, GIT, PPL,
                      str(home / "config.toml"), str(home / "harnesses" / "gh-issues" /
                                                     "harness.toml"),
                      str(home / os_sandbox.FACTS_FILE), self.at(".config/git/config"),
@@ -2163,14 +2196,14 @@ class TestProtectedPaths(ProtectedPathCase):
         home = paths.home()
         found = escape.protected_paths(home, facts_doc())
         for path in (self.at(".gitconfig"), self.at(".config/git"), self.at(".ssh"),
-                     self.at(".config/gh"), self.at(".local/share/gh"), real(WS + "/.claude"),
+                     self.at(".config/gh"), self.at(".local/share/gh"), real(WS),
                      real(home / "config.toml"), real(home / "harnesses"),
                      real(home / os_sandbox.FACTS_FILE), real(GH), real(GIT), real(PPL)):
             self.assertIn(path, found)
         self.assertEqual(found, [real(path) for path in found])
         without = escape.protected_paths(home, None)
         self.assertIn(self.at(".ssh"), without)
-        self.assertNotIn(real(WS + "/.claude"), without)
+        self.assertNotIn(real(WS), without)
 
 
 class TestGithubMcp(OsSandboxCase):

@@ -57,6 +57,25 @@ class TestScope(Home):
         self.assertEqual(scope, [home + "/runs", home + "/labels", home + "/scratch",
                                  str(base / "real"), str(base / "real" / ".worktrees")])
 
+    def test_a_lanes_write_scope_is_its_own_worktree_and_the_checkouts_git(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R25: git in a worktree writes objects, refs and worktrees/<name> under the checkout's
+        # .git, and the lane writes nothing else of the checkout or of another lane's worktree
+        base = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplrepo-")))
+        (base / "real").mkdir()
+        (base / "link").symlink_to(base / "real")
+        worktree = base / "link" / ".worktrees" / "real-KEY-7"
+        scope = os_sandbox.write_scope(doc(checkout=str(base / "link"),
+                                           os_sandbox={"allow_write": ["~/.npm"]}),
+                                       worktree=worktree)
+        home = os.environ["PPL_HOME"]
+        self.assertEqual(scope, [home + "/runs", home + "/labels", home + "/scratch",
+                                 str(base / "real" / ".git"),
+                                 str(base / "real" / ".worktrees" / "real-KEY-7"),
+                                 os.path.realpath(os.path.expanduser("~/.npm"))])
+        self.assertNotIn(str(base / "real"), scope)
+        self.assertNotIn(str(base / "real" / ".worktrees"), scope)
+
     def test_allow_write_follows_the_scope_and_expands_home(self):
         scope = os_sandbox.write_scope(doc(os_sandbox={"allow_write": ["~/.npm"]}))
         self.assertEqual(scope[-1], os.path.realpath(os.path.expanduser("~/.npm")))
@@ -121,7 +140,7 @@ class TestProfile(Home):
             self.assertIn(entry, deny)
         for entry in (os.path.expanduser("~/.gitconfig"), os.path.expanduser("~/.ssh"),
                       str(paths.home() / "config.toml"), str(paths.home() / "os_sandbox.json"),
-                      os.path.join(os.path.realpath("/srv/ws"), ".claude")):
+                      os.path.realpath("/srv/ws")):
             self.assertIn(os.path.realpath(entry), deny)
         self.assertEqual(len(deny), len(set(deny)))
 

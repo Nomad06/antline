@@ -1042,13 +1042,16 @@ def run_cases(cage):
 
 def run_os_sandbox_cases(cage):
     """Who may leave the OS sandbox, on the python cage's GitHub Issues run: the guard facts
-    `ppl harness apply` writes, gh and ppl pins that need not exist, the git on PATH, and the
-    unrelated directory as the workspace, which no sandboxed command can write
-    [R-OS-SANDBOX-ROLE-NO-ESCAPE] [R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-OS-SANDBOX-GIT-CONFIG]."""
-    from ppl import escape_git  # noqa: E402
+    `ppl lane` renders into the lane's start directory, gh and ppl pins that need not exist,
+    the git on PATH, and the start directory as the facts' workspace, which no sandboxed
+    command can write [R-OS-SANDBOX-ROLE-NO-ESCAPE] [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]
+    [R-OS-SANDBOX-GIT-CONFIG]."""
+    from ppl import escape_git, lanes  # noqa: E402
     real = os.path.realpath
     home = cage.ppl_home
-    workspace = str(cage.unrelated)
+    start = lanes.start_dir(cage.task_id)
+    start.mkdir(parents=True, exist_ok=True)
+    workspace = str(start)
     pins = {name: {"path": "/opt/pin/" + name, "realpath": real("/opt/pin/" + name)}
             for name in ("gh", "git", "ppl")}
     # the guard runs the pinned git on the run's repo, so this one must exist
@@ -1060,7 +1063,7 @@ def run_os_sandbox_cases(cage):
              "write_scope": [real(str(home / part)) for part in ("runs", "labels", "scratch")]
              + [real(str(cage.worktree))],
              "pins": pins}
-    cage._store.write_json(home / "os_sandbox.json", facts)
+    cage._store.write_json(start / "os_sandbox.json", facts)
     state = cage._run.load(cage.task_id)
     state["branch"] = "cage-branch"
     cage._run.save(state)
