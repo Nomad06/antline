@@ -27,10 +27,12 @@ _CONNECTOR = "claude_ai_"
 
 
 def mcp_source(project_dir=None):
-    """{server name: config} the operator has registered, from the files doctor.mcp_server_names
-    reads. `project_dir` is where `claude mcp add --scope local|project` entries are keyed (the
-    harness's checkout); the workspace when None."""
-    return doctor.mcp_servers(cwd=project_dir)
+    """{server name: config} from the operator's ~/.claude.json only (D22): the project entry
+    for `project_dir` (the harness's checkout, where `claude mcp add --scope local` keys it)
+    over the user-scope entries. The project's own .mcp.json and settings files are left out
+    on purpose: whoever commits to the project controls them, and `--strict-mcp-config` would
+    start what they name without the operator's approval, outside the OS sandbox."""
+    return doctor.operator_mcp_servers(project_dir)
 
 
 def _parse_agent(text):

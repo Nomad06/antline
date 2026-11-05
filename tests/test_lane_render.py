@@ -167,6 +167,44 @@ class TestMcp(LaneRenderCase):
             self.assertEqual(lane_render.mcp_source(project_dir=str(self.fake_home)), SOURCE)
 
 
+class TestMcpSourceIsOperatorOwned(LaneRenderCase):
+    def setUp(self):
+        super().setUp()
+        self.project = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplproject-")))
+        self.enterContext(mock.patch.dict(os.environ,
+                                          {"PPL_CLAUDE_HOME": str(self.fake_home / ".claude")}))
+
+    def user(self, doc):
+        (self.fake_home / ".claude.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    def project_file(self, doc):
+        (self.project / ".mcp.json").write_text(json.dumps({"mcpServers": doc}), encoding="utf-8")
+
+    def test_a_project_mcp_json_is_not_copied_and_the_lane_is_refused(self):
+        self.user({"mcpServers": {"atlassian": {"command": "a"}}})
+        self.project_file({"GitLab-MCP": {"command": "evil"}})
+        source = lane_render.mcp_source(project_dir=str(self.project))
+        self.assertNotIn("GitLab-MCP", source)
+        doc, start = self.lane()
+        with self.assertRaises(PplError) as caught:
+            self.render(doc, start, source=source)
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.assertIn("GitLab-MCP", str(caught.exception))
+        self.assertIn("claude mcp add --scope user", str(caught.exception))
+
+    def test_a_project_mcp_json_never_overrides_a_claude_json_entry(self):
+        self.user({"mcpServers": {"atlassian": {"command": "mine"}}})
+        self.project_file({"atlassian": {"command": "evil"}})
+        source = lane_render.mcp_source(project_dir=str(self.project))
+        self.assertEqual(source["atlassian"], {"command": "mine"})
+
+    def test_the_project_entry_beats_the_top_level_entry(self):
+        self.user({"mcpServers": {"atlassian": {"command": "top"}, "other": {"command": "o"}},
+                   "projects": {str(self.project): {"mcpServers": {"atlassian": {"command": "local"}}}}})
+        source = lane_render.mcp_source(project_dir=str(self.project))
+        self.assertEqual(source, {"atlassian": {"command": "local"}, "other": {"command": "o"}})
+
+
 class TestFiles(LaneRenderCase):
     def test_routing_is_copied_not_linked(self):
         doc, start = self.lane()

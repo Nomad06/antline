@@ -881,25 +881,19 @@ def _json_object(path):
     return doc if isinstance(doc, dict) else None
 
 
-def mcp_servers(cwd=None, claude_json=None):
-    """{name: config} of every MCP server a session launched in the workspace sees: its
-    .mcp.json, ~/.claude.json (top level and the workspace's project entry) and the mcpServers
-    of the user, project and local settings files. A name found twice keeps the entry of the
-    highest source: the ~/.claude.json project entry, then .mcp.json, then the ~/.claude.json
-    top level, then the settings files."""
-    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
-    cwd = str(base)
+def operator_mcp_servers(project_dir=None, claude_json=None):
+    """{name: config} from the operator's own ~/.claude.json only: the project entry for
+    `project_dir` (local scope, keyed by the path and its realpath) over the top-level
+    mcpServers (user scope). Never <project_dir>/.mcp.json or a settings file: those are
+    controlled by whoever commits to the project, and a lane's --strict-mcp-config launch
+    never asks the operator to approve what they name."""
+    base = Path(project_dir or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
     claude_json = Path(claude_json) if claude_json else claude_home().parent / ".claude.json"
-    found = {}
-    for doc in (_json_object(global_settings_path()),
-                _json_object(base / ".claude" / "settings.json"),
-                _json_object(local_settings_path(cwd))):
-        found.update(_servers(doc))
     user = _json_object(claude_json)
-    if user is not None:
-        found.update(_servers(user))
-    found.update(_servers(_json_object(base / ".mcp.json")))
-    projects = user.get("projects") if user is not None else None
+    if user is None:
+        return {}
+    found = _servers(user)
+    projects = user.get("projects")
     if isinstance(projects, dict):
         for key in dict.fromkeys((str(base), os.path.realpath(base))):
             found.update(_servers(projects.get(key)))
@@ -907,8 +901,18 @@ def mcp_servers(cwd=None, claude_json=None):
 
 
 def mcp_server_names(cwd=None, claude_json=None):
-    """The names, never a command, args or env, of every server mcp_servers finds."""
-    return sorted(mcp_servers(cwd, claude_json))
+    """The names, never a command, args or env, of every MCP server a session launched in the
+    workspace sees: its .mcp.json, ~/.claude.json (top level and the workspace's project
+    entry) and the mcpServers of the user, project and local settings files."""
+    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
+    cwd = str(base)
+    names = set(operator_mcp_servers(base, claude_json))
+    for doc in (_json_object(base / ".mcp.json"),
+                _json_object(global_settings_path()),
+                _json_object(base / ".claude" / "settings.json"),
+                _json_object(local_settings_path(cwd))):
+        names.update(_servers(doc))
+    return sorted(names)
 
 
 def mcp_servers_warning(cwd=None, claude_json=None):
