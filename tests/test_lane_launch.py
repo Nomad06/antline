@@ -353,6 +353,22 @@ class TestStart(LaneCase):
         self.assertIn("/opt/jdk-committed", gates.read_text(encoding="utf-8"))
         self.assertEqual(self.staging_dirs(), [])
 
+    def test_a_lane_started_from_another_lane_takes_the_machine_routing(self):
+        # D15: a call in a lane reads that lane's frozen routing.toml, so ppl lane reads the
+        # machine file by its own path, and a new lane never freezes another lane's models
+        fixtures.bind_lane("OPS-2", self.project, lane=2, harness="other")
+        frozen = lanes.start_dir("OPS-2") / "routing.toml"
+        machine = paths.home() / "routing.toml"
+        frozen.write_text(machine.read_text(encoding="utf-8").replace(
+            'model = "sonnet"', 'model = "other-lanes-sonnet"'), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"PPL_TASK": "OPS-2"}):
+            self.assertEqual(paths.routing_file(), frozen)
+            lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        start = lanes.start_dir(TASK)
+        agents = json.loads((start / "agents.json").read_text(encoding="utf-8"))
+        self.assertEqual(agents["ppl-code-worker"]["model"], "sonnet")
+        self.assertEqual((start / "routing.toml").read_bytes(), machine.read_bytes())
+
     def test_a_third_lane_on_a_harness_with_max_one_is_busy(self):
         fixtures.bind_lane("KEY-1", self.project, lane=1, harness=HARNESS)
         fixtures.bind_lane("OPS-2", self.project, lane=2, harness="other")

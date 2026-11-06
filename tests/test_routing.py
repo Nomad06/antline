@@ -4,6 +4,7 @@ import shutil
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # tests/ is not a package, so the helper next to this file is imported
 # by path. It must be imported before PPL_HOME is chosen below.
@@ -19,7 +20,7 @@ shutil.copy(SOURCE / "defaults" / "routing.example.toml", Path(HOME) / "routing.
 import fixtures
 fixtures.install_harness("example-maven")
 
-from ppl import forges, harness, routing, trackers
+from ppl import forges, harness, lanes, paths, routing, trackers
 from ppl.errors import PplError
 
 
@@ -40,6 +41,32 @@ class TestRouting(unittest.TestCase):
             os.environ.pop("PPL_HOME", None)
         else:
             os.environ["PPL_HOME"] = self._saved_home
+
+    def test_a_lane_reads_its_frozen_routing(self):
+        # D15: ppl lane copies routing.toml into the lane's start directory, and a call made in
+        # that lane (PPL_TASK) reads the copy, not the machine file as it changed since
+        task = "DEMO-8801"
+        machine = Path(HOME) / "routing.toml"
+        fixtures.bind_lane(task, "/tmp/repo-8801")
+        self.addCleanup(lanes.release, task)
+        frozen = lanes.start_dir(task) / "routing.toml"
+        frozen.write_text(machine.read_text(encoding="utf-8").replace(
+            'model = "sonnet"', 'model = "frozen-sonnet"'), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"PPL_TASK": task}):
+            self.assertEqual(paths.routing_file(), frozen)
+            self.assertEqual(routing.tiers()["average"]["model"], "frozen-sonnet")
+        for unbound in ("", "DEMO-8802"):
+            # no lane, or a PPL_TASK no registered lane holds: the machine file
+            with self.subTest(ppl_task=unbound), \
+                    mock.patch.dict(os.environ, {"PPL_TASK": unbound}):
+                self.assertEqual(paths.routing_file(), machine)
+                self.assertEqual(routing.tiers()["average"]["model"], "sonnet")
+        # a lane whose frozen copy is gone is told so, never handed the machine file
+        frozen.unlink()
+        with mock.patch.dict(os.environ, {"PPL_TASK": task}), \
+                self.assertRaises(PplError) as caught:
+            routing.load()
+        self.assertIn(str(frozen), caught.exception.message)
 
     def test_load_returns_all_seven_roles(self):
         self.assertEqual(sorted(routing.load()["roles"]), [

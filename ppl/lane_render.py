@@ -166,7 +166,7 @@ def render(doc, task_id, lane, start, worktree, routing_config, mcp_source):
     mcp_path = start / "mcp.json"
     _write_private(mcp_path, json.dumps(mcp, indent=2, sort_keys=True) + "\n")
     routing_path = start / "routing.toml"
-    machine = paths.home() / "routing.toml"
+    machine = paths.machine_routing_file()
     if machine.is_file():
         shutil.copyfile(machine, routing_path)
     else:

@@ -348,7 +348,9 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
         raise PplError(*problem)
     name = _resolve_harness(harness_name, cwd)
     binary = _binary()
-    routing_config = routing.load()
+    # the machine's routing.toml by its own path: PPL_TASK of a lane this is run from would
+    # otherwise hand it that lane's frozen copy (D15)
+    routing_config = routing.load(path=paths.machine_routing_file())
     installed = paths.harness_dir(name)
     sha = lane_harness.commit(installed)
     staging = paths.home() / "lanes" / (".staging-%s" % uuid.uuid4())

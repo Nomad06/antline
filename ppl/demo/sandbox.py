@@ -16,10 +16,11 @@ from . import sample
 TASK = "GH-1"
 TIMEOUT_SECONDS = 60
 # The lane `ppl lane` would hold for TASK, claimed in the sandbox's own data root, with the
-# installed harness copied where `ppl lane` exports it, and the start directory's settings.json
-# (the hooks, each ending in --task TASK) and guard facts. The demo runs in the checkout, not in
-# a worktree, so the facts are the checkout-wide ones. Interim until the demo starts its run
-# with `ppl lane --no-exec`.
+# installed harness copied where `ppl lane` exports it, the routing.toml it freezes (D15: the
+# demo's ppl calls carry PPL_TASK, so they read that copy), and the start directory's
+# settings.json (the hooks, each ending in --task TASK) and guard facts. The demo runs in the
+# checkout, not in a worktree, so the facts are the checkout-wide ones. Interim until the demo
+# starts its run with `ppl lane --no-exec`.
 _CLAIM = ("import shutil, sys\n"
           "from ppl import harness, lanes, os_sandbox, paths, setup, store\n"
           "task, repo = sys.argv[1], sys.argv[2]\n"
@@ -28,6 +29,7 @@ _CLAIM = ("import shutil, sys\n"
           "start = lanes.start_dir(task)\n"
           "shutil.copytree(paths.harness_dir('demo'), start / 'harness' / 'demo',\n"
           "                ignore=shutil.ignore_patterns('.git'))\n"
+          "shutil.copyfile(paths.machine_routing_file(), start / 'routing.toml')\n"
           "hooks = setup.hook_entries(paths.root(), task)\n"
           "store.write_json(start / 'settings.json',\n"
           "                 {'hooks': {event: [entry] for event, entry in hooks.items()}})\n"

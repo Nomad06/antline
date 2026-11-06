@@ -156,7 +156,8 @@ def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
     The entry is written directly with the given lane number, and the start directory gets the
     lane's record lane.json (its worktree, checkout and `branch`) and, with `settings`, its
     settings.json (lane_settings). An installed harness is copied to <start>/harness/<harness>,
-    what `ppl lane` exports. Returns the entry."""
+    what `ppl lane` exports, and the machine's routing.toml to <start>/routing.toml, the copy
+    `ppl lane` freezes (D15). Returns the entry."""
     from ppl import lanes, store
     start = lanes.start_dir(task_id)
     start.mkdir(parents=True, exist_ok=True)
@@ -171,6 +172,8 @@ def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
         if target.exists():
             shutil.rmtree(target)
         shutil.copytree(installed, target)
+    if paths.machine_routing_file().is_file():
+        shutil.copyfile(paths.machine_routing_file(), start / "routing.toml")
     record = {"lane": lane, "task": task_id, "harness": harness, "harness_sha": "0" * 40,
               "repo": str(repo), "worktree": str(worktree or repo), "start_dir": str(start),
               "session_id": session_id, "pid": None, "started": store.now()}

@@ -52,8 +52,23 @@ def config_file():
     return home() / "config.toml"
 
 
-def routing_file():
+def machine_routing_file():
+    """The machine's routing.toml, which `ppl lane` freezes a copy of into each lane it starts."""
     return home() / "routing.toml"
+
+
+def routing_file():
+    """The routing.toml a call reads (D15): in a lane, the copy `ppl lane` froze into its start
+    directory, PPL_TASK naming a lane the registry holds; else the machine's. A registry that
+    cannot be read raises, so a lane's call never falls back to the machine's models."""
+    task = os.environ.get("PPL_TASK")
+    if task:
+        # imported here: lanes imports this module
+        from . import lanes
+        entry = lanes.entry(task)
+        if entry is not None:
+            return lanes.start_dir(task) / "routing.toml"
+    return machine_routing_file()
 
 
 def models_file():
