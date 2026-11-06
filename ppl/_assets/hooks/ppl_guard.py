@@ -414,12 +414,25 @@ ROLE_COMMAND_LENGTH_LIMIT = 4096
 # from a code worker extracted no target at all. Named here for the
 # runs-root and unparseable-command checks - `_git_write_targets` below is
 # what extracts the path. (`>>?` already covers bash's `&>` and `&>>`.)
+# git subcommands that only read, hyphenated or spelled like a writer's prefix: a word of
+# a writer below that is one of these (merge-base, not merge) is no write shape.
+_GIT_READ_ONLY_WORDS = ("merge-base", "rev-parse", "rev-list", "cat-file", "ls-files", "ls-tree",
+                        "ls-remote", "for-each-ref", "show-ref", "name-rev", "describe",
+                        "cherry", "check-ignore", "check-attr", "diff-tree", "diff-files",
+                        "diff-index", "var", "count-objects", "verify-commit", "verify-tag")
+# git's hyphenated plumbing that writes the index, refs, objects or the tree, and that the
+# write walk cannot place (_git_write_targets): judged as a write shape like apply.
+_GIT_PLUMBING_WRITERS = frozenset({"update-index", "update-ref", "checkout-index", "read-tree",
+                                   "merge-file", "write-tree", "commit-tree", "mktree",
+                                   "pack-refs", "prune-packed", "unpack-objects"})
 BASH_WRITE_SHAPES = re.compile(
     r">>?|\btee\b|\bsed\b[^\n]*-i\b|\bcp\b|\bmv\b|\bdd\b[^\n]*\bof=|\brm\b"
     r"|\btouch\b|\btruncate\b|\bln\b|\binstall\b|\brsync\b|\bpatch\b"
-    r"|\bgit\b[^\n]*\b(?:rm|mv|checkout|switch|restore|apply|merge|rebase|cherry-pick"
-    # a hyphenated word is another subcommand: git merge-base writes nothing
-    r"|pull|revert|clean)\b(?!-)"
+    r"|\bgit\b[^\n]*\b(?!(?:" + "|".join(re.escape(word) for word in _GIT_READ_ONLY_WORDS)
+    + r")(?![\w-]))(?:rm|mv|checkout|switch|restore|apply|merge|rebase|cherry-pick"
+    r"|pull|revert|clean|symbolic-ref|"
+    + "|".join(re.escape(word) for word in sorted(_GIT_PLUMBING_WRITERS))
+    + r"|hash-object(?=[^\n]*\s-w\b))\b"
 )
 
 # Round 1 review (C4): the registry, the lease, the done gate - all of it is
@@ -1543,6 +1556,13 @@ def _git_write_targets(args, cwd):
         # --hard is denied outright by DENIED_COMMANDS (R-GIT-RESET-HARD) -
         # --merge and --keep also rewrite the tree, --soft and --mixed do not.
         return [(None, cwd, False)]
+    # the hyphenated plumbing writes the index, refs, objects or the tree with no path this
+    # could name: symbolic-ref with a target or -d, hash-object with -w, the rest always
+    if (sub in _GIT_PLUMBING_WRITERS
+            or (sub == "symbolic-ref" and (len(_positionals(rest)) >= 2
+                                           or any(t in ("-d", "--delete") for t in rest)))
+            or (sub == "hash-object" and "-w" in rest)):
+        return [(None, cwd, False)]
     return []
 
 
@@ -1999,8 +2019,8 @@ def _bash_write_targets(command, base_cwd, commands=None):
     if "$(" in command or "`" in command:
         # read without here-document bodies, which are data: a commit message there names
         # no write (_command_views)
-        views = _command_views(command)
-        if BASH_WRITE_SHAPES.search("\n".join(views) if views else command):
+        found = _command_views(command)
+        if BASH_WRITE_SHAPES.search("\n".join(found[0] + found[1]) if found else command):
             return [(None, base_cwd, False)]
         return []
     targets = []
@@ -2809,11 +2829,42 @@ class _Unreadable(Exception):
     """A substitution or a here-document left open."""
 
 
-def _mask_text(text, i, closer, inner):
+# What a here-document is fed to: cat is data (a commit message), a shell or any other
+# command runs its body as commands, and an interpreter runs it as code the walk cannot
+# read [R-LANE-CROSS-WRITE].
+_HEREDOC_WRAPPERS = frozenset({"env", "command", "builtin", "exec", "nohup", "nice", "time",
+                               "sudo", "doas", "xargs", "timeout", "stdbuf"})
+_HEREDOC_INTERPRETERS = frozenset({"perl", "ruby", "node", "nodejs", "php", "osascript", "lua",
+                                   "tclsh", "Rscript", "deno", "bun", "pwsh", "awk", "gawk",
+                                   "irb", "julia", "jshell", "groovy"})
+
+
+def _heredoc_consumer(prefix):
+    """What the here-document that follows `prefix` is fed to, as "data", "interpreter" or
+    "commands", read off the last simple command of `prefix` past assignments, options and the
+    usual wrappers. cat is data, python and the other interpreters run code, and anything else, a
+    shell (sh, bash, zsh, dash, ksh, behind env or xargs too) among them, runs commands."""
+    part = re.split(r"\|\||&&|[;|\n(){}]", prefix)[-1]
+    for token in _shlex_tokens(part) or []:
+        if (_ASSIGNMENT_WORD_RE.match(token) or token.startswith("-") or token.isdigit()
+                or token in (">", ">>", "<") or _verb_name(token) in _HEREDOC_WRAPPERS):
+            continue
+        name = _verb_name(token)
+        if name == "cat":
+            return "data"
+        if name.startswith("python") or name.startswith("pypy") or name in _HEREDOC_INTERPRETERS:
+            return "interpreter"
+        return "commands"
+    return "commands"
+
+
+def _mask_text(text, i, closer, inner, fed):
     """(text[i:] up to `closer` outside quotes, with each $(...) and backtick replaced by the
-    word $SUBST and the text inside each appended to `inner`, every here-document body taken
-    out, the index after `closer`). Raises _Unreadable on a substitution or a here-document
-    left open."""
+    word $SUBST and the text inside each appended to `inner`, the index after `closer`). A
+    here-document body is taken out: dropped when fed to cat, which is data, appended to `fed`
+    when fed to an interpreter, and appended to `inner` as commands, masked the same way, when
+    fed to a shell or any other command. Raises _Unreadable on a substitution or a
+    here-document left open."""
     out, pending = [], []
     quote, depth, n = None, 0, len(text)
     while i < n:
@@ -2831,12 +2882,12 @@ def _mask_text(text, i, closer, inner):
                 closer == "`" or depth == 0):
             return "".join(out), i + 1
         if text.startswith("$(", i):
-            body, i = _mask_text(text, i + 2, ")", inner)
+            body, i = _mask_text(text, i + 2, ")", inner, fed)
             inner.append(body)
             out.append("$SUBST")
             continue
         if char == "`":
-            body, i = _mask_text(text, i + 1, "`", inner)
+            body, i = _mask_text(text, i + 1, "`", inner, fed)
             inner.append(body)
             out.append("$SUBST")
             continue
@@ -2848,14 +2899,16 @@ def _mask_text(text, i, closer, inner):
             match = _HEREDOC_OP_RE.match(text, i)
             if match:
                 word = next(group for group in match.groups()[1:] if group is not None)
-                pending.append((match.group(1) == "-", word))
+                pending.append((match.group(1) == "-", word,
+                                _heredoc_consumer("".join(out))))
                 out.append(match.group())
                 i = match.end()
                 continue
         elif quote is None and char == "\n" and pending:
             out.append(char)
             i += 1
-            for strip_tabs, word in pending:
+            for strip_tabs, word, consumer in pending:
+                body = []
                 while True:
                     if i >= n:
                         raise _Unreadable("here-document %s left open" % word)
@@ -2865,6 +2918,11 @@ def _mask_text(text, i, closer, inner):
                     i = end + 1
                     if (line.lstrip("\t") if strip_tabs else line) == word:
                         break
+                    body.append(line)
+                if consumer == "interpreter":
+                    fed.append("\n".join(body))
+                elif consumer == "commands":
+                    inner.append(_mask_text("\n".join(body), 0, None, inner, fed)[0])
             pending = []
             continue
         elif quote is None and char == "(":
@@ -2879,28 +2937,38 @@ def _mask_text(text, i, closer, inner):
 
 
 def _command_views(command):
-    """[the command with every $(...) and backtick masked to the word $SUBST and every
-    here-document body taken out, then the same of the text inside each substitution], or
-    None when one is left open. A commit message in a here-document is data, not commands."""
-    inner = []
+    """([the command with every $(...) and backtick masked to the word $SUBST and every
+    here-document body taken out, then the same of the text inside each substitution and of
+    each here-document body fed to a shell or another command], [each here-document body fed
+    to an interpreter]), or None when one is left open (_mask_text). A commit message in a
+    here-document fed to cat is data, not commands."""
+    inner, fed = [], []
     try:
-        outer, _ = _mask_text(command, 0, None, inner)
+        outer, _ = _mask_text(command, 0, None, inner, fed)
     except _Unreadable:
         return None
-    return [outer] + inner
+    return [outer] + inner, fed
 
 
 def _lane_git_segments(command, cwd):
     """(every segment the write walk reads over each view of `command` (_command_views), the
-    texts it could not read as words): the whole command when a substitution or a
-    here-document is left open, else each segment it cannot split."""
-    views = _command_views(command)
-    if views is None:
-        return [], [command]
+    texts it could not read as words, the here-document bodies fed to an interpreter): the
+    whole command is unread when a substitution or a here-document is left open, else each
+    segment the walk cannot split."""
+    found = _command_views(command)
+    if found is None:
+        return [], [command], []
+    views, fed = found
     segments = []
     for view in views:
         _bash_write_targets(view, cwd if isinstance(cwd, str) else None, segments)
-    return segments, [text for tokens, text, _ in segments if tokens is None]
+    return segments, [text for tokens, text, _ in segments if tokens is None], fed
+
+
+# What an interpreter's here-document may not spell in a lane: ppl, or a git worktree or
+# config call, which the walk cannot read inside code.
+_INTERPRETED_SPELLING_RE = re.compile(
+    r"(?<![\w.-])ppl\b|\bgit\b[\s\S]*?\b(?:worktree|config)\b")
 
 
 def lane_git_denial(command, agent, binding, cwd=None):
@@ -2923,7 +2991,14 @@ def lane_git_denial(command, agent, binding, cwd=None):
     if not (isinstance(command, str) and binding.task and not binding.problem):
         return None
     role = escape.is_role(agent)
-    segments, unread = _lane_git_segments(command, cwd)
+    segments, unread, fed = _lane_git_segments(command, cwd)
+    for body in fed:
+        spelled = _INTERPRETED_SPELLING_RE.search(body)
+        if spelled:
+            return ("BOUNDARY_VIOLATION",
+                    "lane %s may not feed an interpreter a here-document that spells %r: the "
+                    "guard cannot read ppl, git worktree or git config inside code"
+                    % (binding.task, spelled.group()[:60]))
     # only what the walk could not read as words is judged by its spelling: a git whose
     # subcommand it reads, a commit whose message is a substitution among them, is judged by
     # that subcommand

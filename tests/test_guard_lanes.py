@@ -785,6 +785,65 @@ class TestLaneProtection(LaneCase):
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn(why, reason)
 
+    def test_a_here_document_is_judged_by_what_it_feeds(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-CROSS-TASK
+        # R41: a here-document fed to cat is data, one fed to a shell or another command runs
+        # as commands, and one fed to an interpreter may not spell ppl, git worktree or git
+        # config, which the guard cannot read inside code
+        for command in ("bash <<'EOF'\ngit worktree remove x\nEOF",
+                        "sh <<EOF\ngit worktree prune\nEOF",
+                        "env sh <<'EOF'\ncd ..\ngit worktree prune\nEOF",
+                        "bash -s <<'EOF'\ngit $(echo worktree) prune\nEOF",
+                        "xargs -0 sh -c 'true' <<'EOF'\ngit worktree prune\nEOF",
+                        "python3 - <<'EOF'\nimport subprocess\n"
+                        "subprocess.run(['git', 'worktree', 'prune'])\nEOF",
+                        "perl <<'EOF'\nsystem('env -u PPL_TASK ppl show')\nEOF",
+                        "node <<'EOF'\nrequire('child_process').execSync('git config core.x y')\n"
+                        "EOF"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent,
+                                                        cwd=self.worktree[LANE_A]))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        reason = self.deny_reason(self.bash("bash <<'EOF'\ngit config core.hooksPath /tmp/h\nEOF",
+                                            agent="ppl-code-worker", cwd=self.worktree[LANE_A]))
+        self.assertIn("may not write git config", reason)
+        # cat's here-document is data: R40's commit and a note naming git worktree pass
+        commit = ("git commit -m \"$(cat <<'EOF'\nfix: worktree config loading (lane), don't\n"
+                  "git worktree prune is not run here\nEOF\n)\"")
+        for command in (commit, "cat > /tmp/note.md <<'EOF'\ngit worktree prune\nEOF"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker",
+                                            cwd=self.worktree[LANE_A]))
+
+    def test_a_hyphenated_git_writer_is_a_write_shape(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-GUARD-BASH-WRITE-BOUNDARY
+        # R42: git's hyphenated plumbing writes the index, refs, objects or the tree with no
+        # path the walk could name, so it fails closed in a lane, while the read-only
+        # hyphenated words (merge-base, rev-parse, cat-file, ...) are no write shape
+        theirs = self.worktree[LANE_B]
+        git_dir = self.checkout + "/.git"
+        for command in ("git -C %s update-index --add src/App.java" % theirs,
+                        "git --git-dir=%s update-ref refs/heads/main HEAD" % git_dir,
+                        "git -C %s checkout-index -a -f" % theirs,
+                        "git -C %s symbolic-ref HEAD refs/heads/other" % theirs,
+                        "git -C %s hash-object -w src/App.java" % theirs,
+                        "git -C $(echo %s) update-ref refs/heads/x HEAD" % theirs):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent,
+                                                        cwd=self.worktree[LANE_A]))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "git rev-parse HEAD", "git cat-file -p HEAD", "git symbolic-ref HEAD",
+                        "git ls-files $(git rev-parse --show-toplevel)",
+                        "git hash-object src/App.java"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker",
+                                            cwd=self.worktree[LANE_A]))
+
     def test_git_worktree_in_any_form_but_list_is_denied(self):
         # rule: R-LANE-CROSS-WRITE
         # R34: git takes a worktree by a unique tail of its path from anywhere in the
