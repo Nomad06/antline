@@ -48,7 +48,7 @@ class LaneRenderCase(unittest.TestCase):
         else:
             fixtures.install_harness(name)
         repo = Path(tmphome.mkdtemp(prefix="pplrepo-"))
-        fixtures.bind_lane(TASK, repo, lane=2, harness=name)
+        fixtures.bind_lane(TASK, repo, lane=2, harness=name, settings=False)
         start = lanes.start_dir(TASK)
         return harness.load(start / "harness" / name), start
 
@@ -90,6 +90,16 @@ class TestSettings(LaneRenderCase):
         self.assertEqual((facts["lane"], facts["task"]), (2, TASK))
         self.assertEqual(facts["written_sandbox"], settings["sandbox"])
         self.assertEqual(facts["written_allow"], settings["permissions"]["allow"])
+
+    def test_the_profile_denies_github_to_every_sandboxed_command(self):
+        # rule: R-OS-SANDBOX-NETWORK
+        doc, start = self.sandboxed()
+        result = self.render(doc, start)
+        settings = json.loads(result["settings"].read_text(encoding="utf-8"))
+        self.assertEqual(settings["sandbox"]["network"]["deniedDomains"],
+                         ["github.com", "*.github.com"])
+        self.assertTrue(any(entry.endswith(" auth status)")
+                            for entry in settings["permissions"]["allow"]))
 
     def test_the_profile_lets_bash_write_only_its_own_run_worktree_and_the_checkouts_git(self):
         # rule: R-LANE-CROSS-WRITE

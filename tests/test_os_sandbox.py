@@ -11,7 +11,7 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import os_sandbox, paths
+from ppl import lanes, os_sandbox, paths
 from ppl.errors import PplError
 
 PINS = {"gh": {"path": "/opt/x/gh", "realpath": "/opt/x/gh"},
@@ -378,19 +378,48 @@ class TestFacts(Home):
 
 
 class TestLoadFacts(Home):
+    """R31: a CLI-side reader takes the guard facts of the lane the call is in, the ones ppl lane
+    renders into its start directory, never a machine-wide file."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch.dict(os.environ, {"PPL_TASK": "GH-5"}))
+        self.lane = lanes.start_dir("GH-5") / os_sandbox.FACTS_FILE
+        self.lane.parent.mkdir(parents=True)
+
     def test_gh_path_is_the_pin_when_facts_exist_else_bare_gh(self):
         self.assertIsNone(os_sandbox.load_facts())
         self.assertEqual(os_sandbox.gh_path(), "gh")
-        (paths.home() / os_sandbox.FACTS_FILE).write_text(
+        self.lane.write_text(
             json.dumps({"pins": {"gh": {"path": "/opt/x/gh"}}, "written_sandbox": {}}))
         self.assertEqual(os_sandbox.gh_path(), "/opt/x/gh")
         self.assertIn("written_sandbox", os_sandbox.load_facts())
+        self.assertIn("written_sandbox", os_sandbox.load_facts("GH-5"))
+
+    def test_a_lane_never_reads_the_machine_facts(self):
+        (paths.home() / os_sandbox.FACTS_FILE).write_text(
+            json.dumps({"pins": {"gh": {"path": "/opt/machine/gh"}}, "tracker_repo": "o/r"}))
+        self.assertIsNone(os_sandbox.load_facts())
+        self.assertEqual(os_sandbox.gh_path(), "gh")
+        with mock.patch.dict(os.environ, {"PPL_TASK": ""}):
+            self.assertIsNone(os_sandbox.load_facts())
 
     def test_a_malformed_facts_file_is_refused_and_gh_falls_back(self):
-        (paths.home() / os_sandbox.FACTS_FILE).write_text("[1]")
-        with self.assertRaises(PplError):
+        self.lane.write_text("[1]")
+        with self.assertRaises(PplError) as caught:
             os_sandbox.load_facts()
+        self.assertIn("ppl lane", caught.exception.message)
         self.assertEqual(os_sandbox.gh_path(), "gh")
+
+    def test_pinned_repo_never_falls_back_to_the_snapshot(self):
+        with self.assertRaises(PplError) as caught:
+            os_sandbox.pinned_repo("tracker_repo", "o/r")
+        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
+        self.lane.write_text(json.dumps({"tracker_repo": "o/r"}))
+        self.assertEqual(os_sandbox.pinned_repo("tracker_repo", "o/r"), "o/r")
+        with self.assertRaises(PplError) as caught:
+            os_sandbox.pinned_repo("tracker_repo", "o/other")
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
 
 
 class TestSetupChecks(Home):

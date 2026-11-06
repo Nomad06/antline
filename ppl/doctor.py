@@ -1,7 +1,9 @@
-"""Where the PreToolUse guard hook is registered, in this directory's local settings and the
-Claude home's, and whether each registration can fire. `ppl doctor` reports it; where it is
-registered refuses no run, since a lane's hooks come from the settings `ppl lane` renders for
-it and carry its task on their command line.
+"""Where the PreToolUse guard hook is registered, in the settings of the session's own and the
+Claude home's, and whether each registration can fire. In a lane the session's own settings are
+the settings.json `ppl lane` rendered into the lane's start directory (lane_settings_path), whose
+hooks carry the lane's task on their command line; `ppl init` refuses a run whose lane settings
+register no guard naming its task (lane_guard_problem). Outside a lane `ppl doctor` checks the
+machine alone: the setup steps, the models, the harnesses and the Claude Code binary.
 
 Claude Code scopes a `.claude/settings.local.json` hook to sessions launched
 inside that directory tree; a hook in `~/.claude/settings.json` fires for
@@ -29,6 +31,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -66,12 +69,48 @@ def global_settings_path():
     return claude_home() / "settings.json"
 
 
+def lane_settings_path(entry):
+    """The settings.json `ppl lane` rendered into the start directory of the lane registry entry
+    `entry`: the hooks its session runs, each ending in --task <task>, and its OS sandbox
+    profile."""
+    return Path(str(entry.get("start_dir"))) / "settings.json"
+
+
+def _lane_at(cwd=None):
+    """The registry entry of the lane the session is in, else None: with `cwd`, the lane whose
+    start directory or worktree holds it; without, the lane a ppl call is in, resolved as
+    cli.resolve_task resolves its run (PPL_TASK, then the process cwd). A registry that cannot
+    be read is no lane here: ppl init and ppl lane refuse it on their own."""
+    from . import lanes
+    try:
+        if cwd is not None:
+            return lanes.for_path(cwd)
+        task = lanes.task_for_call(None)
+        return lanes.entry(task) if task else None
+    except PplError:
+        return None
+
+
 def local_settings_path(cwd=None):
+    """The settings file of the session's own: in a lane its settings.json
+    (lane_settings_path), else <cwd>/.claude/settings.local.json."""
+    entry = _lane_at(cwd)
+    if entry is not None:
+        return lane_settings_path(entry)
     # PPL_LOCAL_SETTINGS_DIR exists only so tests can pin this without
     # changing the process's actual working directory, which is shared with
     # everything else running in the same interpreter.
     base = cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd()
     return Path(base) / ".claude" / "settings.local.json"
+
+
+def session_dir(cwd=None):
+    """The directory the session starts in: the lane's start directory in a lane, else `cwd`
+    (PPL_LOCAL_SETTINGS_DIR, then the process cwd, when None)."""
+    entry = _lane_at(cwd)
+    if entry is not None:
+        return Path(str(entry.get("start_dir")))
+    return Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd())
 
 
 def _guard_matchers(doc):
@@ -106,6 +145,10 @@ def _has_guard(doc):
 # allows and that writes nothing: an unroled Read of /dev/null.
 HOOK_RUN_TIMEOUT_SECONDS = 10
 HOOK_RUN_REMEDY = "ppl setup claude"
+# What a lane whose settings.json does not register its own guard is told.
+LANE_SETTINGS_REMEDY = ("ppl lane renders it with every hook ending in --task <task>: destroy the "
+                        "lane with ppl destroy --scope local --task <task> and start it again "
+                        "with ppl lane <link>")
 
 
 def _guard_commands(doc):
@@ -119,6 +162,45 @@ def _guard_commands(doc):
             if isinstance(command, str) and GUARD_MARKER in command:
                 commands.append(command)
     return commands
+
+
+def _command_task(command):
+    """The task a guard command names after its script as `--task <id>`, else None."""
+    from . import lanes
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    scripts = [index for index, word in enumerate(words) if os.path.basename(word) == GUARD_MARKER]
+    if not scripts:
+        return None
+    try:
+        return lanes.hook_task(words[scripts[0] + 1:])
+    except ValueError:
+        return None
+
+
+def lane_guard_problem(entry):
+    """None when the lane's settings.json (lane_settings_path) registers the guard and every
+    guard command there ends in --task <the lane's task>, else the message ppl init refuses
+    with: a run starts only under its own lane's guard."""
+    task = entry.get("task")
+    path = lane_settings_path(entry)
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return ("lane %s's %s cannot be read (%s), so the guard of its session cannot be "
+                "confirmed: %s" % (task, path, exc, LANE_SETTINGS_REMEDY))
+    commands = _guard_commands(doc)
+    if not commands:
+        return ("lane %s's %s registers no guard hook (%s), so its session would run unguarded: "
+                "%s" % (task, path, GUARD_MARKER, LANE_SETTINGS_REMEDY))
+    for command in commands:
+        if _command_task(command) != task:
+            return ("lane %s's %s registers the guard hook `%s`, whose command line does not end "
+                    "in --task %s, so it does not bind its calls to this run: %s"
+                    % (task, path, command, task, LANE_SETTINGS_REMEDY))
+    return None
 
 
 def registered_guard_commands(cwd=None):
@@ -170,15 +252,16 @@ def _run_problem(command, workspace):
 def hook_runs(cwd=None, workspace=None):
     """{"ok": True} when every registered guard command executes clean,
     {"ok": False, "problem": ...} naming the first one that does not and the
-    remedy, {"ok": None} when no guard is registered. `cwd` picks the local
-    settings file, `workspace` is the payload's cwd (default: `cwd`, then the
-    process cwd). Kept out of `inspect`, which `ppl init` calls on every run:
+    remedy, {"ok": None} when no guard is registered. `cwd` picks the session's
+    settings file (local_settings_path: in a lane the lane's guard, with its
+    --task), `workspace` is the payload's cwd (default: the session's directory,
+    session_dir). Kept out of `inspect`, which `ppl init` calls on every run:
     this is the one place doctor runs what a settings file names, so the
     interpreter's version is asked here too, before the hook runs."""
     commands = registered_guard_commands(cwd)
     if not commands:
         return {"ok": None, "problem": None}
-    workspace = str(workspace or cwd or os.getcwd())
+    workspace = str(workspace or session_dir(cwd))
     for command in commands:
         problem = _interpreter_problem(command) or _run_problem(command, workspace)
         if problem:
@@ -722,13 +805,17 @@ def setup_problem(report, skip_model_check):
     return message
 
 
-def workspace():
-    """The configured workspace, where Claude Code sessions start, else the cwd."""
+def claude_binary():
+    """{"binary", "path"}: the Claude Code binary config.toml names (claude when it names none)
+    and where PATH finds it, None when PATH finds none. It never raises."""
     from . import config
     try:
-        return config.section("claude").get("workspace") or os.getcwd()
+        binary = config.section("claude").get("binary") or "claude"
     except Exception:
-        return os.getcwd()
+        binary = "claude"
+    if not isinstance(binary, str):
+        return {"binary": None, "path": None}
+    return {"binary": binary, "path": shutil.which(binary)}
 
 
 SKIPPED_IN_SANDBOX = "skipped inside the OS sandbox, run ppl doctor --forge outside it"
@@ -745,7 +832,7 @@ def _gh_kinds(doc):
 def gh_checks(doc, env=None):
     """(forge, tracker) check results of a loaded harness. Inside the OS sandbox the gh
     checks are skipped, since GitHub is closed there by design."""
-    from . import config, forges, trackers
+    from . import forges, trackers
     skipped = {"ok": None, "detail": SKIPPED_IN_SANDBOX}
     forge_gh, tracker_gh = _gh_kinds(doc)
     inside = _in_os_sandbox(env)
@@ -755,9 +842,8 @@ def gh_checks(doc, env=None):
         forge.update(skipped)
     else:
         try:
-            workspace = config.section("claude").get("workspace") or str(Path.home())
             forge.update(forges.get(settings["kind"]).doctor_check(
-                settings, claude_home().parent / ".claude.json", workspace))
+                settings, claude_home().parent / ".claude.json", str(Path.home())))
         except Exception as exc:
             forge.update(ok=False, detail="the forge check failed: %s" % _problem(exc))
     table = doc["tracker"]
@@ -808,7 +894,7 @@ def operator_mcp_servers(project_dir=None, claude_json=None):
     mcpServers (user scope). Never <project_dir>/.mcp.json or a settings file: those are
     controlled by whoever commits to the project, and a lane's --strict-mcp-config launch
     never asks the operator to approve what they name."""
-    base = Path(project_dir or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
+    base = Path(project_dir) if project_dir else session_dir()
     claude_json = Path(claude_json) if claude_json else claude_home().parent / ".claude.json"
     user = _json_object(claude_json)
     if user is None:
@@ -821,36 +907,32 @@ def operator_mcp_servers(project_dir=None, claude_json=None):
     return found
 
 
-def mcp_server_names(cwd=None, claude_json=None):
-    """The names, never a command, args or env, of every MCP server a session launched in the
-    workspace sees: its .mcp.json, ~/.claude.json (top level and the workspace's project
-    entry) and the mcpServers of the user, project and local settings files."""
-    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
-    cwd = str(base)
-    names = set(operator_mcp_servers(base, claude_json))
-    for doc in (_json_object(base / ".mcp.json"),
-                _json_object(global_settings_path()),
-                _json_object(base / ".claude" / "settings.json"),
-                _json_object(local_settings_path(cwd))):
-        names.update(_servers(doc))
-    return sorted(names)
+def mcp_server_names(cwd=None):
+    """The names, never a command, args or env, of the MCP servers a lane's session loads: those
+    of the mcp.json ppl lane rendered into its start directory, the only ones its
+    --strict-mcp-config launch loads. [] outside a lane."""
+    entry = _lane_at(cwd)
+    if entry is None:
+        return []
+    return sorted(_servers(_json_object(Path(str(entry.get("start_dir"))) / "mcp.json")))
 
 
-def mcp_servers_warning(cwd=None, claude_json=None):
-    """One line naming the MCP servers the pipeline workspace's sessions load, when the OS
-    sandbox facts exist: they run outside the sandbox and the edit-tool boundary cannot see
-    them. None without facts or without servers."""
+def mcp_servers_warning(cwd=None):
+    """One line naming the MCP servers a lane's session loads, when the lane has OS sandbox
+    facts: they run outside the sandbox and the edit-tool boundary cannot see them. None
+    outside a lane, without facts or without servers."""
     from . import os_sandbox
+    entry = _lane_at(cwd)
     try:
-        if os_sandbox.load_facts() is None:
+        if entry is None or os_sandbox.load_facts(entry.get("task")) is None:
             return None
     except PplError:
         return None
-    names = mcp_server_names(cwd, claude_json)
+    names = mcp_server_names(cwd)
     if not names:
         return None
     return ("MCP servers run outside the OS sandbox and can write anywhere: %s. Register no "
-            "file-writing MCP server for the pipeline workspace. The list leaves out plugin MCP "
+            "file-writing MCP server for a pipeline lane. The list leaves out plugin MCP "
             "servers and claude.ai connectors, which run outside it as well." % ", ".join(names))
 
 
@@ -979,15 +1061,23 @@ def _plugin_hook_files(names):
     return files
 
 
+def _settings_sources(cwd=None):
+    """Every settings file the session may load, each once: the user's, the session
+    directory's project and local ones, the session's own (local_settings_path: in a lane its
+    settings.json beside the start directory's .claude/settings.local.json) and the managed
+    one."""
+    base = session_dir(cwd)
+    return tuple(dict.fromkeys((global_settings_path(), base / ".claude" / "settings.json",
+                                base / ".claude" / "settings.local.json",
+                                local_settings_path(cwd), managed_settings_path())))
+
+
 def foreign_bash_hooks(cwd=None):
     """Every PreToolUse hook other than ppl's guard whose matcher passes Bash, from the user,
     project, local and managed settings and the hooks/hooks.json of each enabled plugin, as
     {"source": file, "hook": _hook_label}. Such a hook may rewrite a Bash call with
     updatedInput, and whether that keeps dangerouslyDisableSandbox is unverified."""
-    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
-    settings = [global_settings_path(), base / ".claude" / "settings.json",
-                local_settings_path(str(base)), managed_settings_path()]
-    documents = [(path, _json_object(path)) for path in settings]
+    documents = [(path, _json_object(path)) for path in _settings_sources(cwd)]
     sources = documents + [(path, _json_object(path)) for path in
                            _plugin_hook_files(_enabled_plugins([doc for _, doc in documents]))]
     found = []
@@ -1133,12 +1223,13 @@ def _undoing(cwd, recorded=None):
     """What in a settings source undoes the profile: sandbox.excludedCommands, the sandbox or
     the unsandboxed retry switched off, a write grant (sandbox.filesystem.allowWrite or
     permissions.additionalDirectories) over a protected path, and any unix socket allowance.
-    ppl's own block in the local settings, the one apply recorded, is not another source."""
+    ppl's own block in the session's settings, the one the facts record, is not another source.
+    In a lane its start directory's .claude/settings.local.json is read too, the local source
+    its session loads beside its settings.json."""
     recorded = recorded or {}
-    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd())
+    base = session_dir(cwd)
     local = local_settings_path(cwd)
-    sources = (global_settings_path(), base / ".claude" / "settings.json", local,
-               managed_settings_path())
+    sources = _settings_sources(cwd)
     protected = _protected(recorded)
     found = []
     for path in sources:
@@ -1181,13 +1272,15 @@ def _undoing(cwd, recorded=None):
 
 def os_sandbox_facts(cwd=None, env=None, probe=None):
     """Whether Claude Code's OS sandbox closes GitHub for this session. `state` is "on" only
-    with the env marker, ppl's profile in the workspace local settings, a denied live probe
-    and nothing undoing it. Nothing here carries the proxy URL."""
+    with the env marker, ppl's profile in the session's settings (in a lane its settings.json,
+    whose sandbox block must equal written_sandbox in the lane's os_sandbox.json), a denied
+    live probe and nothing undoing it. Nothing here carries the proxy URL."""
     from . import os_sandbox
     env = dict(os.environ) if env is None else env
     marker = env.get("SANDBOX_RUNTIME") == "1"
+    entry = _lane_at(cwd)
     try:
-        recorded = os_sandbox.load_facts() or {}
+        recorded = (os_sandbox.load_facts(entry.get("task")) if entry is not None else None) or {}
     except PplError:
         recorded = {}
     written = recorded.get("written_sandbox")
@@ -1213,29 +1306,38 @@ def os_sandbox_facts(cwd=None, env=None, probe=None):
 
 
 def report(task_id=None, cwd=None, env=None, probe=None):
-    """What `ppl doctor` prints as JSON: the hook registration, the setup
-    report, the run it is about and whether the registered guard runs.
-    `cwd` is the directory whose .claude/settings.local.json is read, the
-    process cwd by default. The run is found as every ppl command finds it
-    (lanes.task_for_call: `task_id`, else PPL_TASK of `env`, else the lane
-    holding `cwd`), and reported as None when there is none or it cannot be
-    read."""
+    """What `ppl doctor` prints as JSON. The lane is found as every ppl command finds its run
+    (lanes.task_for_call: `task_id`, else PPL_TASK of `env`, else the lane holding `cwd`, the
+    process cwd by default), and `task` is that run when its state can be read, else None.
+    Outside a lane (`lane` None) it checks the machine alone: the setup report, the models, the
+    harnesses, the Claude Code binary and the GitHub token variables. In a lane it adds where
+    the guard is registered in the lane's settings.json and the Claude home's, the lane guard's
+    task, the OS sandbox facts, the foreign Bash hooks, the MCP servers and whether the lane's
+    guard runs."""
     from . import lanes, run
-    inspected = inspect(cwd)
     try:
         task_id = lanes.task_for_call(task_id, cwd, env)
+        entry = lanes.entry(task_id) if task_id else None
+    except PplError:
+        task_id, entry = None, None
+    try:
         if task_id:
             run.load(task_id)
     except PplError:
         task_id = None
-    result = dict(inspected)
+    result = {"lane": entry.get("task") if entry else None, "task": task_id}
     result.update(inspect_setup(env))
-    result["os_sandbox"] = os_sandbox_facts(cwd, env, probe)
+    result["claude_binary"] = claude_binary()
     result["github_token_env"] = github_token_names(env)
-    result["foreign_bash_hooks"] = foreign_bash_hooks(cwd)
-    result["mcp_servers"] = mcp_server_names(cwd)
-    result["task"] = task_id
-    runs = hook_runs(cwd=cwd, workspace=workspace())
+    if entry is None:
+        return result
+    where = str(entry.get("start_dir"))
+    result.update(inspect(where))
+    result["lane_guard_problem"] = lane_guard_problem(entry)
+    result["os_sandbox"] = os_sandbox_facts(where, env, probe)
+    result["foreign_bash_hooks"] = foreign_bash_hooks(where)
+    result["mcp_servers"] = mcp_server_names(where)
+    runs = hook_runs(cwd=where, workspace=where)
     result["hook_runs"] = runs["ok"]
     if runs["problem"]:
         result["hook_runs_problem"] = runs["problem"]

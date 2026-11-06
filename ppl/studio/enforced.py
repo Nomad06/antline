@@ -21,7 +21,8 @@ READ_ONLY_SCOPES = frozenset({"active run, read-only roles", "global, every disp
 # session, not a caged role.
 NOT_A_ROLE = frozenset({
     "ppl CLI", "ppl CLI and panel", "ppl CLI and panel stop", "ppl CLI, panel, hook",
-    "ppl CLI, the eleven call sites in cli.py", "ppl CLI, this directory plus the Claude home",
+    "ppl CLI, the eleven call sites in cli.py",
+    "ppl CLI, the lane's start directory plus the Claude home",
     "panel", "hook registration", "active run, session with no agent_type",
     "docs/DESIGN.md, README.md, every rendered file of both example skills and this table",
     "this table and ppl/_assets/hooks/ppl_guard.py",

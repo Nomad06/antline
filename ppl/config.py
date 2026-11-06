@@ -1,11 +1,8 @@
-"""config.toml: per-machine settings in the data root. It records the active
-harness, where the generated agents and skill go, and the `ppl setup`
-bookkeeping in [setup]."""
+"""config.toml: per-machine settings in the data root. It records the Claude Code binary, the
+default harness, the limits and the `ppl setup` bookkeeping in [setup]."""
 import math
-import os
 import shutil
 import tomllib
-from pathlib import Path
 
 from . import paths
 from .errors import PplError
@@ -122,37 +119,26 @@ def lanes_max():
     return value
 
 
-def _dir_setting(key, env_var, fallback):
-    """The environment wins over config, so a test or a one-off render
-    (PPL_AGENTS_DIR=... ppl harness apply) never writes into the real dir."""
-    if os.environ.get(env_var):
-        return Path(os.environ[env_var])
-    value = _section(load(), "claude").get(key)
-    if value is not None and not isinstance(value, str):
-        raise PplError("SCHEMA_INVALID",
-                       "config.toml at %s: claude.%s must be a string" % (paths.config_file(), key))
-    return Path(value).expanduser() if value else fallback
-
-
-def skills_dir():
-    """Where `ppl harness apply` writes the skill."""
-    return _dir_setting("skills_dir", "PPL_SKILLS_DIR", Path.home() / ".claude" / "skills")
-
-
-def agents_dir():
-    """Where `ppl harness apply` writes the agent files."""
-    return _dir_setting("agents_dir", "PPL_AGENTS_DIR", Path.home() / ".claude" / "agents")
-
-
-def set_active_harness(name, memory_sha256=None):
+def set_active_harness(name):
+    """[harness] active, the harness `ppl lane` runs when it is given none. A memory_sha256
+    an older `ppl harness apply` recorded beside it is dropped: nothing reads it."""
     doc = load()
     _section(doc, "harness")
     doc.setdefault("harness", {})["active"] = name
-    if memory_sha256 is None:
-        doc["harness"].pop("memory_sha256", None)
-    else:
-        doc["harness"]["memory_sha256"] = memory_sha256
+    doc["harness"].pop("memory_sha256", None)
     save(doc)
+
+
+def remove(section, keys):
+    """Drop `keys` from one table of config.toml and return the ones that were there."""
+    doc = load()
+    table = _section(doc, section)
+    present = [key for key in keys if key in table]
+    if present:
+        for key in present:
+            doc[section].pop(key)
+        save(doc)
+    return present
 
 
 def _step_lists(doc):

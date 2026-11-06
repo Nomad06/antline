@@ -33,11 +33,12 @@ class TestSandbox(unittest.TestCase):
         self.assertEqual(shown["model_check"], "skipped")
         self.assertEqual(len(self.box.git("log", "--oneline").splitlines()), 1)
 
-    def test_the_guard_command_is_the_one_setup_registered(self):
-        settings = json.loads((self.box.workspace / ".claude" / "settings.local.json").read_text())
+    def test_the_guard_command_is_the_one_the_lanes_settings_register(self):
+        settings = json.loads(self.box.lane_settings().read_text())
         command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         self.assertIn(str(paths.package_parent() / "ppl" / "_assets" / "hooks" / "ppl_guard.py"),
                       command)
+        self.assertTrue(command.endswith(" --task GH-1"), command)
         decision = self.box.guard({"hook_event_name": "PreToolUse", "agent_type": None,
                                    "tool_name": "Bash",
                                    "tool_input": {"command": "git push --force origin main"},

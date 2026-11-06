@@ -201,13 +201,11 @@ class TestPresets(panel_client.StudioTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
-    def test_routing_apply_refuses_a_positional_harness_name(self):
-        code, out, err = self.run_cli("routing", "apply", "myharness")
+    def test_routing_apply_is_gone_since_a_lane_renders_its_own_agents(self):
+        code, out, err = self.run_cli("routing", "apply")
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
-        self.assertIn("--harness", json.loads(err)["message"])
-        self.assertEqual(list(self.agents_dir.iterdir()), [])
 
     def test_routing_show_refuses_a_positional_role_name(self):
         code, out, err = self.run_cli("routing", "show", "ppl-verifier")

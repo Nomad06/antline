@@ -7,10 +7,6 @@ skipped = []
 
 [claude]
 binary = "claude"
-workspace = ""
-agents_dir = ""
-skills_dir = ""
-hooks = "local"
 
 [models]
 verify_ttl_days = 30

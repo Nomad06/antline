@@ -13,7 +13,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from . import config, harness, memory, paths, routing, run, store, trail
+from . import config, harness, lanes, memory, paths, routing, run, store, trail
 from .errors import PplError
 from .studio import files
 
@@ -29,7 +29,7 @@ TIMELINE_EVENTS = ("init", "stage_enter", "lifecycle", "park", "budget", "refusa
 # What a proposal's evidence reference may point at inside the bundle.
 KINDS = ("finding", "remark", "verdict", "gate", "park", "deny", "timeline")
 
-REFLECTOR_AGENT = "ppl-reflector.md"
+REFLECTOR = "ppl-reflector"
 
 # What an assessment may say of a lesson that was in effect, and how many lessons one record
 # may propose.
@@ -514,17 +514,12 @@ def _clear_marker(task_id):
         pass
 
 
-def _harness_name(state):
-    recorded = state.get("harness")
-    name = recorded.get("name") if isinstance(recorded, dict) else None
-    return name or config.active_harness() or "<name>"
-
-
 def bundle(task_id):
     """`ppl lessons bundle`: the merged run's bundle for ppl-reflector and its path, or None
     when config.toml [lessons] reflect is false. Refused ILLEGAL_TRANSITION unless the run is
     in merge_watch and `ppl merge observed` recorded the merge [R-LESSONS-BUNDLE-AFTER-MERGE],
-    and SETUP_INCOMPLETE while the reflector's agent file is missing."""
+    and SETUP_INCOMPLETE while the lane's agents file <start>/agents.json names no ppl-reflector,
+    the agents its session was started with."""
     if not config.lessons_reflect():
         return None
     state = run.load(task_id)
@@ -539,11 +534,16 @@ def bundle(task_id):
         raise PplError("ILLEGAL_TRANSITION",
                        "ppl lessons bundle is valid only once `ppl merge observed` recorded the "
                        "merge, and none is recorded for %s yet" % task_id)
-    agent = config.agents_dir() / REFLECTOR_AGENT
-    if not agent.is_file():
+    agents = lanes.start_dir(task_id) / "agents.json"
+    try:
+        names = store.read_json(agents, {}, lanes.READ_LIMIT)
+    except (PplError, OSError, UnicodeDecodeError):
+        names = {}
+    if not (isinstance(names, dict) and REFLECTOR in names):
         raise PplError("SETUP_INCOMPLETE",
-                       "the reflector's agent file %s is missing, so ppl-reflector cannot be "
-                       "dispatched: run `ppl harness apply %s`" % (agent, _harness_name(state)))
+                       "the lane's agents file %s names no %s, so it cannot be dispatched: run "
+                       "the reflection in the session ppl lane started for %s (ppl lane resume "
+                       "%s)" % (agents, REFLECTOR, task_id, task_id))
     return build_bundle(task_id, {"ended": "merged", "merged_sha": merged})
 
 

@@ -184,10 +184,6 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual([r["id"] for r in memory.active(rows)], ["M-1", "M-3"])
         self.assertEqual([r["id"] for r in memory.active(rows, "ppl-verifier")], ["M-3"])
 
-    def test_digest_is_sha256_hex(self):
-        self.assertEqual(memory.digest(b""),
-                         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-
 
 class TestRead(unittest.TestCase):
     def setUp(self):

@@ -1,7 +1,7 @@
 """A harness is a directory outside the repository that holds everything
 project-specific: build gates, guard shapes, task key shape, tracker and forge
-selection, knowledge skills, role prompt overlays. ppl reads it at `ppl init`
-and `ppl harness apply`, never at hook time: `ppl init --harness` freezes the
+selection, knowledge skills, role prompt overlays. ppl reads it at `ppl lane`,
+`ppl init` and `ppl harness apply`, never at hook time: `ppl init` freezes the
 slice the guard enforces into runs/<task>/harness.json (see snapshot) and the
 hook reads that file."""
 import copy
@@ -532,8 +532,10 @@ def derived_name(source):
 
 def add(source, name=None, staging=False):
     """Install a git URL or a local directory as the harness `name`, by default
-    the name derived from the source. The name must pass check_name: only
-    setup, staging a harness in its own <name>.replacing, passes staging."""
+    the name derived from the source. A plain directory is imported into a new git
+    repository (D8). The name must pass check_name: only setup, staging a harness in
+    its own <name>.replacing, passes staging, and it imports the staged copy itself
+    once its answers are written into it, so the import commit holds them."""
     if not name:
         name = derived_name(source)
     if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
@@ -549,7 +551,8 @@ def add(source, name=None, staging=False):
             _clone(name, source, target)
         else:
             _copy(name, source, target)
-            lane_harness.import_directory(target, name)
+            if not staging:
+                lane_harness.import_directory(target, name)
         load(str(target))
     except PplError:
         shutil.rmtree(target, ignore_errors=True)
@@ -677,12 +680,6 @@ def _os_values(doc, pins, workspace):
     if not os_sandbox.needed(doc):
         return values
     pins = pins if pins is not None else os_sandbox.pins()
-    if workspace is None:
-        from . import config
-        try:
-            workspace = config.section("claude").get("workspace") or ""
-        except PplError:
-            workspace = ""
     workspace = os_sandbox.workspace_dir(workspace) if workspace else _UNKNOWN_WORKSPACE
     checkout = os_sandbox.checkout(doc)
     forge_repo, tracker_repo = os_sandbox.repos(doc)
@@ -798,10 +795,11 @@ def _with_frontmatter(text, skill_name):
 def render_skill(doc, skill_name="pipeline", pins=None, workspace=None, lane=None):
     """relative path -> text of every file of the skill, nothing written.
     Refuses SCHEMA_INVALID on an include marker it cannot resolve, so a
-    marker never reaches the disk. `pins` are the binaries apply pinned, looked
+    marker never reaches the disk. `pins` are the binaries the profile pins, looked
     up on PATH when it is None and the harness needs the OS sandbox profile,
-    `workspace` the [claude] workspace, read from the config when None, and `lane` the lane
-    number a lane's render puts in place of <lane> in the gates and [env] values."""
+    `workspace` the directory the session's gh and ppl calls run from (a lane's start
+    directory; a placeholder when None), and `lane` the lane number a lane's render puts in
+    place of <lane> in the gates and [env] values."""
     if not _NAME_RE.match(skill_name or ""):
         raise PplError("SCHEMA_INVALID", "skill name %r is not a plain directory name" % skill_name)
     values = _values(doc, pins, workspace, lane)
@@ -842,56 +840,25 @@ def write_skill(doc, skills_dir, skill_name="pipeline"):
     return _write_files(render_skill(doc, skill_name), Path(skills_dir) / skill_name)
 
 
-def apply(name, agents_dir=None, skills_dir=None):
-    """Render the agents and the skill for an installed harness, then
-    record it as the active one. Everything is rendered before anything is
-    written, so a bad marker or a bad routing.toml leaves the disk as it was."""
-    from . import config, setup, store
+def apply(name):
+    """Check an installed harness and make it the default `ppl lane` runs when it is given none
+    (config.toml [harness] active). It renders and writes nothing else: a lane renders its own
+    session files from the harness commit when it starts. Refuses HARNESS_INVALID on the first
+    error `verify` finds, and whatever lane_harness.commit refuses (no git repository, uncommitted
+    changes, a failed fetch), both before anything is recorded. Returns {"active", "commit"}."""
+    from . import config
     doc = load(name)
     if os.path.dirname(os.path.abspath(doc["_dir"])) != os.path.abspath(paths.harnesses_dir()):
         _fail(name, "%s is not an installed harness, add it with `ppl harness add` and apply it "
               "by name" % doc["_dir"])
     config.active_harness()
-    pin_map = os_sandbox.pins() if os_sandbox.needed(doc) else None
-    workspace = config.section("claude").get("workspace") or ""
-    skill_files = render_skill(doc, pins=pin_map, workspace=workspace)
-    _size_warnings(skill_files, {role: routing.render(role, doc) for role in routing.REQUIRED_ROLES})
-    try:
-        previous = os_sandbox.load_facts()
-    except PplError:
-        previous = None
-    if not isinstance(previous, dict):
-        previous = {}
-    sandbox_facts = prof = None
-    if os_sandbox.needed(doc):
-        if not workspace:
-            raise PplError("SETUP_INCOMPLETE", "the OS sandbox profile is written to the "
-                           "workspace's local settings and no [claude] workspace is configured. "
-                           "Run ppl setup claude, then ppl harness apply again.")
-        problem = os_sandbox.layout_problem(doc, workspace) or os_sandbox.repo_problem(doc)
-        if problem:
-            raise PplError("SETUP_INCOMPLETE", problem)
-        sandbox_facts = os_sandbox.facts(doc, workspace, pin_map)
-        prof = os_sandbox.profile(doc, workspace, pin_map)
-        sandbox_facts["written_sandbox"] = prof["sandbox"]
-        sandbox_facts["written_allow"] = prof["allow"]
-        setup.check_os_sandbox_settings(workspace, previous)
-    skill_target = (Path(skills_dir) if skills_dir is not None else config.skills_dir()) / "pipeline"
-    facts_path = paths.home() / os_sandbox.FACTS_FILE
-    if sandbox_facts is not None:
-        store.write_json(facts_path, sandbox_facts)
-        os_sandbox.scratch_root().mkdir(parents=True, exist_ok=True)
-    if workspace and (prof or previous.get("written_sandbox") is not None
-                      or previous.get("written_allow")):
-        setup.write_os_sandbox_settings(workspace, prof, previous)
-    if sandbox_facts is None and facts_path.exists():
-        facts_path.unlink()
-    agents = routing.apply(doc, agents_dir)
-    skill = _write_files(skill_files, skill_target)
     active = installed_name(doc)
-    config.set_active_harness(
-        active, memory_sha256=memory.digest(memory.read(doc["_dir"], routing.LESSON_ROLES)[1]))
-    return {"agents": agents, "skill": skill, "active": active}
+    errors = verify(doc["_dir"], active)["errors"]
+    if errors:
+        raise PplError("HARNESS_INVALID", errors[0])
+    sha = lane_harness.commit(doc["_dir"])
+    config.set_active_harness(active)
+    return {"active": active, "commit": sha}
 
 
 def agent_texts(doc):
@@ -978,29 +945,23 @@ def unrunnable_focused_tests(doc):
 
 
 def _missing_skills(doc):
-    """A warning per knowledge skill found in neither the configured skills
-    directory nor ~/.claude/skills. Only a warning: a plugin skill lives elsewhere."""
-    from . import config, doctor
-    roots = []
-    try:
-        roots.append(config.skills_dir())
-    except PplError:
-        pass
-    if doctor.claude_home() / "skills" not in roots:
-        roots.append(doctor.claude_home() / "skills")
+    """A warning per knowledge skill not found under ~/.claude/skills. Only a warning: a plugin
+    skill lives elsewhere."""
+    from . import doctor
+    root = doctor.claude_home() / "skills"
     warnings = []
     for name in (doc.get("knowledge") or {}).get("skills") or []:
-        if not any((root / name / "SKILL.md").is_file() for root in roots):
+        if not (root / name / "SKILL.md").is_file():
             warnings.append("knowledge.skills names %s, which is not under %s: the briefer is "
                             "told to load a skill it may not find (fine for a plugin skill)"
-                            % (name, " or ".join(str(root) for root in roots)))
+                            % (name, root))
     return warnings
 
 
 def _check_pins(doc):
-    """The pins a check renders the skill with: the binaries apply would pin, or their bare
-    names when one is not on PATH. A check measures the rendered text, and apply looks every
-    pin up again and refuses a missing one."""
+    """The pins a check renders the skill with: the binaries a lane would pin, or their bare
+    names when one is not on PATH. A check measures the rendered text, and `ppl lane` looks
+    every pin up again and refuses a missing one."""
     if not os_sandbox.needed(doc):
         return None
     try:

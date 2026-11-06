@@ -72,7 +72,7 @@ def pins(which=shutil.which):
         if not path:
             raise PplError("SETUP_INCOMPLETE",
                            "the OS sandbox profile pins %s but no %s is on PATH. Put %s on "
-                           "PATH, then run ppl harness apply again." % (name, name, name))
+                           "PATH, then run ppl lane again." % (name, name, name))
         found[name] = {"path": path, "realpath": os.path.realpath(path)}
     return found
 
@@ -165,18 +165,18 @@ def is_within(path, parent):
 
 
 def layout_problem(doc, workspace):
-    """A refusal message when the checkout or the worktrees lie inside the workspace or contain
-    it, else None. The profile write-denies the whole workspace, so such a layout would deny
-    the run its own repository."""
+    """A refusal message when the checkout or the worktrees lie inside `workspace`, the lane's
+    start directory, or contain it, else None. The profile write-denies the whole start
+    directory, so such a layout would deny the run its own repository."""
     root = workspace_dir(workspace)
     for key, entry in zip(("[repo] path", "[repo] worktrees"), _repo(doc)):
         real = _real(entry)
         if _inside(real, root) or _inside(root, real):
-            return ("%s %s and the workspace %s overlap, and the OS sandbox keeps the workspace "
-                    "wholly write-denied (it holds CLAUDE.md, agents, skills and settings), so "
-                    "the run could not write its own repository. Move the checkout or the "
-                    "workspace so neither lies inside the other, then run ppl harness apply "
-                    "again." % (key, real, root))
+            return ("%s %s and the lane's start directory %s overlap, and the OS sandbox keeps "
+                    "the start directory wholly write-denied (it holds the session's settings, "
+                    "agents, skill and guard facts), so the run could not write its own "
+                    "repository. Move the checkout or PPL_HOME so neither lies inside the other, "
+                    "then run ppl lane again." % (key, real, root))
     return None
 
 
@@ -188,13 +188,13 @@ def repo_problem(doc):
     if tracker.get("kind") == "github-issues" and not tracker.get("repo"):
         return ("[tracker] repo is not set for the github-issues tracker, so the OS sandbox "
                 "guard has no repository to allow. Set repo = \"owner/name\" in the harness "
-                "[tracker] table, then run ppl harness apply again.")
+                "[tracker] table, then run ppl lane again.")
     if (doc.get("forge") or {}).get("kind") == "github" and not forge_repo:
         return ("forge_repo cannot be derived: the checkout %s has no github.com origin remote "
                 "and the tracker names no GitHub repository, so the OS sandbox guard has no "
                 "repository to allow. Add a github.com origin to the checkout, or use a "
                 "github-issues tracker with [tracker] repo = \"owner/name\", then run ppl "
-                "harness apply again." % checkout(doc))
+                "lane again." % checkout(doc))
     return None
 
 
@@ -364,47 +364,72 @@ def profile(doc, workspace, pin_map, worktree=None, task=None):
     return {"sandbox": sandbox, "allow": _allow_entries(doc, pin_map)}
 
 
-def load_facts():
-    """The parsed PPL_HOME/os_sandbox.json, None when absent. Extra keys are kept."""
-    path = paths.home() / FACTS_FILE
+# What a lane whose guard facts are missing or unreadable is told: ppl lane renders them, and
+# only when the lane starts.
+RENDERED_BY_LANE = ("ppl lane renders it into the lane's start directory when the lane starts: "
+                    "destroy the lane with ppl destroy --scope local --task <task> and start it "
+                    "again with ppl lane <link>")
+
+
+def facts_path(task_id=None):
+    """The guard facts of the lane of `task_id`, else of the lane this call is in (resolved as
+    every ppl command resolves its run, lanes.task_for_call): <start>/os_sandbox.json, which
+    ppl lane renders and no lane's sandbox can write. None outside a lane: no machine-wide file
+    is read."""
+    from . import lanes
+    task = task_id or lanes.task_for_call(None)
+    return lanes.start_dir(task) / FACTS_FILE if task else None
+
+
+def load_facts(task_id=None):
+    """The parsed guard facts of a lane (facts_path), None when there are none: outside a lane,
+    or a lane whose harness needs no OS sandbox. Extra keys are kept."""
+    path = facts_path(task_id)
+    if path is None:
+        return None
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:
-        raise PplError("SETUP_INCOMPLETE", "cannot read %s: %s. Run ppl harness apply."
-                       % (path, exc))
+        raise PplError("SETUP_INCOMPLETE", "cannot read %s: %s. %s"
+                       % (path, exc, RENDERED_BY_LANE))
     try:
         doc = json.loads(text)
     except ValueError:
         doc = None
     if not isinstance(doc, dict):
-        raise PplError("SETUP_INCOMPLETE", "%s is not a JSON object. Run ppl harness apply."
-                       % path)
+        raise PplError("SETUP_INCOMPLETE", "%s is not a JSON object. %s"
+                       % (path, RENDERED_BY_LANE))
     return doc
 
 
-def pinned_repo(key, snapshot_repo):
-    """The repository a ppl command run outside the OS sandbox reaches. With the guard facts
-    present it is their `key` (tracker_repo or forge_repo), and a run snapshot naming another
-    one is refused SCHEMA_INVALID, since a role can write the snapshot but not the facts.
-    Without the facts, the snapshot's."""
-    doc = load_facts()
+def pinned_repo(key, snapshot_repo, task_id=None):
+    """The repository a ppl command run outside the OS sandbox reaches for the run of `task_id`
+    (the lane this call is in when None): the `key` (tracker_repo or forge_repo) of the lane's
+    guard facts, which a run snapshot naming another one cannot change, since a role can write
+    the snapshot but not the facts. SCHEMA_INVALID when they differ, SETUP_INCOMPLETE when the
+    lane has no facts: the snapshot alone is never trusted."""
+    doc = load_facts(task_id)
     if doc is None:
-        return snapshot_repo
+        raise PplError("SETUP_INCOMPLETE",
+                       "%s has no guard facts naming its %s, and a command outside the OS "
+                       "sandbox never takes the repository from the run's harness snapshot, which "
+                       "a role can write: run it for a lane ppl lane started on a GitHub harness"
+                       % ("run %s" % task_id if task_id else "this call's lane", key))
     repo = doc.get(key)
     if not (isinstance(repo, str) and repo) or repo != snapshot_repo:
         raise PplError("SCHEMA_INVALID",
                        "the run's harness snapshot names %r as its repository and %s names %r "
-                       "as %s, so this command reaches neither: run ppl harness apply, or "
-                       "restore the run's harness.json" % (snapshot_repo, FACTS_FILE, repo, key))
+                       "as %s, so this command reaches neither: restore the run's harness.json, "
+                       "or %s" % (snapshot_repo, FACTS_FILE, repo, key, RENDERED_BY_LANE))
     return repo
 
 
-def gh_path():
-    """The pinned gh when the facts exist, else a bare gh."""
+def gh_path(task_id=None):
+    """The gh the lane's guard facts pin (load_facts), else a bare gh."""
     try:
-        doc = load_facts()
+        doc = load_facts(task_id)
         path = doc["pins"]["gh"]["path"] if doc else None
     except (PplError, KeyError, TypeError):
         path = None

@@ -131,18 +131,40 @@ def older_system_python():
     return SYSTEM_PYTHON, fields[0]
 
 
+def commit_harness(target):
+    """Make an installed harness directory a git repository with one commit, as `ppl harness
+    add` leaves a plain directory, under a test-only identity (a temporary repository, never
+    this project's). Returns `target`."""
+    for args in (("init", "-q", "-b", "main"), ("add", "-A"),
+                 ("-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                  "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "Import")):
+        subprocess.run(["git", "-C", str(target), *args], check=True, capture_output=True)
+    return target
+
+
+def lane_settings(task_id):
+    """The hooks a lane's settings.json carries as `ppl lane` renders them, each command ending
+    in --task <task_id>, and no OS sandbox profile."""
+    from ppl import setup
+    return {"hooks": {event: [entry] for event, entry in
+                      setup.hook_entries(paths.root(), task_id).items()}}
+
+
 def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
-              session_id="00000000-0000-4000-8000-000000000001", branch=None):
+              session_id="00000000-0000-4000-8000-000000000001", branch=None, settings=True):
     """Register a lane for `task_id` and create its start directory, as `ppl lane` leaves them.
     The entry is written directly with the given lane number, and the start directory gets the
-    lane's record lane.json (its worktree, checkout and `branch`). An installed harness is
-    copied to <start>/harness/<harness>, what `ppl lane` exports. Returns the entry."""
+    lane's record lane.json (its worktree, checkout and `branch`) and, with `settings`, its
+    settings.json (lane_settings). An installed harness is copied to <start>/harness/<harness>,
+    what `ppl lane` exports. Returns the entry."""
     from ppl import lanes, store
     start = lanes.start_dir(task_id)
     start.mkdir(parents=True, exist_ok=True)
     store.write_json(lanes.record_path(task_id), {
         "task": task_id, "worktree": str(worktree or repo), "checkout": str(repo),
         "branch": branch})
+    if settings:
+        store.write_json(start / "settings.json", lane_settings(task_id))
     installed = paths.harness_dir(harness)
     if installed.is_dir():
         target = start / "harness" / harness

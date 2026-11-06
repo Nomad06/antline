@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -31,16 +32,12 @@ class WizardTestCase(panel_client.StudioTestCase):
     def setUp(self):
         self.enterContext(fixtures.git_identity())
         super().setUp()
-        # the wizard renders into the workspace it configures, as a user's run does
-        os.environ.pop("PPL_AGENTS_DIR", None)
-        os.environ.pop("PPL_SKILLS_DIR", None)
         patcher = mock.patch("ppl.setup._origin_repo", lambda checkout: "acme/demo")
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.workspace = Path(tmphome.mkdtemp(prefix="pplws-"))
         self.repo_root = Path(tmphome.mkdtemp(prefix="pplrepo-"))
         self.answers = {
-            "claude_binary": "claude", "workspace": str(self.workspace), "hooks": "local",
+            "claude_binary": "claude",
             "verify": "yes", "harness_from": "example-generic", "harness_name": "mine",
             "repo": str(self.repo_root / "repo"), "default_branch": "main",
             "task_url_template": "https://tracker.example/<TASK-ID>",
@@ -109,7 +106,7 @@ class TestWizardApi(WizardTestCase):
         self.assertIn("probe failed", job["result"]["reasons"]["models"])
 
     def test_a_step_that_raises_fails_the_job_with_the_envelope(self):
-        job = self.run_step("claude", {"hooks": "local"})
+        job = self.run_step("claude", {"claude_binary": " "})
         self.assertEqual(job["state"], "failed")
         self.assertEqual(job["error"]["error_code"], "SETUP_INCOMPLETE")
 
@@ -151,7 +148,7 @@ class TestWizardApi(WizardTestCase):
 
     def test_an_answer_that_is_not_a_string_is_refused_and_starts_no_job(self):
         elsewhere = self.go_elsewhere()
-        for answers in ({"workspace": None}, {"verify": False}, {"hooks": ["local"]}):
+        for answers in ({"claude_binary": None}, {"verify": False}, {"repo": ["x"]}):
             with self.subTest(answers=answers):
                 status, payload, _ = panel_client.call("POST", "/api/setup/claude",
                                                        body={"answers": answers})
@@ -173,48 +170,39 @@ class TestWizardApi(WizardTestCase):
     def test_the_doctor_route_returns_the_doctor_report(self):
         status, report, _ = panel_client.call("GET", "/api/doctor")
         self.assertEqual(status, 200)
-        for key in ("data_root", "harness", "hook_runs", "registration", "setup"):
+        for key in ("data_root", "harness", "setup", "claude_binary", "lane"):
             self.assertIn(key, report)
 
-
-    def test_the_doctor_route_reports_the_configured_workspace_not_the_server_cwd(self):
+    def test_the_doctor_route_checks_the_machine_wherever_the_server_runs(self):
+        # the studio runs in no lane, so the doctor checks the machine alone
         job = self.run_step("claude", self.answers)
         self.assertEqual(job["result"]["done"], ["claude"])
         self.go_elsewhere()
         status, report, _ = panel_client.call("GET", "/api/doctor")
         self.assertEqual(status, 200)
-        self.assertEqual(report["registration"], "local")
-        self.assertEqual(report["local"]["path"],
-                         str(self.workspace / ".claude" / "settings.local.json"))
-        self.assertIs(report["hook_runs"], True)
+        self.assertIsNone(report["lane"])
+        self.assertEqual(report["claude_binary"]["binary"], "claude")
+        for key in ("registration", "local", "hook_runs", "os_sandbox"):
+            self.assertNotIn(key, report)
 
 
 class TestSameResultAsTheTerminal(WizardTestCase):
     def snapshot(self):
-        agents = self.workspace / ".claude" / "agents"
-        settings = (self.workspace / ".claude" / "settings.local.json").read_text(encoding="utf-8")
-        def unhome(text):
-            for home in (os.path.realpath(paths.home()), str(paths.home())):
-                text = text.replace(home, "<PPL_HOME>")
-            return text
-        settings = unhome(settings)
-        files = {"settings": settings,
-                 "config": paths.config_file().read_text(encoding="utf-8"),
-                 "routing": paths.routing_file().read_text(encoding="utf-8"),
-                 "harness": (paths.harness_dir("mine") / "harness.toml").read_text(encoding="utf-8"),
-                 "skill": unhome((self.workspace / ".claude" / "skills" / "pipeline" / "SKILL.md")
-                                 .read_text(encoding="utf-8"))}
-        for path in sorted(agents.glob("*.md")):
-            files["agent:" + path.name] = unhome(path.read_text(encoding="utf-8"))
-        return files
+        installed = paths.harness_dir("mine")
+        status = subprocess.run(["git", "-C", str(installed), "status", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+        tree = subprocess.run(["git", "-C", str(installed), "rev-parse", "HEAD^{tree}"],
+                              capture_output=True, text=True, check=True).stdout
+        return {"config": paths.config_file().read_text(encoding="utf-8"),
+                "routing": paths.routing_file().read_text(encoding="utf-8"),
+                "harness": (installed / "harness.toml").read_text(encoding="utf-8"),
+                "status": status, "tree": tree}
 
     def test_the_browser_wizard_writes_what_the_terminal_wizard_writes(self):
         for step in setup.STEPS:
             job = self.run_step(step, self.answers)
             self.assertEqual(job["result"]["done"], [step], job)
         browser = self.snapshot()
-        # the terminal run has to write every file itself, none may be left over from the browser's
-        shutil.rmtree(self.workspace / ".claude")
         os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
         result = setup.run(answers=self.answers, non_interactive=True, probe=ok_probe,
                            forge_check=ok_forge, emit=lambda line: None)

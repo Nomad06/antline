@@ -17,5 +17,4 @@ def register(router):
     router.add("POST", "/api/setup/<step>", _run)
     router.add("POST", "/api/setup/<step>/skip",
                lambda params, body, query: wizard.skip_step(params["step"]))
-    router.add("GET", "/api/doctor",
-               lambda params, body, query: doctor.report(cwd=doctor.workspace()))
+    router.add("GET", "/api/doctor", lambda params, body, query: doctor.report())

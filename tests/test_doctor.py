@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import re
@@ -5,6 +6,7 @@ import shlex
 import subprocess
 import sys
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -19,7 +21,7 @@ os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 os.environ["PPL_LOCAL_SETTINGS_DIR"] = tmphome.mkdtemp(prefix="ppllocalsettings-")
 
 import fixtures
-from ppl import config, doctor, forges, models, paths, setup, trackers
+from ppl import config, doctor, forges, lanes, models, paths, setup, trackers
 from ppl.trackers import github_issues
 
 
@@ -30,6 +32,13 @@ GUARD_COMMAND = "/usr/local/bin/python3.12 /home/dev/antline/hooks/ppl_guard.py"
 # reading of the hook's purpose suggests, and the one that leaves Bash, the
 # GitLab denials and the Jira gate dead.
 EDITING_TOOLS_ONLY = "Edit|Write|MultiEdit|NotebookEdit"
+
+
+def bind_lane_at(task):
+    """A lane for `task` in the current PPL_HOME, with no settings.json yet: its start
+    directory, where its session's settings live."""
+    fixtures.bind_lane(task, tmphome.mkdtemp(prefix="pplrepo-"), settings=False)
+    return lanes.start_dir(task)
 
 
 def write_settings(path, guarded=True, other_hooks=True, matchers=(doctor.RECOMMENDED_MATCHER,),
@@ -50,9 +59,11 @@ def write_settings(path, guarded=True, other_hooks=True, matchers=(doctor.RECOMM
 
 
 class TestRegistration(unittest.TestCase):
+    """In a lane, the session's own settings are the lane's settings.json."""
+
     def setUp(self):
-        self.local_dir = Path(tmphome.mkdtemp(prefix="ppllocaldir-"))
-        self.local_path = self.local_dir / ".claude" / "settings.local.json"
+        self.local_dir = bind_lane_at("DEMO-41")
+        self.local_path = self.local_dir / "settings.json"
         self.global_path = doctor.global_settings_path()
         for p in (self.local_path, self.global_path):
             if p.exists():
@@ -124,6 +135,13 @@ class TestRegistration(unittest.TestCase):
         self.local_path.parent.mkdir(parents=True, exist_ok=True)
         self.local_path.write_text("[1, 2, 3]", encoding="utf-8")
         self.assertEqual(doctor.registration(cwd=self.local_dir), "unknown")
+
+    def test_the_lanes_settings_are_read_from_its_worktree_as_well(self):
+        write_settings(self.local_path)
+        worktree = lanes.entry("DEMO-41")["worktree"]
+        self.assertEqual(doctor.inspect(cwd=worktree)["local"]["path"], str(self.local_path))
+        with mock.patch.dict(os.environ, {"PPL_TASK": "DEMO-41"}):
+            self.assertEqual(doctor.registration(), "local")
 
     def test_inspect_carries_paths_and_the_parse_detail(self):
         self.local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -584,8 +602,8 @@ class TestHookRuns(unittest.TestCase):
     cannot run the hook disarms the cage while every file check stays green."""
 
     def setUp(self):
-        self.local_dir = Path(tmphome.mkdtemp(prefix="ppllocaldir-"))
-        self.local_path = self.local_dir / ".claude" / "settings.local.json"
+        self.local_dir = bind_lane_at("DEMO-42")
+        self.local_path = self.local_dir / "settings.json"
         self.global_path = doctor.global_settings_path()
         for p in (self.local_path, self.global_path):
             if p.exists():
@@ -621,6 +639,10 @@ class TestHookRuns(unittest.TestCase):
                                            "session_id": doctor.guard_probe_session_id()})
         self.assertEqual(doctor.guard_probe_session_id(), "ppl-doctor-hook-probe")
         self.assertEqual(os.path.realpath(seen["cwd"]), os.path.realpath(workspace))
+        # by default the payload's cwd is the lane's start directory, where its session starts
+        self.assertTrue(doctor.hook_runs(cwd=self.local_dir)["ok"])
+        seen = json.loads((where / "seen.json").read_text(encoding="utf-8"))
+        self.assertEqual(seen["payload"]["cwd"], str(self.local_dir))
 
     def test_a_guard_that_fails_reports_false_with_its_first_stderr_line_and_the_remedy(self):
         command, _ = self.fake_guard(
@@ -708,8 +730,9 @@ class TestHookRuns(unittest.TestCase):
         self.assertIs(result["ok"], False)
         self.assertIn("broken global", result["problem"])
 
-    def test_the_entry_setup_writes_runs_the_real_guard_clean(self):
-        command = setup.hook_entries(fixtures.SOURCE)["PreToolUse"]["hooks"][0]["command"]
+    def test_the_lanes_guard_with_its_task_runs_the_real_guard_clean(self):
+        command = setup.hook_entries(fixtures.SOURCE, "DEMO-42")["PreToolUse"]["hooks"][0]["command"]
+        self.assertTrue(command.endswith(" --task DEMO-42"))
         write_settings(self.local_path, command=command)
         self.assertEqual(doctor.hook_runs(cwd=self.local_dir), {"ok": True, "problem": None})
 
@@ -861,15 +884,16 @@ class TestHookShape(unittest.TestCase):
         self.assertIsNone(local["hook_shape"])
 
     def test_the_report_says_whether_the_usage_hook_is_registered(self):
-        self.write(guard={}, dispatch={})
+        start = bind_lane_at("DEMO-43")
+        self.write(guard={}, dispatch={}, path=start / "settings.json")
         self.write(guard={}, dispatch={}, usage={}, path=self.global_path)
         with mock.patch.object(doctor, "hook_runs", return_value={"ok": True, "problem": None}):
-            result = doctor.report(cwd=self.local_dir)
+            result = doctor.report(cwd=str(start))
         self.assertEqual(result["local"]["usage_hook"], "missing")
         self.assertEqual(result["global"]["usage_hook"], "registered")
         self.global_path.unlink()
-        self.assertEqual(self.local()["usage_hook"], "missing")
-        self.assertEqual(doctor.inspect(cwd=self.local_dir)["global"]["usage_hook"], "missing")
+        self.assertEqual(doctor.inspect(cwd=str(start))["local"]["usage_hook"], "missing")
+        self.assertEqual(doctor.inspect(cwd=str(start))["global"]["usage_hook"], "missing")
 
     def test_usage_warning_when_the_guard_is_registered_without_it(self):
         self.write(guard={}, dispatch={})
@@ -931,85 +955,134 @@ class TestHookShape(unittest.TestCase):
         self.assertIsNone(doctor.hook_location_warning(cwd=self.local_dir))
 
     def test_the_report_carries_both_per_settings_file(self):
-        self.write(guard={"timeout": None})
+        start = bind_lane_at("DEMO-44")
+        self.write(guard={"timeout": None}, path=start / "settings.json")
         with mock.patch.object(doctor, "hook_runs", return_value={"ok": True, "problem": None}):
-            result = doctor.report(cwd=self.local_dir)
+            result = doctor.report(cwd=str(start))
         self.assertEqual(result["local"]["dispatch_hook"], "missing")
         self.assertIn("no timeout", result["local"]["hook_shape"])
         self.assertEqual(result["global"]["dispatch_hook"], "missing")
 
 
 class TestMcpServersWarning(unittest.TestCase):
+    """A lane's session loads only the MCP servers of the mcp.json ppl lane renders
+    (--strict-mcp-config), so those are the ones doctor names, never their config."""
+
     TOKEN = "ghp_FAKETOKEN0123456789"
 
     def setUp(self):
         self.home = Path(tmphome.mkdtemp(prefix="pplhome-"))
         self.claude = Path(tmphome.mkdtemp(prefix="pplclaude-"))
-        self.cwd = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplcwd-")))
-        self.user_json = self.home / "dot-claude.json"
         patcher = mock.patch.dict(os.environ, {"PPL_HOME": str(self.home),
                                                "PPL_CLAUDE_HOME": str(self.claude)})
         patcher.start()
         self.addCleanup(patcher.stop)
+        os.environ.pop("PPL_TASK", None)
+        self.start = bind_lane_at("GH-45")
 
     def write(self, path, doc):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(doc), encoding="utf-8")
 
     def facts(self):
-        self.write(self.home / "os_sandbox.json", {"version": 1})
+        self.write(self.start / "os_sandbox.json", {"version": 1})
 
-    def warning(self):
-        return doctor.mcp_servers_warning(cwd=str(self.cwd), claude_json=self.user_json)
+    def servers(self, servers):
+        self.write(self.start / "mcp.json", {"mcpServers": servers})
 
-    def test_mcp_warning_lists_workspace_and_user_servers_by_name_only(self):
+    def warning(self, cwd=None):
+        return doctor.mcp_servers_warning(cwd=str(cwd or self.start))
+
+    def test_mcp_warning_lists_the_lanes_servers_by_name_only(self):
         self.facts()
-        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {
-            "command": "uvx", "args": ["serena", "--token", self.TOKEN]}}})
-        self.write(self.user_json, {"projects": {str(self.cwd): {"mcpServers": {
-            "jetbrains": {"command": "npx", "env": {"TOKEN": self.TOKEN}}}}},
-            "mcpServers": {"globalone": {"command": "node"}}})
-        self.write(self.claude / "settings.json", {"mcpServers": {"fromuser": {"command": "x"}}})
-        self.write(self.cwd / ".claude" / "settings.local.json",
-                   {"mcpServers": {"fromlocal": {"command": "x"}}})
+        self.servers({"serena": {"command": "uvx", "args": ["serena", "--token", self.TOKEN]},
+                      "jetbrains": {"command": "npx", "env": {"TOKEN": self.TOKEN}}})
+        # what its --strict-mcp-config launch never loads
+        self.write(self.claude.parent / ".claude.json", {"mcpServers": {"globalone": {}}})
+        self.write(self.start / ".mcp.json", {"mcpServers": {"fromproject": {}}})
         warning = self.warning()
-        for name in ("serena", "jetbrains", "globalone", "fromuser", "fromlocal"):
+        for name in ("serena", "jetbrains"):
             self.assertIn(name, warning)
+        for name in ("globalone", "fromproject"):
+            self.assertNotIn(name, warning)
         self.assertIn("outside the OS sandbox", warning)
         # what the names cannot show: a plugin's servers and the claude.ai connectors
         self.assertIn("plugin MCP servers", warning)
         self.assertIn("claude.ai connectors", warning)
-        for secret in (self.TOKEN, "uvx", "npx", "--token", "node"):
+        for secret in (self.TOKEN, "uvx", "npx", "--token"):
             self.assertNotIn(secret, warning)
         self.assertNotIn("\n", warning)
 
     def test_no_mcp_warning_without_facts(self):
-        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {"command": "uvx"}}})
+        self.servers({"serena": {"command": "uvx"}})
         self.assertIsNone(self.warning())
 
     def test_no_mcp_warning_without_servers(self):
         self.facts()
-        self.write(self.cwd / ".mcp.json", {"mcpServers": {}})
-        self.write(self.user_json, {"projects": {"/elsewhere": {"mcpServers": {"x": {}}}}})
+        self.servers({})
         self.assertIsNone(self.warning())
 
-    def test_the_scan_follows_the_configured_workspace_not_the_process_cwd(self):
+    def test_no_mcp_warning_outside_a_lane(self):
         self.facts()
-        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {"command": "uvx"}}})
+        self.servers({"serena": {"command": "uvx"}})
         elsewhere = Path(tmphome.mkdtemp(prefix="pplelsewhere-"))
-        env = {key: value for key, value in os.environ.items()
-               if key != "PPL_LOCAL_SETTINGS_DIR"}
-        with mock.patch.dict(os.environ, env, clear=True), \
-                mock.patch.object(doctor, "workspace", lambda: str(self.cwd)), \
+        self.write(elsewhere / ".mcp.json", {"mcpServers": {"serena": {}}})
+        self.assertIsNone(self.warning(elsewhere))
+        self.assertEqual(doctor.mcp_server_names(str(elsewhere)), [])
+
+    def test_the_scan_follows_the_lane_not_the_process_cwd(self):
+        self.facts()
+        self.servers({"serena": {"command": "uvx"}})
+        elsewhere = Path(tmphome.mkdtemp(prefix="pplelsewhere-"))
+        with mock.patch.dict(os.environ, {"PPL_TASK": "GH-45"}), \
                 mock.patch("os.getcwd", lambda: str(elsewhere)):
-            self.assertIn("serena", doctor.mcp_servers_warning(claude_json=self.user_json))
+            self.assertIn("serena", doctor.mcp_servers_warning())
 
     def test_doctor_report_carries_mcp_server_names(self):
-        self.write(self.cwd / ".mcp.json", {"mcpServers": {"serena": {"args": [self.TOKEN]}}})
-        result = doctor.report(cwd=str(self.cwd), env={"PATH": "/usr/bin"},
+        self.servers({"serena": {"args": [self.TOKEN]}})
+        result = doctor.report(cwd=str(self.start), env={"PATH": "/usr/bin"},
                                probe=lambda: "unknown")
         self.assertEqual(result["mcp_servers"], ["serena"])
         self.assertNotIn(self.TOKEN, json.dumps(result))
+
+
+class TestReportOutsideALane(unittest.TestCase):
+    """Outside a lane no session's hooks or sandbox are in question: doctor checks the machine
+    alone."""
+
+    def setUp(self):
+        self.enterContext(mock.patch.dict(os.environ, {
+            "PPL_HOME": tmphome.mkdtemp(prefix="pplhome-")}))
+        os.environ.pop("PPL_TASK", None)
+        self.cwd = Path(tmphome.mkdtemp(prefix="pplcwd-"))
+
+    def test_doctor_outside_a_lane_checks_only_the_machine(self):
+        marker = self.cwd / "ran"
+        guard = self.cwd / "ppl_guard.py"
+        guard.write_text("open(%r, 'w').write('ran')\n" % str(marker), encoding="utf-8")
+        write_settings(self.cwd / ".claude" / "settings.local.json",
+                       command="%s %s" % (shlex.quote(sys.executable), shlex.quote(str(guard))))
+        probed = []
+        result = doctor.report(cwd=str(self.cwd), env={"PATH": "/usr/bin"},
+                               probe=lambda: probed.append(1) or "denied")
+        self.assertIsNone(result["lane"])
+        for key in ("registration", "local", "global", "matcher", "os_sandbox",
+                    "foreign_bash_hooks", "mcp_servers", "hook_runs"):
+            self.assertNotIn(key, result)
+        for key in ("setup", "models", "harness", "claude_binary", "data_root"):
+            self.assertIn(key, result)
+        self.assertEqual(result["claude_binary"]["binary"], "claude")
+        self.assertFalse(marker.exists())
+        self.assertEqual(probed, [])
+        from ppl import cli
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"PPL_LOCAL_SETTINGS_DIR": str(self.cwd)}), \
+                redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["doctor"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIsNone(json.loads(out.getvalue().splitlines()[0])["lane"])
+        self.assertNotIn("ppl_guard", out.getvalue())
+        self.assertFalse(marker.exists())
 
 
 class TestReportFindsItsRun(unittest.TestCase):
@@ -1140,7 +1213,8 @@ class TestForeignBashHooks(unittest.TestCase):
 
     def test_the_report_and_the_warning_name_them(self):
         self.write(doctor.global_settings_path(), self.pre_tool_use(("Bash", "sqz compress")))
-        result = doctor.report(cwd=str(self.cwd), env={"PATH": "/usr/bin"},
+        start = bind_lane_at("GH-46")
+        result = doctor.report(cwd=str(start), env={"PATH": "/usr/bin"},
                                probe=lambda: "unknown")
         self.assertEqual([item["hook"] for item in result["foreign_bash_hooks"]], ["sqz"])
         warning = doctor.foreign_bash_hooks_warning(str(self.cwd))
@@ -1152,23 +1226,28 @@ class TestForeignBashHooks(unittest.TestCase):
 class TestOsSandboxFacts(unittest.TestCase):
     BLOCK = {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": True}
 
+    """In a lane: the profile is the sandbox block of its settings.json, which must equal the
+    written_sandbox of its os_sandbox.json."""
+
     def setUp(self):
         self.home = Path(tmphome.mkdtemp(prefix="pplhome-"))
         self.claude = Path(tmphome.mkdtemp(prefix="pplclaude-"))
-        self.cwd = Path(tmphome.mkdtemp(prefix="pplcwd-"))
         self.managed = self.home / "managed-settings.json"
         for patcher in (mock.patch.dict(os.environ, {"PPL_HOME": str(self.home),
-                                                     "PPL_CLAUDE_HOME": str(self.claude)}),
+                                                     "PPL_CLAUDE_HOME": str(self.claude),
+                                                     "PPL_TASK": "GH-47"}),
                         mock.patch.object(doctor, "managed_settings_path",
                                           lambda: self.managed)):
             patcher.start()
             self.addCleanup(patcher.stop)
+        self.cwd = bind_lane_at("GH-47")
+        self.facts_path = self.cwd / "os_sandbox.json"
 
     def write_facts(self, **extra):
         facts = {"version": 1, "write_scope": [], "written_sandbox": self.BLOCK,
                  "pins": {"gh": {"path": "/opt/gh/bin/gh", "realpath": "/opt/gh/bin/gh"}}}
         facts.update(extra)
-        (self.home / "os_sandbox.json").write_text(json.dumps(facts), encoding="utf-8")
+        self.facts_path.write_text(json.dumps(facts), encoding="utf-8")
 
     def write_settings(self, path, doc):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1176,7 +1255,7 @@ class TestOsSandboxFacts(unittest.TestCase):
 
     def set_profile(self):
         self.write_facts()
-        self.write_settings(self.cwd / ".claude" / "settings.local.json", {"sandbox": self.BLOCK})
+        self.write_settings(self.cwd / "settings.json", {"sandbox": self.BLOCK})
 
     def facts(self, probe="denied", env=None):
         env = {"SANDBOX_RUNTIME": "1", "PATH": "/usr/bin"} if env is None else env
@@ -1191,7 +1270,7 @@ class TestOsSandboxFacts(unittest.TestCase):
         self.assertEqual(facts["undoing"], [])
         for missing in ({"SANDBOX_RUNTIME": "0"}, {}):
             self.assertEqual(self.facts(env=missing)["state"], "off")
-        (self.cwd / ".claude" / "settings.local.json").write_text(
+        (self.cwd / "settings.json").write_text(
             json.dumps({"sandbox": dict(self.BLOCK, enabled=False)}), encoding="utf-8")
         self.assertFalse(self.facts()["profile"])
         self.assertEqual(self.facts()["state"], "off")
@@ -1268,7 +1347,7 @@ class TestOsSandboxFacts(unittest.TestCase):
         block = dict(self.BLOCK, filesystem={"allowWrite": [str(self.home / "runs")],
                                              "denyWrite": [str(self.cwd)]})
         self.write_facts(written_sandbox=block)
-        self.write_settings(self.cwd / ".claude" / "settings.local.json", {"sandbox": block})
+        self.write_settings(self.cwd / "settings.json", {"sandbox": block})
         self.assertEqual(self.facts()["undoing"], [])
 
     def test_a_github_token_in_the_environment_is_named_never_its_value(self):
@@ -1381,7 +1460,7 @@ class TestOsSandboxFacts(unittest.TestCase):
         github_issues.doctor_check({"repo": "o/r", "task_prefix": "GH"}, runner=runner)
         self.assertTrue(argv)
         self.assertEqual(set(argv), {pin})
-        (self.home / "os_sandbox.json").unlink()
+        self.facts_path.unlink()
         del argv[:]
         github_forge.doctor_check({}, None, None, runner=runner)
         self.assertEqual(set(argv), {"gh"})

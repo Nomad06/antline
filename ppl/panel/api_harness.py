@@ -1,7 +1,8 @@
 """The Harness page: the installed harnesses, one harness's document and
 fragments with their hashes, and check, save, apply, add, create. A harness
-becomes the active one only by apply, which validates and renders it first,
-as `ppl harness apply` does."""
+becomes the default `ppl lane` runs only by apply, which checks it and its
+commit first, as `ppl harness apply` does, and whose job result is
+{"active", "commit"}."""
 import json
 import shutil
 import tempfile

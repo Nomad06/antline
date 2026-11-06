@@ -21,7 +21,11 @@ from . import boundary, escape_git, escape_paths, paths, store
 from .escape_paths import EDIT_TOOLS, FACTS_FILE, PIN_NAMES, protected_paths  # noqa: F401
 
 FLAG = "dangerouslyDisableSandbox"
-APPLY = "run `ppl harness apply`"
+# Where the guard facts a lane's calls are checked against come from: ppl lane renders them into
+# the lane's start directory (escape_paths.FACTS_FILE there) when the lane starts.
+APPLY = ("ppl lane renders the guard facts into the lane's start directory PPL_HOME/lanes/<task> "
+         "when it starts the lane: destroy the lane with ppl destroy --scope local --task <task> "
+         "and start it again with ppl lane <link>")
 
 # What the shell reads as more than one plain word, outside single quotes.
 _REFUSED = frozenset(";&|<>()`{}*?[$")
@@ -338,7 +342,7 @@ def decide(payload, facts_file, state):
             return ("OWNER_DECISION",
                     "run %s's harness has no OS sandbox profile, so its commands run without "
                     "dangerouslyDisableSandbox: run this one again without it. A GitHub "
-                    "harness gets its profile and pins from `ppl harness apply`" % task_id)
+                    "harness gets its profile and pins from `ppl lane`" % task_id)
         return ("OWNER_DECISION",
                 "%s is missing while run %s is active, so no gh, git or ppl is pinned for a "
                 "command outside the OS sandbox: %s" % (FACTS_FILE, task_id, APPLY))

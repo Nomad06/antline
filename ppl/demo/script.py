@@ -122,9 +122,9 @@ class Walk:
 
 
 def setup(walk):
-    settings = walk.box.workspace / ".claude" / "settings.local.json"
-    if "ppl_guard" not in settings.read_text(encoding="utf-8"):
-        raise RuntimeError("ppl setup registered no guard hook")
+    settings = walk.box.lane_settings().read_text(encoding="utf-8")
+    if "ppl_guard" not in settings or "--task %s" % sandbox.TASK not in settings:
+        raise RuntimeError("the lane's settings register no guard bound to %s" % sandbox.TASK)
     return "ok"
 
 
@@ -288,8 +288,8 @@ BRIEF = {"task_id": sandbox.TASK, "purpose": "apply a discount",
 
 # (actor, tried, expect, rule), and ACTIONS holds the function of each row, in the same order.
 STEPS = [
-    ("operator", "`ppl setup` registers the hooks and applies harness demo", "ok",
-     "R-INIT-SETUP-COMPLETE"),
+    ("operator", "`ppl setup` applies harness demo, and its lane's settings carry the guard",
+     "ok", "R-INIT-SETUP-COMPLETE"),
     ("operator", "`ppl init GH-1` freezes the harness into the run", "ok", ""),
     ("orchestrator", "`ppl stage enter baseline`, `ppl baseline record` at HEAD", "ok", ""),
     ("orchestrator", "`ppl brief set` before the issue was fetched",

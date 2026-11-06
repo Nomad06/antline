@@ -13,16 +13,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import (config, doctor, escape_git, forges, harness, models, paths, routing, tomlout,
-               trackers)
+from . import (config, doctor, escape_git, forges, harness, lane_harness, models, os_sandbox,
+               paths, routing, tomlout, trackers)
 from .errors import PplError
 
 STEPS = ("paths", "claude", "models", "harness", "forge", "apply")
-ANSWER_KEYS = ("claude_binary", "workspace", "hooks", "verify", "harness_from", "harness_name",
-               "replace_harness", "repo", "default_branch", "task_url_template", "key_pattern",
-               "forge", "gitlab_mcp_server", "tracker", "tracker_repo")
+ANSWER_KEYS = ("claude_binary", "verify", "harness_from", "harness_name", "replace_harness",
+               "repo", "default_branch", "task_url_template", "key_pattern", "forge",
+               "gitlab_mcp_server", "tracker", "tracker_repo")
 TIER_PREFIX = "tier."
-HOOK_MODES = ("local", "global", "manual")
 EXAMPLE_HARNESSES = ("example-generic", "example-maven")
 DISPATCH_MARKER = doctor.DISPATCH_MARKER
 USAGE_MARKER = doctor.USAGE_MARKER
@@ -31,12 +30,15 @@ _YES, _NO = ("yes", "y"), ("no", "n")
 _SKIP, _QUIT = "s", "q"
 STEP_INTROS = {
     "paths": "Creates the data root and copies the example config.toml and routing.toml into it.",
-    "claude": "Names the Claude Code binary and an isolated workspace, and registers the three hooks.",
+    "claude": "Names the Claude Code binary, and takes back what an older ppl wrote into its "
+              "workspace.",
     "models": "Picks a model per tier and proves each one answers with a cheap probe.",
     "harness": "Installs the project harness: build gates, guard shapes, task key and tracker.",
     "forge": "Chooses the git forge and the issue tracker and checks that ppl can reach both.",
-    "apply": "Renders the agent files and the orchestrator skill for the harness.",
+    "apply": "Checks the harness at its commit and makes it the default for ppl lane.",
 }
+# The [claude] keys of the single workspace an older ppl rendered into, retired with it (D18).
+LEGACY_CLAUDE_KEYS = ("workspace", "hooks", "agents_dir", "skills_dir")
 
 
 class Quit(Exception):
@@ -134,45 +136,13 @@ _MARKERS = {"PreToolUse": doctor.GUARD_MARKER, "SubagentStart": DISPATCH_MARKER,
 
 
 def _is_ours(hook, marker):
-    return isinstance(hook, dict) and marker in str(hook.get("command", ""))
-
-
-def _bad_settings(path, why):
-    raise PplError("SETUP_INCOMPLETE", "%s %s, fix or remove it and run ppl setup claude again"
-                   % (path, why))
-
-
-def write_local_settings(workspace, code_root):
-    """Merge the three hook entries into <workspace>/.claude/settings.local.json.
-    A guard, dispatch or usage hook already there, matched by its script name,
-    is replaced rather than duplicated. Every other key, entry and hook stays."""
-    path = Path(workspace) / ".claude" / "settings.local.json"
-    doc = {}
-    if path.is_file():
-        try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            _bad_settings(path, "could not be read as JSON (%s)" % exc)
-    if not isinstance(doc, dict) or not isinstance(doc.get("hooks", {}), dict):
-        _bad_settings(path, "is not a JSON object with a hooks table")
-    hooks = doc.setdefault("hooks", {})
-    for event, own in hook_entries(code_root).items():
-        existing = hooks.get(event, [])
-        if not isinstance(existing, list) or not all(
-                isinstance(e, dict) and isinstance(e.get("hooks", []), list) for e in existing):
-            _bad_settings(path, "has a hooks.%s that is not a list of entries with hook lists" % event)
-        marker = _MARKERS[event]
-        kept = []
-        for entry in existing:
-            others = [h for h in entry.get("hooks", []) if not _is_ours(h, marker)]
-            if len(others) == len(entry.get("hooks", [])):
-                kept.append(entry)
-            elif others:
-                kept.append(dict(entry, hooks=others))
-        hooks[event] = kept + [own]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    return path
+    """A hook whose command runs ppl's `marker` script: one of its words has that base name."""
+    command = hook.get("command") if isinstance(hook, dict) else None
+    try:
+        words = shlex.split(command) if isinstance(command, str) else []
+    except ValueError:
+        return False
+    return any(os.path.basename(word) == marker for word in words)
 
 
 def _replace_file(path, doc):
@@ -190,68 +160,162 @@ def _replace_file(path, doc):
         raise
 
 
-def _planned_os_sandbox_doc(path, prof, recorded):
-    """The settings document to write, None when there is nothing to change. Refuses
-    SETUP_INCOMPLETE on invalid JSON, a wrong shape or a foreign sandbox key."""
-    doc = {}
-    if path.is_file():
-        try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            _bad_settings(path, "could not be read as JSON (%s)" % exc)
-    elif prof is None:
-        return None
-    before = copy.deepcopy(doc)
-    permissions = doc.get("permissions", {}) if isinstance(doc, dict) else None
-    if not isinstance(permissions, dict) or not isinstance(permissions.get("allow", []), list):
-        _bad_settings(path, "is not a JSON object with a permissions.allow list")
-    owned = "sandbox" not in doc or doc["sandbox"] == recorded.get("written_sandbox")
-    if not owned and prof is not None:
-        _bad_settings(path, "holds a sandbox key ppl did not write (or you edited ppl's block), "
-                      "remove that key and run ppl harness apply again")
-    old = set(recorded.get("written_allow") or [])
-    allow = [e for e in permissions.get("allow", []) if e not in old]
-    if prof is None:
-        if owned:
-            doc.pop("sandbox", None)
-        if allow or "allow" in permissions:
-            permissions["allow"] = allow
-    else:
-        doc["sandbox"] = prof["sandbox"]
-        permissions["allow"] = allow + [e for e in prof["allow"] if e not in allow]
-    if permissions:
-        doc["permissions"] = permissions
-    return None if doc == before else doc
+def _recorded_facts():
+    """The guard facts an older `ppl harness apply` wrote to PPL_HOME, {} when there are none
+    or they cannot be read: then no sandbox block or allow entry counts as ppl's."""
+    path = paths.home() / os_sandbox.FACTS_FILE
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
 
 
-def check_os_sandbox_settings(workspace, recorded):
-    """Refuse exactly when write_os_sandbox_settings would, writing nothing."""
-    _planned_os_sandbox_doc(Path(workspace) / ".claude" / "settings.local.json",
-                            {"sandbox": {}, "allow": []}, recorded)
+def _without_ppl_hooks(hooks):
+    """`hooks` with every guard, dispatch and usage hook taken out, matched by ppl's script
+    names, an entry left empty dropped, and what was taken out."""
+    removed = []
+    for event, marker in _MARKERS.items():
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            continue
+        kept = []
+        for entry in entries:
+            inner = entry.get("hooks") if isinstance(entry, dict) else None
+            ours = [hook for hook in inner if _is_ours(hook, marker)] \
+                if isinstance(inner, list) else []
+            if not ours:
+                kept.append(entry)
+                continue
+            removed += ["the %s hook %s" % (event, hook.get("command")) for hook in ours]
+            others = [hook for hook in inner if not _is_ours(hook, marker)]
+            if others:
+                kept.append(dict(entry, hooks=others))
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event)
+    return removed
 
 
-def write_os_sandbox_settings(workspace, prof, recorded=None):
-    """Own the sandbox key and ppl's allow entries in <workspace>/.claude/settings.local.json.
-    `prof` is os_sandbox.profile(...), or None to remove them. A sandbox key is ppl's only when
-    it equals the block recorded in os_sandbox.json (`recorded`, read from there when None), and
-    any other one refuses SETUP_INCOMPLETE with the file untouched, as does invalid JSON.
-    With None a foreign block is left alone."""
-    from . import os_sandbox
-    path = Path(workspace) / ".claude" / "settings.local.json"
-    doc = _planned_os_sandbox_doc(path, prof, os_sandbox.load_facts() or {}
-                                  if recorded is None else recorded)
-    if doc is not None:
+def _clean_settings(path, recorded):
+    """Take ppl's hook entries out of an old workspace's settings.local.json, with the sandbox
+    block only when it equals the one apply recorded and the allow entries apply recorded.
+    Everything else in the file stays. Failed, with the file untouched, when it is no JSON
+    object."""
+    if not path.is_file():
+        return []
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Failed("%s could not be read as JSON (%s): fix or remove it, then run ppl setup "
+                     "claude again" % (path, exc))
+    if not isinstance(doc, dict):
+        raise Failed("%s is not a JSON object: fix or remove it, then run ppl setup claude "
+                     "again" % path)
+    removed = []
+    hooks = doc.get("hooks")
+    if isinstance(hooks, dict):
+        removed += _without_ppl_hooks(hooks)
+        if not hooks:
+            doc.pop("hooks")
+    written = recorded.get("written_sandbox")
+    if written is not None and doc.get("sandbox") == written:
+        doc.pop("sandbox")
+        removed.append("the sandbox block ppl wrote")
+    allowed = recorded.get("written_allow")
+    permissions = doc.get("permissions")
+    if isinstance(allowed, list) and isinstance(permissions, dict) \
+            and isinstance(permissions.get("allow"), list):
+        ours = [entry for entry in permissions["allow"] if entry in allowed]
+        removed += ["the permissions.allow entry %s" % entry for entry in ours]
+        permissions["allow"] = [entry for entry in permissions["allow"] if entry not in allowed]
+        if not permissions["allow"]:
+            permissions.pop("allow")
+        if not permissions:
+            doc.pop("permissions")
+    if removed:
         _replace_file(path, doc)
-    return path
+    return ["%s from %s" % (item, path) for item in removed]
 
 
-def _derived_dir(current, key, old_workspace, workspace, *parts):
-    """The workspace-relative agents or skills dir, unless the user pointed
-    config.toml somewhere else by hand: that value is kept."""
-    value = current.get(key) or ""
-    if not value or (old_workspace and value == str(Path(old_workspace, *parts))):
-        return str(Path(workspace, *parts))
-    return value
+def _generated_agent(path):
+    """True for an agent file an older `ppl harness apply` wrote: the notice right after the
+    opening ---, where routing.render puts it."""
+    try:
+        head = path.read_text(encoding="utf-8").split("\n", 2)[:2]
+    except (OSError, UnicodeDecodeError):
+        return False
+    return head == ["---", routing.GENERATED_NOTICE]
+
+
+def _clean_agents(directory):
+    removed = []
+    for path in sorted(Path(directory).glob("ppl-*.md")):
+        if path.is_file() and not path.is_symlink() and _generated_agent(path):
+            path.unlink()
+            removed.append(str(path))
+    return removed
+
+
+def _clean_skill(directory):
+    """Remove the rendered pipeline skill directory when its SKILL.md carries the notice right
+    after the frontmatter, where harness.render_skill puts it."""
+    directory = Path(directory)
+    if directory.is_symlink() or not directory.is_dir():
+        return []
+    try:
+        text = (directory / "SKILL.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    if not text.partition("\n---\n")[2].startswith(harness.SKILL_NOTICE + "\n"):
+        return []
+    shutil.rmtree(directory)
+    return [str(directory)]
+
+
+def _old_dir(current, key, workspace, kind):
+    value = current.get(key)
+    if isinstance(value, str) and value:
+        return Path(value).expanduser()
+    return Path(workspace) / ".claude" / kind if workspace else None
+
+
+def clean_old_workspace():
+    """Take back what an older ppl wrote for the single workspace config.toml names (D18): its
+    hook entries, sandbox block and allow entries in <workspace>/.claude/settings.local.json,
+    the rendered pipeline skill and the ppl-* agent files, each matched by ppl's own markers,
+    and PPL_HOME/os_sandbox.json, then the [claude] workspace, hooks, agents_dir and skills_dir
+    keys. Returns (removed, kept): every path or entry removed, and why nothing was while a run
+    from before lanes is not finished (lane_launch._legacy_run_problem): its session still
+    runs under those hooks and that skill."""
+    from . import lane_launch
+    current = config.section("claude")
+    facts = paths.home() / os_sandbox.FACTS_FILE
+    if not any(key in current for key in LEGACY_CLAUDE_KEYS) and not os.path.lexists(facts):
+        return [], None
+    try:
+        problem = lane_launch._legacy_run_problem()
+    except PplError as exc:
+        problem = "the run runs/ACTIVE names cannot be read: %s" % exc.message
+    if problem:
+        return [], problem
+    workspace = current.get("workspace") if isinstance(current.get("workspace"), str) else ""
+    removed = []
+    if workspace:
+        removed += _clean_settings(Path(workspace) / ".claude" / "settings.local.json",
+                                   _recorded_facts())
+    agents = _old_dir(current, "agents_dir", workspace, "agents")
+    if agents is not None:
+        removed += _clean_agents(agents)
+    skills = _old_dir(current, "skills_dir", workspace, "skills")
+    if skills is not None:
+        removed += _clean_skill(skills / "pipeline")
+    if os.path.lexists(facts):
+        facts.unlink()
+        removed.append(str(facts))
+    config.remove("claude", LEGACY_CLAUDE_KEYS)
+    return removed, None
 
 
 def _step_paths(p):
@@ -263,27 +327,14 @@ def _step_paths(p):
 def _step_claude(p):
     current = config.section("claude")
     binary = p.ask("claude_binary", "Claude Code binary", current.get("binary") or "claude")
-    configured = current.get("workspace") or ""
-    answer = p.ask("workspace", "Isolated workspace directory for pipeline sessions",
-                   configured or str(Path.home() / "ppl-workspace"), required=not configured)
-    workspace = Path(os.path.abspath(Path(answer).expanduser()))
-    hooks = p.ask("hooks", "Register the hooks how? local (write the workspace settings), global "
-                  "or manual (print the entries for you to paste)", current.get("hooks") or "local",
-                  choices=HOOK_MODES)
-    workspace.mkdir(parents=True, exist_ok=True)
-    if hooks == "local":
-        p.emit("hooks registered in %s" % write_local_settings(workspace, paths.root()))
-    else:
-        where = doctor.global_settings_path() if hooks == "global" else "the settings file you choose"
-        p.emit("the OS sandbox profile of a GitHub harness is always written to the workspace's "
-               "local settings, whatever the hooks mode")
-        p.emit("add these entries to %s:" % where)
-        p.emit(json.dumps({"hooks": {event: [entry] for event, entry in
-                                     hook_entries(paths.root()).items()}}, indent=2))
-    config.update("claude", {
-        "binary": binary, "workspace": str(workspace), "hooks": hooks,
-        "agents_dir": _derived_dir(current, "agents_dir", configured, workspace, ".claude", "agents"),
-        "skills_dir": _derived_dir(current, "skills_dir", configured, workspace, ".claude", "skills")})
+    config.update("claude", {"binary": binary})
+    removed, kept = clean_old_workspace()
+    if kept:
+        p.emit("what an older ppl wrote for the workspace %s stays as it is: %s. Run ppl setup "
+               "claude again once that run is finished or destroyed"
+               % (current.get("workspace") or "-", kept))
+    for item in removed:
+        p.emit("removed %s" % item)
 
 
 def _step_models(p, probe):
@@ -421,7 +472,11 @@ def _keep_installed(p, candidate, name, current, problem):
 def _install(p, source, name, installed):
     """Stage `source` beside the installed harnesses and apply the answers
     there. It moves into place only once it loaded, validated and was not
-    kept out, so a bad source or a refusal leaves the installed one as it was."""
+    kept out, so a bad source or a refusal leaves the installed one as it was.
+    A plain directory is imported into git (D8) after the answers are written, so
+    the harness it installs is committed as it stands and `ppl harness apply` takes it.
+    A git source keeps its own history, and answers that change it leave it for the
+    owner to commit."""
     target = paths.harness_dir(name)
     staging = paths.harness_dir("%s.replacing" % name)
     shutil.rmtree(staging, ignore_errors=True)
@@ -441,6 +496,7 @@ def _install(p, source, name, installed):
         if installed and _keep_installed(p, candidate, name, current, problem):
             return
         _write_harness(candidate, before)
+        lane_harness.import_directory(staging, name)
         if not target.exists():
             staging.rename(target)
             return
@@ -578,9 +634,8 @@ def _step_forge(p, forge_check, tracker_check):
     _apply_tracker(p, doc, copy.deepcopy(doc["tracker"]))
     harness.validate(doc, name)
     _write_harness(doc, before)
-    workspace = config.section("claude").get("workspace") or str(Path.home())
     claude_json = doctor.claude_home().parent / ".claude.json"
-    checks = (("forge", forge["kind"], forge_check(dict(forge), claude_json, workspace)),
+    checks = (("forge", forge["kind"], forge_check(dict(forge), claude_json, str(Path.home()))),
               ("tracker", doc["tracker"]["kind"], tracker_check(copy.deepcopy(doc["tracker"]))))
     lines = [("%s: %s" % (kind, result.get("detail", "")), result.get("ok"))
              for _, kind, result in checks]
@@ -595,11 +650,8 @@ def _step_forge(p, forge_check, tracker_check):
 def _step_apply(p):
     name = _target_harness()
     result = harness.apply(name)
-    doc = config.load()
-    doc["harness"].pop("pending", None)
-    config.save(doc)
-    p.emit("rendered %d agent files into %s and the skill into %s for harness %s"
-           % (len(result["agents"]), config.agents_dir(), config.skills_dir(), result["active"]))
+    config.remove("harness", ["pending"])
+    p.emit("harness %s at %s is the default for ppl lane" % (result["active"], result["commit"]))
 
 
 def _default_forge_check(settings, claude_json, workspace):

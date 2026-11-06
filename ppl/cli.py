@@ -125,28 +125,33 @@ def parse_json_arg(text, what):
         raise PplError("SCHEMA_INVALID", "%s is not valid JSON: %s" % (what, exc))
 
 
-def os_sandbox_problem(inspected):
+def os_sandbox_problem(inspected, cwd=None):
     """None when this session's OS sandbox denies GitHub and the guard is registered in the
-    workspace's local settings, else a message naming the first failing fact."""
-    facts = doctor.os_sandbox_facts()
+    lane's settings.json alone, else a message naming the first failing fact. `inspected` is
+    doctor.inspect of the lane, `cwd` the lane's start directory (the lane this call is in when
+    None)."""
+    facts = doctor.os_sandbox_facts(cwd)
+    settings = (inspected.get("local") or {}).get("path") or "the lane's settings.json"
     if facts["state"] != "on":
         return ("this harness reaches GitHub and the OS sandbox is %s for this session (%s): "
-                "start Claude Code in the workspace after `ppl harness apply`, or pass "
-                "--no-os-sandbox to record a run without it" % (facts["state"], _why_off(facts)))
+                "start the task's session with ppl lane <link>, or pass --no-os-sandbox to "
+                "record a run without it" % (facts["state"], _why_off(facts, settings)))
     if inspected["registration"] != "local":
-        return ("the guard hook is registered %s, not in the workspace's settings.local.json: "
-                "`ppl setup claude` registers it there, or pass --no-os-sandbox to record a run "
-                "without the OS sandbox" % inspected["registration"])
+        return ("the guard hook is registered %s, not in the lane's %s alone: ppl lane renders "
+                "it there, and one in the Claude home's settings.json fires in every session. "
+                "Fix that, or pass --no-os-sandbox to record a run without the OS sandbox"
+                % (inspected["registration"], settings))
     return None
 
 
-def _why_off(facts):
+def _why_off(facts, settings):
     if facts["state"] == "unavailable":
         return "native Windows has no OS sandbox"
     if not facts["env_marker"]:
         return "this session is not running inside it"
     if not facts["profile"]:
-        return "ppl's profile is missing from the workspace settings.local.json"
+        return ("ppl's profile in %s is missing or is not the one the lane's os_sandbox.json "
+                "records" % settings)
     if facts["undoing"]:
         return "a setting undoes it"
     return "GitHub is reachable from here"
@@ -205,11 +210,15 @@ def cmd_init(args):
     # takes the lane's worktree and the harness it exported [R-LANE-INIT-INSIDE].
     entry = _init_lane(args)
     repo = _lane_repo(args, entry)
-    # A registered matcher that never passes some guarded tool name to the hook is refused
-    # (doctor.matcher_problem): a denial the hook cannot see is a denial that cannot fire, and
-    # the run would start believing otherwise. So is a guard entry of the wrong shape.
-    inspected = doctor.inspect()
-    problem = doctor.matcher_problem(inspected) or doctor.guard_shape_problem()
+    where = str(entry.get("start_dir"))
+    # The run starts only under its lane's guard: the settings.json ppl lane rendered registers
+    # it with this task on its command line. A registered matcher that never passes some guarded
+    # tool name to the hook is refused (doctor.matcher_problem): a denial the hook cannot see is
+    # a denial that cannot fire, and the run would start believing otherwise. So is a guard
+    # entry of the wrong shape.
+    inspected = doctor.inspect(where)
+    problem = (doctor.lane_guard_problem(entry) or doctor.matcher_problem(inspected)
+               or doctor.guard_shape_problem(where))
     if problem:
         raise PplError("SCHEMA_INVALID", problem)
     # Setup is checked before the model gate so a missing models step is told as
@@ -226,7 +235,7 @@ def cmd_init(args):
     doc = _lane_harness(args, entry)
     os_sandboxed = False
     if os_sandbox.needed(doc) and args.os_sandbox:
-        problem = os_sandbox_problem(inspected)
+        problem = os_sandbox_problem(inspected, where)
         if problem:
             raise PplError("SCHEMA_INVALID", problem)
         os_sandboxed = True
@@ -244,11 +253,11 @@ def cmd_init(args):
                      os_sandboxed=os_sandboxed, lane=lane)
     store.write_json(paths.run_dir(args.task_id) / "harness.json", snapshot)
     # after the run exists, so a refusal's stderr stays the one JSON line it is
-    for warning in (doctor.dispatch_warning(), doctor.usage_warning(),
-                    doctor.hook_location_warning(), doctor.matcher_warning(),
-                    doctor.mcp_servers_warning(),
+    for warning in (doctor.dispatch_warning(where), doctor.usage_warning(where),
+                    doctor.hook_location_warning(where), doctor.matcher_warning(where),
+                    doctor.mcp_servers_warning(where),
                     doctor.github_token_warning() if os_sandbox.needed(doc) else None,
-                    doctor.foreign_bash_hooks_warning() if os_sandbox.needed(doc) else None):
+                    doctor.foreign_bash_hooks_warning(where) if os_sandbox.needed(doc) else None):
         if warning:
             sys.stderr.write("warning: %s\n" % warning)
     print(status.card(state["task_id"]))
@@ -259,17 +268,28 @@ def cmd_doctor(args):
     if getattr(args, "forge", False):
         print(json.dumps(doctor.forge_report(), sort_keys=True))
         return 0
-    result = doctor.report(getattr(args, "task", None))
+    # a --task naming another run than PPL_TASK is refused as every command refuses it, and a
+    # registry that cannot be read is reported, not refused
+    given = getattr(args, "task", None)
+    if given and os.environ.get("PPL_TASK"):
+        lanes.task_for_call(given)
+    result = doctor.report(given)
     print(json.dumps(result, sort_keys=True))
-    problem = doctor.matcher_problem(result)
-    if problem:
-        print(problem)
-    for line in (doctor.guard_shape_problem(), doctor.dispatch_warning(), doctor.usage_warning(),
-                 doctor.hook_location_warning()):
+    lane = result.get("lane")
+    if not lane:
+        # outside a lane only the machine is checked
+        warning = doctor.github_token_warning()
+        if warning:
+            print("warning: %s" % warning)
+        return 0
+    where = str(lanes.start_dir(lane))
+    for line in (result.get("lane_guard_problem"), doctor.matcher_problem(result),
+                 doctor.guard_shape_problem(where), doctor.dispatch_warning(where),
+                 doctor.usage_warning(where), doctor.hook_location_warning(where)):
         if line:
             print(line)
-    for warning in (doctor.matcher_warning(), doctor.mcp_servers_warning(),
-                    doctor.github_token_warning(), _foreign_hooks_warning()):
+    for warning in (doctor.matcher_warning(where), doctor.mcp_servers_warning(where),
+                    doctor.github_token_warning(), _foreign_hooks_warning(lane, where)):
         if warning:
             print("warning: %s" % warning)
     if result.get("hook_runs_problem"):
@@ -277,13 +297,13 @@ def cmd_doctor(args):
     return 0
 
 
-def _foreign_hooks_warning():
-    """The foreign Bash hook warning while an OS sandbox profile is applied, else None."""
+def _foreign_hooks_warning(lane, where):
+    """The foreign Bash hook warning while the lane has an OS sandbox profile, else None."""
     try:
-        applied = os_sandbox.load_facts() is not None
+        applied = os_sandbox.load_facts(lane) is not None
     except PplError:
         applied = True
-    return doctor.foreign_bash_hooks_warning() if applied else None
+    return doctor.foreign_bash_hooks_warning(where) if applied else None
 
 
 def cmd_show(args):
@@ -435,7 +455,8 @@ def cmd_tracker(args):
                        "the %s tracker of %s is read through MCP tools, ppl tracker fetch is "
                        "for a CLI tracker" % (adapter.KIND, task_id))
     if adapter.KIND == "github-issues":
-        table = dict(table, repo=os_sandbox.pinned_repo("tracker_repo", table.get("repo")))
+        table = dict(table, repo=os_sandbox.pinned_repo("tracker_repo", table.get("repo"),
+                                                        task_id))
     result = adapter.fetch(table, task_id, dest)
     store.checked_run_path(paths.run_dir(task_id))
     run.record_tracker_fetch(task_id, result["revision"])
@@ -819,10 +840,10 @@ def cmd_merge(args):
 
 
 def _review_repo(task_id):
-    """The GitHub repository `ppl review fetch` reaches: the guard facts' forge_repo when the
-    facts exist, which a github-issues repo the run's snapshot names must agree with, else the
-    snapshot's github-issues repo or the checkout's origin. With the facts no git runs: the
-    run's repo is role-writable, and this command runs outside the OS sandbox."""
+    """The GitHub repository `ppl review fetch` reaches: the forge_repo of the guard facts of
+    the run's lane, which a github-issues repo the run's snapshot names must agree with. No git
+    runs and the snapshot alone is never taken (os_sandbox.pinned_repo): the run's repo and
+    snapshot are role-writable, and this command runs outside the OS sandbox."""
     snapshot = paths.run_dir(task_id) / "harness.json"
     try:
         doc = store.read_json(snapshot) if stat.S_ISREG(os.lstat(snapshot).st_mode) else None
@@ -836,23 +857,16 @@ def _review_repo(task_id):
     tracker = doc.get("tracker")
     repo = tracker.get("repo") if isinstance(tracker, dict) and \
         tracker.get("kind") == "github-issues" else None
-    facts = os_sandbox.load_facts()
+    facts = os_sandbox.load_facts(task_id)
     if facts is not None:
         forge_repo = facts.get("forge_repo")
         if not (isinstance(forge_repo, str) and github_fetch.is_repo(forge_repo)):
             raise PplError("SCHEMA_INVALID",
                            "%s names no GitHub forge repository (forge_repo is %r), so ppl "
-                           "review fetch reaches none: run ppl harness apply"
-                           % (os_sandbox.FACTS_FILE, forge_repo))
+                           "review fetch reaches none: %s"
+                           % (os_sandbox.FACTS_FILE, forge_repo, os_sandbox.RENDERED_BY_LANE))
         repo = repo or forge_repo
-    else:
-        repo = repo or setup._origin_repo(run.load(task_id).get("repo") or "")
-    repo = os_sandbox.pinned_repo("forge_repo", repo)
-    if not repo:
-        raise PplError("SCHEMA_INVALID",
-                       "no GitHub repository is known for %s: its checkout has no github.com "
-                       "origin" % task_id)
-    return repo
+    return os_sandbox.pinned_repo("forge_repo", repo, task_id)
 
 
 def cmd_review_fetch(args):
@@ -1001,24 +1015,15 @@ def cmd_control(args):
 
 def cmd_routing(args):
     if args.preset and args.action != "preset":
-        flag = {"apply": "--harness <name>", "show": "--role <name>"}[args.action]
         raise PplError("SCHEMA_INVALID",
-                       "ppl routing %s takes %s, not a positional name" % (args.action, flag))
+                       "ppl routing %s takes --role <name>, not a positional name" % args.action)
     if args.action == "preset":
         if not args.preset:
             raise PplError("SCHEMA_INVALID", "name a preset: ppl routing preset economy|balanced|max")
         routing.apply_preset(args.preset)
         print(json.dumps({"preset": args.preset, "roles": routing.summary()}, sort_keys=True))
         return 0
-    if args.action == "apply":
-        name = args.harness or config.active_harness()
-        if not name:
-            raise PplError("HARNESS_NOT_APPLIED",
-                           "no harness to render for: pass --harness <name> or run ppl harness apply <name>")
-        written = routing.apply(harness.load(name))
-        for path in written:
-            print("wrote %s" % path)
-    elif args.role:
+    if args.role:
         risk = args.risk
         if risk is None and args.task:
             risk = run.load(args.task).get("risk")
@@ -1066,10 +1071,7 @@ def cmd_harness(args):
                        "harness %s needs a harness name or a directory path" % args.action)
     if args.action == "apply":
         result = harness.apply(args.name)
-        for path in result["agents"] + result["skill"]:
-            print("wrote %s" % path)
-        print("active harness: %s" % result["active"])
-        # routing.toml was read to render the agents, so status cannot fail here
+        print("default harness: %s at %s" % (result["active"], result["commit"]))
         unverified = [row for row in models.status() if row["state"] != "verified"]
         if unverified:
             print("warning: models not verified: %s (run ppl models verify)"
@@ -1613,9 +1615,8 @@ def build_parser():
     p.add_argument("--task")
 
     p = sub.add_parser("routing")
-    p.add_argument("action", choices=["apply", "show", "preset"])
+    p.add_argument("action", choices=["show", "preset"])
     p.add_argument("preset", nargs="?", help="preset name for `ppl routing preset`: economy, balanced, max")
-    p.add_argument("--harness")
     p.add_argument("--role")
     p.add_argument("--risk", choices=list(run.RISK_TIERS))
     p.add_argument("--task")

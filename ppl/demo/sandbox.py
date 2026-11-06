@@ -16,15 +16,24 @@ from . import sample
 TASK = "GH-1"
 TIMEOUT_SECONDS = 60
 # The lane `ppl lane` would hold for TASK, claimed in the sandbox's own data root, with the
-# installed harness copied where `ppl lane` exports it. Interim until the demo starts its run
+# installed harness copied where `ppl lane` exports it, and the start directory's settings.json
+# (the hooks, each ending in --task TASK) and guard facts. The demo runs in the checkout, not in
+# a worktree, so the facts are the checkout-wide ones. Interim until the demo starts its run
 # with `ppl lane --no-exec`.
 _CLAIM = ("import shutil, sys\n"
-          "from ppl import lanes, paths\n"
-          "lanes.claim(sys.argv[1], 'demo', '0' * 40, sys.argv[2], sys.argv[2],\n"
+          "from ppl import harness, lanes, os_sandbox, paths, setup, store\n"
+          "task, repo = sys.argv[1], sys.argv[2]\n"
+          "lanes.claim(task, 'demo', '0' * 40, repo, repo,\n"
           "            '00000000-0000-4000-8000-000000000000', 1, 1)\n"
-          "shutil.copytree(paths.harness_dir('demo'),\n"
-          "                lanes.start_dir(sys.argv[1]) / 'harness' / 'demo',\n"
-          "                ignore=shutil.ignore_patterns('.git'))\n")
+          "start = lanes.start_dir(task)\n"
+          "shutil.copytree(paths.harness_dir('demo'), start / 'harness' / 'demo',\n"
+          "                ignore=shutil.ignore_patterns('.git'))\n"
+          "hooks = setup.hook_entries(paths.root(), task)\n"
+          "store.write_json(start / 'settings.json',\n"
+          "                 {'hooks': {event: [entry] for event, entry in hooks.items()}})\n"
+          "doc = harness.load(str(start / 'harness' / 'demo'))\n"
+          "store.write_json(start / os_sandbox.FACTS_FILE,\n"
+          "                 os_sandbox.facts(doc, start, os_sandbox.pins()))\n")
 _STRIPPED_PREFIXES = ("PPL_", "GIT_", "GH_", "GITHUB_")
 # These are the throwaway sample repository's commits, so the identity rule in CLAUDE.md,
 # which is about this repository, does not apply to them.
@@ -90,11 +99,15 @@ class Sandbox:
         self.git("commit", "-q", "-m", message)
         return self.git("rev-parse", "HEAD").strip()
 
+    def lane_settings(self):
+        """The settings.json of TASK's lane, whose hooks end in --task TASK."""
+        return self.ppl_home / "lanes" / TASK / "settings.json"
+
     def guard(self, payload):
-        settings = json.loads((self.workspace / ".claude" / "settings.local.json").read_text())
+        settings = json.loads(self.lane_settings().read_text())
         command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-        # the hook binds to TASK's lane by its own command line, as a lane's settings render it
-        argv = shlex.split(command) + ["--task", TASK]
+        # the hook binds to TASK's lane by its own command line, as the lane's settings render it
+        argv = shlex.split(command)
         try:
             done = self._run(argv, cwd=self.workspace, input=json.dumps(payload))
         except PplError as error:
@@ -139,13 +152,12 @@ class Sandbox:
         self.git("init", "-q", "-b", "main", cwd=source)
         self.git("add", "-A", cwd=source)
         self.git("commit", "-q", "-m", "demo harness", cwd=source)
-        # first on PATH, so harness apply pins these and never a ppl or gh installed elsewhere
+        # first on PATH, so the lane's facts pin these and never a ppl or gh installed elsewhere
         for name, text in (("gh", sample.gh_source()), ("ppl", sample.ppl_source())):
             target = self.bin / name
             target.write_text(text, encoding="utf-8")
             target.chmod(0o755)
         self._step("setup", "--non-interactive", "--skip", "models", "--skip", "forge",
-                   "--answer", "workspace=%s" % self.workspace, "--answer", "hooks=local",
                    "--answer", "harness_from=%s" % source, "--answer", "harness_name=demo")
         done = self._run([sys.executable, "-c", _CLAIM, TASK, str(self.repo)], cwd=self.workspace)
         if done.returncode != 0:

@@ -20,7 +20,7 @@ export function HomePage() {
     <h1>Welcome to antline</h1>
     <p class="lede">${done} of ${setup.steps.length} setup steps are done.</p>
     <${AntTrail} steps=${setup.steps} next=${setup.next} />
-    ${setup.next ? html`<a class="button primary" href="#/setup">Continue setup</a>` : html`<p>Setup is complete. Open Claude Code in the workspace and type <code>/pipeline KEY-123</code>.</p>`}
+    ${setup.next ? html`<a class="button primary" href="#/setup">Continue setup</a>` : html`<p>Setup is complete. Start a task in a terminal with <code>ppl lane KEY-123</code>, or with its tracker link.</p>`}
     <ol>
       ${setup.steps.map((step) => html`<li><strong>${step.name}</strong> ${step.intro} <${Badge} kind=${step.state}>${step.state}<//></li>`)}
     </ol>

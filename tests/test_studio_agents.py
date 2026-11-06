@@ -318,7 +318,7 @@ class TestAgentsApi(AgentsTestCase):
         for body in ({"overlay": "- Use pnpm, never npm.\n"}, {"routing": doc}, {}):
             status, _, _ = panel_client.call("POST", "/api/agents/ppl-code-worker/preview", body=body)
             self.assertEqual(status, 200)
-        self.assertEqual(list(self.agents_dir.iterdir()), [])
+        self.assertEqual(self.rendered_files(), [])
 
     def test_notes_with_a_nul_are_refused_by_the_preview_and_the_save(self):
         key = "harness:demo:templates/ppl-verifier.part"

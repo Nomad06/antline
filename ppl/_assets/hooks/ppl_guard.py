@@ -927,7 +927,8 @@ def facts_file(argv):
     """The guard facts the session of the hook whose command line is `argv` runs under: in a
     lane, the os_sandbox.json ppl lane renders into its start directory, lanes.start_dir of
     the --task the command line names, where every registry entry records it; in no lane,
-    PPL_HOME/os_sandbox.json, which ppl harness apply writes. None for a command line that
+    PPL_HOME/os_sandbox.json, which an older ppl harness apply wrote and ppl setup claude
+    removes. None for a command line that
     binds no lane cleanly, whose calls lane_denial refuses. Found from argv alone, so neither
     the registry nor a run file is read for it, and one a role made huge or unreadable holds
     no edit back."""

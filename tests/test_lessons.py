@@ -18,7 +18,8 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import cli, evidence, findings, harness, lessons, memory, paths, review, run, store, verdict
+from ppl import (cli, evidence, findings, harness, lanes, lessons, memory, paths, review, run,
+                 store, verdict)
 from ppl.errors import PplError
 
 PRODUCER = {"provider": "claude-code-subagent", "model": "claude-test", "params_hash": ""}
@@ -71,15 +72,12 @@ def read_bundle(target, name):
 
 
 class LessonsTestCase(unittest.TestCase):
-    """A fresh data root per test with example-maven installed, one lesson in its memory,
-    and the reflector's agent file in place."""
+    """A fresh data root per test with example-maven installed and one lesson in its memory.
+    Each run built here gets the lane agents file ppl lane renders, ppl-reflector in it."""
 
     def setUp(self):
-        self._env = {key: os.environ.get(key) for key in ("PPL_HOME", "PPL_AGENTS_DIR")}
+        self._env = {key: os.environ.get(key) for key in ("PPL_HOME",)}
         os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
-        os.environ["PPL_AGENTS_DIR"] = tmphome.mkdtemp(prefix="pplagents-")
-        self.reflector = Path(os.environ["PPL_AGENTS_DIR"]) / "ppl-reflector.md"
-        self.reflector.write_text("---\nname: ppl-reflector\n---\n", encoding="utf-8")
         fixtures.install_harness("example-maven")
         row = {"id": "M-1", "role": "ppl-code-worker", "cue": "a change touches the cart",
                "lesson": "run the cart tests before handing back",
@@ -107,6 +105,8 @@ class LessonsTestCase(unittest.TestCase):
         doc = harness.load("example-maven")
         run.init(task, "https://tracker/%s" % task, repo,
                  harness={"name": "example-maven", "path": doc["_dir"], "format": harness.FORMAT})
+        store.write_json(lanes.start_dir(task) / "agents.json",
+                         {"ppl-reflector": {"description": "d", "prompt": "p"}})
         directory = paths.run_dir(task)
         store.write_json(directory / "harness.json", harness.snapshot(doc))
         store.write_json(directory / "brief.json", {"task_id": task, "acceptance": ["AC1"]})
@@ -246,17 +246,23 @@ class TestBundle(LessonsTestCase):
         self.assertIsNone(lessons.bundle("DEMO-9104"))
         self.assertFalse((built["directory"] / "lessons").exists())
 
-    def test_bundle_names_a_missing_reflector_agent_file(self):
+    def test_bundle_names_a_lane_agents_file_without_the_reflector(self):
         built = self.build_run("DEMO-9105")
         self.merge(built)
-        self.reflector.unlink()
-        code, _, err = call("lessons", "bundle", "--task", "DEMO-9105")
-        self.assertEqual(code, 2)
-        payload = json.loads(err)
-        self.assertEqual(payload["error_code"], "SETUP_INCOMPLETE")
-        self.assertIn(str(self.reflector), payload["message"])
-        self.assertIn("ppl harness apply example-maven", payload["message"])
-        self.assertFalse((built["directory"] / "lessons").exists())
+        agents = lanes.start_dir("DEMO-9105") / "agents.json"
+        for content in ('{"ppl-verifier": {}}', None):
+            with self.subTest(content=content):
+                if content is None:
+                    agents.unlink()
+                else:
+                    agents.write_text(content, encoding="utf-8")
+                code, _, err = call("lessons", "bundle", "--task", "DEMO-9105")
+                self.assertEqual(code, 2)
+                payload = json.loads(err)
+                self.assertEqual(payload["error_code"], "SETUP_INCOMPLETE")
+                self.assertIn(str(agents), payload["message"])
+                self.assertIn("ppl lane resume DEMO-9105", payload["message"])
+                self.assertFalse((built["directory"] / "lessons").exists())
 
     def test_a_paused_run_still_gets_its_bundle(self):
         # no control.enforce: the bundle changes no run state

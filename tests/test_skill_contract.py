@@ -845,10 +845,9 @@ class TestGithubCommandsLeaveTheSandbox(unittest.TestCase):
         tables = dict(fixtures.GITHUB_ISSUES, repo={"path": self.checkout, "default_branch": "main",
                                                     "worktrees": os.path.join(root, "worktrees")})
         fixtures.install_variant("example-generic", "example-generic", **tables)
-        config.update("claude", {"workspace": self.workspace})
         doc = harness.load("example-generic")
         with mock.patch.object(os_sandbox, "pins", lambda which=None: self.pins):
-            self.files = harness.render_skill(doc)
+            self.files = harness.render_skill(doc, workspace=self.workspace)
         self.facts = os_sandbox.facts(doc, self.workspace, self.pins)
         self.state = {"task_id": SHAPE_TASK, "branch": SHAPE_BRANCH, "repo": self.worktree}
 

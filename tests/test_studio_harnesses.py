@@ -1,6 +1,7 @@
 import copy
 import os
 import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -24,7 +25,6 @@ class HarnessApiTestCase(panel_client.StudioTestCase):
         config.ensure()
         harness.add(EXAMPLE, name="demo")
         config.set_active_harness("demo")
-        config.update("claude", {"workspace": tmphome.mkdtemp(prefix="pplws-")})
         pins = {name: {"path": "/usr/bin/" + name, "realpath": "/usr/bin/" + name}
                 for name in os_sandbox.PIN_NAMES}
         patcher = mock.patch.object(os_sandbox, "pins", lambda which=None: pins)
@@ -131,12 +131,14 @@ class TestHarnessApi(HarnessApiTestCase):
         self.assertEqual(job["error"]["error_code"], "HARNESS_INVALID")
         self.assertEqual(config.active_harness(), "demo")
 
-    def test_apply_runs_as_a_job_into_the_configured_dirs(self):
+    def test_apply_runs_as_a_job_and_answers_the_default_and_its_commit(self):
         status, payload, _ = panel_client.call("POST", "/api/harnesses/demo/apply", body={})
         job = self.wait(payload)
         self.assertEqual(job["state"], "done", job)
-        self.assertTrue((self.agents_dir / "ppl-code-worker.md").is_file())
-        self.assertTrue((self.skills_dir / "pipeline" / "SKILL.md").is_file())
+        head = subprocess.run(["git", "-C", str(paths.harness_dir("demo")), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(job["result"], {"active": "demo", "commit": head})
+        self.assertEqual(self.rendered_files(), [])
 
     def test_adding_from_a_directory_runs_as_a_job(self):
         status, payload, _ = panel_client.call("POST", "/api/harnesses",

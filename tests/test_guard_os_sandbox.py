@@ -77,8 +77,8 @@ def facts_path():
 
 
 def home_facts_path():
-    """PPL_HOME/os_sandbox.json, which a session in no lane reads while harness apply writes
-    it."""
+    """PPL_HOME/os_sandbox.json, which a session in no lane reads: an older harness apply
+    wrote it."""
     return paths.home() / os_sandbox.FACTS_FILE
 
 
@@ -241,7 +241,7 @@ class TestRoleEscape(OsSandboxCase):
         with self.subTest(facts=False, run=True), self.facts_text(None):
             result = self.decide("ls", agent="general-purpose", cwd=OTHER)
             self.assertIsNotNone(self.hook(flagged("general-purpose", "ls", OTHER)))
-            self.assertIn("ppl harness apply", self.deny_reason(result))
+            self.assertIn("ppl lane renders the guard facts", self.deny_reason(result))
         with self.subTest(repo="elsewhere"), self.run_state(repo=OTHER):
             result = self.decide(pr_create(), agent="general-purpose", cwd=WS)
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -322,14 +322,14 @@ class TestFailClosed(OsSandboxCase):
             self.assertEqual(ppl_guard.main(), 0)
         self.assertEqual(stdout.getvalue(), "")
 
-    def test_missing_facts_deny_the_orchestrator_naming_apply(self):
+    def test_missing_facts_deny_the_orchestrator_naming_ppl_lane(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
         with self.facts_text(None):
             for agent, cwd in ((None, WS), (None, REPO), (None, OTHER), ("general-purpose", WS)):
                 with self.subTest(agent=agent, cwd=cwd):
                     result = self.decide(pr_create(), agent=agent, cwd=cwd)
                     self.assertIn("OWNER_DECISION", self.deny_reason(result))
-                    self.assertIn("ppl harness apply", self.deny_reason(result))
+                    self.assertIn("ppl lane renders the guard facts", self.deny_reason(result))
 
     def test_missing_facts_on_a_run_without_the_profile_name_the_real_fix(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
@@ -361,10 +361,10 @@ class TestFailClosed(OsSandboxCase):
             with self.subTest(text=text[:40]), self.facts_text(text):
                 result = self.decide(pr_create())
                 self.assertIn("OWNER_DECISION", self.deny_reason(result))
-                self.assertIn("ppl harness apply", self.deny_reason(result))
+                self.assertIn("ppl lane renders the guard facts", self.deny_reason(result))
         # with no run active too: the guard cannot tell what is pipeline-scoped
         with self.facts_text("{not json"), self.no_lane():
-            self.assertIn("ppl harness apply", self.deny_reason(self.decide("ls", cwd=OTHER)))
+            self.assertIn("ppl lane renders the guard facts", self.deny_reason(self.decide("ls", cwd=OTHER)))
 
     def test_unreadable_run_state_denies_a_flagged_call(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED
@@ -394,7 +394,7 @@ class TestFailClosed(OsSandboxCase):
             snapshot.unlink()
             snapshot.write_text(saved, encoding="utf-8")
         self.assertIn("OWNER_DECISION", self.deny_reason(result))
-        self.assertIn("ppl harness apply", self.deny_reason(result))
+        self.assertIn("ppl lane renders the guard facts", self.deny_reason(result))
 
     def test_extra_keys_in_the_facts_are_accepted(self):
         with self.facts_text(json.dumps(facts_doc(future_key={"a": 1}))):
@@ -410,7 +410,7 @@ class TestOrchestratorShape(OsSandboxCase):
             self.assertIsNone(self.decide(GH + " auth status", cwd=WS))
         with self.facts_text(None):
             result = self.decide("ls", cwd=OTHER)
-            self.assertIn("ppl harness apply", self.deny_reason(result))
+            self.assertIn("ppl lane renders the guard facts", self.deny_reason(result))
         # the run's recorded repo no longer widens or narrows anything
         with self.run_state(repo=OTHER):
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide("ls", cwd=WS)))
@@ -433,7 +433,7 @@ class TestOrchestratorShape(OsSandboxCase):
         pins = dict(facts_doc()["pins"], gh={"path": GH, "realpath": "/opt/cellar/gh-2.1/gh"})
         with self.facts_text(json.dumps(facts_doc(pins=pins))):
             result = self.decide(GH + " auth status")
-        self.assertIn("ppl harness apply", self.deny_reason(result))
+        self.assertIn("ppl lane renders the guard facts", self.deny_reason(result))
 
     def test_a_compound_is_denied(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
@@ -2060,7 +2060,7 @@ class TestProtectedPaths(ProtectedPathCase):
                     with self.subTest(text=text, path=path):
                         reason = self.deny_reason(self.edit(path, tool="Write"))
                         self.assertIn("OWNER_DECISION", reason)
-                        self.assertIn("ppl harness apply", reason)
+                        self.assertIn("ppl lane renders the guard facts", reason)
 
     def test_the_allowed_roots_are_the_write_scope_and_claude_projects_and_plans(self):
         from ppl import escape_paths
