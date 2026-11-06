@@ -1,9 +1,10 @@
 # Stage 0 - admission
 
 Only for the NEW-task branch of "Always start here" in `SKILL.md` (`ppl recover --task
-<TASK-ID>` came back `SCHEMA_INVALID`). If a run already existed, skip this stage entirely -
-resume from the stage `ppl show` reported instead; calling `ppl init` on an existing run
-raises `ILLEGAL_TRANSITION`.
+<TASK-ID>` came back `SCHEMA_INVALID`). If a run already existed, do not run `ppl init` again -
+calling it on an existing run raises `ILLEGAL_TRANSITION` - and resume from the stage `ppl
+show` reported; a run still in `admission` goes on from step 3 here, since the resume ran
+step 2.
 
 1. `ppl init <TASK-ID> --tracker-url <url> --harness <!-- include: harness/name -->` - the run
    takes the lane's worktree, which `ppl lane` made before this session started, and the

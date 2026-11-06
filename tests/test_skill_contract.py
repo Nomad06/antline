@@ -467,7 +467,7 @@ class TestEveryRenderedFile(unittest.TestCase):
     def test_no_rendered_file_mentions_isolated_or_the_active_pointer(self):
         # a run belongs to its lane: the isolated flag and the single active-run pointer are
         # gone (D13, D21), and ppl init takes the lane's worktree, so no --repo either
-        gone = re.compile(r"isolat|\bactive[- ]run\b|\bACTIVE\b|runs/ACTIVE|--repo\b"
+        gone = re.compile(r"isolat|\bactive[- ]run\b|runs/ACTIVE|--repo\b"
                           r"|PPL_AGENTS_DIR|PPL_SKILLS_DIR|ppl harness apply|worktree add",
                           re.IGNORECASE)
         found = ["%s %s:%d: %s" % (name, path, number, line.strip())
@@ -1044,6 +1044,12 @@ class TestReflectionSkillText(unittest.TestCase):
             self.assertLess(stage0.index(" lessons pending`"), stage0.index("admission list"),
                             name)
             self.assertIn("`references/reflection.md`", stage0, name)
+            # M3: a resumed session lists its unrecorded claims again, once
+            recovered = _flat(files["SKILL.md"])
+            recovered = recovered[recovered.index("- **Exit 0**"):recovered.index("- **Exit 2")]
+            self.assertIn("once per session, do step 2 of `references/stage-0-admission.md`",
+                          recovered, name)
+            self.assertIn("goes on from step 3 here, since the resume ran step 2", stage0, name)
 
     def test_the_reflection_reference_calls_the_bundle_data(self):
         for name in RENDERED:

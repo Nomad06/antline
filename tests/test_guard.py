@@ -2932,8 +2932,9 @@ class TestGuard(unittest.TestCase):
         self.assertEqual(block, "cd <worktree>\ngit fetch origin master\n")
         self.assertNotIn("worktree add", stage1)
         start = str(paths.home() / "lanes" / "DEMO-700")
+        # under the profile it is the same fetch, with -C into the worktree (R62)
         for command in (block.replace("<worktree>", "/tmp/repo").replace("\n", " && ").rstrip(
-                " &"), "git fetch origin master"):
+                " &"), "git fetch origin master", "git -C /tmp/repo fetch origin master"):
             for cwd in (start, "/tmp/repo"):
                 with self.subTest(command=command, cwd=cwd):
                     self.assertIsNone(decide(payload(None, "Bash", {"command": command},

@@ -669,9 +669,11 @@ def _os_values(doc, pins, workspace):
     that write outside the lane's own run run on the pinned binaries, word for word in the
     shapes the guard lets out of the sandbox, each followed by OS_FLAG_NOTE, and stage 1 runs
     git with -C instead of a cd, so the session stays in the lane's start directory its gh and
-    ppl calls run from. The repositories, the checkout and the fetch come from the os_sandbox
-    functions the facts and the allow entries are made with. Without the profile stage 1 changes
-    into the lane's worktree, where every gate runs, and the commands are the plain ones."""
+    ppl calls run from: a sandboxed fetch in the worktree, the GitHub one pinned in the
+    checkout outside the sandbox. The repositories and the GitHub fetch come from the os_sandbox
+    functions the facts and the allow entries are made with. Without the profile stage 1
+    changes into the lane's worktree, where every gate runs, and the commands are the plain
+    ones."""
     repo = doc["repo"]
     default_branch = repo["default_branch"]
     values = {("os", "gh"): "gh", ("os", "ppl"): "ppl", ("os", "flag-note"): "",
@@ -686,7 +688,6 @@ def _os_values(doc, pins, workspace):
         return values
     pins = pins if pins is not None else os_sandbox.pins()
     workspace = os_sandbox.workspace_dir(workspace) if workspace else _UNKNOWN_WORKSPACE
-    checkout = os_sandbox.checkout(doc)
     forge_repo, tracker_repo = os_sandbox.repos(doc)
     forge_repo = forge_repo or _UNKNOWN_REPO
     gh = pins["gh"]["path"]
@@ -698,7 +699,9 @@ def _os_values(doc, pins, workspace):
                    ("os", "flag-note"): OS_FLAG_NOTE, ("os", "forge-repo"): forge_repo,
                    ("os", "tracker-repo"): tracker_repo or _UNKNOWN_REPO,
                    ("os", "cd"): "",
-                   ("os", "fetch"): "git -C %s fetch origin %s" % (checkout, default_branch),
+                   # in the worktree: FETCH_HEAD is the worktree's own, in its git dir, which
+                   # the lane's write scope holds, and the checkout's .git is not (R62)
+                   ("os", "fetch"): "git -C <worktree> fetch origin %s" % default_branch,
                    ("os", "gates-where"): OS_GATES_WHERE,
                    ("os", "stage1-note"): "\n\n" + note if note else ""})
     if not github_forge:

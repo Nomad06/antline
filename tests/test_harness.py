@@ -1937,7 +1937,10 @@ class TestRenderOsSandbox(HarnessTestCase):
         checkout = os.path.realpath("/home/dev/src/project")
         # git reaches GitLab from inside the sandbox, so only the pinned ppl commands that write
         # PPL_HOME outside the lane's own run are flagged (R57, D24)
-        self.assertIn("```bash\ngit -C %s fetch origin master\n```" % checkout, stage1)
+        # in the worktree, whose own git dir takes FETCH_HEAD: the lane's write scope holds no
+        # FETCH_HEAD of the checkout's .git (R62)
+        self.assertIn("```bash\ngit -C <worktree> fetch origin master\n```", stage1)
+        self.assertNotIn(checkout, stage1.split("```bash", 1)[1].split("```", 1)[0])
         self.assertNotIn("\ncd ", stage1)
         flagged = sorted(relative for relative, text in rendered.items()
                          if "dangerouslyDisableSandbox" in text)

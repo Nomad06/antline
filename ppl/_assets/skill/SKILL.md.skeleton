@@ -48,7 +48,9 @@ made that run yet. There are exactly three outcomes:
   line always names the current lease generation - capture that number now. Do
   **not** run `ppl init` - the run is already there. Run `ppl show --task <TASK-ID> --json`
   to see its current `stage`, and resume the pipeline from that stage (its reference is in
-  the stage map below).
+  the stage map below). First, once per session, do step 2 of
+  `references/stage-0-admission.md`: it lists again the reflections this lane claimed and
+  has not recorded, so finish each of them before you resume.
 
 - **Exit 2, `SCHEMA_INVALID`** - two different shapes, read the message to tell them
   apart. `run.load` on a task id nobody has `ppl init`'ed yet means no run exists for this
