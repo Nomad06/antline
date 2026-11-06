@@ -467,11 +467,12 @@ def _alive(pid):
 
 def _run_facts(task_id):
     """(stage, outcome) of the lane's run, both None before ppl init. The outcome is the run's
-    last durable fact, as the panel shows it."""
+    last durable fact, as the panel shows it. Display only: the lane's sandbox can write its
+    state.json, so whatever reading it raises is that lane's row and stops no other."""
     try:
         state = store.read_json(run.state_path(task_id), None, lanes.READ_LIMIT)
-    except (PplError, OSError, UnicodeDecodeError) as exc:
-        return "unknown", "run state is unreadable: %s" % exc
+    except Exception as exc:
+        return "unknown", "run state is unreadable: %s" % (getattr(exc, "message", None) or exc)
     if not isinstance(state, dict):
         return (None, None) if state is None else ("unknown", "run state is not an object")
     return state.get("stage"), state.get("last_durable_fact")

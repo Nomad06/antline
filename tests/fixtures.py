@@ -18,6 +18,11 @@ SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
 FAKE_PINS = {name: {"path": "/opt/pin/bin/" + name, "realpath": "/opt/pin/bin/" + name}
              for name in ("gh", "git", "ppl")}
 
+# What a lane's sandbox can leave in its run's state.json or log that no JSON parse turns into
+# a document: an integer of more than 4,300 digits, a plain ValueError on every supported
+# Python, and nesting that raises RecursionError on Python 3.11-3.13 (3.14 parses it).
+UNPARSEABLE_JSON = {"digits": "1" * 4301, "deep": "[" * 100000 + "]" * 100000}
+
 # The tables that turn an example harness into a GitHub Issues one.
 GITHUB_ISSUES = {"tracker": {"kind": "github-issues", "repo": "o/r", "task_prefix": "GH"},
                  "task": {"key_pattern": "^GH-[0-9]+$",

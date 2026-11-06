@@ -2218,7 +2218,9 @@ def bound_state(binding):
     run.load raises PplError when state.json is simply missing, but a state.json
     that exists and is corrupt (a half-written file from a crashed process) makes
     the underlying json.load raise json.JSONDecodeError, and a permission problem
-    raises OSError; neither is a PplError. None of those escapes.
+    raises OSError; neither is a PplError. None of those escapes, and neither does a
+    ValueError or a RecursionError (an integer past the digit limit, nesting too deep),
+    which store.read_json now maps too.
     """
     if binding.problem:
         raise PplError("OWNER_DECISION", binding.problem)
@@ -2227,7 +2229,7 @@ def bound_state(binding):
         return None, None
     try:
         state = run.load(task_id, _READ_LIMIT)
-    except (PplError, OSError, ValueError):
+    except (PplError, OSError, ValueError, RecursionError):
         return task_id, None
     if not isinstance(state, dict):
         return task_id, None
@@ -3177,21 +3179,32 @@ def _command_views(command):
     (_mask_text), or the command itself spells $SUBST, which would stand for a substitution
     it does not hold. Read once per command: every check of a decision asks for the same
     views, and they are shared, so the lists are tuples."""
-    return _read_views(command) if isinstance(command, str) else None
+    return _read_views(command)[0] if isinstance(command, str) else None
+
+
+# Why the masking reads a command by its spelling alone, which a lane refuses
+# (lane_spelling_denial); a substitution or a here-document left open has no such cause.
+_SPELLED_TOO_DEEP = ("its substitutions and here-documents nest deeper than %d levels"
+                     % _NESTING_LIMIT)
+_SPELLED_MASK_WORD = "it spells $SUBST, the word the guard masks a substitution with"
 
 
 @functools.lru_cache(maxsize=8)
 def _read_views(command):
+    """(the views _command_views gives, None), else (None, _SPELLED_TOO_DEEP or
+    _SPELLED_MASK_WORD, or None for a substitution or a here-document left open)."""
     # with backslash-newlines joined, as the views are when they are split (_built_raws)
     if "$SUBST" in _CONTINUED_LINE_RE.sub(r"\1", command):
-        return None
+        return None, _SPELLED_MASK_WORD
     inner, fed, unsure, spelled = [], [], [], []
     try:
         outer, kids, _ = _mask_text(command, 0, None, inner, fed, unsure, spelled)
-    except (_Unreadable, _NestedTooDeep, RecursionError):
-        return None
+    except (_NestedTooDeep, RecursionError):
+        return None, _SPELLED_TOO_DEEP
+    except _Unreadable:
+        return None, None
     return ((outer,) + tuple(view for view, _ in inner), tuple(fed), tuple(unsure),
-            tuple(spelled), (kids,) + tuple(kids for _, kids in inner))
+            tuple(spelled), (kids,) + tuple(kids for _, kids in inner)), None
 
 
 @functools.lru_cache(maxsize=8)
@@ -3206,8 +3219,10 @@ def _blinded_write_shape(command):
         return True
     found = _command_views(command)
     if found is None:
-        # read by its spelling, a here-document's backslash-newlines joined as its views are
-        return bool(BASH_WRITE_SHAPES.search(_CONTINUED_LINE_RE.sub(r"\1", command)))
+        # read by its spelling, a here-document's backslash-newlines joined as its views are;
+        # the raw text was searched above, so the joined one only when it differs
+        joined = _CONTINUED_LINE_RE.sub(r"\1", command)
+        return joined != command and bool(BASH_WRITE_SHAPES.search(joined))
     return bool(BASH_WRITE_SHAPES.search("\n".join(found[0] + found[1] + found[3])))
 
 
@@ -3392,6 +3407,27 @@ def lane_heredoc_denial(command, binding):
             "whose body holds a backslash or a line that leaves a quote open, or that the guard "
             "cannot read: bash may read it otherwise than the guard, so write the delimiter as "
             "<<'EOF'" % binding.task)
+
+
+def lane_spelling_denial(command, agent, binding, cwd=None):
+    """("BOUNDARY_VIOLATION", reason) for a Bash command of a session bound to a lane that the
+    masking reads by its spelling alone because its substitutions and here-documents nest
+    deeper than _NESTING_LIMIT or it spells $SUBST (_read_views), else None
+    [R-LANE-CROSS-WRITE]. Read by its spelling, the command skips the segment walk and the
+    built-ppl check, so a git or a ppl spelled otherwise than the spelling checks read would
+    pass: such a command is denied, after the here-document and git checks, which keep their
+    reasons. Decided before the write shapes are searched, which on a long command of git
+    words takes seconds."""
+    if not (isinstance(command, str) and binding.task and not binding.problem):
+        return None
+    why = _read_views(command)[1]
+    if why is None:
+        return None
+    return (lane_heredoc_denial(command, binding) or lane_git_denial(command, agent, binding, cwd)
+            or ("BOUNDARY_VIOLATION",
+                "lane %s may not run a command the guard can read only by its spelling, "
+                "since %s: write it with fewer nested substitutions, or name the variable "
+                "otherwise" % (binding.task, why)))
 
 
 def lane_git_denial(command, agent, binding, cwd=None):
@@ -3628,6 +3664,10 @@ def _decide(payload, argv=()):
     # The registry is read for the other lanes, the binding having read only this lane's
     # entry.
     if tool in WRITE_TOOLS or tool == "Bash":
+        refusal = (lane_spelling_denial(tool_input.get("command"), agent, binding(),
+                                        payload.get("cwd")) if tool == "Bash" else None)
+        if refusal:
+            return deny(*refusal)
         try:
             listed = lanes.read(_READ_LIMIT)
         except Exception:
@@ -3746,27 +3786,43 @@ def _decide(payload, argv=()):
                 return deny("BOUNDARY_VIOLATION", boundary.unknown_patterns_reason(task_id)
                             if patterns is None else reason)
         elif tool in READ_TOOLS:
-            raw = read_target_path(tool_input, payload)
+            # every path key the call carries is judged, whichever one the tool reads
+            named = [str(tool_input[key]) for key in READ_PATH_KEYS if tool_input.get(key)]
+            raws = named or [read_target_path(tool_input, payload)]
             glob = tool_input.get("pattern") if tool == "Glob" else None
-            for named in (raw, glob):
-                if isinstance(named, str) and _has_dotdot(named):
-                    return deny("BOUNDARY_VIOLATION", _dotdot_reason(tool, named))
-            # A relative path is the session's, so it resolves against the
-            # payload cwd, never the hook process's own.
-            target = _resolve_path_against_cwd(raw, payload.get("cwd"))
-            if not target:
-                return deny("BOUNDARY_VIOLATION",
-                            "ppl-test-worker's %s call names no resolvable path" % tool)
-            if targets_repo(target, state):
-                rel = relative_to_repo(target, state)
-                if not boundary.path_is_test_scoped(rel, read_patterns):
-                    if patterns is None:
-                        return deny("BOUNDARY_VIOLATION",
-                                    boundary.unknown_patterns_reason(task_id))
+            for each in raws + [glob]:
+                if isinstance(each, str) and _has_dotdot(each):
+                    return deny("BOUNDARY_VIOLATION", _dotdot_reason(tool, each))
+            # Claude Code trims a path before it reads it and the guard does not, so a blank
+            # at either end would place it against the session cwd, outside the repo in a lane
+            for each in named + [glob]:
+                if isinstance(each, str) and escape_paths.unclear(each):
                     return deny("BOUNDARY_VIOLATION",
-                                "ppl-test-worker may not read %s: only test sources are "
-                                "visible to it, reading the implementation is the exact "
-                                "channel this cage exists to close" % target)
+                                "ppl-test-worker gives %s %r, which starts or ends with "
+                                "whitespace or holds a control character that Claude Code may "
+                                "trim: spell the path plainly" % (tool, each))
+            # an absolute pattern lists what it names whatever the path
+            if isinstance(glob, str) and os.path.isabs(os.path.expanduser(glob)):
+                return deny("BOUNDARY_VIOLATION",
+                            "ppl-test-worker gives Glob the absolute pattern %s: pass the test "
+                            "directory as path and give a relative pattern" % glob)
+            for raw in raws:
+                # A relative path is the session's, so it resolves against the
+                # payload cwd, never the hook process's own.
+                target = _resolve_path_against_cwd(raw, payload.get("cwd"))
+                if not target:
+                    return deny("BOUNDARY_VIOLATION",
+                                "ppl-test-worker's %s call names no resolvable path" % tool)
+                if targets_repo(target, state):
+                    rel = relative_to_repo(target, state)
+                    if not boundary.path_is_test_scoped(rel, read_patterns):
+                        if patterns is None:
+                            return deny("BOUNDARY_VIOLATION",
+                                        boundary.unknown_patterns_reason(task_id))
+                        return deny("BOUNDARY_VIOLATION",
+                                    "ppl-test-worker may not read %s: only test sources are "
+                                    "visible to it, reading the implementation is the exact "
+                                    "channel this cage exists to close" % target)
 
     if agent == "ppl-reflector" and tool in READ_TOOLS:
         reason = reflector_read_denial(tool, tool_input, payload, task_id)

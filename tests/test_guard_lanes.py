@@ -1139,6 +1139,52 @@ class TestLaneProtection(LaneCase):
                         self.assertLess(time.perf_counter() - start, 0.5)
                         self.assertIn("git worktree", self.deny_reason(result))
 
+    def test_a_command_the_guard_reads_by_its_spelling_alone_is_denied_in_a_lane(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Final review, ledger 262: substitutions nested past the 32 levels the masking reads,
+        # or a command that spells the $SUBST mask word, are read by their spelling alone,
+        # which skips the segment walk and the built-ppl check, so a git or ppl spelled other
+        # than the spelling checks read it passed. Such a command is denied in a lane, for
+        # every session, naming the cause.
+        own = self.worktree[LANE_A]
+        deep = "echo " + "$(" * 33 + "true" + ")" * 33
+        for trigger, cause in ((deep + "; ", "nest deeper than 32"),
+                               ("echo $SUBST; ", "$SUBST")):
+            for tail in ("$G worktree prune", "git w''orktree prune",
+                         "$(echo ppl) show --task %s" % LANE_B, "ls"):
+                for agent in (None, "ppl-code-worker"):
+                    with self.subTest(command=trigger + tail, agent=agent):
+                        reason = self.deny_reason(self.bash(trigger + tail, agent=agent,
+                                                            cwd=own))
+                        self.assertIn("BOUNDARY_VIOLATION", reason)
+                        if tail == "ls":
+                            self.assertIn(cause, reason)
+        # read by the walk, the same spellings were denied before
+        for command in ("git w''orktree prune", "$(echo ppl) show --task %s" % LANE_B):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(walked=command, agent=agent):
+                    self.assertIn("BOUNDARY_VIOLATION",
+                                  self.deny_reason(self.bash(command, agent=agent, cwd=own)))
+        # outside a lane nothing changes
+        for command in (deep, "echo $SUBST"):
+            with self.subTest(no_lane=command):
+                self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": command},
+                                                           own)))
+
+    def test_a_long_command_read_by_its_spelling_is_decided_in_time(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Final review, ledger 263: a 32 KiB orchestrator command of git words behind
+        # substitutions nested past 32 levels took 9 s, the write shapes searched over it
+        # once per reading, and a timeout lets the call through. It is denied in a lane before
+        # any write shape is searched.
+        own = self.worktree[LANE_A]
+        command = ("echo " + "$(" * 33 + "true" + ")" * 33 + " git" * 8200)[:32 * 1024]
+        self.assertEqual(len(command), 32 * 1024)
+        start = time.perf_counter()
+        result = self.bash(command, cwd=own)
+        self.assertLess(time.perf_counter() - start, 1.0)
+        self.assertIn("nest deeper than 32", self.deny_reason(result))
+
     def test_an_assignment_that_ends_in_home_hands_git_no_config(self):
         # rule: R-LANE-CROSS-WRITE
         # R49: a GIT_CONFIG_*, HOME or XDG_CONFIG_HOME assignment is read at a word's start, so

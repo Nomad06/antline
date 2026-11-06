@@ -654,19 +654,23 @@ class TestLanesApi(panel_client.StudioTestCase):
         self.assertEqual(payload["lanes"], [])
         self.assertTrue(payload["error"])
 
-    def test_a_lane_whose_spend_cannot_be_read_has_an_empty_usd_and_the_response_stays_200(self):
+    def test_a_lane_whose_spend_cannot_be_read_says_so_and_the_response_stays_200(self):
+        # a failure reads "usd unreadable", never what no spend prints, and any exception the
+        # lane's own files raise stays in its row
         lanes._write([self._lane(1, "LN-1"), self._lane(2, "LN-2")])
         real = status_mod.usd_text
-
-        def usd_text(task):
-            if task == "LN-1":
-                raise PplError("SCHEMA_INVALID", "bad state")
-            return real(task)
-        with mock.patch.object(status_mod, "usd_text", usd_text):
-            code, payload, _ = panel_client.call("GET", "/api/lanes")
-        self.assertEqual(code, 200)
-        self.assertEqual(payload["lanes"][0]["usd"], "")
-        self.assertTrue(payload["lanes"][1]["usd"].startswith("usd "))
+        for error in (PplError("SCHEMA_INVALID", "bad state"), RecursionError("deep"),
+                      AttributeError("list has no get")):
+            def usd_text(task):
+                if task == "LN-1":
+                    raise error
+                return real(task)
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(status_mod, "usd_text", usd_text):
+                    code, payload, _ = panel_client.call("GET", "/api/lanes")
+                self.assertEqual(code, 200)
+                self.assertEqual(payload["lanes"][0]["usd"], "usd unreadable")
+                self.assertTrue(payload["lanes"][1]["usd"].startswith("usd "))
 
     def test_the_day_error_path_keeps_the_lanes_and_the_response_200(self):
         lanes._write([self._lane(1, "LN-1")])

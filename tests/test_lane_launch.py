@@ -930,6 +930,31 @@ class TestList(LaneCase):
         self.assertEqual((code, err), (0, ""))
         self.assertIn("no lanes", out)
 
+    def test_one_lanes_unparseable_state_breaks_neither_the_list_nor_the_lanes_page(self):
+        # Final review I2: a lane's sandbox can write its run's state.json, so a state no
+        # JSON parse reads stays that lane's problem, in ppl lane list and on /api/lanes
+        from ppl.panel import api_lanes
+        for lane, task in enumerate(("KEY-1", "KEY-2"), 1):
+            fixtures.bind_lane(task, self.project, lane=lane, harness=HARNESS)
+        store.write_json(run.state_path("KEY-1"), {"task_id": "KEY-1", "stage": "tests"})
+        paths.run_dir("KEY-2").mkdir(parents=True, exist_ok=True)
+        for name, text in fixtures.UNPARSEABLE_JSON.items():
+            run.state_path("KEY-2").write_text(text, encoding="utf-8")
+            with self.subTest(state=name):
+                code, out, err = call("lane", "list", "--json")
+                self.assertEqual(code, 0, err)
+                rows = {row["task"]: row for row in json.loads(out)}
+                self.assertEqual(sorted(rows), ["KEY-1", "KEY-2"])
+                self.assertEqual(rows["KEY-1"]["stage"], "tests")
+                answer = api_lanes.overview({}, None, {})
+                self.assertIsNone(answer["error"])
+                self.assertEqual([row["task"] for row in answer["lanes"]], ["KEY-1", "KEY-2"])
+                self.assertEqual(answer["lanes"][0]["stage"], "tests")
+                if name == "digits":
+                    self.assertEqual(rows["KEY-2"]["stage"], "unknown")
+                    self.assertIn("unreadable", rows["KEY-2"]["outcome"])
+                    self.assertEqual(answer["lanes"][1]["usd"], "usd unreadable")
+
 
 class TestClose(LaneCase):
     def merged(self, task=TASK, sha="b" * 40):

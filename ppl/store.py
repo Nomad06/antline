@@ -71,14 +71,19 @@ def read_json(path, default=None, limit=None):
     documented 0/2/1 contract - at whichever call site happens to read it
     first [R-STORE-CORRUPT-JSON]. It never blocks on a file that is not a
     regular one, and with `limit` reads none over that many bytes (read_regular_text).
+    Bytes that are not UTF-8, an integer past Python's digit limit (a plain ValueError) and
+    nesting too deep to parse (RecursionError) are SCHEMA_INVALID too: a run's files are in
+    its lane's sandbox scope, and a reader of every run must not stop on one.
     """
     try:
         text = read_regular_text(path, limit)
     except FileNotFoundError:
         return default
+    except UnicodeDecodeError as exc:
+        raise PplError("SCHEMA_INVALID", "%s is not UTF-8: %s" % (path, exc))
     try:
         return json.loads(text)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise PplError("SCHEMA_INVALID", "%s is not valid JSON: %s" % (path, exc))
 
 
@@ -194,7 +199,7 @@ def read_log_at(directory):
                     continue
                 try:
                     events.append(json.loads(line))
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
     except FileNotFoundError:
         pass

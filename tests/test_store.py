@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 # tests/ is not a package, so the helper next to this file is imported
@@ -50,6 +51,43 @@ class TestStore(unittest.TestCase):
         with self.assertRaises(PplError) as ctx:
             store.read_json(target)
         self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+
+    def test_every_way_a_document_fails_to_parse_is_a_routable_error(self):
+        # rule: R-STORE-CORRUPT-JSON
+        # Final review I2: an integer of more than 4,300 digits raises a plain ValueError on
+        # every supported Python, deep nesting RecursionError on 3.11-3.13, and bytes that are
+        # not UTF-8 UnicodeDecodeError. A run's state.json is in its lane's sandbox scope, so
+        # each one reached readers outside that run.
+        cases = {"digits.json": b"1" * 4301, "latin.json": b'{"a": "\xff"}'}
+        for name, data in cases.items():
+            target = paths.home() / name
+            target.write_bytes(data)
+            for limit in (None, store.HOOK_READ_LIMIT):
+                with self.subTest(name=name, limit=limit):
+                    with self.assertRaises(PplError) as ctx:
+                        store.read_json(target, None, limit)
+                    self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+        target = paths.home() / "deep.json"
+        target.write_text("{}", encoding="utf-8")
+        with mock.patch.object(store.json, "loads", side_effect=RecursionError("deep")):
+            with self.assertRaises(PplError) as ctx:
+                store.read_json(target)
+        self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+
+    def test_a_log_line_too_deep_to_parse_is_skipped(self):
+        directory = paths.home() / "deep-log"
+        directory.mkdir()
+        (directory / "log.jsonl").write_text('{"event": "a"}\n[[[deep]]]\n{"event": "b"}\n',
+                                             encoding="utf-8")
+        real = json.loads
+
+        def loads(text):
+            if text.startswith("[[["):
+                raise RecursionError("maximum recursion depth exceeded")
+            return real(text)
+        with mock.patch.object(store.json, "loads", loads):
+            events = store.read_log_at(directory)
+        self.assertEqual(events, [{"event": "a"}, {"event": "b"}])
 
     def test_write_json_accepts_a_str_path(self):
         target = str(paths.home() / "z.json")

@@ -19,7 +19,7 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
 
 import fixtures
-from ppl import boundary, control, harness, run, store, paths
+from ppl import boundary, control, harness, lanes, run, store, paths
 import ppl_guard
 import ppl_python_floor
 
@@ -609,6 +609,30 @@ class TestGuard(unittest.TestCase):
             ["--task", "DEMO-704"])
         self.assertIsNotNone(result)
         self.assertIn("OWNER_DECISION", self.deny_reason(result))
+
+    def test_a_run_state_no_json_parse_reads_denies_a_role_without_raising(self):
+        # rule: R-STATE-UNREADABLE-FAIL-CLOSED
+        # Final review I2: a 4,301-digit integer raises a plain ValueError and deep nesting
+        # RecursionError on 3.11-3.13. One that escaped bound_state reached main() as an
+        # internal error, which skipped every run-scoped check after it for the orchestrator.
+        run.init("DEMO-708", "u", "/tmp/repo2")
+        fixtures.bind_lane("DEMO-708", "/tmp/repo2")
+        state_file = paths.run_dir("DEMO-708") / "state.json"
+        for name, text in fixtures.UNPARSEABLE_JSON.items():
+            state_file.write_text(text, encoding="utf-8")
+            with self.subTest(state=name):
+                result = decide(payload("ppl-code-worker", "Bash", {"command": "ls"},
+                                        cwd="/tmp/repo2"), ["--task", "DEMO-708"])
+                self.assertIn("OWNER_DECISION", self.deny_reason(result))
+        for error in (RecursionError("deep"), ValueError("digits")):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(ppl_guard.run, "load", side_effect=error):
+                    result = decide(payload("ppl-code-worker", "Bash", {"command": "ls"},
+                                            cwd="/tmp/repo2"), ["--task", "DEMO-708"])
+                    self.assertIn("state is unreadable", self.deny_reason(result))
+                    # an unroled call is decided, not raised to main() as an internal error
+                    self.assertIsNone(decide(payload(None, "Bash", {"command": "ls"},
+                                                     cwd="/tmp/repo2"), ["--task", "DEMO-708"]))
 
     def test_broken_run_state_permits_a_non_pipeline_agent_without_raising(self):
         # A tool call with no recognised agent_type is not denied on that basis
@@ -1978,11 +2002,53 @@ class TestGuard(unittest.TestCase):
         result = decide(tool_call)
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
+    def test_test_worker_read_tools_refuse_a_path_claude_code_trims(self):
+        # rule: R-TEST-WORKER-READ-TOOLS
+        # In a lane the session cwd is the start directory, outside the repo. A path with a
+        # blank at either end is relative to the guard, so it was joined to that cwd and was
+        # never "in the repo", while Claude Code trims it and reads the implementation.
+        start = str(lanes.start_dir("DEMO-700"))
+        orders = "/tmp/repo/source/core/orders"
+        for blank in (" ", "\t", " "):
+            for spelled, source in ((blank + orders, blank + orders + "/Foo.java"),
+                                    (orders + blank, orders + "/Foo.java" + blank)):
+                calls = (("Read", {"file_path": source}),
+                         ("Grep", {"pattern": "x", "path": spelled}),
+                         ("Glob", {"pattern": "*.java", "path": spelled}),
+                         # every path key is judged, not only the first one present
+                         ("Grep", {"pattern": "x", "file_path": orders + "/src/test",
+                                   "path": spelled}))
+                for tool, tool_input in calls:
+                    with self.subTest(tool=tool, path=repr(spelled)):
+                        result = decide(payload("ppl-test-worker", tool, tool_input, cwd=start))
+                        self.assertIsNotNone(result, "the call was allowed")
+                        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                        self.assertIn("Claude Code may trim", self.deny_reason(result))
+
+    def test_test_worker_glob_with_an_absolute_pattern_is_denied(self):
+        # rule: R-TEST-WORKER-READ-TOOLS
+        # Glob lists what an absolute pattern names whatever its path, so a test directory as
+        # path, or none, listed main-source names
+        start = str(lanes.start_dir("DEMO-700"))
+        for tool_input in ({"pattern": "/tmp/repo/source/core/orders/**/*.java",
+                            "path": "/tmp/repo/source/core/orders/src/test"},
+                           {"pattern": "/tmp/repo/source/core/orders/*.java"},
+                           {"pattern": "~/repo/source/**/*.java",
+                            "path": "/tmp/repo/source/core/orders/src/test"}):
+            with self.subTest(tool_input=tool_input):
+                result = decide(payload("ppl-test-worker", "Glob", tool_input, cwd=start))
+                self.assertIsNotNone(result, "the call was allowed")
+                self.assertIn("absolute pattern", self.deny_reason(result))
+
     def test_test_worker_glob_over_test_sources_is_allowed(self):
         self.assertIsNone(decide(payload(
             "ppl-test-worker", "Glob",
             {"pattern": "**/*Test.java",
              "path": "/tmp/repo/source/core/orders/src/test"})))
+        self.assertIsNone(decide(payload(
+            "ppl-test-worker", "Glob",
+            {"pattern": "**/*Test.java", "path": "/tmp/repo/source/core/orders/src/test"},
+            cwd=str(lanes.start_dir("DEMO-700")))))
 
     def test_test_worker_reading_the_brief_outside_the_repo_is_allowed(self):
         target = str(paths.run_dir("DEMO-700") / "brief.json")

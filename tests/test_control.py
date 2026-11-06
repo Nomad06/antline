@@ -5,6 +5,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # tests/ is not a package, so the helper next to this file is imported
 # by path. It must be imported before PPL_HOME is chosen below.
@@ -736,6 +737,80 @@ class TestDestroyCleansUpTheLane(unittest.TestCase):
             run.destroy("DEMO-476", "local")
         self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
         self.assertIn("DEMO-476", caught.exception.message)
+
+    def test_a_lane_whose_state_cannot_be_parsed_is_destroyed_all_the_same(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Final review I2: destroy takes the worktree from the lane's entry or record, so a
+        # state.json its sandbox made unparseable holds neither the slot nor the cleanup, for
+        # a live lane and for one ppl lane close freed. Its own data root: the archived states
+        # are no other test's business.
+        self.enterContext(mock.patch.dict(os.environ,
+                                          {"PPL_HOME": tmphome.mkdtemp(prefix="pplhome-")}))
+        main = self.checkout()
+        tasks = iter(("DEMO-510", "DEMO-511", "DEMO-512", "DEMO-513"))
+        for name, text in sorted(fixtures.UNPARSEABLE_JSON.items()):
+            for closed in (False, True):
+                task = next(tasks)
+                with self.subTest(state=name, closed=closed):
+                    entry, tree = self.lane(task, main, record_branch=True)
+                    run.init(task, "u", str(tree))
+                    run.state_path(task).write_text(text, encoding="utf-8")
+                    if closed:
+                        lanes.release(task)
+                    result = run.destroy(task, "local")
+                    self.assertEqual((result["worktree"], result["branch"], result["status"],
+                                      result["start_dir"]),
+                                     ("removed", "deleted", "archived", "removed"))
+                    self.assertEqual(result["lane"], "none" if closed else "released")
+                    self.assertIsNone(lanes.entry(task))
+                    self.assertFalse(tree.exists())
+                    self.assertFalse(os.path.lexists(entry["start_dir"]))
+
+    def test_a_worktree_a_role_locked_is_removed(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Final review I3: R35 leaves the lane's own .git/worktrees/<id> writable, and a lock
+        # planted there made one --force refuse, so destroy freed the slot and deleted the
+        # record while the worktree and branch stayed. A lock is a planted cleanup blocker
+        # (R19): two --force take a locked worktree.
+        main = self.checkout()
+        entry, tree = self.lane("DEMO-514", main, record_branch=True)
+        run.init("DEMO-514", "u", str(tree))
+        git_dir = Path(self.git(tree, "rev-parse", "--absolute-git-dir"))
+        (git_dir / "locked").write_text("planted\n", encoding="utf-8")
+        result = run.destroy("DEMO-514", "local")
+        self.assertEqual((result["worktree"], result["branch"], result["lane"],
+                          result["start_dir"]), ("removed", "deleted", "released", "removed"))
+        self.assertNotIn("worktree_error", result)
+        self.assertFalse(tree.exists())
+        self.assertNotIn("DEMO-514-work", self.branches(main))
+
+    def test_a_worktree_left_behind_keeps_the_record_for_the_retry(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Final review I3: a worktree destroy could not remove keeps the start directory and
+        # its lane.json, as a run directory left behind does, so the retry reads the record
+        main = self.checkout()
+        entry, tree = self.lane("DEMO-515", main, record_branch=True)
+        run.init("DEMO-515", "u", str(tree))
+        real = run._git
+
+        def git(directory, args):
+            if args[:2] == ["worktree", "remove"]:
+                return subprocess.CompletedProcess(args, 128, "", "fatal: cannot remove it")
+            return real(directory, args)
+        with mock.patch.object(run, "_git", git):
+            first = run.destroy("DEMO-515", "local")
+        self.assertEqual((first["worktree"], first["lane"], first["start_dir"]),
+                         ("left_behind", "released", "kept"))
+        self.assertIn("cannot remove it", first["worktree_error"])
+        self.assertIsNone(lanes.entry("DEMO-515"))
+        self.assertTrue(lanes.record_path("DEMO-515").is_file())
+        self.assertTrue(tree.is_dir())
+        second = run.destroy("DEMO-515", "local")
+        self.assertEqual((second["worktree"], second["branch"], second["start_dir"]),
+                         ("removed", "deleted", "removed"))
+        self.assertFalse(tree.exists())
+        self.assertNotIn("DEMO-515-work", self.branches(main))
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
 
 
 if __name__ == "__main__":

@@ -8,11 +8,17 @@ from ..errors import PplError
 SHOWN = ("lane", "task", "harness", "stage", "outcome", "alive", "resume")
 
 
+# What the page shows for a lane whose spend cannot be read, which no spend would print as.
+USD_UNREADABLE = "usd unreadable"
+
+
 def _usd(task):
+    """The lane's spend line. Display only: the lane's sandbox can write the run's files, so
+    whatever reading them raises is that lane's row and stops no other."""
     try:
         return status.usd_text(task)
-    except (PplError, OSError, ValueError, KeyError, TypeError):
-        return ""
+    except Exception:
+        return USD_UNREADABLE
 
 
 def _day():
