@@ -115,7 +115,7 @@ def _legacy_run_problem():
 
 
 def _day_cap_problem():
-    """Why the day's spend blocks a new lane, or None [R-BUDGET-USD-PER-DAY]."""
+    """(code, reason) for why the day's spend blocks a new lane, or None [R-BUDGET-USD-PER-DAY]."""
     return usage.day_cap_problem()
 
 
@@ -345,7 +345,7 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
         raise PplError("OWNER_DECISION", problem)
     problem = _day_cap_problem()
     if problem:
-        raise PplError("BUDGET_EXHAUSTED", problem)
+        raise PplError(*problem)
     name = _resolve_harness(harness_name, cwd)
     binary = _binary()
     routing_config = routing.load()

@@ -351,10 +351,10 @@ def check_usd_budget(task_id):
     and ppl park stays available. The machine-wide day cap is checked first, whatever
     the run's own cap [R-BUDGET-USD-PER-DAY].
     """
-    problem = usage.day_cap_problem()
+    problem = usage.day_cap_problem(task_id)
     if problem:
-        raise PplError("BUDGET_EXHAUSTED", "%s Park the task with a handoff (ppl park) instead "
-                       "of continuing." % problem)
+        raise PplError(problem[0], "%s Park the task with a handoff (ppl park) instead "
+                       "of continuing." % problem[1])
     budgets = run.load(task_id)["budgets"]
     cap = budgets["usd_max"]
     if not cap > 0:

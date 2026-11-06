@@ -376,6 +376,7 @@ def spent_usd(task_id):
 
 DAY_LOG_LIMIT = 16 * 1024 * 1024
 UNREADABLE = "unreadable: "
+BLOCKED = "blocked: "
 
 
 def _local_midnight(now):
@@ -410,27 +411,31 @@ def _log_events(directory):
     return events
 
 
-def _since(now_counts, before_counts):
-    return {name: max(0, now_counts.get(name, 0) - before_counts.get(name, 0))
-            for name in now_counts}
-
-
-def _models_since(latest, baseline):
-    """The models of `latest` less those of `baseline`, a model that did not grow left out."""
+def _delta(reading, previous):
+    """What `reading` (cumulative counts per model) adds over `previous`. A count below its
+    previous value is a counter reset (the agent restarted) and counts in full, from zero:
+    never a negative delta, never clamped away. Models that added nothing are left out."""
     out = {}
-    for model, counts in latest.items():
-        delta = _since(counts, baseline.get(model, {}) if isinstance(baseline.get(model), dict)
-                       else {})
-        if any(is_count(value) and value > 0 for value in delta.values()):
-            out[model] = delta
+    for model, counts in reading.items():
+        if not isinstance(counts, dict) or not all(is_count(v) for v in counts.values()):
+            raise ValueError("malformed counts for %s" % model)
+        before = previous.get(model) if isinstance(previous.get(model), dict) else {}
+        added = {}
+        for name, value in counts.items():
+            if not is_count(value):
+                continue
+            base = before.get(name, 0) if is_count(before.get(name, 0)) else 0
+            added[name] = value - base if value >= base else value
+        if any(value > 0 for value in added.values()):
+            out[model] = added
     return out
 
 
 def _spent_today_in(directory, midnight):
-    """(models spent since `midnight`, in the order logged) of one run directory. Usage events are
-    cumulative per agent, so an agent's spend is its last reading today less its last reading
-    before midnight."""
-    before, latest = {}, {}
+    """The models one run directory spent since `midnight`. Usage events are cumulative per
+    agent: an agent's spend is each reading today over the one before it, the last one before
+    midnight starting the count."""
+    previous, models = {}, {}
     for event in _log_events(directory):
         if not isinstance(event, dict) or event.get("event") != "usage":
             continue
@@ -439,27 +444,64 @@ def _spent_today_in(directory, midnight):
         key, stamp = event.get("agent_id"), _epoch(event.get("at"))
         if not isinstance(key, str) or stamp is None:
             continue
-        (latest if stamp >= midnight else before)[key] = event["models"]
-    models = {}
-    for key, readings in latest.items():
-        models = add(models, _models_since(readings, before.get(key, {})))
+        if stamp >= midnight:
+            models = add(models, _delta(event["models"], previous.get(key, {})))
+        previous[key] = event["models"]
     return models
 
 
-def spent_today(now=None):
+def _frozen(directory):
+    state = store.read_json(os.path.join(str(directory), "state.json"), None, DAY_LOG_LIMIT)
+    budgets = state.get("budgets") if isinstance(state, dict) else None
+    table = budgets.get("prices") if isinstance(budgets, dict) else None
+    if not (isinstance(table, dict) and table):
+        return None
+    for model, entry in table.items():
+        ok = isinstance(entry, dict) and all(
+            name in entry and is_count(entry[name]) and entry[name] >= 0 for name in COUNTS)
+        if not ok:
+            raise ValueError("prices.%s is malformed" % model)
+    return table
+
+
+def _scan_dirs():
+    """[(name, directory, live)]. A live run is a directory under runs/ with a state.json or a
+    log.jsonl, the ones a lane's sandbox can write; an archived one lies under runs/_archive."""
+    root = paths.runs_dir()
+    found = []
+    if root.is_dir():
+        for entry in sorted(root.iterdir()):
+            if entry.name != "_archive" and entry.is_dir() and (
+                    os.path.lexists(str(entry / "state.json"))
+                    or os.path.lexists(str(entry / "log.jsonl"))):
+                found.append((entry.name, entry, True))
+        archive = root / "_archive"
+        if archive.is_dir():
+            found.extend((entry.name, entry, False) for entry in sorted(archive.iterdir())
+                         if entry.is_dir())
+    return found
+
+
+def spent_today(now=None, task=None):
     """(usd, issues): what every run, live or archived, spent since local midnight, each run
-    priced with the prices `ppl init` froze into it. usd is None when a model that spent today
-    has no price, and `issues` then names those models, plus a run dir whose log or state cannot
-    be read, listed as 'unreadable: <dir>' and skipped, never a crash."""
-    from ppl import metrics, trail
+    priced with the prices `ppl init` froze into it. issues name a model that spent today
+    without a price (usd is then None), 'blocked: <task>' for the checked run when its state,
+    log or prices cannot be used, and 'unreadable: <name>' for any other such run, which is
+    skipped. Nothing here raises for one bad run. With `task`, the check is for that run: a
+    problem in its own state, log or prices is 'blocked', and in any other run, live or archived,
+    the run is skipped and named 'unreadable', so one corrupt run never stops the others."""
     midnight = _local_midnight(now)
     usd, issues = 0.0, []
-    for task_id, directory in metrics._run_records():
+    try:
+        scan = _scan_dirs()
+    except OSError:
+        return None, [BLOCKED + "runs"]
+    for name, directory, live in scan:
         try:
             models = _spent_today_in(directory, midnight)
-            frozen = trail._frozen_prices(directory)
-        except (PplError, OSError, UnicodeDecodeError):
-            issues.append(UNREADABLE + str(task_id))
+            frozen = _frozen(directory)
+        except Exception:
+            issues.append((BLOCKED if name == task and live else UNREADABLE) + name)
             continue
         if not models:
             continue
@@ -467,31 +509,45 @@ def spent_today(now=None):
         if unpriced:
             issues.extend(model for model in unpriced if model not in issues)
         else:
-            usd += spent
-    unpriced = [item for item in issues if not item.startswith(UNREADABLE)]
-    return (None if unpriced else usd), issues
+            usd += max(0.0, spent)
+    if not math.isfinite(usd):
+        usd = math.inf
+    models = [item for item in issues if not item.startswith((UNREADABLE, BLOCKED))]
+    blocked = [item for item in issues if item.startswith(BLOCKED)]
+    return (None if models or blocked else usd), issues
 
 
-def day_cap_problem():
-    """Why today's spend blocks a start or a transition, or None [R-BUDGET-USD-PER-DAY]. No
-    cap, 0 or absent, never blocks. A model that spent today without a price leaves the sum
-    uncomputable, and a cap that cannot be computed is refused, as the per-run cap does."""
+def day_cap_problem(task=None):
+    """None, or (code, message) for why today's spend blocks a start or a transition
+    [R-BUDGET-USD-PER-DAY]. No cap, 0 or absent, never blocks. Over the cap is BUDGET_EXHAUSTED.
+    OWNER_DECISION, as R-BUDGET-USD-UNPRICED, when the sum cannot be computed: a model that spent
+    today has no price in its run, or the checked run's own log, state or prices (`task`) cannot
+    be read or are malformed. Any other run that cannot be is skipped and named.""" 
     cap = config.budgets_usd_max_per_day()
     if not cap > 0:
         return None
-    spent, issues = spent_today()
+    spent, issues = spent_today(task=task)
     reset = ("It resets after local midnight, or when the owner raises [budgets] "
              "usd_max_per_day in %s." % paths.config_file())
-    unpriced = [item for item in issues if not item.startswith(UNREADABLE)]
+    blocked = [item[len(BLOCKED):] for item in issues if item.startswith(BLOCKED)]
+    if blocked:
+        return ("OWNER_DECISION",
+                "the day cap (usd_max_per_day %s) cannot be checked: the log, state or prices of "
+                "the run%s %s cannot be read, are malformed or are over the %d byte read cap. "
+                "Repair or destroy %s. %s" % (cap, "s" if len(blocked) > 1 else "", ", ".join(blocked),
+                            DAY_LOG_LIMIT, "them" if len(blocked) > 1 else "it", reset))
+    unpriced = [item for item in issues if not item.startswith((UNREADABLE, BLOCKED))]
     if unpriced:
-        return ("the day cap (usd_max_per_day %s) cannot be checked: today's usage has no price "
+        return ("OWNER_DECISION",
+                "the day cap (usd_max_per_day %s) cannot be checked: today's usage has no price "
                 "in the run's table for %s. Add %s to %s and start a new run. %s"
                 % (cap, ", ".join(unpriced),
                    ", ".join('[prices."%s"]' % model for model in unpriced),
                    paths.config_file(), reset))
     if spent >= cap:
         skipped = [item for item in issues if item.startswith(UNREADABLE)]
-        return ("the day cap is reached: %s USD spent since local midnight across every run, "
+        return ("BUDGET_EXHAUSTED",
+                "the day cap is reached: %s USD spent since local midnight across every run, "
                 "usd_max_per_day is %s.%s %s"
                 % (round(spent, 4), cap,
                    " Not counted, %s." % ", ".join(skipped) if skipped else "", reset))

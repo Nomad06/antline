@@ -2714,7 +2714,9 @@ Only the exit-code rule has code behind it, the rest are recipes rendered into t
   or absent meaning none, is the dollars every run, live or archived, spent since local midnight,
   each priced with its own frozen prices. At or over it `ppl stage enter`, `ppl transition` and
   `ppl lane` refuse with `BUDGET_EXHAUSTED`, naming the day cap and the day's spend and saying
-  it resets after local midnight or when the owner raises it [R-BUDGET-USD-PER-DAY]. Like the dispatch cap
+  it resets after local midnight or when the owner raises it. A model with no price, or a
+  state, log or price table of the checked run that cannot be used, is `OWNER_DECISION`, and
+  another run that cannot be used is skipped and named [R-BUDGET-USD-PER-DAY]. Like the dispatch cap
   the check comes after the fact: what a dispatch costs is known only once its role stops, so the
   dispatch that crosses the cap has already run when the next stage boundary refuses
   [R-BUDGET-USD-CAP] [R-BUDGET-USD-BEFORE-DISPATCH n/a].

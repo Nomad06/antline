@@ -1396,8 +1396,32 @@ class TestUsdCap(unittest.TestCase):
         code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-5")
         self.assertEqual(code, 2, err)
         error = json.loads(err)
-        self.assertEqual(error["error_code"], "BUDGET_EXHAUSTED")
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
         self.assertIn('[prices."n"]', error["message"])
+
+    def test_the_day_cap_is_refused_from_the_real_usage_log(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.start("DAYCAP-6", 0.0, per_day=1.0)
+        self.record_usage("DAYCAP-6", 1200000)
+        # the shared test home holds the runs of other tests: scan this run's own directory
+        only = [("DAYCAP-6", paths.run_dir("DAYCAP-6"), True)]
+        self.enterContext(mock.patch.object(usage, "_scan_dirs", return_value=only))
+        code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-6")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "BUDGET_EXHAUSTED")
+        self.assertIn("usd_max_per_day", error["message"])
+
+    def test_a_live_run_whose_log_is_over_the_read_cap_is_refused_owner_decision(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.start("DAYCAP-7", 0.0, per_day=100.0)
+        self.record_usage("DAYCAP-7", 1)
+        with mock.patch.object(usage, "DAY_LOG_LIMIT", 10):
+            code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-7")
+        self.assertEqual(code, 2, err)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        self.assertIn("DAYCAP-7", error["message"])
 
     def test_below_the_day_cap_a_stage_enters(self):
         # rule: R-BUDGET-USD-PER-DAY
