@@ -830,6 +830,29 @@ class TestLaneProtection(LaneCase):
         self.assertIsNone(self.bash(commit, agent="ppl-code-worker", cwd=self.worktree[LANE_A]))
         self.assertIsNone(self.bash(commit, cwd=self.worktree[LANE_A]))
 
+    def test_a_here_document_body_bash_expands_is_read_by_its_spelling_too(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R43: a body is judged as written, without bash's here-document expansion, so one
+        # whose delimiter is unquoted and that holds a backslash, or that leaves a quote open
+        # across a line, is also read by its spelling, raw and with its backslashes taken out
+        own = self.worktree[LANE_A]
+        for command in ("bash <<EOF\ngit work\\\\tree prune\nEOF",
+                        "bash <<EOF\ngit work\\\ntree prune\nEOF",
+                        "bash <<'EOF'\ngit \"\nworktree\" prune\nEOF"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("git worktree", reason)
+        reason = self.deny_reason(self.bash("bash <<EOF\ngit con\\\\fig core.hooksPath /x\nEOF",
+                                            agent="ppl-code-worker", cwd=own))
+        self.assertIn("may not write git config", reason)
+        for command in ("bash <<'EOF'\ngit status\nEOF",
+                        "git commit -m \"$(cat <<'EOF'\nFix config handling\n\nworktree notes\n"
+                        "EOF\n)\""):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker", cwd=own))
+
     def test_a_hyphenated_git_writer_is_a_write_shape(self):
         # rule: R-LANE-CROSS-WRITE
         # rule: R-GUARD-BASH-WRITE-BOUNDARY

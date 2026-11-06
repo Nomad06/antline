@@ -2856,13 +2856,16 @@ def _heredoc_feeds_interpreter(prefix):
     return False
 
 
-def _mask_text(text, i, closer, inner, fed):
+def _mask_text(text, i, closer, inner, fed, loose):
     """(text[i:] up to `closer` outside quotes, with each $(...) and backtick replaced by the
     word $SUBST and the text inside each appended to `inner`, the index after `closer`). Every
     here-document body is taken out of the text and appended to `inner` as commands, masked the
     same way, whatever its consumer, its delimiter's quoting or its pipeline; one fed to an
-    interpreter is appended to `fed` as well. Raises _Unreadable on a substitution or a
-    here-document left open."""
+    interpreter is appended to `fed` as well. A body is masked as written, without bash's
+    here-document expansion, so one whose delimiter is unquoted and that holds a backslash,
+    or one that leaves a quote open across a line, is appended to `loose` too, raw and with
+    its backslashes taken out, to be read by its spelling [R-LANE-CROSS-WRITE]. Raises
+    _Unreadable on a substitution or a here-document left open."""
     out, pending = [], []
     quote, depth, n = None, 0, len(text)
     while i < n:
@@ -2880,12 +2883,12 @@ def _mask_text(text, i, closer, inner, fed):
                 closer == "`" or depth == 0):
             return "".join(out), i + 1
         if text.startswith("$(", i):
-            body, i = _mask_text(text, i + 2, ")", inner, fed)
+            body, i = _mask_text(text, i + 2, ")", inner, fed, loose)
             inner.append(body)
             out.append("$SUBST")
             continue
         if char == "`":
-            body, i = _mask_text(text, i + 1, "`", inner, fed)
+            body, i = _mask_text(text, i + 1, "`", inner, fed, loose)
             inner.append(body)
             out.append("$SUBST")
             continue
@@ -2897,15 +2900,16 @@ def _mask_text(text, i, closer, inner, fed):
             match = _HEREDOC_OP_RE.match(text, i)
             if match:
                 word = next(group for group in match.groups()[1:] if group is not None)
+                quoted = any(match.group(index) is not None for index in (2, 3, 4))
                 pending.append((match.group(1) == "-", word,
-                                _heredoc_feeds_interpreter("".join(out))))
+                                _heredoc_feeds_interpreter("".join(out)), quoted))
                 out.append(match.group())
                 i = match.end()
                 continue
         elif quote is None and char == "\n" and pending:
             out.append(char)
             i += 1
-            for strip_tabs, word, interpreted in pending:
+            for strip_tabs, word, interpreted, quoted in pending:
                 body = []
                 while True:
                     if i >= n:
@@ -2920,8 +2924,12 @@ def _mask_text(text, i, closer, inner, fed):
                 text_of_body = "\n".join(body)
                 if interpreted:
                     fed.append(text_of_body)
+                if ((not quoted and "\\" in text_of_body)
+                        or any(_outside_quotes(line) is None for line in body)):
+                    loose.extend([text_of_body,
+                                  text_of_body.replace("\\\n", "").replace("\\", "")])
                 try:
-                    inner.append(_mask_text(text_of_body, 0, None, inner, fed)[0])
+                    inner.append(_mask_text(text_of_body, 0, None, inner, fed, loose)[0])
                 except _Unreadable:
                     # a $( or a backtick left open in the body: kept raw, read by its spelling
                     inner.append(text_of_body)
@@ -2942,13 +2950,14 @@ def _command_views(command):
     """([the command with every $(...) and backtick masked to the word $SUBST and every
     here-document body taken out, then the same of the text inside each substitution and of
     each here-document body, judged as commands line by line], [each here-document body fed
-    to an interpreter]), or None when one is left open (_mask_text)."""
-    inner, fed = [], []
+    to an interpreter], [each body to be read by its spelling as well]), or None when one is
+    left open (_mask_text)."""
+    inner, fed, loose = [], [], []
     try:
-        outer, _ = _mask_text(command, 0, None, inner, fed)
+        outer, _ = _mask_text(command, 0, None, inner, fed, loose)
     except _Unreadable:
         return None
-    return [outer] + inner, fed
+    return [outer] + inner, fed, loose
 
 
 def _lane_git_segments(command, cwd):
@@ -2959,8 +2968,8 @@ def _lane_git_segments(command, cwd):
     found = _command_views(command)
     if found is None:
         return [], [command], []
-    views, fed = found
-    segments, unread = [], []
+    views, fed, loose = found
+    segments, unread = [], list(loose)
     for view in views:
         if "$(" in view or "`" in view:
             # a substitution the masking could not see, as in a here-document body after an
