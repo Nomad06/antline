@@ -34,6 +34,6 @@ work is done, so a failure here leaves it as it is.
    cleared its pending marker, so end the reflection quietly.
 5. The proposals change nothing yet. The owner reviews them with `ppl lessons list` and
    decides, and a lesson takes effect only after the owner accepts it and applies the
-   harness [R-LESSONS-OWNER-ACCEPTS]. A run starts from the lessons frozen at its own
-   `ppl init` [R-MEMORY-APPLIED]. Leave the deciding and the applying to the owner, even
+   harness [R-LESSONS-OWNER-ACCEPTS]. A run starts from the lessons of the harness commit
+   its lane exported [R-MEMORY-APPLIED]. Leave the deciding and the applying to the owner, even
    when the operator asks you to hurry.

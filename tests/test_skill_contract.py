@@ -212,7 +212,9 @@ def walk(steps, stage, status, blockers=()):
 def _walk(steps, stage, status, blockers=()):
     """(walk's answer, the (stage, status) the run ended in)"""
     task_id = "WALK-%d" % next(_walks)
-    with mock.patch.dict(os.environ, {"PPL_HOME": tmphome.mkdtemp(prefix="pplwalk-")}), \
+    # PPL_TASK as the lane's session has it, so a step without --task works on this run
+    with mock.patch.dict(os.environ, {"PPL_HOME": tmphome.mkdtemp(prefix="pplwalk-"),
+                                      "PPL_TASK": task_id}), \
             mock.patch.object(gitfacts, "head_sha", return_value=WALK_SHA), \
             mock.patch.object(gitfacts, "changed_paths", return_value=[]), \
             mock.patch.object(verdict, "done_blockers", return_value=list(blockers)):

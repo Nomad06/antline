@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -22,16 +23,17 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 # cmd_init consults doctor.registration(), which otherwise reads this
 # machine's real ~/.claude/settings.json and this process's real cwd. Pointed
 # at empty tmp directories, registration() is deterministically "none" for
-# every ordinary test in this module - isolated=true's default refusal fires
-# only on "global", so "none" never trips it. Tests that exercise doctor
-# itself override these per-test and restore them.
+# every ordinary test in this module, so no matcher or hook-shape refusal
+# trips. Tests that exercise doctor itself override these per-test and
+# restore them.
 os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 os.environ["PPL_LOCAL_SETTINGS_DIR"] = tmphome.mkdtemp(prefix="ppllocalsettings-")
 
 import fixtures
 import ppl
 from ppl.errors import PplError
-from ppl import boundary, cli, config, doctor, models as ppl_models, paths, setup
+from ppl import (boundary, cli, config, doctor, lanes, models as ppl_models, paths, run,
+                 setup)
 
 ROUTING_EXAMPLE = Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "defaults" / "routing.example.toml"
 MODULE_HOME = os.environ["PPL_HOME"]
@@ -59,7 +61,7 @@ def seed_setup():
 
 
 def setUpModule():
-    """Every ordinary `call("init", ...)` below runs against a home whose models
+    """Every ordinary `init_in_lane(...)` below runs against a home whose models
     are verified and whose setup is complete, so the init gates only bite where
     a test removes that.
 
@@ -89,6 +91,18 @@ def call(*args):
     with redirect_stdout(out), redirect_stderr(err):
         code = cli.main(list(args))
     return code, out.getvalue(), err.getvalue()
+
+
+def init_in_lane(task_id, *flags):
+    """`ppl init` as a lane's session runs it: the task's lane bound first, with the --repo value
+    as its worktree and the --harness value as its harness (example-maven when none is passed),
+    and PPL_TASK naming it for this call only."""
+    flags = list(flags)
+    repo = flags[flags.index("--repo") + 1] if "--repo" in flags else "/tmp/repo"
+    name = flags[flags.index("--harness") + 1] if "--harness" in flags else "example-maven"
+    fixtures.bind_lane(task_id, repo, harness=name)
+    with mock.patch.dict(os.environ, {"PPL_TASK": task_id}):
+        return call("init", task_id, *flags)
 
 
 def make_repo():
@@ -144,7 +158,7 @@ def stamp_challenge(task_id):
 
 class TestCli(unittest.TestCase):
     def test_init_then_show(self):
-        code, out, _ = call("init", "DEMO-600", "--tracker-url", "u", "--repo", "/tmp/repo",
+        code, out, _ = init_in_lane("DEMO-600", "--tracker-url", "u", "--repo", "/tmp/repo",
                             "--harness", "example-maven")
         self.assertEqual(code, 0)
         code, out, _ = call("show", "--task", "DEMO-600", "--json")
@@ -156,21 +170,14 @@ class TestCli(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_status_prints_the_card(self):
-        call("init", "DEMO-601", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-601", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, out, _ = call("status", "--task", "DEMO-601")
         self.assertEqual(code, 0)
         self.assertIn("Needs you:", out)
 
-    def test_task_defaults_to_the_active_run(self):
-        call("init", "DEMO-602", "--tracker-url", "u", "--repo", "/tmp/repo",
-             "--harness", "example-maven")
-        code, out, _ = call("status")
-        self.assertEqual(code, 0)
-        self.assertIn("DEMO-602", out)
-
     def test_control_set_and_get(self):
-        call("init", "DEMO-603", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-603", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         self.assertEqual(call("control", "set", "pause", "--task", "DEMO-603")[0], 0)
         code, out, _ = call("control", "get", "--task", "DEMO-603")
@@ -179,7 +186,7 @@ class TestCli(unittest.TestCase):
 
     def test_paused_run_refuses_stage_enter(self):
         # rule: R-OPERATOR-HALT-CLI
-        call("init", "DEMO-604", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-604", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         call("control", "set", "pause", "--task", "DEMO-604")
         code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-604")
@@ -193,7 +200,7 @@ class TestCli(unittest.TestCase):
                         if isinstance(a, argparse._SubParsersAction))
         stage = next(a for a in commands.choices["stage"]._actions if a.dest == "stage")
         self.assertEqual(tuple(stage.choices), fsm.STAGES)
-        call("init", "DEMO-6070", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-6070", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("stage", "enter", "basline", "--task", "DEMO-6070")
         self.assertEqual(code, 2)
@@ -203,7 +210,7 @@ class TestCli(unittest.TestCase):
 
     def test_a_run_can_walk_from_init_to_a_lifecycle_transition(self):
         from ppl import run as run_module
-        call("init", "DEMO-605", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-605", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         for stage in ["baseline", "briefing", "implementation", "tests", "gates"]:
             code, _, err = call("stage", "enter", stage, "--task", "DEMO-605")
@@ -233,7 +240,7 @@ class TestCli(unittest.TestCase):
 
     def test_recover_halts_with_owner_decision_when_operator_pauses(self):
         repo = make_repo()
-        call("init", "DEMO-610", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-610", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("control", "set", "pause", "--task", "DEMO-610")
         code, out, err = call("recover", "--task", "DEMO-610")
         self.assertEqual(code, 2)
@@ -244,14 +251,14 @@ class TestCli(unittest.TestCase):
     def test_recover_halts_with_owner_decision_when_control_file_is_unusable(self):
         from ppl import paths, store
         repo = make_repo()
-        call("init", "DEMO-611", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-611", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         store.write_json(paths.run_dir("DEMO-611") / "control.json", {"command": "pause"})
         code, out, err = call("recover", "--task", "DEMO-611")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "OWNER_DECISION")
 
     def test_recover_exits_two_when_reconcile_reports_blocked(self):
-        call("init", "DEMO-612", "--tracker-url", "u", "--repo", "/tmp/definitely-not-a-repo-xyz",
+        init_in_lane("DEMO-612", "--tracker-url", "u", "--repo", "/tmp/definitely-not-a-repo-xyz",
              "--harness", "example-maven")
         code, out, err = call("recover", "--task", "DEMO-612")
         self.assertEqual(code, 2)
@@ -269,7 +276,7 @@ class TestCli(unittest.TestCase):
         # forever here - the run is already parked, and retrying creates
         # nothing. SCHEMA_INVALID's remedy ("create it now") is the one that
         # actually gets unstuck.
-        call("init", "DEMO-6231", "--tracker-url", "u", "--repo", "/tmp/definitely-not-a-repo-xyz",
+        init_in_lane("DEMO-6231", "--tracker-url", "u", "--repo", "/tmp/definitely-not-a-repo-xyz",
              "--harness", "example-maven")
         code, _, err = call("park", "--blocker", "OWNER_DECISION",
                             "--safe-next", "waiting on the owner", "--task", "DEMO-6231")
@@ -286,7 +293,7 @@ class TestCli(unittest.TestCase):
         # condition - EXTERNAL_BLOCKED, whose "park, retry on the next tick"
         # remedy still fits that shape.
         plain_dir = tmphome.mkdtemp(prefix="not-a-repo-")
-        call("init", "DEMO-6232", "--tracker-url", "u", "--repo", plain_dir,
+        init_in_lane("DEMO-6232", "--tracker-url", "u", "--repo", plain_dir,
              "--harness", "example-maven")
         code, out, err = call("recover", "--task", "DEMO-6232")
         self.assertEqual(code, 2)
@@ -294,7 +301,7 @@ class TestCli(unittest.TestCase):
 
     def test_recover_exits_zero_when_nothing_is_wrong(self):
         repo = make_repo()
-        call("init", "DEMO-613", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-613", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         code, out, err = call("recover", "--task", "DEMO-613")
         self.assertEqual(code, 0, err)
 
@@ -302,7 +309,7 @@ class TestCli(unittest.TestCase):
 
     def test_baseline_records_the_branch_alongside_base_sha(self):
         repo = make_repo()
-        call("init", "DEMO-614", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-614", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-614")
         base = head_sha(repo)
         commit(repo, "work.txt", "work\n")
@@ -319,7 +326,7 @@ class TestCli(unittest.TestCase):
     def test_evidence_defaults_producer_when_not_given(self):
         from ppl import evidence
         repo = make_repo()
-        call("init", "DEMO-615", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-615", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         rc_file = tempfile.mkstemp()[1]
         Path(rc_file).write_text("0", encoding="utf-8")
         log_file = tempfile.mkstemp()[1]
@@ -337,7 +344,7 @@ class TestCli(unittest.TestCase):
 
     def test_approval_reports_none_when_no_approval_is_recorded(self):
         repo = make_repo()
-        call("init", "DEMO-620", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-620", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         code, out, err = call("approval", "check", "--task", "DEMO-620")
         self.assertEqual(code, 0, err)
         doc = json.loads(out.strip().splitlines()[-1])
@@ -348,7 +355,7 @@ class TestCli(unittest.TestCase):
     def test_approval_reports_current_when_approved_sha_matches_head(self):
         from ppl import gitfacts, run
         repo = make_repo()
-        call("init", "DEMO-621", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-621", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         state = run.load("DEMO-621")
         head = gitfacts.head_sha(repo)
         state["mr"]["approved_sha"] = head
@@ -363,7 +370,7 @@ class TestCli(unittest.TestCase):
     def test_approval_reports_stale_when_approved_sha_is_not_head(self):
         from ppl import run
         repo = make_repo()
-        call("init", "DEMO-622", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-622", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         state = run.load("DEMO-622")
         state["mr"]["approved_sha"] = "0" * 40
         run.save(state)
@@ -376,14 +383,14 @@ class TestCli(unittest.TestCase):
     # --- review finding 3 & 4: a missing or malformed JSON input file is routable ---
 
     def test_boundary_set_missing_file_is_schema_invalid(self):
-        call("init", "DEMO-623", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-623", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("boundary", "set", "/no/such/file.json", "--task", "DEMO-623")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_boundary_set_malformed_file_is_schema_invalid(self):
-        call("init", "DEMO-624", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-624", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         bad = write_text_file("not json")
         code, _, err = call("boundary", "set", bad, "--task", "DEMO-624")
@@ -399,7 +406,7 @@ class TestCli(unittest.TestCase):
         # this wide can be recorded AFTER a verdict already passed, so it is
         # the same shape as the C3 baseline attack: rewrite the criterion the
         # gate reads, then run the gate.
-        call("init", "DEMO-626", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-626", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         bound_file = write_json_file({"write": ["**"], "forbid": []})
         code, _, err = call("boundary", "set", bound_file, "--task", "DEMO-626")
@@ -408,14 +415,14 @@ class TestCli(unittest.TestCase):
         self.assertIn("**", err)
 
     def test_boundary_set_still_accepts_a_narrow_glob(self):
-        call("init", "DEMO-627", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-627", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         bound_file = write_json_file({"write": ["src/**"], "forbid": []})
         code, _, err = call("boundary", "set", bound_file, "--task", "DEMO-627")
         self.assertEqual(code, 0, err)
 
     def test_brief_set_missing_file_is_schema_invalid(self):
-        call("init", "DEMO-625", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-625", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("brief", "set", "/no/such/file.json",
                             "--from", "ppl-briefer", "--task", "DEMO-625")
@@ -425,7 +432,7 @@ class TestCli(unittest.TestCase):
 
     def test_verdict_record_malformed_file_is_schema_invalid(self):
         repo = make_repo()
-        call("init", "DEMO-626", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-626", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         bad = write_text_file("{not json")
         code, _, err = call("verdict", "record", bad,
                             "--from", "ppl-verifier", "--task", "DEMO-626")
@@ -441,7 +448,7 @@ class TestCli(unittest.TestCase):
 
     def test_evidence_malformed_producer_is_schema_invalid(self):
         repo = make_repo()
-        call("init", "DEMO-627", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-627", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         rc_file = tempfile.mkstemp()[1]
         Path(rc_file).write_text("0", encoding="utf-8")
         log_file = tempfile.mkstemp()[1]
@@ -456,7 +463,7 @@ class TestCli(unittest.TestCase):
 
     def test_baseline_leaves_no_file_when_repo_is_unusable(self):
         from ppl import paths
-        call("init", "DEMO-628", "--tracker-url", "u", "--repo", "/tmp/definitely-not-a-repo-xyz",
+        init_in_lane("DEMO-628", "--tracker-url", "u", "--repo", "/tmp/definitely-not-a-repo-xyz",
              "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-628")
         baseline_file = write_json_file({"base_sha": "abc123"})
@@ -476,7 +483,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_invalid_subcommand_choice_is_schema_invalid_json(self):
-        call("init", "DEMO-629", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-629", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("control", "set", "not-a-real-command", "--task", "DEMO-629")
         self.assertEqual(code, 2)
@@ -486,7 +493,7 @@ class TestCli(unittest.TestCase):
 
     def test_mr_set_then_state_reports_none_before_approval(self):
         repo = make_repo()
-        call("init", "DEMO-630", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-630", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         code, out, err = call("mr", "set", "--iid", "15500", "--url", "https://gitlab/x/-/mr/1",
                               "--task", "DEMO-630")
         self.assertEqual(code, 0, err)
@@ -496,14 +503,14 @@ class TestCli(unittest.TestCase):
         self.assertEqual(out.strip(), "none")
 
     def test_mr_set_without_iid_is_schema_invalid(self):
-        call("init", "DEMO-631", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-631", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("mr", "set", "--url", "https://gitlab/x/-/mr/1", "--task", "DEMO-631")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_mr_set_without_url_is_schema_invalid(self):
-        call("init", "DEMO-632", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-632", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("mr", "set", "--iid", "1", "--task", "DEMO-632")
         self.assertEqual(code, 2)
@@ -512,7 +519,7 @@ class TestCli(unittest.TestCase):
     def test_review_answered_then_approved_flips_mr_state_to_current(self):
         from ppl import gitfacts
         repo = make_repo()
-        call("init", "DEMO-633", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-633", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         head = gitfacts.head_sha(repo)
         code, out, err = call("review", "answered", "--thread", "t1", "--sha", head,
                               "--classification", "NEEDS_REPLY_ONLY",
@@ -526,7 +533,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(out.strip(), "current")
 
     def test_review_answered_without_thread_is_schema_invalid(self):
-        call("init", "DEMO-634", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-634", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("review", "answered", "--sha", "abc",
                             "--classification", "NEEDS_REPLY_ONLY", "--task", "DEMO-634")
@@ -534,7 +541,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_review_answered_with_unknown_classification_is_schema_invalid(self):
-        call("init", "DEMO-635", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-635", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("review", "answered", "--thread", "t1", "--sha", "abc",
                             "--classification", "LOOKS_FINE_TO_ME", "--task", "DEMO-635")
@@ -546,7 +553,7 @@ class TestCli(unittest.TestCase):
     def test_mr_set_with_author_is_visible_through_the_pending_filter(self):
         from ppl import review
         repo = make_repo()
-        call("init", "DEMO-636", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-636", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         code, _, err = call("mr", "set", "--iid", "1", "--url", "u",
                             "--author", "ppl-bot-42", "--task", "DEMO-636")
         self.assertEqual(code, 0, err)
@@ -558,7 +565,7 @@ class TestCli(unittest.TestCase):
     def test_review_answered_with_last_note_id_lets_a_follow_up_note_reopen_it(self):
         from ppl import gitfacts, review
         repo = make_repo()
-        call("init", "DEMO-637", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-637", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         head = gitfacts.head_sha(repo)
         code, _, err = call("review", "answered", "--thread", "t1", "--sha", head,
                             "--classification", "NEEDS_REPLY_ONLY",
@@ -571,7 +578,7 @@ class TestCli(unittest.TestCase):
     #     can actually call (fix round 2, finding 1) ---
 
     def test_review_pending_prints_the_filtered_array_as_the_last_stdout_line(self):
-        call("init", "DEMO-638", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-638", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         threads_file = write_json_file([
             {"id": "t1", "author": "reviewer", "resolved": False},
@@ -585,7 +592,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual([t["id"] for t in doc], ["t1"])
 
     def test_review_pending_honors_an_explicit_author_override(self):
-        call("init", "DEMO-639", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-639", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         threads_file = write_json_file([
             {"id": "t1", "author": "reviewer"},
@@ -600,7 +607,7 @@ class TestCli(unittest.TestCase):
     def test_review_pending_uses_a_note_id_recorded_through_answered(self):
         from ppl import gitfacts
         repo = make_repo()
-        call("init", "DEMO-640", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-640", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         head = gitfacts.head_sha(repo)
         call("review", "answered", "--thread", "t1", "--sha", head,
              "--classification", "NEEDS_REPLY_ONLY", "--last-note-id", "41",
@@ -616,7 +623,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual([t["id"] for t in doc], ["t2"])
 
     def test_review_pending_missing_threads_file_is_schema_invalid(self):
-        call("init", "DEMO-641", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-641", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("review", "pending", "--threads", "/no/such/file.json",
                             "--sha", "abc", "--task", "DEMO-641")
@@ -624,7 +631,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_review_pending_malformed_threads_file_is_schema_invalid(self):
-        call("init", "DEMO-642", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-642", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         bad = write_text_file("not json")
         code, _, err = call("review", "pending", "--threads", bad,
@@ -633,7 +640,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_review_pending_non_array_threads_file_is_schema_invalid(self):
-        call("init", "DEMO-643", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-643", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         not_a_list = write_json_file({"id": "t1"})
         code, _, err = call("review", "pending", "--threads", not_a_list,
@@ -642,7 +649,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_review_pending_without_threads_flag_is_schema_invalid(self):
-        call("init", "DEMO-644", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-644", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("review", "pending", "--sha", "abc", "--task", "DEMO-644")
         self.assertEqual(code, 2)
@@ -651,7 +658,7 @@ class TestCli(unittest.TestCase):
     # --- fix round 3: malformed thread payload must not crash the process ---
 
     def test_review_pending_thread_missing_id_is_schema_invalid_not_a_traceback(self):
-        call("init", "DEMO-645", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-645", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         threads_file = write_json_file([{"author": "reviewer"}])
         code, _, err = call("review", "pending", "--threads", threads_file,
@@ -660,7 +667,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_review_pending_second_element_malformed_first_element_fine(self):
-        call("init", "DEMO-646", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-646", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         threads_file = write_json_file([{"id": "t1", "author": "reviewer"}, "not-a-thread"])
         code, _, err = call("review", "pending", "--threads", threads_file,
@@ -680,7 +687,7 @@ class TestCli(unittest.TestCase):
     # --- fix round 3: --author "" is a deliberate explicit no-filter, not an omission ---
 
     def test_review_pending_empty_author_disables_filtering_without_using_the_stored_identity(self):
-        call("init", "DEMO-647", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-647", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         call("mr", "set", "--iid", "1", "--url", "u", "--author", "ppl-bot-42", "--task", "DEMO-647")
         threads_file = write_json_file([
@@ -709,7 +716,7 @@ class TestBaselineGuards(unittest.TestCase):
         # failing only much later at `ppl transition done`
         # [R-BASELINE-RECORDED-BEFORE-LEAVING].
         repo = make_repo()
-        call("init", "DEMO-658", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-658", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-658")
         code, _, err = call("stage", "enter", "briefing", "--task", "DEMO-658")
         self.assertEqual(code, 2)
@@ -730,7 +737,7 @@ class TestBaselineGuards(unittest.TestCase):
         # - `_resume_target` already forces the eventual resume back into
         # "baseline", so nothing is skipped by letting this one edge through.
         repo = make_repo()
-        call("init", "DEMO-659", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-659", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-659")
         code, _, err = call("stage", "enter", "escalation", "--task", "DEMO-659")
         self.assertEqual(code, 0, err)
@@ -738,7 +745,7 @@ class TestBaselineGuards(unittest.TestCase):
     def test_recording_a_baseline_twice_is_an_illegal_transition(self):
         # rule: R-BASELINE-WRITE-ONCE
         repo = make_repo()
-        call("init", "DEMO-650", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-650", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-650")
         base = head_sha(repo)
         commit(repo, "work.txt", "work\n")
@@ -758,7 +765,7 @@ class TestBaselineGuards(unittest.TestCase):
         repo = make_repo()
         orphan = commit(repo, "b.txt", "two\n")
         subprocess.run(["git", "-C", repo, "reset", "--hard", "-q", "HEAD~1"], check=True)
-        call("init", "DEMO-651", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-651", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-651")
         baseline_file = write_json_file({"base_sha": orphan})
         code, _, err = call("baseline", "record", baseline_file, "--task", "DEMO-651")
@@ -770,7 +777,7 @@ class TestBaselineGuards(unittest.TestCase):
         repo = make_repo()
         base = head_sha(repo)
         commit(repo, "b.txt", "two\n")
-        call("init", "DEMO-652", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-652", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-652")
         baseline_file = write_json_file({"base_sha": base})
         code, _, err = call("baseline", "record", baseline_file, "--task", "DEMO-652")
@@ -781,7 +788,7 @@ class TestBaselineGuards(unittest.TestCase):
     def test_baseline_is_refused_while_the_run_is_paused(self):
         from ppl import control
         repo = make_repo()
-        call("init", "DEMO-653", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-653", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-653")
         control.set_command("DEMO-653", "pause")
         try:
@@ -801,7 +808,7 @@ class TestBaselineGuards(unittest.TestCase):
         # This is what makes it safe: the run is still IN the baseline stage
         # when this call happens.
         repo = make_repo()
-        call("init", "DEMO-655", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-655", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-655")
         head = head_sha(repo)
         baseline_file = write_json_file({"base_sha": head})
@@ -831,7 +838,7 @@ class TestBaselineGuards(unittest.TestCase):
         repo = make_repo()
         base = head_sha(repo)
         commit(repo, "work.txt", "work\n")
-        call("init", "DEMO-657", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-657", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-657")
         state = run_module.load("DEMO-657")
         state["base_sha"] = base
@@ -849,7 +856,7 @@ class TestBaselineGuards(unittest.TestCase):
 
     def test_a_json_array_where_a_document_belongs_is_schema_invalid(self):
         repo = make_repo()
-        call("init", "DEMO-654", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-654", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         array_file = write_json_file([{"base_sha": head_sha(repo)}])
         code, _, err = call("baseline", "record", array_file, "--task", "DEMO-654")
         self.assertEqual(code, 2, "a JSON array must route, not crash with exit 1")
@@ -869,7 +876,7 @@ class TestNextSafeActionAfterArtifactCommands(unittest.TestCase):
 
     def test_baseline_record_advances_next_safe_action(self):
         repo = make_repo()
-        call("init", "DEMO-6301", "--tracker-url", "u", "--repo", repo,
+        init_in_lane("DEMO-6301", "--tracker-url", "u", "--repo", repo,
              "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-6301")
         baseline_file = write_json_file({"base_sha": head_sha(repo)})
@@ -882,7 +889,7 @@ class TestNextSafeActionAfterArtifactCommands(unittest.TestCase):
 
     def test_brief_set_advances_next_safe_action(self):
         repo = make_repo()
-        call("init", "DEMO-6302", "--tracker-url", "u", "--repo", repo,
+        init_in_lane("DEMO-6302", "--tracker-url", "u", "--repo", repo,
              "--harness", "example-maven")
         brief_file = write_json_file({
             "task_id": "DEMO-6302", "purpose": "p", "success_outcome": "s",
@@ -904,7 +911,7 @@ class TestNextSafeActionAfterArtifactCommands(unittest.TestCase):
         from ppl import run
         repo = make_repo()
         base = head_sha(repo)
-        call("init", "DEMO-6303", "--tracker-url", "u", "--repo", repo,
+        init_in_lane("DEMO-6303", "--tracker-url", "u", "--repo", repo,
              "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-6303")
         call("baseline", "record", write_json_file({"base_sha": base}), "--task", "DEMO-6303")
@@ -934,7 +941,7 @@ class TestNextSafeActionAfterArtifactCommands(unittest.TestCase):
         self.assertIn("ppl stage enter implementation", next_action)
 
     def test_mr_set_advances_next_safe_action(self):
-        call("init", "DEMO-6304", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-6304", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("mr", "set", "--iid", "1", "--url", "https://gitlab/mr/1",
                             "--author", "someone", "--task", "DEMO-6304")
@@ -958,7 +965,7 @@ class TestTransitionOrdering(unittest.TestCase):
     def test_an_illegal_lifecycle_target_is_reported_before_the_done_gate_runs(self):
         # rule: R-DONE-GATE
         repo = make_repo()
-        call("init", "DEMO-656", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-656", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         # No brief, no baseline: done_blockers would fail on a missing
         # base_sha (EXTERNAL_BLOCKED) long before it ever got to checking
         # acceptance or a verdict - but status is still "planned", and
@@ -971,7 +978,7 @@ class TestTransitionOrdering(unittest.TestCase):
 def init_at_stage(task_id, stage, status="in_progress"):
     """A run placed directly at `stage`: the walk there is not what these tests prove."""
     from ppl import run
-    call("init", task_id, "--tracker-url", "u", "--repo", "/tmp/repo", "--harness", "example-maven")
+    init_in_lane(task_id, "--tracker-url", "u", "--repo", "/tmp/repo", "--harness", "example-maven")
     state = run.load(task_id)
     state["stage"] = stage
     state["status"] = status
@@ -1041,7 +1048,7 @@ class TestClosureOnlyWhenDonePasses(unittest.TestCase):
         """A real repo, a run stamped into review with its baseline at HEAD and no verdict."""
         from ppl import run
         repo = make_repo()
-        code, _, err = call("init", task_id, "--tracker-url", "u", "--repo", repo,
+        code, _, err = init_in_lane(task_id, "--tracker-url", "u", "--repo", repo,
                             "--harness", "example-maven")
         self.assertEqual(code, 0, err)
         state = run.load(task_id)
@@ -1189,7 +1196,7 @@ class TestNeedsYouFlagsParkingAtEveryBoundary(unittest.TestCase):
     """
 
     def test_park_at_planned_still_needs_you(self):
-        call("init", "DEMO-6401", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-6401", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, out, err = call("park", "--blocker", "SPEC_GAP",
                               "--safe-next", "escalate to the owner", "--task", "DEMO-6401")
@@ -1199,7 +1206,7 @@ class TestNeedsYouFlagsParkingAtEveryBoundary(unittest.TestCase):
 
     def test_park_at_done_still_needs_you(self):
         from ppl import run
-        call("init", "DEMO-6402", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-6402", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         state = run.load("DEMO-6402")
         state["status"] = "done"
@@ -1215,7 +1222,7 @@ class TestNeedsYouFlagsParkingAtEveryBoundary(unittest.TestCase):
         # help says so) - the identical gap, exercised through the actual
         # command an orchestrator runs rather than through `ppl park`
         # directly.
-        call("init", "DEMO-6403", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-6403", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("escalate", "--code", "SPEC_GAP",
                             "--question", "is X in scope?", "--task", "DEMO-6403")
@@ -1229,7 +1236,7 @@ class TestNeedsYouFlagsParkingAtEveryBoundary(unittest.TestCase):
         # escalate`. It carries the identical status-untouched shape at
         # every lifecycle status, not just at the two boundaries `ppl park`
         # exposes - status.card must catch it too.
-        call("init", "DEMO-6404", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-6404", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("stage", "enter", "escalation", "--task", "DEMO-6404")
         self.assertEqual(code, 0, err)
@@ -1239,7 +1246,7 @@ class TestNeedsYouFlagsParkingAtEveryBoundary(unittest.TestCase):
     def test_needs_you_no_when_nothing_is_wrong(self):
         # The negative case, so the assertions above are not vacuously true
         # for a run that always prints something other than exactly "no".
-        call("init", "DEMO-6405", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-6405", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, out, _ = call("status", "--task", "DEMO-6405")
         self.assertIn("Needs you: no", out)
@@ -1259,7 +1266,7 @@ class TestDispatchHardCap(unittest.TestCase):
     def test_stage_enter_is_refused_once_the_hard_cap_is_reached(self):
         # rule: R-BUDGET-DISPATCH-CAP
         repo = make_repo()
-        call("init", "DEMO-660", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-660", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         self.spend_to_the_cap("DEMO-660")
         code, _, err = call("stage", "enter", "baseline", "--task", "DEMO-660")
         self.assertEqual(code, 2)
@@ -1268,7 +1275,7 @@ class TestDispatchHardCap(unittest.TestCase):
     def test_transition_is_refused_once_the_hard_cap_is_reached(self):
         # rule: R-BUDGET-DISPATCH-CAP
         repo = make_repo()
-        call("init", "DEMO-661", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-661", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", "DEMO-661")
         self.spend_to_the_cap("DEMO-661")
         code, _, err = call("transition", "done", "--task", "DEMO-661")
@@ -1278,7 +1285,7 @@ class TestDispatchHardCap(unittest.TestCase):
     def test_stage_enter_still_works_one_dispatch_below_the_cap(self):
         from ppl import run
         repo = make_repo()
-        call("init", "DEMO-662", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-662", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         state = run.load("DEMO-662")
         state["budgets"]["dispatch_used"] = state["budgets"]["dispatch_hard"] - 1
         run.save(state)
@@ -1299,7 +1306,7 @@ class TestUsdCap(unittest.TestCase):
         config.update("budgets", {"usd_max": usd_max})
         config.update("prices", {"m": {"input": 0, "cache_write": 0, "cache_read": 0,
                                        "output": 1.0}})
-        code, _, err = call("init", task_id, "--tracker-url", "u", "--repo", make_repo(),
+        code, _, err = init_in_lane(task_id, "--tracker-url", "u", "--repo", make_repo(),
                             "--harness", "example-maven")
         self.assertEqual(code, 0, err)
 
@@ -1531,7 +1538,7 @@ class TestUsdCap(unittest.TestCase):
 class TestEvidenceShaDefault(unittest.TestCase):
     def test_sha_defaults_to_git_head_when_not_given(self):
         repo = make_repo()
-        call("init", "DEMO-670", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-670", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         rc_file = tempfile.mkstemp()[1]
         Path(rc_file).write_text("0", encoding="utf-8")
         code, out, err = call("evidence", "add", "--check", "focused-tests",
@@ -1542,7 +1549,7 @@ class TestEvidenceShaDefault(unittest.TestCase):
 
     def test_an_explicit_sha_still_wins(self):
         repo = make_repo()
-        call("init", "DEMO-671", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-671", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         rc_file = tempfile.mkstemp()[1]
         Path(rc_file).write_text("0", encoding="utf-8")
         code, out, err = call("evidence", "add", "--check", "focused-tests",
@@ -1563,7 +1570,7 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
     def test_evidence_add_refuses_a_stale_generation(self):
         # rule: R-LEASE-STALE-WRITE
         repo = make_repo()
-        call("init", "DEMO-940", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-940", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("recover", "--task", "DEMO-940")
         rc_file = tempfile.mkstemp()[1]
         Path(rc_file).write_text("0", encoding="utf-8")
@@ -1574,7 +1581,7 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
 
     def test_evidence_add_without_generation_is_schema_invalid(self):
-        call("init", "DEMO-941", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-941", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         rc_file = tempfile.mkstemp()[1]
         Path(rc_file).write_text("0", encoding="utf-8")
@@ -1588,7 +1595,7 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
         # rule: R-LEASE-STALE-WRITE
         from ppl import gitfacts
         repo = make_repo()
-        call("init", "DEMO-942", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-942", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("recover", "--task", "DEMO-942")
         head = gitfacts.head_sha(repo)
         doc = write_json_file({
@@ -1605,7 +1612,7 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
         # rule: R-LEASE-STALE-WRITE
         from ppl import gitfacts
         repo = make_repo()
-        call("init", "DEMO-943", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-943", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("recover", "--task", "DEMO-943")
         head = gitfacts.head_sha(repo)
         code, _, err = call("review", "answered", "--thread", "t1", "--sha", head,
@@ -1617,7 +1624,7 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
     def test_apply_patch_refuses_a_stale_generation(self):
         # rule: R-LEASE-STALE-WRITE
         repo = make_repo()
-        call("init", "DEMO-944", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-944", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("recover", "--task", "DEMO-944")
         code, _, err = call("apply-patch", "--role", "ppl-code-worker",
                             "--diff", "/no/such/diff.patch",
@@ -1628,7 +1635,7 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
     def test_findings_add_refuses_a_stale_generation(self):
         # rule: R-LEASE-STALE-WRITE
         repo = make_repo()
-        call("init", "DEMO-9440", "--tracker-url", "u", "--repo", repo,
+        init_in_lane("DEMO-9440", "--tracker-url", "u", "--repo", repo,
              "--harness", "example-maven")
         call("recover", "--task", "DEMO-9440")
         code, _, err = call("findings", "add", "--severity", "blocking",
@@ -1639,7 +1646,7 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "ILLEGAL_TRANSITION")
 
     def test_findings_add_without_generation_is_schema_invalid(self):
-        call("init", "DEMO-9441", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-9441", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("findings", "add", "--severity", "blocking",
                             "--evidence", "e", "--affected-sha", "a" * 40,
@@ -1649,14 +1656,14 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_stage_enter_reports_the_generation_to_capture(self):
-        call("init", "DEMO-945", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-945", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, out, err = call("stage", "enter", "baseline", "--task", "DEMO-945")
         self.assertEqual(code, 0, err)
         self.assertIn("generation: 1", out)
 
     def test_stage_enter_names_the_stage_reference_on_its_last_line(self):
-        call("init", "DEMO-946", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-946", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, out, err = call("stage", "enter", "baseline", "--task", "DEMO-946")
         self.assertEqual(code, 0, err)
@@ -1665,7 +1672,7 @@ class TestLeaseFencesTheWritePaths(unittest.TestCase):
             "Before anything in this stage, read references/stage-1-baseline.md"])
 
     def test_stage_enter_adds_no_line_for_a_stage_without_a_reference(self):
-        call("init", "DEMO-947", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-947", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, out, err = call("stage", "enter", "escalation", "--task", "DEMO-947")
         self.assertEqual(code, 0, err)
@@ -1678,7 +1685,7 @@ class TestApplyPatchPatterns(unittest.TestCase):
     PYTHON = ["tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
 
     def init(self, task):
-        call("init", task, "--tracker-url", "u", "--repo", make_repo(),
+        init_in_lane(task, "--tracker-url", "u", "--repo", make_repo(),
              "--harness", "example-maven")
         snapshot = paths.run_dir(task) / "harness.json"
         self.assertTrue(snapshot.is_file(), "ppl init wrote no harness snapshot")
@@ -1736,7 +1743,7 @@ class TestNameContractSpecRevision(unittest.TestCase):
     def test_brief_set_binds_a_spec_revision_to_state(self):
         from ppl import run
         repo = make_repo()
-        call("init", "DEMO-960", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-960", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         code, out, err = call("brief", "set", self._brief_file({"Foo.bar": "int"}),
                               "--from", "ppl-briefer", "--task", "DEMO-960")
         stamp_challenge("DEMO-960")
@@ -1762,7 +1769,7 @@ class TestNameContractSpecRevision(unittest.TestCase):
         """
         from ppl import gitfacts, run
         base = gitfacts.head_sha(repo)
-        call("init", task_id, "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane(task_id, "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", task_id)
         call("baseline", "record", write_json_file({"base_sha": base}), "--task", task_id)
         # `ppl transition done` also checks the lifecycle FSM (planned -> ...
@@ -1921,7 +1928,7 @@ class TestBoundaryChangeSpecRevisionStaleness(unittest.TestCase):
         """
         from ppl import gitfacts, run
         base = gitfacts.head_sha(repo)
-        call("init", task_id, "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane(task_id, "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", task_id)
         call("baseline", "record", write_json_file({"base_sha": base}), "--task", task_id)
         state = run.load(task_id)
@@ -1977,7 +1984,7 @@ class TestBoundaryChangeSpecRevisionStaleness(unittest.TestCase):
         from ppl import gitfacts, run
         base = gitfacts.head_sha(repo)
         task_id = "DEMO-9982"
-        call("init", task_id, "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane(task_id, "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         call("stage", "enter", "baseline", "--task", task_id)
         call("baseline", "record", write_json_file({"base_sha": base}), "--task", task_id)
         state = run.load(task_id)
@@ -2032,7 +2039,7 @@ class TestWatchdog(unittest.TestCase):
 
     def test_a_control_enforce_gated_command_refuses_past_the_deadline(self):
         # rule: R-WATCHDOG-DEADLINE
-        call("init", "DEMO-950", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-950", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         self._expire("DEMO-950")
         code, _, err = call("budget", "spend", "dispatch", "--task", "DEMO-950")
@@ -2041,7 +2048,7 @@ class TestWatchdog(unittest.TestCase):
 
     def test_the_refusal_parks_the_run_and_bumps_the_generation(self):
         from ppl import run
-        call("init", "DEMO-951", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-951", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         self._expire("DEMO-951")
         call("budget", "spend", "dispatch", "--task", "DEMO-951")
@@ -2054,7 +2061,7 @@ class TestWatchdog(unittest.TestCase):
         # require_current_generation is evidence/verdict/review-answered/apply-patch's
         # shared gate, and control.enforce is not in any of their call paths.
         repo = make_repo()
-        call("init", "DEMO-952", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-952", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         self._expire("DEMO-952")
         rc_file = tempfile.mkstemp()[1]
         Path(rc_file).write_text("0", encoding="utf-8")
@@ -2069,7 +2076,7 @@ class TestWatchdog(unittest.TestCase):
         # how a timed-out run is supposed to be recorded, so the one command
         # that records a blocker must not itself be refused for the run
         # already being past its deadline.
-        call("init", "DEMO-953", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-953", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         self._expire("DEMO-953")
         code, _, err = call("park", "--blocker", "OWNER_DECISION",
@@ -2077,7 +2084,7 @@ class TestWatchdog(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
     def test_watchdog_check_reports_not_timed_out_before_the_deadline(self):
-        call("init", "DEMO-954", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-954", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, out, _ = call("watchdog", "check", "--task", "DEMO-954")
         self.assertEqual(code, 0)
@@ -2085,7 +2092,7 @@ class TestWatchdog(unittest.TestCase):
 
     def test_watchdog_check_parks_and_reports_timed_out(self):
         # rule: R-WATCHDOG-DEADLINE
-        call("init", "DEMO-955", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-955", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         self._expire("DEMO-955")
         code, _, err = call("watchdog", "check", "--task", "DEMO-955")
@@ -2097,7 +2104,7 @@ class TestWatchdog(unittest.TestCase):
         # exit-0 fact recover surfaces in its actions, not one of recover's
         # own exit-2 cases (EXTERNAL_BLOCKED, OWNER_DECISION).
         repo = make_repo()
-        call("init", "DEMO-956", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-956", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         self._expire("DEMO-956")
         code, out, _ = call("recover", "--task", "DEMO-956")
         self.assertEqual(code, 0)
@@ -2106,7 +2113,7 @@ class TestWatchdog(unittest.TestCase):
     def test_a_control_enforce_gated_command_refreshes_the_deadline(self):
         # (a), at the CLI level: rule: R-WATCHDOG-DEADLINE
         from ppl import run, store
-        call("init", "DEMO-957", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-957", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         state = run.load("DEMO-957")
         state["deadline"] = store.deadline_in(60)
@@ -2119,7 +2126,7 @@ class TestWatchdog(unittest.TestCase):
         # (c) rule: R-WATCHDOG-DEADLINE
         from ppl import run, store
         repo = make_repo()
-        call("init", "DEMO-958", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-958", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         # Simulate a recover that ran elsewhere and left this attempt stale.
         run.bump_generation("DEMO-958")
         state = run.load("DEMO-958")
@@ -2147,7 +2154,7 @@ class TestWatchdog(unittest.TestCase):
         # it".
         from ppl import gitfacts, run, store
         repo = make_repo()
-        call("init", "DEMO-959", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-959", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         head = gitfacts.head_sha(repo)
         run.bump_generation("DEMO-959")
         state = run.load("DEMO-959")
@@ -2169,7 +2176,7 @@ class TestWatchdog(unittest.TestCase):
         # but not proven - a mutation moving the refresh above `record =
         # read(task_id)` left the suite green).
         from ppl import run, store
-        call("init", "DEMO-971", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-971", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         call("control", "set", "pause", "--task", "DEMO-971")
         state = run.load("DEMO-971")
@@ -2186,7 +2193,7 @@ class TestWatchdog(unittest.TestCase):
         # Same invariant, same raise site (control.enforce's `invalid`
         # branch), different way of reaching it.
         from ppl import paths, run, store
-        call("init", "DEMO-972", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-972", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         store.write_json(paths.run_dir("DEMO-972") / "control.json", {"command": "pause"})
         state = run.load("DEMO-972")
@@ -2256,7 +2263,7 @@ class TestControlEnforceOnTheFourMissingGuards(unittest.TestCase):
     def test_boundary_set_is_refused_while_paused(self):
         # rule: R-OPERATOR-HALT-CLI
         from ppl import control
-        call("init", "DEMO-900", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-900", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         control.set_command("DEMO-900", "pause")
         try:
@@ -2270,7 +2277,7 @@ class TestControlEnforceOnTheFourMissingGuards(unittest.TestCase):
     def test_mr_set_is_refused_while_paused(self):
         from ppl import control
         repo = make_repo()
-        call("init", "DEMO-901", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-901", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         control.set_command("DEMO-901", "pause")
         try:
             code, _, err = call("mr", "set", "--iid", "1",
@@ -2283,7 +2290,7 @@ class TestControlEnforceOnTheFourMissingGuards(unittest.TestCase):
     def test_review_approved_is_refused_while_paused(self):
         from ppl import control, gitfacts
         repo = make_repo()
-        call("init", "DEMO-902", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
+        init_in_lane("DEMO-902", "--tracker-url", "u", "--repo", repo, "--harness", "example-maven")
         head = gitfacts.head_sha(repo)
         control.set_command("DEMO-902", "pause")
         try:
@@ -2298,7 +2305,7 @@ class TestControlEnforceOnTheFourMissingGuards(unittest.TestCase):
         # ledger, threads.json) same as "approved" does, so it is one of the
         # gated writes now too, not a park/escalate-style carve-out.
         from ppl import control
-        call("init", "DEMO-903", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-903", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         control.set_command("DEMO-903", "pause")
         try:
@@ -2312,7 +2319,7 @@ class TestControlEnforceOnTheFourMissingGuards(unittest.TestCase):
     def test_budget_spend_is_refused_while_paused(self):
         # rule: R-OPERATOR-HALT-CLI
         from ppl import control
-        call("init", "DEMO-904", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-904", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         control.set_command("DEMO-904", "pause")
         try:
@@ -2324,7 +2331,7 @@ class TestControlEnforceOnTheFourMissingGuards(unittest.TestCase):
 
     def test_park_still_works_while_paused(self):
         from ppl import control
-        call("init", "DEMO-905", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-905", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         control.set_command("DEMO-905", "pause")
         try:
@@ -2336,7 +2343,7 @@ class TestControlEnforceOnTheFourMissingGuards(unittest.TestCase):
 
     def test_escalate_still_works_while_paused(self):
         from ppl import control
-        call("init", "DEMO-906", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-906", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         control.set_command("DEMO-906", "pause")
         try:
@@ -2348,7 +2355,7 @@ class TestControlEnforceOnTheFourMissingGuards(unittest.TestCase):
 
     def test_control_set_resume_still_works_while_paused(self):
         from ppl import control
-        call("init", "DEMO-907", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-907", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         control.set_command("DEMO-907", "pause")
         code, _, err = call("control", "set", "resume", "--task", "DEMO-907")
@@ -2357,74 +2364,187 @@ class TestControlEnforceOnTheFourMissingGuards(unittest.TestCase):
         control.enforce("DEMO-907")
 
 
-class TestInitIsolatedFlag(unittest.TestCase):
-    def test_init_defaults_isolated_true(self):
-        call("init", "DEMO-908", "--tracker-url", "u", "--repo", "/tmp/repo",
-             "--harness", "example-maven")
-        code, out, _ = call("show", "--task", "DEMO-908", "--json")
-        self.assertIs(json.loads(out)["isolated"], True)
+class TestInitInsideALane(unittest.TestCase):
+    """ppl init runs in its task's lane, the one PPL_TASK or the cwd binds: the lane's worktree
+    is the run's repo and the harness ppl lane exported into its start directory is the run's."""
 
-    def test_init_no_isolated_records_false(self):
-        call("init", "DEMO-909", "--tracker-url", "u", "--repo", "/tmp/repo", "--no-isolated",
-             "--harness", "example-maven")
-        code, out, _ = call("show", "--task", "DEMO-909", "--json")
-        self.assertIs(json.loads(out)["isolated"], False)
-
-
-class TestInitChecksTheMemoryWasApplied(unittest.TestCase):
     def setUp(self):
-        from ppl import harness, os_sandbox
-        self.harness = harness
-        self.agents = tmphome.mkdtemp(prefix="pplagents-")
-        self.skills = tmphome.mkdtemp(prefix="pplskills-")
+        seed_routing()
+        mark_all_verified()
+        seed_setup()
         self.addCleanup(seed_setup)
-        fixtures.install_harness("example-maven")
-        self.memory = paths.harness_dir("example-maven") / "memory.toml"
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop("PPL_TASK", None)
 
-    def apply(self):
-        self.harness.apply("example-maven", agents_dir=self.agents, skills_dir=self.skills)
+    def init(self, task_id, *flags):
+        with mock.patch.dict(os.environ, {"PPL_TASK": task_id}):
+            return call("init", task_id, "--tracker-url", "u", *flags)
 
-    def write_memory(self):
-        from ppl import memory
-        self.memory.write_text(memory.dumps([{
-            "id": "M-1", "role": "ppl-verifier", "cue": "a gate is flaky", "lesson": "rerun it once",
-            "sources": ["KEY-1:finding:F-1"], "accepted_at": "2026-10-28T00:00:00Z", "seen": 1,
-            "status": "active"}]), encoding="utf-8")
-
-    def init(self, task):
-        return call("init", task, "--tracker-url", "u", "--repo", "/tmp/repo",
-                    "--harness", "example-maven")
-
-    def test_init_refuses_when_memory_changed_since_apply(self):
-        # rule: R-MEMORY-APPLIED
-        self.apply()
-        self.write_memory()
-        code, _, err = self.init("DEMO-9930")
+    def test_init_outside_a_lane_is_refused_naming_ppl_lane(self):
+        # rule: R-LANE-INIT-INSIDE
+        code, _, err = call("init", "DEMO-7001", "--tracker-url", "u", "--repo", "/tmp/repo",
+                            "--harness", "example-maven")
         self.assertEqual(code, 2)
-        payload = json.loads(err)
-        self.assertEqual(payload["error_code"], "SETUP_INCOMPLETE")
-        self.assertIn("ppl harness apply example-maven", payload["message"])
-
-    def test_init_passes_after_apply_records_the_memory(self):
-        self.write_memory()
-        self.apply()
-        self.assertEqual(self.init("DEMO-9931")[0], 0)
-
-    def test_init_passes_for_a_harness_that_never_had_memory(self):
-        self.assertNotIn("memory_sha256", config.section("harness"))
-        self.assertFalse(self.memory.exists())
-        self.assertEqual(self.init("DEMO-9932")[0], 0)
-
-    def test_init_passes_for_an_empty_memory_file_nothing_recorded(self):
-        self.memory.write_text("", encoding="utf-8")
-        self.assertEqual(self.init("DEMO-9933")[0], 0)
-
-    def test_init_refuses_when_memory_was_removed_after_apply(self):
-        self.write_memory()
-        self.apply()
-        self.memory.unlink()
-        code, _, err = self.init("DEMO-9934")
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "SETUP_INCOMPLETE")
+        self.assertIn("ppl lane <link>", error["message"])
+        self.assertFalse(paths.run_dir("DEMO-7001").exists())
+        # the task's lane exists, but this call is not in it: no PPL_TASK, the cwd elsewhere
+        fixtures.bind_lane("DEMO-7001", "/tmp/repo")
+        code, _, err = call("init", "DEMO-7001", "--tracker-url", "u", "--harness", "example-maven")
         self.assertEqual((code, json.loads(err)["error_code"]), (2, "SETUP_INCOMPLETE"))
+        # PPL_TASK names a task with no lane
+        lanes.release("DEMO-7001")
+        code, _, err = self.init("DEMO-7001")
+        self.assertEqual((code, json.loads(err)["error_code"]), (2, "SETUP_INCOMPLETE"))
+        self.assertIn("ppl lane <link>", json.loads(err)["message"])
+        self.assertFalse(paths.run_dir("DEMO-7001").exists())
+
+    def test_init_in_another_tasks_lane_is_refused(self):
+        # rule: R-LANE-INIT-INSIDE
+        fixtures.bind_lane("DEMO-7002", "/tmp/repo")
+        fixtures.bind_lane("DEMO-7003", "/tmp/repo-b", lane=2)
+        with mock.patch.dict(os.environ, {"PPL_TASK": "DEMO-7002"}):
+            code, _, err = call("init", "DEMO-7003", "--tracker-url", "u")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertIn("DEMO-7002", json.loads(err)["message"])
+        self.assertFalse(paths.run_dir("DEMO-7003").exists())
+
+    def test_init_in_the_lane_its_cwd_is_in_needs_no_ppl_task(self):
+        repo = make_repo()
+        entry = fixtures.bind_lane("DEMO-7004", repo)
+        with contextlib.chdir(entry["start_dir"]):
+            code, _, err = call("init", "DEMO-7004", "--tracker-url", "u")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-7004")["lane"],
+                         {"number": 1, "start_dir": entry["start_dir"],
+                          "session_id": entry["session_id"]})
+
+    def test_init_defaults_repo_to_the_lane_worktree(self):
+        repo = make_repo()
+        fixtures.bind_lane("DEMO-7005", repo)
+        code, _, err = self.init("DEMO-7005")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-7005")["repo"], repo)
+
+    def test_init_with_another_repo_is_refused(self):
+        # rule: R-LANE-INIT-INSIDE
+        repo, other = make_repo(), make_repo()
+        fixtures.bind_lane("DEMO-7006", repo)
+        code, _, err = self.init("DEMO-7006", "--repo", other)
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "SCHEMA_INVALID")
+        self.assertIn(repo, error["message"])
+        self.assertFalse(paths.run_dir("DEMO-7006").exists())
+        # the lane's own worktree through a symlinked parent is the same directory
+        link = Path(tmphome.mkdtemp(prefix="ppllink-")) / "parent"
+        link.symlink_to(os.path.dirname(repo))
+        code, _, err = self.init("DEMO-7006", "--repo", str(link / os.path.basename(repo)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-7006")["repo"], repo)
+
+    def test_init_loads_the_harness_from_the_lane_snapshot(self):
+        # rule: R-INIT-HARNESS-APPLIED
+        entry = fixtures.bind_lane("DEMO-7007", "/tmp/repo")
+        installed = paths.harness_dir("example-maven") / "harness.toml"
+        installed.write_text(installed.read_text(encoding="utf-8").replace(
+            'key_pattern = "^[A-Z][A-Z0-9]+-[0-9]+$"', 'key_pattern = "^ACME-[0-9]+$"'),
+            encoding="utf-8")
+        code, _, err = self.init("DEMO-7007")
+        self.assertEqual(code, 0, err)
+        snapshot = Path(entry["start_dir"]) / "harness" / "example-maven"
+        state = run.load("DEMO-7007")
+        self.assertEqual(state["harness"]["name"], "example-maven")
+        self.assertEqual(state["harness"]["path"], str(snapshot))
+        frozen = json.loads((paths.run_dir("DEMO-7007") / "harness.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(frozen["task"]["key_pattern"], "^[A-Z][A-Z0-9]+-[0-9]+$")
+
+    def test_init_with_another_harness_than_the_lanes_is_refused(self):
+        # rule: R-INIT-HARNESS-APPLIED
+        fixtures.install_harness("example-generic")
+        fixtures.bind_lane("DEMO-7008", "/tmp/repo")
+        code, _, err = self.init("DEMO-7008", "--harness", "example-generic")
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "SCHEMA_INVALID")
+        self.assertIn("example-maven", error["message"])
+        self.assertFalse(paths.run_dir("DEMO-7008").exists())
+        code, _, err = self.init("DEMO-7008", "--harness", "example-maven")
+        self.assertEqual(code, 0, err)
+
+    def test_isolated_flag_is_an_argparse_error(self):
+        fixtures.bind_lane("DEMO-7010", "/tmp/repo")
+        for flag in ("--isolated", "--no-isolated"):
+            code, _, err = self.init("DEMO-7010", flag)
+            self.assertEqual(code, 2, flag)
+            error = json.loads(err)
+            self.assertEqual(error["error_code"], "SCHEMA_INVALID", flag)
+            self.assertIn("unrecognized arguments: %s" % flag, error["message"])
+        self.assertFalse(paths.run_dir("DEMO-7010").exists())
+
+
+class TestBareCommandsFindTheirRun(unittest.TestCase):
+    """A command without --task takes its run from PPL_TASK, else from the lane whose start
+    directory or worktree holds the cwd, and never from a pointer file (R29)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.worktree_a, cls.worktree_b = make_repo(), make_repo()
+        for task_id, worktree in (("DEMO-7020", cls.worktree_a), ("DEMO-7021", cls.worktree_b)):
+            code, _, err = init_in_lane(task_id, "--tracker-url", "u", "--repo", worktree)
+            assert code == 0, err
+
+    def setUp(self):
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop("PPL_TASK", None)
+
+    def status_of(self, cwd, ppl_task=None, *flags):
+        env = {"PPL_TASK": ppl_task} if ppl_task else {}
+        with mock.patch.dict(os.environ, env), contextlib.chdir(cwd):
+            return call("status", *flags)
+
+    def test_bare_commands_resolve_the_run_from_ppl_task_then_cwd(self):
+        elsewhere = tmphome.mkdtemp(prefix="pplelsewhere-")
+        code, out, err = self.status_of(elsewhere, "DEMO-7020")
+        self.assertEqual(code, 0, err)
+        self.assertIn("DEMO-7020", out)
+        # no PPL_TASK: the lane whose worktree, or start directory, holds the cwd
+        code, out, err = self.status_of(os.path.join(self.worktree_b))
+        self.assertEqual(code, 0, err)
+        self.assertIn("DEMO-7021", out)
+        code, out, err = self.status_of(lanes.start_dir("DEMO-7020"))
+        self.assertEqual(code, 0, err)
+        self.assertIn("DEMO-7020", out)
+        # PPL_TASK wins over the cwd
+        code, out, err = self.status_of(self.worktree_b, "DEMO-7020")
+        self.assertIn("DEMO-7020", out)
+        # neither: refused, naming ppl lane, whatever a leftover runs/ACTIVE says
+        (paths.runs_dir() / "ACTIVE").write_text("DEMO-7020\n", encoding="utf-8")
+        self.addCleanup((paths.runs_dir() / "ACTIVE").unlink)
+        code, _, err = self.status_of(elsewhere)
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "SCHEMA_INVALID")
+        self.assertEqual(error["message"], "no --task given and not inside a lane; start one "
+                                           "with ppl lane <link>")
+
+    def test_task_and_ppl_task_naming_different_runs_are_refused(self):
+        elsewhere = tmphome.mkdtemp(prefix="pplelsewhere-")
+        code, _, err = self.status_of(elsewhere, "DEMO-7020", "--task", "DEMO-7021")
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "SCHEMA_INVALID")
+        self.assertIn("DEMO-7021", error["message"])
+        self.assertIn("PPL_TASK", error["message"])
+        code, out, err = self.status_of(elsewhere, "DEMO-7020", "--task", "DEMO-7020")
+        self.assertEqual(code, 0, err)
+        # --task alone, from outside every lane, names any run
+        code, out, err = self.status_of(elsewhere, None, "--task", "DEMO-7021")
+        self.assertEqual(code, 0, err)
+        self.assertIn("DEMO-7021", out)
 
 
 # The entry ppl setup claude writes: this interpreter, then the real guard script.
@@ -2460,8 +2580,7 @@ class TestInitVerifiesTheGuardMatcher(unittest.TestCase):
     """A registered guard whose matcher never passes a tool name to it is a
     denial that cannot fire, whatever the code behind it says - the Jira gate
     was dead this way on the machine this was built on. ppl init refuses to
-    start a run under such a registration, isolated or not: --no-isolated
-    waives the isolation check, not this one.
+    start a run under such a registration, local or global.
     """
 
     EDITING_TOOLS_ONLY = "Edit|Write|MultiEdit|NotebookEdit"
@@ -2485,7 +2604,7 @@ class TestInitVerifiesTheGuardMatcher(unittest.TestCase):
     def test_init_refuses_when_the_registered_matcher_leaves_guarded_tools_uncovered(self):
         # rule: R-GUARD-MATCHER
         write_local_guard_registration(self.local_dir, matcher=self.EDITING_TOOLS_ONLY)
-        code, _, err = call("init", "DEMO-9910", "--tracker-url", "u", "--repo", "/tmp/repo",
+        code, _, err = init_in_lane("DEMO-9910", "--tracker-url", "u", "--repo", "/tmp/repo",
                             "--harness", "example-maven")
         self.assertEqual(code, 2)
         doc = json.loads(err)
@@ -2494,12 +2613,12 @@ class TestInitVerifiesTheGuardMatcher(unittest.TestCase):
         self.assertIn("Bash", doc["message"])
         self.assertIn(doctor.RECOMMENDED_MATCHER, doc["message"])
 
-    def test_init_no_isolated_still_refuses_an_incomplete_matcher(self):
+    def test_init_refuses_an_incomplete_matcher_registered_globally(self):
         # rule: R-GUARD-MATCHER
         # The hook is armed globally here and cannot see Bash in any session.
         write_global_guard_registration(matcher=self.EDITING_TOOLS_ONLY)
-        code, _, err = call("init", "DEMO-9911", "--tracker-url", "u", "--repo", "/tmp/repo",
-                            "--no-isolated", "--harness", "example-maven")
+        code, _, err = init_in_lane("DEMO-9911", "--tracker-url", "u", "--repo", "/tmp/repo",
+                                    "--harness", "example-maven")
         self.assertEqual(code, 2)
         doc = json.loads(err)
         self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
@@ -2508,7 +2627,7 @@ class TestInitVerifiesTheGuardMatcher(unittest.TestCase):
     def test_init_is_not_refused_when_the_matcher_covers_every_guarded_tool(self):
         # rule: R-GUARD-MATCHER
         write_local_guard_registration(self.local_dir)
-        code, _, err = call("init", "DEMO-9912", "--tracker-url", "u", "--repo", "/tmp/repo",
+        code, _, err = init_in_lane("DEMO-9912", "--tracker-url", "u", "--repo", "/tmp/repo",
                             "--harness", "example-maven")
         self.assertEqual(code, 0, err)
 
@@ -2516,7 +2635,7 @@ class TestInitVerifiesTheGuardMatcher(unittest.TestCase):
         # Many installs have no GitHub MCP server, so the gap is told, not refused.
         explicit = "|".join(re.escape(name) for name in doctor.guarded_tool_names())
         write_local_guard_registration(self.local_dir, matcher=explicit)
-        code, _, err = call("init", "DEMO-9913", "--tracker-url", "u", "--repo", "/tmp/repo",
+        code, _, err = init_in_lane("DEMO-9913", "--tracker-url", "u", "--repo", "/tmp/repo",
                             "--harness", "example-maven")
         self.assertEqual(code, 0, err)
         self.assertIn("warning: ", err)
@@ -2556,7 +2675,7 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         path.write_text(json.dumps(doc), encoding="utf-8")
 
     def init(self, task_id):
-        return call("init", task_id, "--tracker-url", "u", "--repo", "/tmp/repo",
+        return init_in_lane(task_id, "--tracker-url", "u", "--repo", "/tmp/repo",
                     "--harness", "example-maven")
 
     def test_init_refuses_a_guard_entry_that_is_not_a_command(self):
@@ -2644,11 +2763,10 @@ class TestInitChecksTheHookShape(unittest.TestCase):
 
 
 class TestInitVerifiesTheGuardHookRegistration(unittest.TestCase):
-    """Finding 1(b): isolated=true asserts a fact - that the guard hook is
-    registered only where an isolated run assumes it is - that nothing
-    checked before. ppl init now refuses the one configuration that makes
-    that assertion silently false: hook registered only globally.
-    """
+    """Where the guard is registered refuses no run any more: a lane's hooks come from the
+    settings ppl lane renders for it and carry its task on their command line
+    [R-LANE-HOOK-BINDING]. ppl init still reads this directory's and the Claude home's settings
+    for the matcher and the hook shape."""
 
     def setUp(self):
         self.global_path = doctor.global_settings_path()
@@ -2659,21 +2777,10 @@ class TestInitVerifiesTheGuardHookRegistration(unittest.TestCase):
         if self.global_path.exists():
             self.global_path.unlink()
 
-    def test_init_refuses_when_hook_is_registered_only_globally(self):
-        # rule: R-INIT-ISOLATION-CHECK
+    def test_init_is_not_refused_when_the_hook_is_registered_only_globally(self):
         write_global_guard_registration()
-        code, _, err = call("init", "DEMO-920", "--tracker-url", "u", "--repo", "/tmp/repo",
-                            "--harness", "example-maven")
-        self.assertEqual(code, 2)
-        doc = json.loads(err)
-        self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
-        self.assertIn("settings.local.json", doc["message"])
-        self.assertIn("--no-isolated", doc["message"])
-
-    def test_init_no_isolated_is_not_refused_when_hook_is_registered_only_globally(self):
-        write_global_guard_registration()
-        code, _, err = call("init", "DEMO-921", "--tracker-url", "u", "--repo", "/tmp/repo",
-                            "--no-isolated", "--harness", "example-maven")
+        code, _, err = init_in_lane("DEMO-921", "--tracker-url", "u", "--repo", "/tmp/repo",
+                                    "--harness", "example-maven")
         self.assertEqual(code, 0, err)
 
     def test_init_is_not_refused_when_the_hook_is_registered_locally(self):
@@ -2682,7 +2789,7 @@ class TestInitVerifiesTheGuardHookRegistration(unittest.TestCase):
         os.environ["PPL_LOCAL_SETTINGS_DIR"] = local_dir
         write_local_guard_registration(local_dir)
         try:
-            code, _, err = call("init", "DEMO-922", "--tracker-url", "u", "--repo", "/tmp/repo",
+            code, _, err = init_in_lane("DEMO-922", "--tracker-url", "u", "--repo", "/tmp/repo",
                                 "--harness", "example-maven")
             self.assertEqual(code, 0, err)
         finally:
@@ -2692,72 +2799,15 @@ class TestInitVerifiesTheGuardHookRegistration(unittest.TestCase):
                 os.environ["PPL_LOCAL_SETTINGS_DIR"] = previous
 
     def test_init_is_not_refused_when_the_hook_is_registered_nowhere(self):
-        # "not armed yet" (README) is the pre-existing, honestly documented
-        # state, not the mismatch this refusal targets.
-        code, _, err = call("init", "DEMO-923", "--tracker-url", "u", "--repo", "/tmp/repo",
+        # "not armed yet" (README) is the pre-existing, honestly documented state
+        code, _, err = init_in_lane("DEMO-923", "--tracker-url", "u", "--repo", "/tmp/repo",
                             "--harness", "example-maven")
         self.assertEqual(code, 0, err)
 
-    def test_init_refuses_when_the_hook_is_registered_both_locally_and_globally(self):
-        # rule: R-INIT-ISOLATION-CHECK
-        # Round 3, Finding 2: a working local registration does not make an
-        # armed global one safe.
-        local_dir = tmphome.mkdtemp(prefix="ppllocaldir-")
-        previous = os.environ.get("PPL_LOCAL_SETTINGS_DIR")
-        os.environ["PPL_LOCAL_SETTINGS_DIR"] = local_dir
-        write_local_guard_registration(local_dir)
-        write_global_guard_registration()
-        try:
-            code, _, err = call("init", "DEMO-926", "--tracker-url", "u", "--repo", "/tmp/repo",
-                                "--harness", "example-maven")
-            self.assertEqual(code, 2)
-            doc = json.loads(err)
-            self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
-            self.assertIn("--no-isolated", doc["message"])
-        finally:
-            if previous is None:
-                del os.environ["PPL_LOCAL_SETTINGS_DIR"]
-            else:
-                os.environ["PPL_LOCAL_SETTINGS_DIR"] = previous
-
-    def test_init_refuses_when_local_is_confirmed_but_global_is_unreadable(self):
-        # rule: R-INIT-ISOLATION-CHECK
-        # Round 3, Finding 1: a confirmed local yes must not rescue an
-        # unreadable global file - the global side might genuinely be armed.
-        local_dir = tmphome.mkdtemp(prefix="ppllocaldir-")
-        previous = os.environ.get("PPL_LOCAL_SETTINGS_DIR")
-        os.environ["PPL_LOCAL_SETTINGS_DIR"] = local_dir
-        write_local_guard_registration(local_dir)
-        self.global_path.write_text("// my settings\nnot json", encoding="utf-8")
-        try:
-            code, _, err = call("init", "DEMO-927", "--tracker-url", "u", "--repo", "/tmp/repo",
-                                "--harness", "example-maven")
-            self.assertEqual(code, 2)
-            doc = json.loads(err)
-            self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
-            self.assertIn("confirmed", doc["message"])
-        finally:
-            if previous is None:
-                del os.environ["PPL_LOCAL_SETTINGS_DIR"]
-            else:
-                os.environ["PPL_LOCAL_SETTINGS_DIR"] = previous
-
-    def test_init_refuses_when_the_global_settings_file_cannot_be_parsed(self):
-        # Finding 1, round 2: a "//" comment in a hand-edited settings.json is
-        # an ordinary edit, not a contrived case - it must refuse, not read as
-        # "no hook here" just because this check could not parse the file.
+    def test_init_is_not_refused_when_a_settings_file_cannot_be_parsed(self):
         self.global_path.write_text('// my settings\n{"hooks": {}}', encoding="utf-8")
-        code, _, err = call("init", "DEMO-924", "--tracker-url", "u", "--repo", "/tmp/repo",
-                            "--harness", "example-maven")
-        self.assertEqual(code, 2)
-        doc = json.loads(err)
-        self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
-        self.assertIn("confirmed", doc["message"])
-
-    def test_init_no_isolated_is_not_refused_when_a_settings_file_cannot_be_parsed(self):
-        self.global_path.write_text('// my settings\n{"hooks": {}}', encoding="utf-8")
-        code, _, err = call("init", "DEMO-925", "--tracker-url", "u", "--repo", "/tmp/repo",
-                            "--no-isolated", "--harness", "example-maven")
+        code, _, err = init_in_lane("DEMO-925", "--tracker-url", "u", "--repo", "/tmp/repo",
+                                    "--harness", "example-maven")
         self.assertEqual(code, 0, err)
 
 
@@ -2772,30 +2822,22 @@ class TestDoctorCommand(unittest.TestCase):
             self.global_path.unlink()
 
     def test_doctor_reports_none_when_nowhere_registered(self):
-        call("init", "DEMO-930", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-930", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, out, err = call("doctor", "--task", "DEMO-930")
         self.assertEqual(code, 0, err)
         doc = json.loads(out.splitlines()[0])
         self.assertEqual(doc["registration"], "none")
-        self.assertIsNone(doc["mismatch"])
+        self.assertEqual(doc["task"], "DEMO-930")
+        self.assertNotIn("isolated", doc)
+        self.assertNotIn("mismatch", doc)
 
-    def test_doctor_reports_the_mismatch_against_an_isolated_run(self):
-        call("init", "DEMO-931", "--tracker-url", "u", "--repo", "/tmp/repo",
-             "--harness", "example-maven")
-        write_global_guard_registration()
-        code, out, err = call("doctor", "--task", "DEMO-931")
-        self.assertEqual(code, 0, err)
-        doc = json.loads(out.splitlines()[0])
-        self.assertEqual(doc["registration"], "global")
-        self.assertIsNotNone(doc["mismatch"])
-
-    def test_doctor_without_an_active_run_still_reports_registration(self):
+    def test_doctor_without_a_run_still_reports_registration(self):
         code, out, err = call("doctor", "--task", "DEMO-NOPE-999")
         self.assertEqual(code, 0, err)
         doc = json.loads(out.splitlines()[0])
         self.assertEqual(doc["registration"], "none")
-        self.assertIsNone(doc["isolated"])
+        self.assertIsNone(doc["task"])
 
     def test_doctor_output_names_the_inspected_paths(self):
         # Finding 3, round 2: PPL_CLAUDE_HOME/PPL_LOCAL_SETTINGS_DIR make this
@@ -2841,16 +2883,13 @@ class TestDoctorCommand(unittest.TestCase):
 
     def test_doctor_reports_unknown_for_an_unparseable_settings_file(self):
         self.global_path.write_text('// my settings\n{"hooks": {}}', encoding="utf-8")
-        call("init", "DEMO-932", "--tracker-url", "u", "--repo", "/tmp/repo", "--no-isolated",
+        init_in_lane("DEMO-932", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, out, err = call("doctor", "--task", "DEMO-932")
         self.assertEqual(code, 0, err)
         doc = json.loads(out.splitlines()[0])
         self.assertEqual(doc["registration"], "unknown")
         self.assertIsNotNone(doc["global"]["detail"])
-        # isolated=false for this run: reporting registration honestly is not
-        # the same claim as refusing to start it, so no mismatch here either.
-        self.assertIsNone(doc["mismatch"])
 
 
 class TestMetricsCommandPrintsUndefinedNotZero(unittest.TestCase):
@@ -2947,7 +2986,7 @@ class TestLabelAndMetricsSurviveDestroyThroughTheRealCli(unittest.TestCase):
     def test_label_destroy_label_again_then_metrics_sees_both(self):
         # rule: R-METRIC-SCANS-ARCHIVE
         from ppl import paths, store
-        call("init", "DEMO-44444", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-44444", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         store.write_json(paths.run_dir("DEMO-44444") / "verdicts" / "deadbeef.json", {
             "task_id": "DEMO-44444", "candidate_sha": "deadbeef",
@@ -2996,7 +3035,7 @@ class TestLabelIsNotLivenessOrLease(unittest.TestCase):
         # rule: R-LABEL-NO-LIVENESS-REFRESH
         # Any control.enforce-gated command would refuse this with TIMED_OUT
         # (see TestWatchdog) - labelling a past SHA must not be one of them.
-        call("init", "DEMO-980", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-980", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         self._expire("DEMO-980")
         code, _, err = call("label", "--sha", "a" * 40, "--actual", "defective",
@@ -3006,7 +3045,7 @@ class TestLabelIsNotLivenessOrLease(unittest.TestCase):
     def test_label_does_not_refresh_the_deadline(self):
         # rule: R-LABEL-NO-LIVENESS-REFRESH
         from ppl import run
-        call("init", "DEMO-981", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-981", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         expired = self._expire("DEMO-981")
         call("label", "--sha", "b" * 40, "--actual", "correct", "--task", "DEMO-981")
@@ -3017,7 +3056,7 @@ class TestLabelIsNotLivenessOrLease(unittest.TestCase):
         # control.enforce or require_current_generation - ppl label calls
         # neither, so the stage must stay exactly where it was.
         from ppl import run
-        call("init", "DEMO-982", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-982", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         self._expire("DEMO-982")
         call("label", "--sha", "c" * 40, "--actual", "defective", "--task", "DEMO-982")
@@ -3026,7 +3065,7 @@ class TestLabelIsNotLivenessOrLease(unittest.TestCase):
     def test_label_does_not_bump_the_lease_generation(self):
         # rule: R-LABEL-NO-LEASE-FENCE
         from ppl import run
-        call("init", "DEMO-983", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-983", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         before = run.load("DEMO-983")["lease_generation"]
         code, _, err = call("label", "--sha", "d" * 40, "--actual", "correct",
@@ -3040,7 +3079,7 @@ class TestLabelIsNotLivenessOrLease(unittest.TestCase):
         # require --generation (see TestLeaseFencesTheWritePaths):
         # requiring one here would be theatre, since a label is a fact about
         # an already-past SHA, never a write a dispatched attempt races.
-        call("init", "DEMO-984", "--tracker-url", "u", "--repo", "/tmp/repo",
+        init_in_lane("DEMO-984", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
         code, _, err = call("label", "--sha", "e" * 40, "--actual", "defective",
                             "--task", "DEMO-984", "--generation", "1")
@@ -3058,7 +3097,7 @@ class TestInitModelCheck(unittest.TestCase):
 
     def test_init_refuses_when_models_are_unverified(self):
         # rule: R-INIT-MODELS-VERIFIED
-        code, out, err = call("init", "DEMO-501", "--tracker-url", "u", "--repo", make_repo(),
+        code, out, err = init_in_lane("DEMO-501", "--tracker-url", "u", "--repo", make_repo(),
                               "--harness", "example-maven")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "MODELS_UNVERIFIED")
@@ -3066,7 +3105,7 @@ class TestInitModelCheck(unittest.TestCase):
 
     def test_init_passes_when_verified(self):
         mark_all_verified()
-        code, out, err = call("init", "DEMO-502", "--tracker-url", "u", "--repo", make_repo(),
+        code, out, err = init_in_lane("DEMO-502", "--tracker-url", "u", "--repo", make_repo(),
                               "--harness", "example-maven")
         self.assertEqual(code, 0, err)
         state = json.loads((paths.run_dir("DEMO-502") / "state.json").read_text(encoding="utf-8"))
@@ -3075,7 +3114,7 @@ class TestInitModelCheck(unittest.TestCase):
         self.assertIn("Models:   verified", out)
 
     def test_skip_model_check_is_recorded(self):
-        code, out, err = call("init", "DEMO-503", "--tracker-url", "u", "--repo", make_repo(),
+        code, out, err = init_in_lane("DEMO-503", "--tracker-url", "u", "--repo", make_repo(),
                               "--skip-model-check", "--harness", "example-maven")
         self.assertEqual(code, 0, err)
         state = json.loads((paths.run_dir("DEMO-503") / "state.json").read_text(encoding="utf-8"))
@@ -3084,14 +3123,14 @@ class TestInitModelCheck(unittest.TestCase):
         self.assertIn("Models:   skipped", out)
 
     def test_the_init_log_event_carries_the_model_check(self):
-        call("init", "DEMO-504", "--tracker-url", "u", "--repo", make_repo(), "--skip-model-check",
+        init_in_lane("DEMO-504", "--tracker-url", "u", "--repo", make_repo(), "--skip-model-check",
              "--harness", "example-maven")
         log = (paths.run_dir("DEMO-504") / "log.jsonl").read_text(encoding="utf-8")
         event = json.loads(log.splitlines()[0])
         self.assertEqual((event["event"], event["model_check"]), ("init", "skipped"))
 
     def test_the_refusal_names_the_models_and_the_way_out(self):
-        code, out, err = call("init", "DEMO-505", "--tracker-url", "u", "--repo", make_repo(),
+        code, out, err = init_in_lane("DEMO-505", "--tracker-url", "u", "--repo", make_repo(),
                               "--risk", "high", "--harness", "example-maven")
         self.assertEqual(code, 2)
         message = json.loads(err)["message"]
@@ -3108,7 +3147,7 @@ class TestInitHarness(unittest.TestCase):
         self.addCleanup(seed_setup)
 
     def test_init_with_harness_writes_the_snapshot(self):
-        code, out, err = call("init", "DEMO-2601", "--tracker-url", "u", "--repo", make_repo(),
+        code, out, err = init_in_lane("DEMO-2601", "--tracker-url", "u", "--repo", make_repo(),
                               "--harness", "example-maven")
         self.assertEqual(code, 0, err)
         state = json.loads((paths.run_dir("DEMO-2601") / "state.json").read_text(encoding="utf-8"))
@@ -3125,51 +3164,24 @@ class TestInitHarness(unittest.TestCase):
         path.write_text(path.read_text(encoding="utf-8").replace(
             'key_pattern = "^[A-Z][A-Z0-9]+-[0-9]+$"', 'key_pattern = "^ACME-[0-9]+$"'),
             encoding="utf-8")
-        code, out, err = call("init", "DEMO-608", "--tracker-url", "u", "--repo", make_repo(),
+        code, out, err = init_in_lane("DEMO-608", "--tracker-url", "u", "--repo", make_repo(),
                               "--harness", "example-maven")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
         self.assertIn("^ACME-[0-9]+$", json.loads(err)["message"])
 
-    def test_init_refuses_a_harness_that_is_not_the_applied_one(self):
-        # rule: R-INIT-HARNESS-APPLIED
-        fixtures.install_harness("example-generic")
-        code, out, err = call("init", "DEMO-609", "--tracker-url", "u", "--repo", make_repo(),
-                              "--harness", "example-generic")
-        self.assertEqual(code, 2)
-        self.assertEqual(json.loads(err)["error_code"], "HARNESS_NOT_APPLIED")
-        self.assertIn("ppl harness apply example-generic", json.loads(err)["message"])
-
-    def test_init_refuses_a_harness_directory_outside_the_data_root(self):
-        # rule: R-INIT-HARNESS-APPLIED
-        outside = Path(tmphome.mkdtemp(prefix="pplharness-")) / "example-maven"
-        shutil.copytree(fixtures.SOURCE / "defaults" / "harnesses" / "example-maven", outside)
-        code, out, err = call("init", "DEMO-606", "--tracker-url", "u", "--repo", make_repo(),
-                              "--harness", str(outside))
-        self.assertEqual(code, 2)
-        self.assertEqual(json.loads(err)["error_code"], "HARNESS_NOT_APPLIED")
-        self.assertIn("is not an installed harness", json.loads(err)["message"])
-        self.assertFalse(paths.run_dir("DEMO-606").exists())
-
     def test_init_records_the_installed_directory_name(self):
         fixtures.install_harness("example-maven", as_name="mine")
         config.set_active_harness("mine")
-        code, out, err = call("init", "DEMO-607", "--tracker-url", "u", "--repo", make_repo(),
+        code, out, err = init_in_lane("DEMO-607", "--tracker-url", "u", "--repo", make_repo(),
                               "--harness", "mine")
         self.assertEqual(code, 0, err)
         state = json.loads((paths.run_dir("DEMO-607") / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["harness"]["name"], "mine")
-        self.assertEqual(state["harness"]["path"], str(paths.harness_dir("mine")))
+        self.assertEqual(state["harness"]["path"],
+                         str(lanes.start_dir("DEMO-607") / "harness" / "mine"))
         snap = json.loads((paths.run_dir("DEMO-607") / "harness.json").read_text(encoding="utf-8"))
         self.assertEqual(snap["name"], "mine")
-
-    def test_init_refuses_when_no_harness_was_ever_applied(self):
-        # rule: R-INIT-HARNESS-APPLIED
-        config.set_active_harness("")
-        code, out, err = call("init", "DEMO-616", "--tracker-url", "u", "--repo", make_repo(),
-                              "--harness", "example-maven")
-        self.assertEqual(code, 2)
-        self.assertEqual(json.loads(err)["error_code"], "HARNESS_NOT_APPLIED")
 
 
 class TestInitRequiresSetup(unittest.TestCase):
@@ -3178,7 +3190,7 @@ class TestInitRequiresSetup(unittest.TestCase):
         self.addCleanup(seed_setup)
 
     def init(self, task_id, *extra):
-        return call("init", task_id, "--tracker-url", "u", "--repo", make_repo(), *extra)
+        return init_in_lane(task_id, "--tracker-url", "u", "--repo", make_repo(), *extra)
 
     def test_init_refuses_when_setup_is_incomplete(self):
         # rule: R-INIT-SETUP-COMPLETE
@@ -3187,7 +3199,7 @@ class TestInitRequiresSetup(unittest.TestCase):
         if config_path.exists():
             config_path.unlink()
         try:
-            code, out, err = call("init", "DEMO-801", "--tracker-url", "u", "--repo", make_repo(),
+            code, out, err = init_in_lane("DEMO-801", "--tracker-url", "u", "--repo", make_repo(),
                                   "--harness", "example-maven")
             self.assertEqual(code, 2)
             self.assertEqual(json.loads(err)["error_code"], "SETUP_INCOMPLETE")
@@ -3229,23 +3241,11 @@ class TestInitRequiresSetup(unittest.TestCase):
         code, out, err = self.init("DEMO-806", "--harness", "example-maven")
         self.assertEqual(code, 0, err)
 
-    def test_init_without_a_harness_refuses_and_names_the_active_one(self):
-        # rule: R-INIT-SETUP-COMPLETE
-        code, out, err = self.init("DEMO-807")
-        self.assertEqual(code, 2)
-        error = json.loads(err)
-        self.assertEqual(error["error_code"], "SETUP_INCOMPLETE")
-        self.assertIn("pass --harness example-maven", error["message"])
-        self.assertFalse(paths.run_dir("DEMO-807").exists())
-
-    def test_init_without_a_harness_and_none_applied_says_how_to_apply_one(self):
+    def test_init_without_a_harness_takes_the_lanes(self):
         config.set_active_harness("")
-        code, out, err = self.init("DEMO-810")
-        self.assertEqual(code, 2)
-        error = json.loads(err)
-        self.assertEqual(error["error_code"], "SETUP_INCOMPLETE")
-        self.assertIn("no harness is applied yet", error["message"])
-        self.assertIn("`ppl setup harness` and `ppl setup apply`", error["message"])
+        code, out, err = self.init("DEMO-807")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-807")["harness"]["name"], "example-maven")
 
     def test_a_skipped_models_step_points_at_the_skip_flag(self):
         config.mark_step("models", "skipped")
@@ -3467,7 +3467,6 @@ class TestTrackerFetch(unittest.TestCase):
         from ppl import harness, run, store
         shutil.rmtree(paths.run_dir(task_id), ignore_errors=True)
         run.init(task_id, "https://github.com/o/r/issues/7", "/tmp/repo")
-        run.set_active(task_id)
         if tracker:
             fixtures.install_variant("example-generic", "gh-issues", **fixtures.GITHUB_ISSUES)
             store.write_json(paths.run_dir(task_id) / "harness.json",
@@ -3771,7 +3770,7 @@ class TestRefusalRetryCap(unittest.TestCase):
     refusal for the same command, role and lease generation parks the run."""
 
     def init(self, task_id, repo="/tmp/repo"):
-        code, _, err = call("init", task_id, "--tracker-url", "u", "--repo", repo,
+        code, _, err = init_in_lane(task_id, "--tracker-url", "u", "--repo", repo,
                             "--harness", "example-maven")
         self.assertEqual(code, 0, err)
 
@@ -4233,7 +4232,7 @@ class TestInitRequiresTheOsSandbox(unittest.TestCase):
         task = task or "GH-%d" % next(self.COUNTER)
         with mock.patch.object(doctor, "os_sandbox_facts", return_value=facts), \
                 mock.patch.object(doctor, "inspect", return_value=inspected):
-            code, out, err = call("init", task, "--tracker-url", "u", "--repo", "/tmp/repo",
+            code, out, err = init_in_lane(task, "--tracker-url", "u", "--repo", "/tmp/repo",
                                   "--harness", harness, *flags)
         return task, code, out, err
 
@@ -4248,8 +4247,7 @@ class TestInitRequiresTheOsSandbox(unittest.TestCase):
 
     def test_init_refuses_when_the_guard_is_only_global(self):
         # rule: R-OS-SANDBOX-INIT-REQUIRED
-        # --no-isolated, so the isolation check passes and the OS sandbox one is what refuses
-        task, code, _, err = self.start("on", "global", "--no-isolated")
+        task, code, _, err = self.start("on", "global")
         self.assertEqual(code, 2)
         doc = json.loads(err)
         self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
@@ -4259,7 +4257,7 @@ class TestInitRequiresTheOsSandbox(unittest.TestCase):
 
     def test_init_refuses_when_the_guard_is_absent(self):
         # rule: R-OS-SANDBOX-INIT-REQUIRED
-        task, code, _, err = self.start("on", "none", "--no-isolated")
+        task, code, _, err = self.start("on", "none")
         self.assertEqual(code, 2)
         doc = json.loads(err)
         self.assertEqual(doc["error_code"], "SCHEMA_INVALID")

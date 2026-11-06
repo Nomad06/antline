@@ -226,8 +226,8 @@ tools, the three read tools, Bash, the forge adapters' denied tools, the tracker
 under every default prefix, the agent tools and WebFetch) must be a full regex match of some
 registered guard entry's matcher, the names left uncovered are reported per settings file as
 `uncovered` under a top-level `matcher` verdict of `ok` or `incomplete`, and `ppl init` refuses
-`SCHEMA_INVALID` to create a run while a confirmed registration leaves any of them uncovered,
-`--no-isolated` or not [R-GUARD-MATCHER]. That list holds the default tracker prefixes and the
+`SCHEMA_INVALID` to create a run while a confirmed registration leaves any of them uncovered
+[R-GUARD-MATCHER]. That list holds the default tracker prefixes and the
 default forge server names only, so an operator who keeps an explicit matcher and names a
 custom tracker prefix or `forge.mcp_server` in the harness covers those names by hand. The
 GitHub MCP server's issue writes are not on it: the tracker gate and the role ban match them
@@ -563,11 +563,14 @@ feature: parallel waves (section 2, out of scope for v1) must not be turned on u
 resource separation exists for whichever of these a gate recipe actually touches, and nothing
 in this codebase enforces that precondition today [R-LANE-RESOURCE-ISOLATION n/a].
 
-**The `isolated` flag.** `ppl init` still writes this field (true by default, false with
-`--no-isolated`) and still checks where the guard is registered (below), but the guard no
-longer reads it: every call of a lane session is its run's, so the tracker-write gate (9.2) and
-the operator pause (9.2) reach the unroled main session (the orchestrator, which carries no
-`agent_type`) from any cwd, and a session in no lane meets neither [R-LANE-HOOK-BINDING].
+**A run belongs to its lane.** `ppl init` runs in the session `ppl lane` started for the task,
+which `PPL_TASK` or the cwd binds, and refuses outside it; the run takes the lane's worktree as
+its repo [R-LANE-INIT-INSIDE] and the harness the lane exported [R-INIT-HARNESS-APPLIED]. The
+`isolated` flag and the `runs/ACTIVE` pointer are gone: every call of a lane session is its
+run's, so the tracker-write gate (9.2) and the operator pause (9.2) reach the unroled main
+session (the orchestrator, which carries no `agent_type`) from any cwd, and a session in no
+lane meets neither [R-LANE-HOOK-BINDING]. A `ppl` command without `--task` takes its run from
+`PPL_TASK`, else from the lane whose start directory or worktree holds its cwd.
 
 **The `os_sandboxed` flag.** On a harness that reaches GitHub, `ppl init` also requires
 that this session runs inside Claude Code's OS sandbox with GitHub denied
@@ -675,64 +678,24 @@ checked here, so the pipeline workspace should register no file-writing one
 [R-OS-SANDBOX-PROTECTED-PATHS]. A role's call to a GitHub MCP tool is denied
 [R-FORGE-GH-MCP-NO-ROLE], and so is its WebFetch of a github.com URL [R-WEBFETCH-GITHUB-NO-ROLE].
 
-**Checked, not just trusted.** `ppl` cannot see how the guard hook is registered
-from inside `decide()` - that lives in a `.claude/settings*.json` file, not in run state -
-but it can be checked separately, on disk, before a run even starts
-[R-INIT-ISOLATION-CHECK]. `ppl doctor` and `ppl
-init --isolated` (the default) both call `doctor.inspect()`, which reads this directory's
+**Where the guard is registered.** `ppl doctor` reads this directory's
 `.claude/settings.local.json` and `~/.claude/settings.json` for the guard hook's command and
 reports `"local"`, `"global"`, `"both"`, `"none"`, or `"unknown"` (a settings file exists but
-could not be read or parsed). The two files answer different halves of what
-`isolated=true` asserts - "the hook fires here" (needs a confirmed local yes) and "the hook
-does not fire elsewhere" (needs a confirmed global no) - so a confirmed local yes does not
-paper over an unreadable global file: that combination is `"unknown"`, not `"local"`,
-because the half isolation actually depends on was not confirmed. `ppl init --isolated`
-refuses with `SCHEMA_INVALID` on three combinations that are silently wrong
-[R-INIT-ISOLATION-CHECK]:
+could not be read or parsed). A confirmed local yes does not paper over an unreadable global
+file, which fires in every session: that combination is `"unknown"`. No registration holds a
+run back any more: a lane's hooks come from the settings `ppl lane` renders for its run and
+carry that run on their own command line [R-LANE-HOOK-BINDING], and the payload's session
+identity stays unchecked [R-ISOLATION-SESSION-IDENTITY n/a]. `ppl init` still reads both files
+for the matcher [R-GUARD-MATCHER] and the hook's shape [R-DOCTOR-HOOK-SHAPE].
 
-- `"global"` - registered only globally. The tracker gate and the pause would reach every
-  session on the machine while `isolated=true` asserts the opposite.
-- `"both"` - registered locally *and* globally. The local registration is real, but the
-  global one still fires everywhere else, which is the same violation as `"global"` alone; a
-  deliberate migration in progress (global first, local added afterward) looks identical to
-  this on disk, and is refused the same way [R-INIT-ISOLATION-CHECK].
-- `"unknown"` - the registration could not be confirmed at all, most often because the global
-  side could not be read or parsed even though the local side is a confirmed yes. Treating
-  that as "fine" would be the exact bug this check exists to remove.
-
-`--no-isolated` is not refused by any of these, and neither is `"local"` or `"none"` - "none"
-is the openly documented unregistered state (README.md "Hooks"), not a mismatch between a flag
-and reality, and refusing it would block using `ppl` before the hook exists at all
-[R-INIT-ISOLATION-CHECK].
-
-**Residual, still not fixed.** The check is a file inspection, not a proof that the *session
-running this command* was itself launched from a directory whose `.claude/settings.local.json`
-carries the hook - an operator could register it locally in `~/ppl-workspace` and then run
-`ppl init --isolated` from a shell in that same directory while a *different* Claude Code
-session (launched elsewhere) is the one actually driving the pipeline; `ppl doctor` would
-report `"local"` and see no mismatch, and the isolated assumption would still be false for
-that other session. It is also a point-in-time check: nothing re-verifies registration for
-the lifetime of the run if the operator edits `~/.claude/settings.json` afterward.
-
-Two more blind spots: `PPL_CLAUDE_HOME` fully substitutes for `~/.claude` when set in the
-environment, which is a deliberate test seam (the suite uses it to stay out of the real
-settings) - but it means a stray value of that variable in a real invocation makes `ppl
-doctor` and `ppl init --isolated` inspect an unrelated, likely-empty directory and report
-`"none"`, seeing no mismatch that may in fact exist. And `doctor._has_guard` matches the
+Two blind spots of that report: `PPL_CLAUDE_HOME` fully substitutes for `~/.claude` when set
+in the environment, which is a deliberate test seam (the suite uses it to stay out of the real
+settings), so a stray value of that variable in a real invocation makes `ppl doctor` inspect
+an unrelated, likely-empty directory and report `"none"`. And `doctor._has_guard` matches the
 literal substring `ppl_guard.py` in a hook's `command`, so a different checkout's guard hook,
-at a different path on the same machine, reads as this one's.
-
-All four gaps above are limits of the `isolated` assertion, which the guard no longer reads:
-a lane's hooks come from the settings `ppl lane` renders for its run and carry that run on
-their own command line [R-LANE-HOOK-BINDING], and the payload's session identity stays
-unchecked [R-ISOLATION-SESSION-IDENTITY n/a]. What is checked, not merely
-trusted: the hook being registered only globally (`"global"`), registered both locally and
-globally (`"both"`), and the registration being unreadable or unparseable at all (`"unknown"`,
-including a confirmed local yes next to an unreadable global file - see above) - all three
-refuse `ppl init --isolated` with `SCHEMA_INVALID`, and all are reported by `ppl doctor`
-together with the paths and, for `"unknown"`, the parse or read error [R-INIT-ISOLATION-CHECK].
-Every call of a lane session is its run's, and still an unroled session's ordinary file
-write outside the run's repo is untouched [R-UNROLED-REPO-WRITE].
+at a different path on the same machine, reads as this one's. Every call of a lane session is
+its run's, and still an unroled session's ordinary file write outside the run's repo is
+untouched [R-UNROLED-REPO-WRITE].
 
 ### 5.5 The rule matrix
 
@@ -907,9 +870,10 @@ after that role's project notes, and the orchestrator's as the same section at t
 skill. Cue and lesson are cleaned again at render, so a hand-edited file puts no heading, comment
 or include marker into a prompt [R-MEMORY-TEXT-CLEANED]. `ppl init` freezes the entries active at
 that moment into `harness.json` as `memory`, so an entry accepted later is not in that run's
-snapshot [R-LESSONS-PAST-ONLY n/a]. The apply records the sha256 of the `memory.toml` bytes in
-`config.toml` `[harness] memory_sha256`, and `ppl init` refuses `SETUP_INCOMPLETE` while the file
-on disk has another digest [R-MEMORY-APPLIED]. A lesson is prompt text and grants nothing, the
+snapshot [R-LESSONS-PAST-ONLY n/a]. A lane renders its agents and skill, lessons included, from
+the harness commit `ppl lane` exported, and `ppl lane` refuses while the installed checkout has
+uncommitted changes, so a `memory.toml` edit reaches no run until it is committed
+[R-MEMORY-APPLIED]. A lesson is prompt text and grants nothing, the
 guard never reads it [R-MEMORY-NEVER-GRANTS n/a].
 
 `ppl harness validate [--json]` runs `harness.verify`, the check the studio runs on a draft or a
@@ -979,11 +943,11 @@ statuses without an instruction [R-FSM-STAGE-GRAPH] [R-FSM-LIFECYCLE].
 
 `ppl init` refuses `SETUP_INCOMPLETE` while
 `ppl setup` has not recorded the models step (waived by `--skip-model-check`), the harness step
-and the apply step as done, or when no `--harness` is passed [R-INIT-SETUP-COMPLETE]. A
+and the apply step as done [R-INIT-SETUP-COMPLETE]. A
 harness added and applied by hand does not count as done, and the refusal names the `ppl
-setup` step to run. It refuses `HARNESS_NOT_APPLIED` unless the harness it loads is
-the active one the agents and skill were rendered for [R-INIT-HARNESS-APPLIED], and refuses a
-task id that does not match the harness's `task.key_pattern` [R-INIT-TASK-KEY-PATTERN].
+setup` step to run. It loads the harness its lane exported, never the installed one, and
+refuses a `--harness` naming another [R-INIT-HARNESS-APPLIED], and refuses a task id that does
+not match the harness's `task.key_pattern` [R-INIT-TASK-KEY-PATTERN].
 
 `ppl init --harness` freezes the slice the cage enforces - `[task]`, `[tracker]`, `[forge]` and
 the `[[guard.shape]]` rows - into `runs/<task>/harness.json`, and the hook reads that snapshot,
@@ -2078,7 +2042,8 @@ whichever run is active at that moment, and the usage hook logs its tokens into 
 or neither is recorded when no run is active. Proposals then wait for the owner, who accepts, rejects, retires or edits them and
 runs `ppl harness apply <name>`. The orchestrator does not run those commands. Its session is
 not a role, so that is discipline there, as the residual of [R-LESSONS-OWNER-ACCEPTS] says.
-A run reads the lessons its snapshot froze at `ppl init` [R-MEMORY-APPLIED].
+A run reads the lessons of the harness commit its lane exported, frozen into its snapshot at
+`ppl init` [R-MEMORY-APPLIED].
 
 ## 7. Stage flow: task link to MR
 
@@ -2807,7 +2772,7 @@ Free text does not route. Closed dictionary:
 | `EXTERNAL_BLOCKED` | forge/tracker/CI unavailable or a dependency is blocked | park, retry on next tick |
 | `SETUP_INCOMPLETE` | `ppl setup` has not recorded a step `ppl init` needs [R-INIT-SETUP-COMPLETE] | run the named `ppl setup <step>`, no run exists yet |
 | `MODELS_UNVERIFIED` | a model the run would route to is unverified or stale [R-INIT-MODELS-VERIFIED] | `ppl models verify`, or `--skip-model-check` |
-| `HARNESS_NOT_APPLIED` | the harness `ppl init` loads is not the active one [R-INIT-HARNESS-APPLIED] | `ppl harness apply <name>` |
+| `HARNESS_NOT_APPLIED` | `ppl routing apply` names no harness and none is the default | `ppl harness apply <name>` |
 | `HARNESS_INVALID` | a harness file fails validation | fix it, then `ppl harness validate <name>` |
 | `TIMED_OUT` | no `ppl` activity was recorded since the run's inactivity deadline (6.9) | `ppl recover`, inspect the stuck attempt, then resume or re-brief |
 | `VERIFICATION_UNAVAILABLE` | `ppl verdict record` parks the run [R-VERIFICATION-UNAVAILABLE-PARK]: the second consecutive INCONCLUSIVE/ERROR/CANCELLED/TIMEOUT verdict on the same `candidate_sha` (6.10) | inspect why the verifier keeps failing to reach a result on this sha, never just redispatch a third time |

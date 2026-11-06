@@ -505,7 +505,7 @@ event = "ppl destroy, ppl control set destroy, panel control POST"
 enforcement = "blocking"
 hook_or_check = "ppl/control.py:set_command, ppl/run.py:destroy"
 deny_test = "tests/test_control.py::TestControl::test_destroy_requires_a_scope, tests/test_panel_api.py::TestPanelApi::test_control_destroy_without_scope_is_refused"
-allow_test = "tests/test_control.py::TestDestroy::test_local_destroy_archives_the_run_and_clears_active"
+allow_test = "tests/test_control.py::TestDestroy::test_local_destroy_archives_the_run_and_releases_the_lane"
 owner = "operator"
 residual = ""
 
@@ -1426,16 +1426,16 @@ residual = "the field is required on a verdict but defaulted on a receipt, and i
 # ---------------------------------------------------------------------------
 
 [[rule]]
-id = "R-INIT-ISOLATION-CHECK"
-statement = "ppl init --isolated refuses with SCHEMA_INVALID when the guard hook is registered only globally, registered both locally and globally, or its registration cannot be confirmed."
-scope = "ppl CLI, this directory plus the Claude home"
-event = "ppl init --isolated, ppl doctor"
+id = "R-LANE-INIT-INSIDE"
+statement = "ppl init runs inside its task's lane: it refuses SETUP_INCOMPLETE, naming ppl lane <link>, when neither PPL_TASK nor the cwd binds the call to a lane the registry holds, and SCHEMA_INVALID when they bind it to another task's lane. The run takes that lane's worktree as its repo, and a --repo naming another directory is refused SCHEMA_INVALID (compared by realpath), and it records the lane's number, start directory and session id in state.json."
+scope = "ppl CLI"
+event = "ppl init"
 enforcement = "blocking"
-hook_or_check = "ppl/doctor.py:mismatch, ppl/doctor.py:inspect, ppl/cli.py:cmd_init"
-deny_test = "tests/test_cli.py::TestInitVerifiesTheGuardHookRegistration::test_init_refuses_when_hook_is_registered_only_globally, tests/test_cli.py::TestInitVerifiesTheGuardHookRegistration::test_init_refuses_when_the_hook_is_registered_both_locally_and_globally, tests/test_cli.py::TestInitVerifiesTheGuardHookRegistration::test_init_refuses_when_local_is_confirmed_but_global_is_unreadable"
-allow_test = "tests/test_cli.py::TestInitVerifiesTheGuardHookRegistration::test_init_is_not_refused_when_the_hook_is_registered_locally, tests/test_cli.py::TestInitVerifiesTheGuardHookRegistration::test_init_no_isolated_is_not_refused_when_hook_is_registered_only_globally"
-owner = "operator"
-residual = "a file inspection, not a proof about the session actually driving the run - see R-ISOLATION-SESSION-IDENTITY"
+hook_or_check = "ppl/cli.py:_init_lane, ppl/cli.py:_lane_repo, ppl/lanes.py:task_for_call"
+deny_test = "tests/test_cli.py::TestInitInsideALane::test_init_outside_a_lane_is_refused_naming_ppl_lane, tests/test_cli.py::TestInitInsideALane::test_init_in_another_tasks_lane_is_refused, tests/test_cli.py::TestInitInsideALane::test_init_with_another_repo_is_refused"
+allow_test = "tests/test_cli.py::TestInitInsideALane::test_init_defaults_repo_to_the_lane_worktree, tests/test_cli.py::TestInitInsideALane::test_init_in_the_lane_its_cwd_is_in_needs_no_ppl_task"
+owner = "ppl"
+residual = "ppl init checks the lane by PPL_TASK and the cwd, which the session's environment and its own commands set, not by the session id the spec names: a terminal outside any lane that sets PPL_TASK to the task can initialise its run, with the lane's worktree and harness all the same. The guard's binding, not this check, is what keeps a lane's session on its own run (R-LANE-CROSS-TASK)"
 
 [[rule]]
 id = "R-OS-SANDBOX-INIT-REQUIRED"
@@ -1531,7 +1531,7 @@ hook_or_check = "ppl/_assets/hooks/ppl_guard.py:ppl_task_mismatch, ppl/_assets/h
 deny_test = "tests/test_guard_lanes.py::TestLaneProtection::test_ppl_with_another_lanes_task_is_denied, tests/test_guard_lanes.py::TestLaneProtection::test_ppl_behind_a_wrapper_the_walk_does_not_unwrap_is_still_judged, tests/test_guard_lanes.py::TestLaneProtection::test_ppl_where_the_guard_cannot_place_the_cwd_is_denied, tests/test_guard_lanes.py::TestLaneProtection::test_ppl_behind_a_shell_construct_the_cd_follower_cannot_see_through_is_denied, tests/test_guard_lanes.py::TestLaneProtection::test_every_here_document_body_is_judged_as_commands, tests/test_guard_lanes.py::TestLaneProtection::test_a_command_word_the_shell_builds_is_read_by_its_raw_spelling, tests/test_guard_lanes.py::TestLaneProtection::test_an_unreadable_registry_holds_a_bound_write_and_a_ppl_command"
 allow_test = "tests/test_guard_lanes.py::TestLaneProtection::test_ppl_with_its_own_task_is_allowed"
 owner = "guard-hook"
-residual = "lexical, and it fails closed: a command that spells ppl and names another lane's task anywhere is denied, in an echo before it or in a commit title too, and so is one that spells ppl where the guard cannot place its directory, from the lane's own directories too. What it cannot see: a ppl it cannot spell (an interpreter running ppl's code, a renamed copy, a script or a shell function) run with a task id or a directory built at run time (a variable set by an earlier call, pieces joined in the shell); either of those alone is enough today, while a bare ppl takes its run from the session's PPL_TASK, and stops being enough once Task 7's resolve_task reads the lane holding the cwd, for a ppl whose PPL_TASK is stripped (env -u, unset, env -i, exec -c, sudo). The registry is read for the call, unlocked: one that cannot be read then denies a command that may run ppl or sets PPL_TASK with OWNER_DECISION. The ppl CLI itself does not compare the task it is given with the lane its session is in. A bare ppl, with no --task and no PPL_TASK, resolves its run through cli.resolve_task, which still falls back to runs/ACTIVE: that is closed by Task 7's resolve_task, which takes PPL_TASK, then the lane holding the cwd, never ACTIVE (R29)"
+residual = "lexical, and it fails closed: a command that spells ppl and names another lane's task anywhere is denied, in an echo before it or in a commit title too, and so is one that spells ppl where the guard cannot place its directory, from the lane's own directories too. What it cannot see: a ppl it cannot spell (an interpreter running ppl's code, a renamed copy, a script or a shell function) run with a task id or a directory built at run time (a variable set by an earlier call, pieces joined in the shell): a task id is enough alone, and a directory is enough for a ppl whose PPL_TASK is stripped (env -u, unset, env -i, exec -c, sudo), since a bare ppl takes its run from PPL_TASK, else from the lane whose start directory or worktree holds its cwd (cli.resolve_task, never a pointer file). The registry is read for the call, unlocked: one that cannot be read then denies a command that may run ppl or sets PPL_TASK with OWNER_DECISION. The ppl CLI refuses a --task that names another run than PPL_TASK, but with PPL_TASK stripped it does not compare the task it is given with the lane holding its cwd"
 
 [[rule]]
 id = "R-LANE-SHARED-GIT-DIR"
@@ -1552,7 +1552,7 @@ scope = "hook registration"
 event = "ppl doctor, ppl init"
 enforcement = "blocking"
 hook_or_check = "ppl/doctor.py:matcher_covers, ppl/doctor.py:matcher_problem, ppl/doctor.py:matcher_warning, ppl/cli.py:cmd_init"
-deny_test = "tests/test_cli.py::TestInitVerifiesTheGuardMatcher::test_init_refuses_when_the_registered_matcher_leaves_guarded_tools_uncovered, tests/test_cli.py::TestInitVerifiesTheGuardMatcher::test_init_no_isolated_still_refuses_an_incomplete_matcher"
+deny_test = "tests/test_cli.py::TestInitVerifiesTheGuardMatcher::test_init_refuses_when_the_registered_matcher_leaves_guarded_tools_uncovered, tests/test_cli.py::TestInitVerifiesTheGuardMatcher::test_init_refuses_an_incomplete_matcher_registered_globally"
 allow_test = "tests/test_cli.py::TestInitVerifiesTheGuardMatcher::test_init_is_not_refused_when_the_matcher_covers_every_guarded_tool, tests/test_doctor.py::TestMatcher::test_the_recommended_matcher_covers_every_guarded_tool, tests/test_doctor.py::TestMatcher::test_the_readme_recipe_registers_the_recommended_matcher, tests/test_doctor.py::TestMatcher::test_coverage_is_the_union_over_the_guard_entries, tests/test_guard_tracker_cli.py::TestTrackerCliGate::test_the_installed_matcher_passes_github_mcp_issue_writes_to_the_guard, tests/test_doctor.py::TestMatcher::test_an_explicit_matcher_missing_github_issue_writes_is_warned_not_refused, tests/test_doctor.py::TestMatcher::test_a_catch_all_matcher_draws_no_github_issue_write_warning, tests/test_doctor.py::TestMatcher::test_a_global_explicit_matcher_is_warned_beside_a_complete_local_one, tests/test_cli.py::TestInitVerifiesTheGuardMatcher::test_a_matcher_missing_github_issue_writes_is_a_warning_not_a_refusal"
 owner = "ppl"
 residual = "judged only against the two settings files ppl reads, at doctor and init time, not against a lane's own settings.json, which ppl lane renders with the catch-all matcher: a matcher narrowed after the run started, a registration in a file ppl does not read (managed policy, a project settings.json), or an entry whose command names another checkout's ppl_guard.py is not caught, and full-match is the stricter of the two readings Claude Code could give a matcher, so a registration that passes here fires under either. The GitHub issue-write check is a warning on one probe under the default server name: an explicit matcher that passes mcp__github__.* draws none and still misses a GitHub server registered under another name, and a run starts under a matcher that misses them all"
@@ -2123,27 +2123,27 @@ residual = "a skipped check is visible in ppl status and the init log, nothing p
 
 [[rule]]
 id = "R-INIT-SETUP-COMPLETE"
-statement = "ppl init refuses with SETUP_INCOMPLETE while the setup steps models (unless --skip-model-check), harness and apply are not recorded done in config.toml, and when no --harness is passed."
+statement = "ppl init refuses with SETUP_INCOMPLETE while the setup steps models (unless --skip-model-check), harness and apply are not recorded done in config.toml."
 scope = "ppl CLI"
 event = "ppl init"
 enforcement = "blocking"
 hook_or_check = "ppl/doctor.py:setup_problem, ppl/doctor.py:setup_state, ppl/cli.py:cmd_init"
-deny_test = "tests/test_cli.py::TestInitRequiresSetup::test_init_refuses_when_setup_is_incomplete, tests/test_cli.py::TestInitRequiresSetup::test_the_refusal_names_the_missing_step_and_its_command, tests/test_cli.py::TestInitRequiresSetup::test_init_without_a_harness_refuses_and_names_the_active_one"
+deny_test = "tests/test_cli.py::TestInitRequiresSetup::test_init_refuses_when_setup_is_incomplete, tests/test_cli.py::TestInitRequiresSetup::test_the_refusal_names_the_missing_step_and_its_command"
 allow_test = "tests/test_cli.py::TestInitHarness::test_init_with_harness_writes_the_snapshot"
 owner = "ppl"
 residual = "the steps paths, claude and forge are reported by ppl doctor but not required: a run can start with hooks registered by hand and the forge unchecked"
 
 [[rule]]
 id = "R-INIT-HARNESS-APPLIED"
-statement = "ppl init --harness refuses with HARNESS_NOT_APPLIED unless config.toml [harness].active names the installed harness directory being loaded, because the agent files and the skill on disk were rendered for the active one."
+statement = "ppl init loads the harness its lane exported into the start directory (<start>/harness/<name>), never the installed one, and refuses SCHEMA_INVALID a --harness that names another harness than the lane's, and SETUP_INCOMPLETE a lane with no exported harness there."
 scope = "ppl CLI"
 event = "ppl init"
 enforcement = "blocking"
-hook_or_check = "ppl/harness.py:require_applied, ppl/cli.py:cmd_init"
-deny_test = "tests/test_cli.py::TestInitHarness::test_init_refuses_a_harness_that_is_not_the_applied_one, tests/test_cli.py::TestInitHarness::test_init_refuses_when_no_harness_was_ever_applied, tests/test_cli.py::TestInitHarness::test_init_refuses_a_harness_directory_outside_the_data_root"
-allow_test = "tests/test_cli.py::TestInitHarness::test_init_with_harness_writes_the_snapshot"
+hook_or_check = "ppl/cli.py:_lane_harness, ppl/cli.py:cmd_init"
+deny_test = "tests/test_cli.py::TestInitInsideALane::test_init_with_another_harness_than_the_lanes_is_refused"
+allow_test = "tests/test_cli.py::TestInitInsideALane::test_init_loads_the_harness_from_the_lane_snapshot, tests/test_cli.py::TestInitHarness::test_init_with_harness_writes_the_snapshot"
 owner = "ppl"
-residual = ""
+residual = "the start directory is outside every lane's write scope and write-protected by the guard (R-LANE-START-DIR-PROTECTED), so the snapshot ppl init loads is the export ppl lane made; a process outside any sandbox can still change it before ppl init runs"
 
 [[rule]]
 id = "R-INIT-TASK-KEY-PATTERN"
@@ -2231,15 +2231,15 @@ residual = "the text is cleaned, not judged: a clean sentence that gives a bad i
 
 [[rule]]
 id = "R-MEMORY-APPLIED"
-statement = "ppl init refuses SETUP_INCOMPLETE when the harness memory.toml differs, by sha256 of its bytes, from the one the last ppl harness apply recorded in config.toml [harness] memory_sha256, so a run never starts on lessons its agent files were not rendered from. A harness with no recorded digest and no memory.toml, or an empty one, passes."
+statement = "A run's memory is the harness commit ppl lane exported: ppl lane renders the lane's agents and skill, lessons included, from the installed harness's commit (lane_harness.commit), refusing OWNER_DECISION while the installed checkout has uncommitted changes, so an edit to memory.toml that is not committed reaches no lane, and ppl init freezes the snapshot of that same export."
 scope = "ppl CLI"
-event = "ppl init"
+event = "ppl lane"
 enforcement = "blocking"
-hook_or_check = "ppl/harness.py:memory_problem, ppl/cli.py:cmd_init"
-deny_test = "tests/test_cli.py::TestInitChecksTheMemoryWasApplied::test_init_refuses_when_memory_changed_since_apply"
-allow_test = "tests/test_cli.py::TestInitChecksTheMemoryWasApplied::test_init_passes_after_apply_records_the_memory, tests/test_cli.py::TestInitChecksTheMemoryWasApplied::test_init_passes_for_a_harness_that_never_had_memory"
+hook_or_check = "ppl/lane_harness.py:commit, ppl/lane_launch.py:start"
+deny_test = "tests/test_lane_launch.py::TestStart::test_start_renders_from_the_harness_commit"
+allow_test = "tests/test_cli.py::TestInitInsideALane::test_init_loads_the_harness_from_the_lane_snapshot"
 owner = "ppl"
-residual = "judged at ppl init only: a ppl harness apply during a run re-renders the agent files that run's later dispatches read, as for .part notes. The digest says the file was applied, not that the agent files on disk are still the rendered ones"
+residual = "the commit is the installed harness's origin default branch after a fetch, or its local HEAD without an origin: until plan 3, ppl lessons accept and the studio's saves write memory.toml in the installed checkout, and a lane refuses to start until the owner commits that change in the harness repository"
 
 [[rule]]
 id = "R-LESSONS-PAST-ONLY"
@@ -2251,7 +2251,7 @@ hook_or_check = "none"
 deny_test = ""
 allow_test = "tests/test_harness.py::TestSnapshotAndApplied::test_an_entry_accepted_after_the_snapshot_is_not_in_it"
 owner = "ppl"
-residual = "PROPERTY: harness.json is written once at ppl init and holds the entries active then. What the run's agents read is tied to it by R-MEMORY-APPLIED, and an owner's ppl harness apply during the run re-renders the agent files its later dispatches read, as for .part notes"
+residual = "PROPERTY: harness.json is written once at ppl init from the harness its lane exported and holds the entries active at that commit. The lane's agents and skill were rendered from the same export (R-MEMORY-APPLIED), so a lesson accepted while the run goes on reaches only lanes started after its commit"
 
 [[rule]]
 id = "R-MEMORY-NEVER-GRANTS"

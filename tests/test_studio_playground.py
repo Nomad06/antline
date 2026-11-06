@@ -276,7 +276,7 @@ class TestPlayground(PlaygroundTestCase):
         if not paths.run_dir(playground.TASK).exists():
             scratch = Path(tmphome.mkdtemp(prefix="pplscratch-"))
             folder = drafts.write("demo", self.draft["doc"], self.draft["fragments"], root=scratch)
-            run.init(playground.TASK, "https://tracker.invalid/x", str(self.repo), isolated=False,
+            run.init(playground.TASK, "https://tracker.invalid/x", str(self.repo),
                      model_check="skipped", harness={"name": "demo"})
             store.write_json(paths.run_dir(playground.TASK) / "harness.json",
                              harness.snapshot(harness.load(str(folder))))

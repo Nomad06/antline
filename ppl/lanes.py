@@ -137,6 +137,27 @@ def for_path(path, limit=READ_LIMIT):
     return holding(read(limit), path)
 
 
+def task_for_call(given=None, cwd=None):
+    """The run a ppl call is about: `given` (its --task), else PPL_TASK, else the task of the
+    lane whose start directory or worktree holds `cwd` (the process cwd by default), else None.
+    Never a pointer file. SCHEMA_INVALID when --task and PPL_TASK name different runs: a lane's
+    session works on its own run, and from outside one PPL_TASK is unset."""
+    env = os.environ.get("PPL_TASK") or None
+    if given and env and given != env:
+        raise PplError("SCHEMA_INVALID", "--task %s and PPL_TASK=%s name different runs: a lane's "
+                       "session works on its own run; unset PPL_TASK to name another from "
+                       "outside a lane" % (given, env))
+    if given or env:
+        return given or env
+    if cwd is None:
+        try:
+            cwd = os.getcwd()
+        except OSError:
+            return None
+    found = for_path(cwd)
+    return found.get("task") if found else None
+
+
 @contextmanager
 def _locked():
     # imported here: only the registry's writers lock, and the hooks, which read it with no

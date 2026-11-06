@@ -1,13 +1,7 @@
-"""Whether the PreToolUse guard hook is actually registered where the
-`isolated` flag (DESIGN 5.4) assumes it is - a fact `isolated` cannot check
-about itself, only assert. `ppl doctor` reports it; `ppl init --isolated`
-refuses on the configurations that make that assertion silently wrong: hook
-registered only globally, hook registered both locally and globally (the
-global copy still fires everywhere), or registration that could not be
-confirmed at all because a settings file exists but could not be read or
-parsed - including a global file that is unreadable even when the local
-side is a confirmed yes, since a working local registration says nothing
-about whether the global side is actually clear.
+"""Where the PreToolUse guard hook is registered, in this directory's local settings and the
+Claude home's, and whether each registration can fire. `ppl doctor` reports it; where it is
+registered refuses no run, since a lane's hooks come from the settings `ppl lane` renders for
+it and carry its task on their command line.
 
 Claude Code scopes a `.claude/settings.local.json` hook to sessions launched
 inside that directory tree; a hook in `~/.claude/settings.json` fires for
@@ -21,7 +15,7 @@ acts on. A name the matcher never passes is a denial that cannot fire however
 correct the code behind it - the Jira gate was dead this way when the Atlassian
 server turned out to register under a different prefix - so `inspect()` reports
 the uncovered names per file, and `ppl init` refuses to create a run while any
-registered matcher leaves one uncovered, isolated or not (`matcher_problem`).
+registered matcher leaves one uncovered (`matcher_problem`).
 
 Known blind spots, not closed by this module (DESIGN 5.4's residual list):
 `PPL_CLAUDE_HOME` fully substitutes for `~/.claude` when set, so a stray
@@ -546,18 +540,11 @@ def inspect(cwd=None):
     """The full picture: per-location state plus the combined registration.
 
     The two sides answer different questions, so an unreadable side is not
-    interchangeable with the other one (round 3 finding): `isolated=true`
-    asserts both "the hook fires here" (needs a confirmed *local* yes) and
-    "the hook does not fire elsewhere" (needs a confirmed *global* no). A
-    confirmed local yes says nothing about whether the global side is
-    actually clear, so it must not paper over an unreadable global file -
-    "local yes, global unreadable" is "unknown", not "local", because the
-    thing isolation actually depends on (no global registration) was never
-    confirmed. The reverse asymmetry is fine: a confirmed *global* yes is
-    disqualifying on its own regardless of whether the local side could be
-    read, so "global yes, local unreadable" is "global", which already
-    refuses under `isolated=true` - there is nothing an unreadable local file
-    could tell us that would make an armed global hook acceptable.
+    interchangeable with the other one (round 3 finding): a confirmed local yes says
+    nothing about whether the global side, which fires in every session on the machine,
+    is clear, so "local yes, global unreadable" is "unknown", not "local". The reverse
+    asymmetry is fine: a confirmed *global* yes holds on its own, whatever the local side
+    reads, so "global yes, local unreadable" is "global".
 
     So: `registration` is `"both"` only when both sides are confirmed yes;
     `"local"` when local is a confirmed yes and global is a confirmed no
@@ -614,11 +601,10 @@ def matcher_problem(inspected):
     """None when every confirmed registration's matcher covers every guarded
     tool name, else a message naming the file, the names and the fix.
 
-    Unlike `mismatch` this does not depend on `isolated`: a registered hook
-    whose matcher never passes a tool name to it is a denial that cannot fire
-    wherever the hook lives. Sides that are not a confirmed yes contribute
-    nothing - an unarmed hook is the documented unregistered state, and an
-    unreadable file is `mismatch`'s business.
+    A registered hook whose matcher never passes a tool name to it is a denial
+    that cannot fire wherever the hook lives. Sides that are not a confirmed yes
+    contribute nothing: an unarmed hook is the documented unregistered state, and
+    an unreadable file is reported as "unknown".
     """
     problems = []
     for side in (inspected.get("local"), inspected.get("global")):
@@ -635,71 +621,6 @@ def matcher_problem(inspected):
     return ("%s. A denial the hook never sees cannot fire, however the code behind it reads. "
             "Set that entry's matcher to \"%s\" (README.md \"Hooks\") and re-run "
             "ppl doctor." % ("; ".join(problems), RECOMMENDED_MATCHER))
-
-
-def mismatch(isolated, inspected):
-    """None when `inspected` is consistent with `isolated`, else a message naming a fix.
-
-    `inspected` is normally the dict `inspect()` returns; a bare registration
-    string (one of "local"/"global"/"both"/"none"/"unknown") is also accepted,
-    for callers - and tests - that already have just the combined state and
-    do not need the per-file detail in the "unknown" message.
-
-    Three combinations are silently wrong and worth refusing over, all only
-    under isolated=true (the default, and the documented recommended path):
-
-    - "global": the hook is confirmed registered only globally. That denies
-      5.4's own claim - the Jira gate and the pause would reach every session
-      on the machine, not just this run, while asserting the opposite.
-    - "unknown": this check could not confirm the global side is clear (see
-      `inspect()`), so isolated=true's "the hook does not fire elsewhere"
-      half cannot be confirmed either. Treating "unknown" as "fine" here
-      would be the exact bug this module exists to remove, now living inside
-      the fix for it.
-    - "both": the hook fires locally, which is what isolated=true wants, but
-      it is *also* registered globally, which means it fires everywhere else
-      too - the same violation as "global" alone, just with a working local
-      registration sitting next to it. A deliberate migration in progress
-      (global first, local added afterward) looks identical to this from a
-      file on disk, and the refusal is the same either way: isolation is not
-      what this run has until the global registration is gone.
-
-    "none" is not flagged: an unarmed hook is the pre-existing, openly
-    documented unregistered state (README.md "Hooks"), not a mismatch between a flag and
-    reality.
-    """
-    if not isolated:
-        return None
-    if isinstance(inspected, dict):
-        where = inspected["registration"]
-        broken = [loc["detail"] for loc in (inspected.get("local"), inspected.get("global"))
-                 if loc and loc.get("detail")]
-    else:
-        where = inspected
-        broken = []
-    if where == "unknown":
-        detail = "; ".join(broken) if broken else "a settings file could not be confirmed"
-        return ("the guard hook's registration could not be confirmed (%s). Isolation cannot "
-                "be verified from a settings file this check cannot read or parse - fix it, or "
-                "re-run with --no-isolated to accept the cwd-scoped fallback knowing this "
-                "could not be checked." % detail)
-    if where == "global":
-        return ("the guard hook is registered only globally (%s), not in this directory's "
-                "settings.local.json (%s). With isolated=true, that means the Jira gate and "
-                "the operator pause reach every Claude Code session on this machine, not "
-                "just this run - the opposite of what isolated=true asserts. Fix by "
-                "registering the hook locally instead (see README.md \"Hooks\"), or by "
-                "passing --no-isolated to accept the cwd-scoped fallback."
-                % (global_settings_path(), local_settings_path()))
-    if where == "both":
-        return ("the guard hook is registered both locally (%s) and globally (%s). The global "
-                "registration still fires in every session on this machine, so isolation is "
-                "not what this run has, regardless of the local one - the same problem as "
-                "\"global\" alone, not made safer by also having a working local copy. Remove "
-                "the global registration for isolation to mean anything, or pass "
-                "--no-isolated to accept that the hook reaches every session."
-                % (local_settings_path(), global_settings_path()))
-    return None
 
 
 # The setup steps a run cannot start without. paths, claude and forge are
@@ -1293,18 +1214,19 @@ def os_sandbox_facts(cwd=None, env=None, probe=None):
 
 def report(task_id=None, cwd=None, env=None, probe=None):
     """What `ppl doctor` prints as JSON: the hook registration, the setup
-    report, the active run's isolation and whether the registered guard runs.
+    report, the run it is about and whether the registered guard runs.
     `cwd` is the directory whose .claude/settings.local.json is read, the
-    process cwd by default."""
-    from . import run
+    process cwd by default. The run is found as every ppl command finds it
+    (lanes.task_for_call: `task_id`, else PPL_TASK, else the lane holding
+    `cwd`), and reported as None when there is none or it cannot be read."""
+    from . import lanes, run
     inspected = inspect(cwd)
-    task_id = task_id or run.active()
-    isolated = None
-    if task_id:
-        try:
-            isolated = run.load(task_id).get("isolated")
-        except PplError:
-            task_id = None
+    try:
+        task_id = lanes.task_for_call(task_id, cwd)
+        if task_id:
+            run.load(task_id)
+    except PplError:
+        task_id = None
     result = dict(inspected)
     result.update(inspect_setup(env))
     result["os_sandbox"] = os_sandbox_facts(cwd, env, probe)
@@ -1312,8 +1234,6 @@ def report(task_id=None, cwd=None, env=None, probe=None):
     result["foreign_bash_hooks"] = foreign_bash_hooks(cwd)
     result["mcp_servers"] = mcp_server_names(cwd)
     result["task"] = task_id
-    result["isolated"] = isolated
-    result["mismatch"] = mismatch(isolated, inspected) if isolated is not None else None
     runs = hook_runs(cwd=cwd, workspace=workspace())
     result["hook_runs"] = runs["ok"]
     if runs["problem"]:

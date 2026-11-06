@@ -1624,50 +1624,6 @@ class TestSnapshotAndApplied(HarnessTestCase):
         self.assertNotIn("mcp__snap__", doc["tracker"]["mcp_prefixes"])
         self.assertEqual(doc["tracker"]["kind"], "jira")
 
-    def test_require_applied_passes_for_the_active_installed_directory(self):
-        fixtures.install_harness("example-maven")
-        self.activate("example-maven")
-        self.assertIsNone(harness.require_applied(harness.load("example-maven")))
-
-    def test_require_applied_refuses_another_installed_harness_and_names_the_fix(self):
-        fixtures.install_harness("example-maven")
-        fixtures.install_harness("example-generic")
-        self.activate("example-maven")
-        with self.assertRaises(PplError) as caught:
-            harness.require_applied(harness.load("example-generic"))
-        self.assertEqual(caught.exception.code, "HARNESS_NOT_APPLIED")
-        self.assertIn("ppl harness apply example-generic", caught.exception.message)
-        self.assertIn("active: example-maven", caught.exception.message)
-
-    def test_require_applied_with_no_config_says_none_is_active(self):
-        fixtures.install_harness("example-maven")
-        with self.assertRaises(PplError) as caught:
-            harness.require_applied(harness.load("example-maven"))
-        self.assertEqual(caught.exception.code, "HARNESS_NOT_APPLIED")
-        self.assertIn("active: none", caught.exception.message)
-
-    def test_require_applied_is_keyed_on_the_directory_not_the_document_name(self):
-        # The document inside "mine" still says name = "example-maven".
-        fixtures.install_harness("example-maven", as_name="mine")
-        self.activate("example-maven")
-        with self.assertRaises(PplError) as caught:
-            harness.require_applied(harness.load("mine"))
-        self.assertEqual(caught.exception.code, "HARNESS_NOT_APPLIED")
-        self.assertIn("ppl harness apply mine", caught.exception.message)
-        self.activate("mine")
-        self.assertIsNone(harness.require_applied(harness.load("mine")))
-
-    def test_require_applied_refuses_a_directory_outside_the_data_root(self):
-        fixtures.install_harness("example-maven")
-        self.activate("example-maven")
-        outside = Path(tmphome.mkdtemp(prefix="pplharness-")) / "example-maven"
-        shutil.copytree(fixtures.SOURCE / "defaults" / "harnesses" / "example-maven", outside)
-        with self.assertRaises(PplError) as caught:
-            harness.require_applied(harness.load(str(outside)))
-        self.assertEqual(caught.exception.code, "HARNESS_NOT_APPLIED")
-        self.assertIn("is not an installed harness", caught.exception.message)
-        self.assertIn("ppl harness add", caught.exception.message)
-
     def test_a_document_name_that_differs_from_its_directory_is_a_validate_warning(self):
         fixtures.install_harness("example-maven", as_name="mine")
         doc = harness.load("mine")
@@ -1983,7 +1939,6 @@ class TestRenderSkill(HarnessTestCase):
                                skills_dir=skills)
         self.assertEqual(result["active"], "mine")
         self.assertEqual(config.active_harness(), "mine")
-        self.assertIsNone(harness.require_applied(harness.load("mine")))
 
     def test_apply_refuses_a_harness_outside_the_data_root(self):
         fixtures.install_routing()

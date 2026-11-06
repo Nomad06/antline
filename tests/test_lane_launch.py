@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import os
@@ -252,6 +253,7 @@ class TestStart(LaneCase):
         self.assertIn(HARNESS, message)
 
     def test_start_renders_from_the_harness_commit(self):
+        # rule: R-MEMORY-APPLIED
         installed = paths.harness_dir(HARNESS)
         self.edit_harness(JAVA_HOME="/opt/jdk-committed")
         git(installed, "commit", "-q", "-am", "jdk")
@@ -311,7 +313,7 @@ class TestStart(LaneCase):
     def test_a_legacy_active_run_blocks_start_until_finished(self):
         state = {"task_id": "OLD-1", "stage": "implementation", "mr": {"merged_sha": None}}
         store.write_json(run.state_path("OLD-1"), state)
-        paths.active_file().write_text("OLD-1\n", encoding="utf-8")
+        paths.legacy_active_file().write_text("OLD-1\n", encoding="utf-8")
         message = refusal(self, "OWNER_DECISION", lane_launch.start, LINK,
                           harness_name=HARNESS, exec_=False)
         self.assertIn("OLD-1", message)
@@ -320,6 +322,20 @@ class TestStart(LaneCase):
         self.assert_nothing_made()
         state["mr"]["merged_sha"] = "a" * 40
         store.write_json(run.state_path("OLD-1"), state)
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertIsNotNone(lanes.entry(TASK))
+
+    def test_a_legacy_active_run_blocks_start_even_when_its_task_holds_a_lane(self):
+        # nothing writes runs/ACTIVE now, so whatever it names is a run from before lanes
+        fixtures.bind_lane("OLD-2", self.project, self.base / "old-tree", harness="other")
+        store.write_json(run.state_path("OLD-2"), {"task_id": "OLD-2", "stage": "review",
+                                                   "mr": {"merged_sha": None}})
+        paths.legacy_active_file().write_text("OLD-2\n", encoding="utf-8")
+        message = refusal(self, "OWNER_DECISION", lane_launch.start, LINK,
+                          harness_name=HARNESS, exec_=False)
+        self.assertIn("OLD-2", message)
+        self.assertIsNone(lanes.entry(TASK))
+        run.destroy("OLD-2", "local")
         lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
         self.assertIsNotNone(lanes.entry(TASK))
 
@@ -657,6 +673,22 @@ class TestClose(LaneCase):
         self.assertTrue(self.worktree.is_dir())
         self.assertTrue(self.branch_exists())
         refusal(self, "SCHEMA_INVALID", lane_launch.close, TASK)
+
+    def test_close_takes_its_task_as_every_bare_command_does(self):
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.merged()
+        with mock.patch.dict(os.environ, {"PPL_TASK": TASK}):
+            code, _, err = call("lane", "close", "--task", "OPS-9")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+        self.assertIn("PPL_TASK", json.loads(err)["message"])
+        self.assertIsNotNone(lanes.entry(TASK))
+        # no PPL_TASK: the lane whose start directory holds the cwd
+        with contextlib.chdir(lanes.start_dir(TASK)):
+            code, out, err = call("lane", "close")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["task"], TASK)
+        self.assertEqual(lanes.read(), [])
 
 
 if __name__ == "__main__":

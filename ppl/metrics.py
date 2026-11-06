@@ -182,7 +182,7 @@ def _run_records():
     root = paths.runs_dir()
     if root.is_dir():
         for entry in sorted(root.iterdir()):
-            if entry.name in ("ACTIVE", "_archive"):
+            if entry.name == "_archive":
                 continue
             if entry.is_dir() and (entry / "state.json").is_file():
                 records.append((entry.name, entry))

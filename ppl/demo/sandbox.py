@@ -15,12 +15,16 @@ from . import sample
 
 TASK = "GH-1"
 TIMEOUT_SECONDS = 60
-# The lane `ppl lane` would hold for TASK, claimed in the sandbox's own data root. Interim
-# until the demo starts its run with `ppl lane --no-exec`.
-_CLAIM = ("import sys\n"
-          "from ppl import lanes\n"
+# The lane `ppl lane` would hold for TASK, claimed in the sandbox's own data root, with the
+# installed harness copied where `ppl lane` exports it. Interim until the demo starts its run
+# with `ppl lane --no-exec`.
+_CLAIM = ("import shutil, sys\n"
+          "from ppl import lanes, paths\n"
           "lanes.claim(sys.argv[1], 'demo', '0' * 40, sys.argv[2], sys.argv[2],\n"
-          "            '00000000-0000-4000-8000-000000000000', 1, 1)\n")
+          "            '00000000-0000-4000-8000-000000000000', 1, 1)\n"
+          "shutil.copytree(paths.harness_dir('demo'),\n"
+          "                lanes.start_dir(sys.argv[1]) / 'harness' / 'demo',\n"
+          "                ignore=shutil.ignore_patterns('.git'))\n")
 _STRIPPED_PREFIXES = ("PPL_", "GIT_", "GH_", "GITHUB_")
 # These are the throwaway sample repository's commits, so the identity rule in CLAUDE.md,
 # which is about this repository, does not apply to them.
@@ -53,6 +57,8 @@ class Sandbox:
                if not key.startswith(_STRIPPED_PREFIXES) and key not in models.SESSION_MARKERS}
         parent = str(paths.package_parent())
         env.update(
+            # the lane session's own: a bare ppl works on TASK's run
+            PPL_TASK=TASK,
             HOME=str(self.home), PPL_HOME=str(self.ppl_home),
             PPL_CLAUDE_HOME=str(self.home / ".claude"), GIT_CONFIG_NOSYSTEM="1",
             GIT_CONFIG_GLOBAL="/dev/null", XDG_CONFIG_HOME=str(self.home / ".config"),
@@ -141,12 +147,12 @@ class Sandbox:
         self._step("setup", "--non-interactive", "--skip", "models", "--skip", "forge",
                    "--answer", "workspace=%s" % self.workspace, "--answer", "hooks=local",
                    "--answer", "harness_from=%s" % source, "--answer", "harness_name=demo")
-        self._step("init", TASK, "--tracker-url", "https://github.com/demo/shop/issues/1",
-                   "--repo", str(self.repo), "--harness", "demo", "--skip-model-check", "--no-os-sandbox")
         done = self._run([sys.executable, "-c", _CLAIM, TASK, str(self.repo)], cwd=self.workspace)
         if done.returncode != 0:
             raise PplError("SCHEMA_INVALID", "demo sandbox: the lane for %s was not claimed: %s"
                            % (TASK, (done.stderr or done.stdout).strip()[:500]))
+        self._step("init", TASK, "--tracker-url", "https://github.com/demo/shop/issues/1",
+                   "--harness", "demo", "--skip-model-check", "--no-os-sandbox")
 
     def remove(self):
         shutil.rmtree(self.root, ignore_errors=True)

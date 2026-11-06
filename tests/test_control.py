@@ -12,7 +12,8 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import control, paths, run, status, store, trail
+import fixtures
+from ppl import control, lanes, paths, run, status, store, trail
 from ppl.errors import PplError
 
 
@@ -63,14 +64,28 @@ class TestControl(unittest.TestCase):
 
 
 class TestDestroy(unittest.TestCase):
-    def test_local_destroy_archives_the_run_and_clears_active(self):
+    def test_local_destroy_archives_the_run_and_releases_the_lane(self):
+        entry = fixtures.bind_lane("DEMO-430", "/tmp/repo")
+        other = fixtures.bind_lane("DEMO-434", "/tmp/repo-b", lane=2)
         run.init("DEMO-430", "u", "/tmp/repo")
         result = run.destroy("DEMO-430", "local")
         self.assertEqual(result["status"], "archived")
-        from ppl import paths
+        self.assertEqual(result["lane"], "released")
         self.assertFalse((paths.run_dir("DEMO-430") / "state.json").exists())
         self.assertTrue(any(paths.runs_dir().glob("_archive/DEMO-430-*")))
-        self.assertIsNone(run.active())
+        self.assertIsNone(lanes.entry("DEMO-430"))
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+        self.assertEqual(lanes.entry("DEMO-434"), other)
+        self.assertTrue(os.path.isdir(other["start_dir"]))
+        self.assertFalse((paths.runs_dir() / "ACTIVE").exists())
+
+    def test_local_destroy_of_a_run_whose_lane_was_closed_removes_its_start_dir(self):
+        entry = fixtures.bind_lane("DEMO-435", "/tmp/repo")
+        run.init("DEMO-435", "u", "/tmp/repo")
+        lanes.release("DEMO-435")
+        result = run.destroy("DEMO-435", "local")
+        self.assertEqual((result["status"], result["lane"]), ("archived", "none"))
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
 
     def test_local_destroy_removes_the_scratch_dir(self):
         from ppl import os_sandbox

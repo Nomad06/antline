@@ -87,9 +87,9 @@ class LaneCase(unittest.TestCase):
 class TestTheHookBinding(LaneCase):
     def test_a_role_without_a_lane_is_denied(self):
         # rule: R-LANE-ROLE-OUTSIDE
-        # the old shared pointer names a live run, and still arms nothing
+        # a leftover of the old shared pointer names a live run, and still arms nothing
         self.lane(LANE_A)
-        self.assertEqual(run.active(), LANE_A)
+        paths.legacy_active_file().write_text(LANE_A + "\n", encoding="utf-8")
         for agent in ("ppl-code-worker", "ppl-reflector", "ppl-not-generated-yet"):
             with self.subTest(agent=agent):
                 result = ppl_guard.decide(payload(agent, "Bash", {"command": "ls"}))
@@ -156,9 +156,9 @@ class TestTheHookBinding(LaneCase):
         # rule: R-LANE-HOOK-BINDING
         # rule: R-UNROLED-REPO-WRITE
         repo = self.lane(LANE_A)
-        # the old shared pointer names another run, and changes nothing for lane A
+        # a leftover of the old shared pointer names another run, and changes nothing for lane A
         self.lane(LANE_B, lane=2)
-        self.assertEqual(run.active(), LANE_B)
+        paths.legacy_active_file().write_text(LANE_B + "\n", encoding="utf-8")
         start = str(lanes.start_dir(LANE_A))
         for cwd in (repo, start, ELSEWHERE):
             with self.subTest(cwd=cwd):
@@ -397,7 +397,7 @@ class TestTheOtherHooksBind(LaneCase):
         self.lane(LANE_A, lane=1)
         self.lane(LANE_B, lane=2)
         run.init(UNREGISTERED, "u", "/tmp/repo")
-        self.assertEqual(run.active(), UNREGISTERED)
+        paths.legacy_active_file().write_text(UNREGISTERED + "\n", encoding="utf-8")
         stop = {"hook_event_name": "SubagentStop", "session_id": "s1",
                 "transcript_path": str(self.transcript().parent / "missing.jsonl"),
                 "agent_id": "a1", "agent_type": "ppl-code-worker", "cwd": "/tmp",

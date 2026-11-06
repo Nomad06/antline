@@ -100,14 +100,14 @@ def _merged(state):
 
 
 def _legacy_run_problem():
-    """Why the run the old single-run pointer (runs/ACTIVE) names blocks a lane, or None: it
-    holds no lane, its state.json exists (a destroyed run's is archived) and its merge is not
-    recorded."""
+    """Why the run the old single-run pointer (runs/ACTIVE) names blocks a lane, or None: its
+    state.json exists (a destroyed run's is archived) and its merge is not recorded. Nothing
+    writes the pointer now, so the run it names was started before lanes (D19)."""
     try:
-        task_id = store.read_regular_text(paths.active_file(), lanes.READ_LIMIT).strip()
+        task_id = store.read_regular_text(paths.legacy_active_file(), lanes.READ_LIMIT).strip()
     except FileNotFoundError:
         return None
-    if not task_id or lanes.entry(task_id) is not None:
+    if not task_id:
         return None
     state = store.read_json(run.state_path(task_id), None, lanes.READ_LIMIT)
     if state is None or _merged(state):

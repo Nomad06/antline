@@ -580,42 +580,6 @@ def snapshot(doc):
             "memory": memory.in_effect(doc.get("_memory") or [])}
 
 
-def memory_problem(doc):
-    """None when the memory.toml on disk is the one the last apply rendered, else
-    what to do. Compared by content: a missing record passes only when there is
-    no memory at all, so an install from before memory existed need not re-apply."""
-    from . import config
-    current = memory.digest(memory.read(doc["_dir"], routing.LESSON_ROLES)[1])
-    recorded = config.section("harness").get("memory_sha256")
-    if recorded == current:
-        return None
-    if recorded is None and current == memory.digest(b""):
-        return None
-    return ("memory.toml changed since the last apply: run `ppl harness apply %s`"
-            % installed_name(doc))
-
-
-def require_applied(doc):
-    """Refuse unless the loaded harness is the installed directory that
-    config.toml [harness].active names. The agents and the skill on disk were
-    rendered from that directory, so a copy elsewhere with the same document
-    name is not the applied harness."""
-    from . import config
-    active = config.active_harness()
-    directory = os.path.abspath(doc["_dir"])
-    if active and directory == os.path.abspath(paths.harness_dir(active)):
-        return
-    if os.path.dirname(directory) == os.path.abspath(paths.harnesses_dir()):
-        name = installed_name(doc)
-        raise PplError("HARNESS_NOT_APPLIED",
-                       "harness %r is not the applied one (active: %s). The agents and skill on "
-                       "disk were rendered for another project: run `ppl harness apply %s` first."
-                       % (name, active or "none", name))
-    raise PplError("HARNESS_NOT_APPLIED",
-                   "harness at %s is not an installed harness, add it with `ppl harness add` "
-                   "and apply it" % directory)
-
-
 # The orchestrator skill on disk is a build artifact: skill/ holds skeletons
 # (`*.skeleton`) with include markers and plain files copied as they are, and
 # render_skill fills every marker from the forge adapter and the harness.

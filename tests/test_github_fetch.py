@@ -190,7 +190,8 @@ class TestReviewFetchCli(unittest.TestCase):
         self.task = "GH-9"
         shutil.rmtree(paths.run_dir(self.task), ignore_errors=True)
         run.init(self.task, "https://github.com/o/r/issues/9", "/tmp/repo")
-        run.set_active(self.task)
+        # the lane session's environment names the run a bare ppl works on
+        self.enterContext(mock.patch.dict(os.environ, {"PPL_TASK": self.task}))
         fixtures.install_variant("example-generic", "gh-forge", forge={"kind": "github"},
                                  **fixtures.GITHUB_ISSUES)
         store.write_json(paths.run_dir(self.task) / "harness.json",

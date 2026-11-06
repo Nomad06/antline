@@ -415,13 +415,12 @@ class TestPanelApi(unittest.TestCase):
         bad_row = [r for r in rows if r["task_id"] == other_task][0]
         self.assertEqual(bad_row["status"], "error")
 
-    # --- defect: the archive dir and the ACTIVE marker are not runs ---
+    # --- defect: the archive dir is not a run ---
 
-    def test_list_runs_ignores_archive_and_active_marker(self):
+    def test_list_runs_ignores_archive(self):
         server.handle_control(self.task, {"command": "destroy", "scope": "local"})
         ids = [r["task_id"] for r in server.list_runs()]
         self.assertNotIn("_archive", ids)
-        self.assertNotIn("ACTIVE", ids)
 
     # --- Handler: real cross-origin and missing-header rejection ---
 

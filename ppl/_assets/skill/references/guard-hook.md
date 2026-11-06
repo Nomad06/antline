@@ -19,11 +19,9 @@ hand without the lane flags has none [R-LANE-BARE-RESUME n/a].
 - **`local`** - registered in this directory's `.claude/settings.local.json` only. This is
   the isolated, recommended state; the present-tense claims in this skill hold for this run.
 - **`global`** or **`both`** - registered in `~/.claude/settings.json`, which fires in every
-  Claude Code session on the machine, not just this run - the opposite of what `isolated`
-  asserts. `ppl init --isolated` (the default) already refuses `SCHEMA_INVALID` on a NEW run
-  in this configuration [R-INIT-ISOLATION-CHECK]; if you are resuming an existing run that
-  predates this state, treat the isolation guarantee specifically as an owner decision, the
-  same as `none`, even though the hook itself is armed and every other cage rule does fire.
+  Claude Code session on the machine. Your lane's own hooks come from the settings `ppl lane`
+  rendered for it and carry this run on their command line, so this run is bound either way
+  [R-LANE-HOOK-BINDING]; tell the operator the global entry also reaches their other sessions.
 - **`unknown`** - a settings file exists but could not be read or parsed. Read this the same
   way as `none`: this check has no confirmed answer about isolation from a file it is unable
   to read, so nothing in this skill should be taken as armed until that is fixed.

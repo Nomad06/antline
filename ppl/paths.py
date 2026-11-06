@@ -79,5 +79,8 @@ def run_dir(task_id):
     return runs_dir() / check_task_id(task_id)
 
 
-def active_file():
+def legacy_active_file():
+    """The single-run pointer ppl init wrote before lanes. Nothing writes it now: only
+    `ppl lane` reads it, to refuse while it names a run from before lanes that is not finished
+    (D19)."""
     return runs_dir() / "ACTIVE"

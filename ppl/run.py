@@ -3,7 +3,7 @@ import shutil
 import subprocess
 import uuid
 
-from . import fsm, paths, store
+from . import fsm, lanes, paths, store
 from .errors import PplError, role_output
 
 DEFAULT_BUDGETS = {
@@ -37,21 +37,6 @@ def state_path(task_id):
     return paths.run_dir(task_id) / "state.json"
 
 
-def active(limit=None):
-    """The active run's task id, or None. A pointer that is not a regular file, or with
-    `limit` one over that many bytes, is refused SCHEMA_INVALID without blocking
-    (store.read_regular_text)."""
-    try:
-        return store.read_regular_text(paths.active_file(), limit).strip() or None
-    except FileNotFoundError:
-        return None
-
-
-def set_active(task_id):
-    paths.runs_dir().mkdir(parents=True, exist_ok=True)
-    paths.active_file().write_text(paths.check_task_id(task_id) + "\n", encoding="utf-8")
-
-
 def load(task_id, limit=None):
     state = store.read_json(state_path(task_id), limit=limit)
     if state is None:
@@ -66,9 +51,9 @@ def save(state):
 RISK_TIERS = ("low", "normal", "high")
 
 
-def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check="verified",
+def _new_state(task_id, tracker_url, repo, risk="normal", model_check="verified",
                harness=None, usd_max=0.0, prices=None, routing_preset=None,
-               os_sandboxed=False):
+               os_sandboxed=False, lane=None):
     pid = os.getpid()
     budgets = dict(DEFAULT_BUDGETS)
     budgets["usd_max"] = usd_max
@@ -83,8 +68,8 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "harness": harness,
         "routing_preset": routing_preset,
         "repo": repo,
-        "isolated": isolated,
         "os_sandboxed": os_sandboxed,
+        "lane": lane,
         "branch": None,
         "base_sha": None,
         "candidate_sha": None,
@@ -112,8 +97,10 @@ def _routing_preset(presets, routing):
         return None
 
 
-def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="verified",
-         harness=None, os_sandboxed=False):
+def init(task_id, tracker_url, repo, risk="normal", model_check="verified", harness=None,
+         os_sandboxed=False, lane=None):
+    """Create the run. `lane` is {"number", "start_dir", "session_id"} of the lane it runs in,
+    as ppl init passes it, None for a run made outside one (the tests', the playground's)."""
     paths.check_task_id(task_id)
     if risk not in RISK_TIERS:
         raise PplError("SCHEMA_INVALID", "risk must be one of %s" % ", ".join(RISK_TIERS))
@@ -125,12 +112,11 @@ def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="
     # The cap and the prices it is computed with are frozen into state.json, which
     # the guard write-protects (R-RUNS-WRITE-PROTECTION), since config.toml stays
     # editable mid-run.
-    state = _new_state(task_id, tracker_url, repo, isolated, risk, model_check, harness,
+    state = _new_state(task_id, tracker_url, repo, risk, model_check, harness,
                        usd_max=config.budgets_usd_max(), prices=usage.prices(),
                        routing_preset=_routing_preset(presets, routing),
-                       os_sandboxed=os_sandboxed)
+                       os_sandboxed=os_sandboxed, lane=lane)
     save(state)
-    set_active(task_id)
     store.append_log(task_id, {"event": "init", "tracker_url": tracker_url, "repo": repo,
                                "model_check": model_check,
                                "harness": (harness or {}).get("name")})
@@ -494,8 +480,10 @@ def park(task_id, blocker, safe_next, unsafe_to_repeat, refusals=None):
 
 
 def destroy(task_id, scope):
-    """Local scope is file work and happens here. Remote scope is an outward mutation and
-    is queued for the orchestrator, which is the only component holding GitLab credentials.
+    """Local scope is file work and happens here: the worktree, the scratch directory, the run
+    (archived), the lane's registry slot and its start directory. Remote scope is an outward
+    mutation and is queued for the orchestrator, which is the only component holding GitLab
+    credentials.
     """
     if scope not in ("local", "full"):
         raise PplError("SCHEMA_INVALID", "destroy scope must be local or full")
@@ -543,14 +531,28 @@ def destroy(task_id, scope):
         task_id, store.now().replace(":", ""), uuid.uuid4().hex[:8]))
     archive.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(paths.run_dir(task_id)), str(archive))
-    if active() == task_id:
-        paths.active_file().unlink(missing_ok=True)
-    result = {"status": "archived", "archive": str(archive), "worktree": worktree}
+    result = {"status": "archived", "archive": str(archive), "worktree": worktree,
+              "lane": "released" if lanes.release(task_id) else "none"}
+    result.update(_remove_start_dir(task_id))
     if worktree_error:
         # The run is archived either way, but a destroy that could not remove
         # the worktree has to say so rather than report a clean success.
         result["worktree_error"] = worktree_error
     return result
+
+
+def _remove_start_dir(task_id):
+    """Remove the lane's start directory, which `ppl lane close` leaves, as {"start_dir": state}
+    plus "start_dir_error" when it could not be removed: a start directory left behind makes the
+    task's next `ppl lane` refuse."""
+    start = lanes.start_dir(task_id)
+    if not os.path.lexists(str(start)):
+        return {"start_dir": "absent"}
+    try:
+        shutil.rmtree(str(start))
+    except OSError as exc:
+        return {"start_dir": "left_behind", "start_dir_error": str(exc)}
+    return {"start_dir": "removed"}
 
 
 def record_tracker_fetch(task_id, revision):

@@ -260,7 +260,8 @@ class TestRun(unittest.TestCase):
         state = run.init("DEMO-100", "https://j/DEMO-100", "/tmp/repo")
         self.assertEqual(state["stage"], "admission")
         self.assertEqual(state["status"], "planned")
-        self.assertEqual(run.active(), "DEMO-100")
+        self.assertIsNone(state["lane"])
+        self.assertNotIn("isolated", state)
 
     def test_init_records_orchestrator_identity(self):
         state = run.init("DEMO-101", "https://j/DEMO-101", "/tmp/repo")
@@ -303,13 +304,19 @@ class TestRun(unittest.TestCase):
             run.load("DEMO-999")
         self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
 
-    def test_init_defaults_isolated_true(self):
-        state = run.init("DEMO-107", "https://j/DEMO-107", "/tmp/repo")
-        self.assertIs(state["isolated"], True)
+    def test_init_records_the_lane_it_runs_in(self):
+        lane = {"number": 2, "start_dir": "/h/lanes/DEMO-107",
+                "session_id": "00000000-0000-4000-8000-000000000002"}
+        state = run.init("DEMO-107", "https://j/DEMO-107", "/tmp/repo", lane=lane)
+        self.assertEqual(state["lane"], lane)
+        self.assertEqual(run.load("DEMO-107")["lane"], lane)
 
-    def test_init_can_be_told_not_isolated(self):
-        state = run.init("DEMO-108", "https://j/DEMO-108", "/tmp/repo", isolated=False)
-        self.assertIs(state["isolated"], False)
+    def test_init_writes_no_active_pointer(self):
+        from ppl import paths
+        run.init("DEMO-108", "https://j/DEMO-108", "/tmp/repo")
+        self.assertFalse((paths.runs_dir() / "ACTIVE").exists())
+        self.assertFalse(hasattr(run, "active"))
+        self.assertFalse(hasattr(run, "set_active"))
 
     def test_init_records_the_tracker_url_and_no_harness_by_default(self):
         state = run.init("DEMO-109", "https://j/DEMO-109", "/tmp/repo")

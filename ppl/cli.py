@@ -6,17 +6,20 @@ import stat
 import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
-               harness, lane_launch, lessons, metrics, models, os_sandbox, paths, recover, refusals,
-               review, routing, run, schema, setup, status, store, trackers, trail, usage, verdict,
-               watchdog)
+               harness, lane_launch, lanes, lessons, metrics, models, os_sandbox, paths, recover,
+               refusals, review, routing, run, schema, setup, status, store, trackers, trail,
+               usage, verdict, watchdog)
 from .errors import PplError, role_output
 from .forges import github_fetch
 
 
 def resolve_task(args):
-    task_id = getattr(args, "task", None) or run.active()
+    """The run a command is about: --task, else PPL_TASK, else the lane whose start directory or
+    worktree holds the cwd (lanes.task_for_call), else SCHEMA_INVALID naming ppl lane."""
+    task_id = lanes.task_for_call(getattr(args, "task", None))
     if not task_id:
-        raise PplError("SCHEMA_INVALID", "no --task given and no active run")
+        raise PplError("SCHEMA_INVALID",
+                       "no --task given and not inside a lane; start one with ppl lane <link>")
     return task_id
 
 
@@ -149,47 +152,78 @@ def _why_off(facts):
     return "GitHub is reachable from here"
 
 
+def _init_lane(args):
+    """The registry entry of the lane `ppl init` runs in: the one PPL_TASK, else the cwd, binds,
+    which must be this task's (R-LANE-INIT-INSIDE)."""
+    bound = lanes.task_for_call(None)
+    if bound is None:
+        raise PplError("SETUP_INCOMPLETE",
+                       "ppl init runs inside its task's lane, and this call is in none (no "
+                       "PPL_TASK, and no lane's start directory or worktree holds the cwd): start "
+                       "one with ppl lane <link>")
+    if bound != args.task_id:
+        raise PplError("SCHEMA_INVALID",
+                       "this session is lane %s's, so it initialises %s, not %s: start %s's own "
+                       "lane with ppl lane <link>" % (bound, bound, args.task_id, args.task_id))
+    entry = lanes.entry(bound)
+    if entry is None:
+        raise PplError("SETUP_INCOMPLETE",
+                       "PPL_TASK names %s, which holds no lane: start one with ppl lane <link>"
+                       % bound)
+    return entry
+
+
+def _lane_harness(args, entry):
+    """The harness the lane exported into its start directory, loaded: never the installed one,
+    which may have moved on since the lane started [R-INIT-HARNESS-APPLIED]."""
+    name = entry.get("harness")
+    if args.harness and args.harness != name:
+        raise PplError("SCHEMA_INVALID",
+                       "--harness %s is not lane %s's harness %s: leave --harness out, ppl init "
+                       "runs the harness its lane exported" % (args.harness, args.task_id, name))
+    snapshot = os.path.join(str(entry.get("start_dir")), "harness", str(name))
+    if not os.path.isfile(os.path.join(snapshot, "harness.toml")):
+        raise PplError("SETUP_INCOMPLETE",
+                       "lane %s has no harness snapshot at %s: destroy the lane with ppl destroy "
+                       "--scope local --task %s and start it again with ppl lane <link>"
+                       % (args.task_id, snapshot, args.task_id))
+    return harness.load(snapshot)
+
+
+def _lane_repo(args, entry):
+    """The lane's worktree, which --repo may name only by another spelling of the same path."""
+    worktree = entry.get("worktree")
+    if args.repo and os.path.realpath(args.repo) != os.path.realpath(str(worktree)):
+        raise PplError("SCHEMA_INVALID",
+                       "--repo %s is not lane %s's worktree %s: leave --repo out, ppl init takes "
+                       "the lane's" % (args.repo, args.task_id, worktree))
+    return worktree
+
+
 def cmd_init(args):
-    # isolated=true asserts a fact about how the guard hook is registered that
-    # ppl cannot otherwise verify. The configurations that make that assertion
-    # silently wrong are refused here rather than trusted: see doctor.mismatch
-    # and DESIGN 5.4. This includes "unknown" - a settings file that exists
-    # but could not be read or parsed - since accepting that as "clear" would
-    # be the exact bug this check exists to remove. Independent of isolation,
-    # a registered matcher that never passes some guarded tool name to the hook
-    # is refused too (doctor.matcher_problem): a denial the hook cannot see is
-    # a denial that cannot fire, and the run would start believing otherwise.
+    # A run belongs to its lane: ppl init runs in the session ppl lane started for the task, and
+    # takes the lane's worktree and the harness it exported [R-LANE-INIT-INSIDE].
+    entry = _init_lane(args)
+    repo = _lane_repo(args, entry)
+    # A registered matcher that never passes some guarded tool name to the hook is refused
+    # (doctor.matcher_problem): a denial the hook cannot see is a denial that cannot fire, and
+    # the run would start believing otherwise. So is a guard entry of the wrong shape.
     inspected = doctor.inspect()
-    problem = (doctor.mismatch(args.isolated, inspected) or doctor.matcher_problem(inspected)
-               or doctor.guard_shape_problem())
+    problem = doctor.matcher_problem(inspected) or doctor.guard_shape_problem()
     if problem:
         raise PplError("SCHEMA_INVALID", problem)
     # Setup is checked before the model gate so a missing models step is told as
     # "run ppl setup models", and --skip-model-check waives only that one step.
-    # The harness is mandatory: every run freezes the snapshot of an applied one.
     state = doctor.setup_state()
     problem = doctor.setup_problem(state, args.skip_model_check)
     if problem:
         raise PplError("SETUP_INCOMPLETE", problem)
-    if not args.harness:
-        active = state["harness"]["active"]
-        if state["harness"]["problem"]:
-            hint = "the active harness could not be read: %s" % state["harness"]["problem"]
-        elif active:
-            hint = "pass --harness %s, the applied harness" % active
-        else:
-            hint = "no harness is applied yet, run `ppl setup harness` and `ppl setup apply`"
-        raise PplError("SETUP_INCOMPLETE", "ppl init needs --harness <name>: %s" % hint)
     if args.skip_model_check:
         model_check = "skipped"
     else:
         models.require_verified(args.risk)
         model_check = "verified"
-    doc = harness.load(args.harness)
-    harness.require_applied(doc)
-    problem = harness.memory_problem(doc)
-    if problem:
-        raise PplError("SETUP_INCOMPLETE", problem)
+    doc = _lane_harness(args, entry)
     os_sandboxed = False
     if os_sandbox.needed(doc) and args.os_sandbox:
         problem = os_sandbox_problem(inspected)
@@ -203,9 +237,11 @@ def cmd_init(args):
     harness_record = {"name": harness.installed_name(doc), "path": doc["_dir"],
                       "format": harness.FORMAT}
     snapshot = harness.snapshot(doc)
-    state = run.init(args.task_id, args.tracker_url, args.repo, isolated=args.isolated,
-                     risk=args.risk, model_check=model_check, harness=harness_record,
-                     os_sandboxed=os_sandboxed)
+    lane = {"number": entry.get("lane"), "start_dir": entry.get("start_dir"),
+            "session_id": entry.get("session_id")}
+    state = run.init(args.task_id, args.tracker_url, repo, risk=args.risk,
+                     model_check=model_check, harness=harness_record,
+                     os_sandboxed=os_sandboxed, lane=lane)
     store.write_json(paths.run_dir(args.task_id) / "harness.json", snapshot)
     # after the run exists, so a refusal's stderr stays the one JSON line it is
     for warning in (doctor.dispatch_warning(), doctor.usage_warning(),
@@ -225,8 +261,6 @@ def cmd_doctor(args):
         return 0
     result = doctor.report(getattr(args, "task", None))
     print(json.dumps(result, sort_keys=True))
-    if result["mismatch"]:
-        print(result["mismatch"])
     problem = doctor.matcher_problem(result)
     if problem:
         print(problem)
@@ -1297,15 +1331,12 @@ def cmd_lessons(args):
 
 
 def _lane_close_task(args):
-    """The task `ppl lane close` frees: the one it names, else the lane session's PPL_TASK."""
+    """The task `ppl lane close` frees: the one it names as <id> or --task, else as every bare
+    command finds it (resolve_task)."""
     if args.rest and args.task and args.rest != args.task:
         raise PplError("SCHEMA_INVALID", "ppl lane close names %s and --task %s: name one task"
                        % (args.rest, args.task))
-    task_id = args.rest or args.task or os.environ.get("PPL_TASK")
-    if not task_id:
-        raise PplError("SCHEMA_INVALID", "ppl lane close needs the task: --task <id>, or run it "
-                       "in the lane's session, which sets PPL_TASK")
-    return task_id
+    return resolve_task(argparse.Namespace(task=args.rest or args.task))
 
 
 def cmd_lane(args):
@@ -1400,14 +1431,8 @@ def build_parser():
     p = sub.add_parser("init")
     p.add_argument("task_id")
     p.add_argument("--tracker-url", required=True)
-    p.add_argument("--repo", required=True)
-    # isolated defaults to true: the launch directory is assumed to be the only
-    # place the guard hook is registered, so it is safe to scope the Jira gate
-    # and the operator pause on "a run is active" rather than on cwd (DESIGN 5.4).
-    # --no-isolated is the operator's explicit acknowledgement that the hook is
-    # registered somewhere broader (e.g. global settings), so scoping falls back
-    # to cwd instead of reaching their other projects.
-    p.add_argument("--isolated", action=argparse.BooleanOptionalAction, default=True)
+    # the lane's worktree when left out, and any other directory is refused
+    p.add_argument("--repo")
     # A harness that reaches GitHub needs the OS sandbox that denies it. --no-os-sandbox is the
     # operator's per-run opt-out, and the run records it.
     p.add_argument("--os-sandbox", action=argparse.BooleanOptionalAction, default=True)
@@ -1672,7 +1697,8 @@ def build_parser():
     p.add_argument("--slug", default="work", help="the branch is <TASK-ID>-<slug>")
     p.add_argument("--no-exec", action="store_true",
                    help="print {argv, env, cwd} as JSON instead of starting claude")
-    p.add_argument("--task", help="close: the task whose lane to free (default: PPL_TASK)")
+    p.add_argument("--task", help="close: the task whose lane to free (default: PPL_TASK, else "
+                                  "the lane holding the cwd)")
     p.add_argument("--json", action="store_true", help="list: print JSON")
 
     p = sub.add_parser("lessons")
@@ -1720,11 +1746,12 @@ def _role_output_run(args):
     """(task_id, command) when this call records a role's output in a run that exists."""
     command = role_output_command(args)
     try:
-        task_id = getattr(args, "task", None) or run.active()
+        # the run resolve_task finds, without its refusal when there is none
+        task_id = lanes.task_for_call(getattr(args, "task", None))
         if command is None or not task_id or not run.state_path(task_id).exists():
             return None, None
     except (OSError, PplError):
-        # a task id or pointer the command itself already failed on
+        # a task id, a PPL_TASK or a registry the command itself already failed on
         return None, None
     return task_id, command
 

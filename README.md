@@ -318,9 +318,8 @@ The recommended matcher is `.*`, so the guard sees every call. `ppl init` refuse
 a run under a matcher that leaves a guarded tool name uncovered [R-GUARD-MATCHER].
 Those names carry the default tracker prefixes and forge server names only, so an
 explicit matcher plus a custom `tracker.mcp_prefixes` or `forge.mcp_server` needs
-those names covered by hand. `ppl init` also refuses an isolated run while the
-guard is in `~/.claude/settings.json` [R-INIT-ISOLATION-CHECK], so if you answered
-`global` in `ppl setup claude`, start runs with `ppl init --no-isolated`. In a session
+those names covered by hand. `ppl init` runs inside the task's lane and refuses
+outside it [R-LANE-INIT-INSIDE]. In a session
 `ppl lane` did not start the hooks carry no task, so a role there is refused and no
 run-scoped rule is enforced [R-LANE-ROLE-OUTSIDE].
 
