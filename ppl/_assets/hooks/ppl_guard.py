@@ -418,7 +418,8 @@ BASH_WRITE_SHAPES = re.compile(
     r">>?|\btee\b|\bsed\b[^\n]*-i\b|\bcp\b|\bmv\b|\bdd\b[^\n]*\bof=|\brm\b"
     r"|\btouch\b|\btruncate\b|\bln\b|\binstall\b|\brsync\b|\bpatch\b"
     r"|\bgit\b[^\n]*\b(?:rm|mv|checkout|switch|restore|apply|merge|rebase|cherry-pick"
-    r"|pull|revert|clean)\b"
+    # a hyphenated word is another subcommand: git merge-base writes nothing
+    r"|pull|revert|clean)\b(?!-)"
 )
 
 # Round 1 review (C4): the registry, the lease, the done gate - all of it is
@@ -1992,11 +1993,14 @@ def _bash_write_targets(command, base_cwd, commands=None):
     fails to resolve: deny, not skip. A `sh -c` or `bash -c` string is one
     opaque word: nothing inside it is read. With `commands`, every segment the
     walk reads is appended to it (see _segment_write_targets), one it cannot
-    split into words as (None, 0, its cwd), and a command holding a `$(` or a
-    backtick appends nothing.
+    split into words as (None, its raw text, its cwd), and a command holding a
+    `$(` or a backtick appends nothing.
     """
     if "$(" in command or "`" in command:
-        if BASH_WRITE_SHAPES.search(command):
+        # read without here-document bodies, which are data: a commit message there names
+        # no write (_command_views)
+        views = _command_views(command)
+        if BASH_WRITE_SHAPES.search("\n".join(views) if views else command):
             return [(None, base_cwd, False)]
         return []
     targets = []
@@ -2017,7 +2021,7 @@ def _bash_write_targets(command, base_cwd, commands=None):
             if BASH_WRITE_SHAPES.search(segment):
                 targets.append((None, cwd, False))
             if commands is not None:
-                commands.append((None, 0, cwd))
+                commands.append((None, segment, cwd))
             if background:
                 cwd = list_cwd
             continue
@@ -2595,16 +2599,42 @@ def _task_assigned(command, segments, tasks):
 _UNPLACED_CHARS = frozenset("*?[{")
 
 
+# What a segment's command position may hold that the cd follower does not see through: a
+# cd behind a control keyword, inside a function or in a string the shell runs again is not
+# one it follows [R-LANE-CROSS-TASK].
+_SHELL_STRUCTURE_WORDS = frozenset({"if", "then", "elif", "else", "while", "until", "for", "do",
+                                    "case", "select", "function", "eval", "source", "."})
+
+
+def _shell_structure(tokens, start):
+    """The control keyword, eval, source, `.`, exec with a command or function definition a
+    segment's command position holds, else None."""
+    word = tokens[start] if start < len(tokens) else ""
+    if word in _SHELL_STRUCTURE_WORDS:
+        return word
+    # `f() {` reaches the walk as the word f(, its ) read as a group closer
+    if "()" in word or word.endswith("(") or tokens[start + 1:start + 2] == ["()"]:
+        return "a function definition"
+    if start < len(tokens) and any(_verb_name(token) == "exec" for token in tokens[:start]):
+        return "exec"
+    return None
+
+
 def _unplaced_cwd(segments, cwd):
-    """Why the directories a command's segments run in cannot be placed, else None: the walk
-    was blinded (a $(...) or a backtick, a segment it cannot split into words), or a cd,
+    """Why the directories a command's segments run in cannot be placed, else None: the call
+    names no cwd, the walk was blinded (a $(...) or a backtick, a segment it cannot split
+    into words), a segment runs a control keyword, eval, source, `.`, exec with a command or
+    a function definition (_shell_structure), behind which a cd is not followed, or a cd,
     pushd, popd or env -C went where it cannot follow (a variable, cd -, pushd +N, a bare cd)
-    or to a glob, a brace or a ~user it takes as written. A session cwd of None places
-    nothing to begin with and is not counted."""
+    or to a glob, a brace or a ~user it takes as written."""
     if not isinstance(cwd, str):
-        return None
+        return "a call that names no cwd"
     if not segments or any(tokens is None for tokens, _, _ in segments):
         return "a $(...), a backtick or a word the shell may split otherwise"
+    for tokens, start, _ in segments:
+        structure = _shell_structure(tokens, start)
+        if structure:
+            return "%s, behind which a cd is not followed" % structure
     for _, _, where in segments:
         if where is None:
             return "a cd, pushd, popd or env -C to a variable, cd -, pushd +N or a bare cd"
@@ -2628,8 +2658,9 @@ def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
       ppl with no PPL_TASK takes that lane's run (cli.resolve_task reads lanes.for_path), the
       cwd followed through cd, pushd, popd and env -C as the write walk follows it, and the
       session's own cwd where the walk recognises no ppl segment;
-    - a command that runs or spells ppl where that cwd cannot be placed (_unplaced_cwd): the
-      walk blinded by a substitution, or a cd it cannot follow or that the shell expands.
+    - a command that runs or spells ppl where that cwd cannot be placed (_unplaced_cwd): no
+      cwd in the call, the walk blinded by a substitution, a control keyword, eval, source,
+      exec or a function definition, or a cd it cannot follow or that the shell expands.
     A task with no lane is no other lane's run: a pending reflection names a destroyed run's
     task. `lanes_list` is the registry as read for this call: None, it could not be read, and
     a command that may run ppl or sets PPL_TASK gets ("OWNER_DECISION", why)."""
@@ -2720,14 +2751,15 @@ def _git_subcommand(words):
         if word in _GIT_GLOBAL_VALUE_FLAGS:
             if i + 1 >= len(words):
                 return None, [], "%s with no value" % word
-            if word in ("-c", "--config-env") and _GIT_ALIAS_KEY_RE.match(words[i + 1]):
-                return None, [], "%s %s, an alias or include set on the command line" % (
-                    word, words[i + 1])
+            if word in ("-c", "--config-env") and _git_config_key_problem(words[i + 1]):
+                return None, [], "%s %s, %s" % (word, words[i + 1],
+                                                _git_config_key_problem(words[i + 1]))
             i += 2
         elif word.startswith(_GIT_GLOBAL_GLUED):
             if (word.startswith("--config-env=")
-                    and _GIT_ALIAS_KEY_RE.match(word[len("--config-env="):])):
-                return None, [], "%s, an alias or include set on the command line" % word
+                    and _git_config_key_problem(word[len("--config-env="):])):
+                return None, [], "%s, %s" % (word,
+                                             _git_config_key_problem(word[len("--config-env="):]))
             i += 1
         elif word in _GIT_GLOBAL_FLAGS:
             i += 1
@@ -2735,7 +2767,24 @@ def _git_subcommand(words):
             return None, [], "the option %s, which the guard does not read" % word
     if i >= len(words):
         return None, [], None
+    if any(char in words[i] for char in _BUILT_WORD_CHARS):
+        return None, [], "the subcommand %s, which the shell builds or expands" % words[i]
     return words[i], words[i + 1:], None
+
+
+# What makes a word one the shell builds or expands before git or the guard sees it: a
+# variable, a substitution, a glob, a brace.
+_BUILT_WORD_CHARS = frozenset("$`*?[{")
+
+
+def _git_config_key_problem(value):
+    """Why a -c or --config-env value cannot be let through in a lane, else None: an alias or
+    an include, or a value the shell builds, which may be either."""
+    if _GIT_ALIAS_KEY_RE.match(value):
+        return "an alias or include set on the command line"
+    if "$" in value or "`" in value:
+        return "a config value the shell builds"
+    return None
 
 
 def _git_config_write(rest):
@@ -2750,6 +2799,108 @@ def _git_config_write(rest):
 
 _GIT_CONFIG_SPELLED_RE = re.compile(r"\bgit\b[\s\S]*\bconfig\b")
 _GIT_WORKTREE_SPELLED_RE = re.compile(r"\bgit\b[\s\S]*\bworktree\b")
+
+
+# A here-document operator and its delimiter word, plain or quoted.
+_HEREDOC_OP_RE = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([^\s;&|<>()]+))")
+
+
+class _Unreadable(Exception):
+    """A substitution or a here-document left open."""
+
+
+def _mask_text(text, i, closer, inner):
+    """(text[i:] up to `closer` outside quotes, with each $(...) and backtick replaced by the
+    word $SUBST and the text inside each appended to `inner`, every here-document body taken
+    out, the index after `closer`). Raises _Unreadable on a substitution or a here-document
+    left open."""
+    out, pending = [], []
+    quote, depth, n = None, 0, len(text)
+    while i < n:
+        char = text[i]
+        if quote == "'":
+            out.append(char)
+            quote = None if char == "'" else quote
+            i += 1
+            continue
+        if char == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote is None and closer is not None and char == closer and (
+                closer == "`" or depth == 0):
+            return "".join(out), i + 1
+        if text.startswith("$(", i):
+            body, i = _mask_text(text, i + 2, ")", inner)
+            inner.append(body)
+            out.append("$SUBST")
+            continue
+        if char == "`":
+            body, i = _mask_text(text, i + 1, "`", inner)
+            inner.append(body)
+            out.append("$SUBST")
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+        elif quote is None and char == "'":
+            quote = "'"
+        elif quote is None and text.startswith("<<", i) and not text.startswith("<<<", i):
+            match = _HEREDOC_OP_RE.match(text, i)
+            if match:
+                word = next(group for group in match.groups()[1:] if group is not None)
+                pending.append((match.group(1) == "-", word))
+                out.append(match.group())
+                i = match.end()
+                continue
+        elif quote is None and char == "\n" and pending:
+            out.append(char)
+            i += 1
+            for strip_tabs, word in pending:
+                while True:
+                    if i >= n:
+                        raise _Unreadable("here-document %s left open" % word)
+                    end = text.find("\n", i)
+                    end = n if end < 0 else end
+                    line = text[i:end]
+                    i = end + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == word:
+                        break
+            pending = []
+            continue
+        elif quote is None and char == "(":
+            depth += 1
+        elif quote is None and char == ")" and depth:
+            depth -= 1
+        out.append(char)
+        i += 1
+    if closer is not None:
+        raise _Unreadable("%s left open" % closer)
+    return "".join(out), n
+
+
+def _command_views(command):
+    """[the command with every $(...) and backtick masked to the word $SUBST and every
+    here-document body taken out, then the same of the text inside each substitution], or
+    None when one is left open. A commit message in a here-document is data, not commands."""
+    inner = []
+    try:
+        outer, _ = _mask_text(command, 0, None, inner)
+    except _Unreadable:
+        return None
+    return [outer] + inner
+
+
+def _lane_git_segments(command, cwd):
+    """(every segment the write walk reads over each view of `command` (_command_views), the
+    texts it could not read as words): the whole command when a substitution or a
+    here-document is left open, else each segment it cannot split."""
+    views = _command_views(command)
+    if views is None:
+        return [], [command]
+    segments = []
+    for view in views:
+        _bash_write_targets(view, cwd if isinstance(cwd, str) else None, segments)
+    return segments, [text for tokens, text, _ in segments if tokens is None]
 
 
 def lane_git_denial(command, agent, binding, cwd=None):
@@ -2772,16 +2923,25 @@ def lane_git_denial(command, agent, binding, cwd=None):
     if not (isinstance(command, str) and binding.task and not binding.problem):
         return None
     role = escape.is_role(agent)
-    segments = []
-    _bash_write_targets(command, cwd if isinstance(cwd, str) else None, segments)
-    blinded = not segments or any(tokens is None for tokens, _, _ in segments)
-    worktree = blinded and _GIT_WORKTREE_SPELLED_RE.search(command)
-    config = blinded and role and _GIT_CONFIG_SPELLED_RE.search(command)
-    untrusted = (blinded and _GIT_ALIAS_SPELLED_RE.search(command)
+    segments, unread = _lane_git_segments(command, cwd)
+    # only what the walk could not read as words is judged by its spelling: a git whose
+    # subcommand it reads, a commit whose message is a substitution among them, is judged by
+    # that subcommand
+    worktree = any(_GIT_WORKTREE_SPELLED_RE.search(text) for text in unread)
+    config = role and any(_GIT_CONFIG_SPELLED_RE.search(text) for text in unread)
+    untrusted = (any(_GIT_ALIAS_SPELLED_RE.search(text) for text in unread)
                  and "an alias or include set on the command line")
-    runs_git = False
+    runs_git = any(re.search(r"\bgit\b", text) for text in unread)
     for tokens, start, _ in segments:
-        for index, word in enumerate(tokens or ()):
+        if tokens is None:
+            continue
+        verb = tokens[start] if start < len(tokens) else ""
+        if (("$" in verb or "`" in verb)
+                and ({"worktree", "config"} & set(tokens) or _runs_ppl_module(tokens)
+                     or any(_verb_name(word) in ("ppl", "ppl.cli") for word in tokens))):
+            untrusted = untrusted or ("the command word %s, which the shell builds, before "
+                                      "a worktree, config or ppl word" % verb)
+        for index, word in enumerate(tokens):
             if _verb_name(word) != "git":
                 continue
             runs_git = True
@@ -2796,17 +2956,18 @@ def lane_git_denial(command, agent, binding, cwd=None):
                 worktree = True
             if sub == "config" and role and _git_config_write(rest):
                 config = True
-    if runs_git or (blinded and re.search(r"\bgit\b", command)):
+    if runs_git:
         moved = [word for tokens, _, _ in segments for word in tokens or ()
                  if _GIT_CONFIG_ENV_RE.match(word)]
-        if moved or (blinded and re.search(r"(?:GIT_CONFIG\w*|HOME|XDG_CONFIG_HOME)=", command)):
+        if moved or any(re.search(r"(?:GIT_CONFIG\w*|HOME|XDG_CONFIG_HOME)=", text)
+                        for text in unread):
             untrusted = untrusted or ("%s, which hands git config from elsewhere"
                                       % (moved[0].split("=", 1)[0] + "=" if moved
                                          else "an environment assignment"))
     if untrusted:
         return ("BOUNDARY_VIOLATION",
-                "lane %s may not run git with %s: the guard reads git's subcommand to keep "
-                "git worktree and a role's git config in bounds, and that could make it "
+                "lane %s may not run a command with %s: the guard reads git's subcommand to "
+                "keep git worktree and a role's git config in bounds, and that could make it "
                 "another" % (binding.task, untrusted))
     if worktree:
         return ("BOUNDARY_VIOLATION",

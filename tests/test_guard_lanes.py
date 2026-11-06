@@ -712,6 +712,79 @@ class TestLaneProtection(LaneCase):
             with self.subTest(placed=command):
                 self.assertIsNone(self.bash(command))
 
+    def test_ppl_behind_a_shell_construct_the_cd_follower_cannot_see_through_is_denied(self):
+        # rule: R-LANE-CROSS-TASK
+        # R38: a cd behind a control keyword, in a function, or in a string the shell runs
+        # again is one the walk does not follow, so a command that spells ppl with one fails
+        # closed, and so does a call that names no cwd at all
+        for command in ("if true; then cd $X; fi; env -u PPL_TASK ppl show",
+                        'while read d; do cd "$d"; done </tmp/f; env -u PPL_TASK ppl show',
+                        "for d in ../*; do (cd $d && env -u PPL_TASK ppl show); done",
+                        "f() { cd $X; }; f; env -u PPL_TASK ppl show",
+                        "function f { cd ..; }; f; env -u PPL_TASK ppl show",
+                        "eval 'cd $X'; env -u PPL_TASK ppl show",
+                        "source /tmp/x.sh; env -u PPL_TASK ppl show",
+                        ". /tmp/x.sh; env -u PPL_TASK ppl show",
+                        "case x in *) cd ..;; esac; env -u PPL_TASK ppl show",
+                        "exec env -u PPL_TASK ppl show"):
+            for agent in (None, "ppl-verifier"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("cannot tell the directory", reason)
+        reason = self.deny_reason(ppl_guard.decide(
+            payload(None, "Bash", {"command": "ppl show"}, None), argv(LANE_A)))
+        self.assertIn("names no cwd", reason)
+        for command in ("ppl show", "cd %s && ppl show" % self.worktree[LANE_A],
+                        "if true; then echo x; fi"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command))
+
+    def test_a_git_subcommand_or_command_word_the_shell_builds_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R39: a subcommand, a config value or a command word the shell builds may be
+        # worktree, an alias or git itself, so it fails closed for every session
+        for command in ("W=worktree; git $W prune", 'git "$W" remove shop-%s' % LANE_B,
+                        "git -C %s $W remove --force shop-%s" % (self.checkout, LANE_B),
+                        "git ${W} prune", "git $1 prune", "git work*ee prune",
+                        "git $(echo worktree) prune", "git `printf work`tree prune",
+                        'git -c "$K" wt prune', "G=git; $G worktree remove x",
+                        "$(command -v git) worktree prune",
+                        "C=config; git $C core.hooksPath /tmp/h"):
+            for agent in (None, "ppl-code-worker", "general-purpose"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("git status", "git log -1 $(git rev-parse HEAD)", "echo $HOME"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker",
+                                            cwd=self.worktree[LANE_A]))
+
+    def test_a_git_is_judged_by_its_subcommand_whatever_its_arguments_hold(self):
+        # rule: R-LANE-SHARED-GIT-DIR
+        # rule: R-LANE-CROSS-WRITE
+        # R40: a role's commit with its message in a here-document, and a diff with a
+        # substituted base, are judged as the commit and the diff they are, and only a git whose
+        # subcommand the guard cannot read is judged by its spelling
+        own = self.worktree[LANE_A]
+        commit = ("git commit -m \"$(cat <<'EOF'\nfix: worktree config loading (lane), don't\n"
+                  "git worktree prune is not run here\nEOF\n)\"")
+        for command in (commit, "git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "git log --oneline `git merge-base HEAD main`..HEAD -- config"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker", cwd=own))
+        for command, why in (("git $(echo worktree) remove x", "builds or expands"),
+                             ("echo $(git worktree prune)", "git worktree"),
+                             ('git config core.hooksPath "$(cat /tmp/h)"',
+                              "may not write git config"),
+                             ("git commit -m \"$(cat <<'EOF'\nleft open\n)\"", "git worktree")):
+            with self.subTest(denied=command):
+                reason = self.deny_reason(self.bash(command + (" && git worktree prune"
+                                                               if "left open" in command else ""),
+                                                    agent="ppl-code-worker", cwd=own))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn(why, reason)
+
     def test_git_worktree_in_any_form_but_list_is_denied(self):
         # rule: R-LANE-CROSS-WRITE
         # R34: git takes a worktree by a unique tail of its path from anywhere in the
