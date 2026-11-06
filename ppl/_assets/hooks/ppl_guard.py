@@ -2481,6 +2481,9 @@ def _claimed_bundles(task_id):
 
 
 _GLOB_CHARACTERS = "*?[{"
+# What a reflector's Glob pattern may not hold at all: extglob groups and negation, and the
+# escape, which make Glob search from another root than the one _glob_root reads.
+_GLOB_UNREAD = "()!+@\\"
 
 
 def _glob_root(pattern):
@@ -2498,22 +2501,27 @@ def reflector_archive_read_denial(tool, tool_input, payload, task_id):
     inside the bundle of a pending marker its own lane claimed, so a lane reflects on the runs it
     took and no other. The path, and a Glob's absolute pattern, are placed through every link
     and in any letter case (escape_paths). A Grep or Glob whose search root holds the archive,
-    runs/ or PPL_HOME, say, would read every bundle in it and is refused, and so is a Glob
-    pattern that climbs with `..` from inside the archive, since a pattern is matched below its
-    root."""
+    runs/ or PPL_HOME, say, would read every bundle in it and is refused. A Glob pattern with a
+    `..` segment, from any root, or with an extglob or escape character, is refused before any
+    of this, since the guard would not read the root Glob searches from."""
     archive = str(paths.runs_dir() / "_archive")
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
     pattern = tool_input.get("pattern") if tool == "Glob" else None
+    if isinstance(pattern, str) and (_has_dotdot(pattern)
+                                     or any(char in pattern for char in _GLOB_UNREAD)):
+        # fail closed on what the root cut does not model: a pattern can climb from any root
+        # with `..`, and an extglob or an escape lets Glob read another root than the guard
+        return ("ppl-reflector's Glob pattern %s has a .. segment or one of %s, which the guard "
+                "does not place: name the files below the claimed bundle without them"
+                % (pattern, " ".join(_GLOB_UNREAD)))
     named = [read_target_path(tool_input, payload)]
     if isinstance(pattern, str) and os.path.isabs(pattern):
         named.append(pattern)
     claimed = None
-    in_archive = False
     for item in named:
         landed = escape_paths.landing(item, cwd) if isinstance(item, str) and item else None
         if not landed or escape_paths.under(landed[0], [archive]) is None:
             continue
-        in_archive = True
         if claimed is None:
             claimed = _claimed_bundles(task_id)
         if not (claimed and all(escape_paths.inside(form, claimed) for form in landed[1])):
@@ -2531,10 +2539,6 @@ def reflector_archive_read_denial(tool, tool_input, payload, task_id):
                 return ("ppl-reflector in lane %s searches %s, which holds the run archive, "
                         "where it reads only inside the bundle of a run this lane claimed: "
                         "search that bundle" % (task_id, root))
-    if in_archive and isinstance(pattern, str) and _has_dotdot(pattern):
-        return ("ppl-reflector's Glob pattern %s has a .. segment inside the run archive, where "
-                "it reads only below a bundle its lane claimed: name the files without it"
-                % pattern)
     return None
 
 

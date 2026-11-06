@@ -1596,7 +1596,16 @@ class TestAbandonedRun(LessonsTestCase):
                 ("Glob", {"pattern": "_archive/*/lessons/bundle/*",
                           "path": str(paths.runs_dir())}),
                 ("Glob", {"pattern": str(paths.runs_dir()) + "/*/*/lessons/bundle/*"}),
-                ("Glob", {"pattern": str(paths.home()) + "/**/outcome.json"})):
+                ("Glob", {"pattern": str(paths.home()) + "/**/outcome.json"}),
+                # N3: a `..` segment from a root outside the archive, an escaped absolute
+                # pattern and an extglob pattern are refused whatever the root
+                ("Glob", {"pattern": "../runs/_archive/**",
+                          "path": str(paths.home() / "lanes")}),
+                ("Glob", {"pattern": "../../runs/_archive/**"}),
+                ("Glob", {"pattern": str(paths.runs_dir()) + "/\\_archive/*/lessons/bundle/*"}),
+                ("Glob", {"pattern": "*.@(json|md)", "path": start}),
+                ("Glob", {"pattern": "!(x)/**", "path": start}),
+                ("Glob", {"pattern": "+(_archive)/**", "path": str(paths.runs_dir())})):
             with self.subTest(tool=tool, tool_input=tool_input):
                 result = decide(tool, **tool_input)
                 self.assertIsNotNone(result, tool_input)
