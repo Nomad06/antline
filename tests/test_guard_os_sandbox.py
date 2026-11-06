@@ -869,10 +869,28 @@ class TestOrchestratorShape(OsSandboxCase):
                                ("GH-7", scratch_file("lessons-GH-9.json")),
                                ("GH-7", "lessons-GH-7.json"),
                                ("GH-7", scratch_file("lessons-GH-404.json")),
-                               ("GH-9", link), ("GH-10", hard)):
+                               ("GH-9", link), ("GH-10", hard),
+                               # a `..` that lands in another lane's scratch, and a letter-case
+                               # spelling of the lane's own file, which string equality refuses
+                               ("GH-7", scratch_file("../GH-8/lessons-GH-7.json")),
+                               ("GH-7", mine.replace("/scratch/GH-7/", "/scratch/gh-7/")),
+                               ("GH-7", mine.replace("lessons-GH-7", "Lessons-GH-7"))):
                 command = "%s lessons record --task %s --file %s" % (PPL, task, path)
                 with self.subTest(command=command):
                     self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_ppl_lessons_behind_an_assignment_or_a_wrapper_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # R63: ppl reads PPL_TASK, so nothing may set it or wrap ppl on the way out
+        record = PPL + " lessons record --task GH-7 --file " + scratch_file("lessons-GH-7.json")
+        with self.reflection():
+            for shape in (PPL + " lessons pending", record):
+                for prefix in ("PPL_TASK=GH-9 ", "PPL_TASK=GH-7 ", "env ", "env PPL_TASK=GH-9 ",
+                               "/usr/bin/env ", "command ", "exec ", "nice ", "nohup ",
+                               "time ", "sudo ", "timeout 5 ", "xargs "):
+                    with self.subTest(command=prefix + shape):
+                        self.assertIn("BOUNDARY_VIOLATION",
+                                      self.deny_reason(self.decide(prefix + shape)))
 
     def test_ppl_lessons_pending_or_record_with_an_extra_argument_is_denied(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE

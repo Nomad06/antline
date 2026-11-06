@@ -383,7 +383,8 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
         # what ppl destroy removes once ppl lane close has freed the slot: the start directory
         # is out of every lane's write scope, unlike the run's state.json
         store.write_json(lanes.record_path(task_id), {"task": task_id, "worktree": worktree,
-                                                      "checkout": checkout, "branch": branch})
+                                                      "checkout": checkout, "branch": branch,
+                                                      "harness": name})
         files = lane_render.render(doc, task_id, entry["lane"], start_dir, worktree,
                                    routing_config, mcp)
         argv = claude_argv(binary, session_id, start_dir, worktree, task_id, link,
@@ -433,7 +434,8 @@ def resume(task_id, exec_=True):
 
 def close(task_id):
     """Free the lane of a merged run whose reflection is not pending. Only the registry entry
-    goes: the start directory and the worktree stay until ppl destroy --scope local."""
+    goes: the start directory and the worktree stay until ppl destroy --scope local. The lane's
+    unrecorded claims go back to pending (R60)."""
     entry = _lane(task_id)
     state = store.read_json(run.state_path(task_id), None, lanes.READ_LIMIT)
     if not _merged(state):
@@ -444,8 +446,10 @@ def close(task_id):
         raise PplError("ILLEGAL_TRANSITION", "the reflection of %s is pending: record it with "
                        "ppl lessons record --task %s, then close the lane" % (task_id, task_id))
     released = lanes.release(task_id)
-    return {"task": task_id, "lane": entry["lane"], "released": released,
-            "kept": [entry["start_dir"], entry["worktree"]]}
+    result = {"task": task_id, "lane": entry["lane"], "released": released,
+              "kept": [entry["start_dir"], entry["worktree"]]}
+    result.update(lessons.hand_back(task_id))
+    return result
 
 
 def _alive(pid):

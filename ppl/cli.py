@@ -1238,13 +1238,13 @@ def cmd_label(args):
 
 def _lessons_record(args):
     # --task is required: a pending run reflected on is archived, so no lane holds it, and a
-    # lane session's PPL_TASK names its own run, so --task is not checked against it. In a lane
-    # the task is the lane's own run or a marker it claimed (R57). Not a role-output command of
-    # refusals.COMMANDS and no control.enforce: it reads the bundle and writes only under
-    # PPL_HOME/lessons.
+    # lane session's PPL_TASK names its own run, so --task is not checked against it. In a lane,
+    # PPL_TASK's and never the cwd's, the task is the lane's own run or a marker it claimed
+    # (R57, R63). Not a role-output command of refusals.COMMANDS and no control.enforce: it reads
+    # the bundle and writes only under PPL_HOME/lessons.
     if not args.task or not args.file:
         raise PplError("SCHEMA_INVALID", "ppl lessons record needs --task <id> and --file <json>")
-    lane = lanes.task_for_call(None)
+    lane = os.environ.get("PPL_TASK") or None
     try:
         doc = store.read_json(args.file, None, lessons.BUNDLE_READ_LIMIT)
     except (OSError, UnicodeDecodeError, RecursionError) as exc:
@@ -1313,10 +1313,11 @@ def _lessons_review(args):
 
 
 def _lessons_pending():
-    """Every pending marker outside a lane. In a lane, the markers of runs of the lane's harness,
-    each claimed for this lane first (D20), and the ones it claimed before and has not recorded,
-    so a resumed session finishes them."""
-    lane = lanes.task_for_call(None)
+    """Every pending marker outside a lane. In the lane PPL_TASK names, never the one the cwd
+    lies in (R63), the markers stamped with the lane's harness, each claimed for this lane first
+    (D20), and the ones it claimed before and has not recorded, so a resumed session finishes
+    them."""
+    lane = os.environ.get("PPL_TASK") or None
     if lane is None:
         markers = lessons.pending()
     else:

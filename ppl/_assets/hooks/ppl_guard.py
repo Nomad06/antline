@@ -2453,6 +2453,66 @@ def _takes(real_forms, removal, roots):
     return None
 
 
+def _claimed_bundles(task_id):
+    """The bundles the pending markers the lane of `task_id` claimed name (lessons.claim_pending,
+    D20), read with no lock and through the hook's cap. PPL_HOME/lessons is outside every lane's
+    write scope; a marker that cannot be read names none."""
+    folder = paths.pending_marker("X").parent
+    suffix = ".json" + paths.CLAIMED + task_id
+    try:
+        names = os.listdir(str(folder))
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if not name.endswith(suffix):
+            continue
+        try:
+            doc = json.loads(store.read_regular_text(folder / name, _READ_LIMIT))
+        except Exception:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        bundle = doc.get("bundle")
+        if (doc.get("task") == name[:-len(suffix)] and isinstance(bundle, str)
+                and os.path.isabs(bundle)):
+            found.append(bundle)
+    return found
+
+
+def reflector_archive_read_denial(tool, tool_input, payload, task_id):
+    """Why ppl-reflector in the lane of `task_id` may not make this Read, Grep or Glob, else
+    None [R-LANE-REFLECTOR-READS]. In runs/_archive, where every destroyed run lies, it reads only
+    inside the bundle of a pending marker its own lane claimed, so a lane reflects on the runs it
+    took and no other. The path, and a Glob's absolute pattern, are placed through every link
+    and in any letter case (escape_paths), and a Glob pattern that climbs with `..` from inside
+    the archive is refused, since the pattern is matched below the path."""
+    archive = str(paths.runs_dir() / "_archive")
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    pattern = tool_input.get("pattern") if tool == "Glob" else None
+    named = [read_target_path(tool_input, payload)]
+    if isinstance(pattern, str) and os.path.isabs(pattern):
+        named.append(pattern)
+    claimed = None
+    in_archive = False
+    for item in named:
+        landed = escape_paths.landing(item, cwd) if isinstance(item, str) and item else None
+        if not landed or escape_paths.under(landed[0], [archive]) is None:
+            continue
+        in_archive = True
+        if claimed is None:
+            claimed = _claimed_bundles(task_id)
+        if not (claimed and all(escape_paths.inside(form, claimed) for form in landed[1])):
+            return ("ppl-reflector in lane %s reads the run archive only inside the bundle of a "
+                    "run this lane claimed with ppl lessons pending, and %s is not in one"
+                    % (task_id, item))
+    if in_archive and isinstance(pattern, str) and _has_dotdot(pattern):
+        return ("ppl-reflector's Glob pattern %s has a .. segment inside the run archive, where "
+                "it reads only below a bundle its lane claimed: name the files without it"
+                % pattern)
+    return None
+
+
 def cross_lane_denial(payload, binding, lanes_list):
     """("BOUNDARY_VIOLATION", reason) when a call writes where no session of this lane may,
     else None. Every path key of an edit tool and every target of a write-shaped Bash is
@@ -3649,6 +3709,11 @@ def _decide(payload, argv=()):
                                 "ppl-test-worker may not read %s: only test sources are "
                                 "visible to it, reading the implementation is the exact "
                                 "channel this cage exists to close" % target)
+
+    if agent == "ppl-reflector" and tool in READ_TOOLS:
+        reason = reflector_archive_read_denial(tool, tool_input, payload, task_id)
+        if reason:
+            return deny("BOUNDARY_VIOLATION", reason)
 
     if agent == "ppl-review-responder" and tool == "Bash":
         command = tool_input.get("command", "")

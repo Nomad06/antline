@@ -26,15 +26,17 @@ def start_dir(task_id):
 
 
 def record_path(task_id):
-    """The lane's record in its start directory, {"task", "worktree", "checkout", "branch"} as
-    ppl lane made them. It outlives the registry entry, which ppl lane close removes, until
-    ppl destroy removes the start directory, and no lane's sandbox can write it."""
+    """The lane's record in its start directory, {"task", "worktree", "checkout", "branch",
+    "harness"} as ppl lane made them. It outlives the registry entry, which ppl lane close
+    removes, until ppl destroy removes the start directory, and no lane's sandbox can write
+    it."""
     return start_dir(task_id) / RECORD_FILE
 
 
 def record(task_id):
     """The lane's record lane.json as a dict whose worktree and checkout are strings and whose
-    branch is a string or None, else None: missing, or not that shape."""
+    branch and harness are each a string or None (a record from before R61 names no harness),
+    else None: missing, or not that shape."""
     try:
         found = store.read_json(record_path(task_id), None, READ_LIMIT)
     except (PplError, OSError, UnicodeDecodeError, RecursionError):
@@ -42,8 +44,9 @@ def record(task_id):
     if not isinstance(found, dict) or not all(
             isinstance(found.get(key), str) and found.get(key) for key in ("worktree", "checkout")):
         return None
-    if found.get("branch") is not None and not isinstance(found.get("branch"), str):
-        return None
+    for key in ("branch", "harness"):
+        if found.get(key) is not None and not isinstance(found.get(key), str):
+            return None
     return found
 
 

@@ -298,11 +298,14 @@ class TestStart(LaneCase):
                     self.assertFalse(self.branch_exists())
 
     def test_start_records_the_lane_in_its_start_directory(self):
-        # R53: destroy reads the worktree from here once ppl lane close has freed the slot
+        # R53: destroy reads the worktree from here once ppl lane close has freed the slot, and
+        # R61: a destroy with reflection then stamps its marker with the harness named here
         lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
         record = json.loads(lanes.record_path(TASK).read_text(encoding="utf-8"))
         self.assertEqual(record, {"task": TASK, "worktree": str(self.worktree),
-                                  "checkout": str(self.project), "branch": BRANCH})
+                                  "checkout": str(self.project), "branch": BRANCH,
+                                  "harness": HARNESS})
+        self.assertEqual(lanes.record(TASK), record)
 
     def test_without_an_origin_the_worktree_starts_from_the_local_default_branch(self):
         local = self.make_repo(self.base / "local")
@@ -566,11 +569,12 @@ class TestTheLaneWriteScope(LaneCase):
                      if before.get(path) != after.get(path)}
 
     def abandon(self, task, harness_name):
-        """A run of `harness_name` that the owner destroyed with reflection outside every lane:
-        its pending marker."""
+        """A run in a lane of `harness_name` that the owner destroyed with reflection outside
+        every lane: its pending marker, stamped with that harness (R61)."""
         run.init(task, "u", str(self.base / ("gone-" + task)),
                  harness={"name": harness_name, "path": "x", "format": harness.FORMAT})
         store.write_json(paths.run_dir(task) / "harness.json", {"name": harness_name})
+        fixtures.bind_lane(task, self.base / ("gone-" + task), lane=9, harness=harness_name)
         lessons.destroy_with_reflection(task, "gave up")
         return lessons.pending_path(task)
 

@@ -163,7 +163,7 @@ def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
     start.mkdir(parents=True, exist_ok=True)
     store.write_json(lanes.record_path(task_id), {
         "task": task_id, "worktree": str(worktree or repo), "checkout": str(repo),
-        "branch": branch})
+        "branch": branch, "harness": harness})
     if settings:
         store.write_json(start / "settings.json", lane_settings(task_id))
     installed = paths.harness_dir(harness)

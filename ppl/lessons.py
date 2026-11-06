@@ -300,9 +300,10 @@ def _checked_bundle(candidate, source, tail=()):
     return candidate
 
 
-def find_bundle(task_id, by_task=None):
-    """The bundle `record` reads: the one a pending marker names, the marker the lane of
-    `by_task` claimed first, else the run's own, live or archived. A marker wins, since a
+def _locate(task_id, by_task=None):
+    """(bundle, marker): the bundle `record` reads and the pending marker that named it, None
+    for the run's own bundle. The marker the lane of `by_task` claimed comes first, then the
+    unclaimed one, else the run's own bundle, live or archived. A marker wins, since a
     destroyed run's bundle sits in the archive. A marker that names no real directory inside
     runs/ is SCHEMA_INVALID, and so is no bundle at all."""
     paths.check_task_id(task_id)
@@ -316,11 +317,16 @@ def find_bundle(task_id, by_task=None):
         if not isinstance(named, dict) or named.get("task") != task_id \
                 or not isinstance(named.get("bundle"), str):
             _refuse("%s is not {\"task\": %s, \"bundle\": <path>}" % (where, task_id))
-        return _checked_bundle(named["bundle"], where, ("lessons", "bundle"))
+        return _checked_bundle(named["bundle"], where, ("lessons", "bundle")), named
     target = bundle_dir(trail.find_run(task_id))
     if not os.path.lexists(str(target)):
         _refuse("%s has no bundle at %s: run ppl lessons bundle first" % (task_id, target))
-    return _checked_bundle(target, "the run's bundle")
+    return _checked_bundle(target, "the run's bundle"), None
+
+
+def find_bundle(task_id, by_task=None):
+    """The bundle `record` reads (_locate)."""
+    return _locate(task_id, by_task)[0]
 
 
 def _read(bundle, name, cache):
@@ -486,12 +492,14 @@ def record(task_id, doc, by_task=None):
     a task that is already recorded, which removes it: nothing is left to record, and a marker
     left there would send the next session to the reflector again. `by_task` is the lane the
     call runs in, which records only its own run or a marker it claimed, and only for the
-    harness its registry entry names (R59)."""
+    harness its registry entry names: its own run's bundle must name that harness (R59), a
+    claimed marker must carry it (R61), and the proposals are stored under it."""
     paths.check_task_id(task_id)
     if by_task:
+        paths.check_task_id(by_task)
         _lane_may_record(task_id, by_task)
     own_harness = lane_harness(by_task) if by_task else None
-    bundle = find_bundle(task_id, by_task)
+    bundle, marker = _locate(task_id, by_task)
     cache = {}
     in_effect = _read(bundle, "memory-in-effect.json", cache)
     name = in_effect.get("harness") if isinstance(in_effect, dict) else None
@@ -500,11 +508,20 @@ def record(task_id, doc, by_task=None):
     except PplError as exc:
         _refuse("memory-in-effect.json names a harness that is not a plain name: %s"
                 % exc.message)
-    if by_task and name != own_harness:
-        # the lane's own bundle lies in its run, which its sandbox can write (R59)
-        _refuse("the bundle's memory-in-effect.json names the harness %s, and lane %s runs %s: a "
-                "lane records lessons for its own harness only, so nothing was written"
-                % (name, by_task, own_harness))
+    if by_task:
+        if marker is not None:
+            # a claimed run's bundle was written in its own lane's reach: the harness is the one
+            # its marker carries, stamped from the registry at its destroy (R61)
+            if marker.get("harness") != own_harness:
+                _refuse("the pending marker of %s carries the harness %r, and lane %s runs %s: a "
+                        "lane records lessons for its own harness only, so nothing was written"
+                        % (task_id, marker.get("harness"), by_task, own_harness))
+        elif name != own_harness:
+            # the lane's own bundle lies in its run, which its sandbox can write (R59)
+            _refuse("the bundle's memory-in-effect.json names the harness %s, and lane %s runs "
+                    "%s: a lane records lessons for its own harness only, so nothing was "
+                    "written" % (name, by_task, own_harness))
+        name = own_harness
     entries = in_effect.get("entries")
     if not isinstance(entries, list) or not all(
             isinstance(e, dict) and isinstance(e.get("id"), str) for e in entries):
@@ -840,6 +857,23 @@ def _ended(state, task_id, why):
     return {"ended": "destroyed", "last_stage": stage, "blocker": blocker, "why": why}
 
 
+def _lane_stamp(task_id):
+    """The harness the run's lane ran, which its pending marker carries (R61): the registry
+    entry's, else the lane's record lane.json's, both out of every lane's reach. None for a run
+    from before lanes or a name that is not a plain one: the run's own harness.json is never
+    read for it."""
+    entry = lanes.entry(task_id)
+    name = entry.get("harness") if entry else None
+    if name is None:
+        found = lanes.record(task_id)
+        name = found.get("harness") if found else None
+    try:
+        harness.check_name(name)
+    except PplError:
+        return None
+    return name
+
+
 def destroy_with_reflection(task_id, why):
     """Archives a run at the owner's say-so and leaves a pending marker for its reflection.
     `why` is the owner's one line on why it ended, in outcome.json for a run that was not
@@ -852,6 +886,8 @@ def destroy_with_reflection(task_id, why):
     if not isinstance(why, str) or not why.strip():
         raise PplError("SCHEMA_INVALID", "a destroy with reflection needs a non-empty why")
     why = why.strip()
+    # read before the destroy frees the slot and removes the start directory with its record
+    stamp = _lane_stamp(task_id)
     if not config.lessons_reflect():
         result = run.destroy(task_id, "local")
         result["reflection"] = "off"
@@ -867,8 +903,11 @@ def destroy_with_reflection(task_id, why):
     if outcome["ended"] == "merged":
         result["why"] = why
     bundle_path = result["archive"] + "/lessons/bundle"
+    marker = {"task": task_id, "bundle": bundle_path}
+    if stamp is not None:
+        marker["harness"] = stamp
     try:
-        store.write_json(pending_path(task_id), {"task": task_id, "bundle": bundle_path})
+        store.write_json(pending_path(task_id), marker)
     except (OSError, PplError) as exc:
         raise PplError("EXTERNAL_BLOCKED",
                        "%s is archived at %s, but its pending reflection marker could not be "
@@ -904,42 +943,32 @@ def _markers(suffix):
                 and isinstance(doc.get("bundle"), str)
             entry = {"task": task, "bundle": doc["bundle"]} if ok else \
                 {"task": task, "warning": "is not {\"task\": %s, \"bundle\": <path>}" % task}
+            if ok and isinstance(doc.get("harness"), str):
+                entry["harness"] = doc["harness"]
         except (PplError, OSError, UnicodeDecodeError, RecursionError) as exc:
             entry = {"task": task, "warning": "cannot be read: %s" % exc}
         found.append((stamp, name, entry))
     return [entry for _, _, entry in sorted(found, key=lambda item: item[:2])]
 
 
-def _run_harness(bundle):
-    """The harness the archived run of a marker's bundle ran, as its harness.json names it, None
-    when that cannot be read."""
-    try:
-        doc = store.read_json(Path(bundle).parent.parent / "harness.json", None,
-                              BUNDLE_READ_LIMIT)
-    except (PplError, OSError, UnicodeDecodeError, RecursionError):
-        return None
-    name = doc.get("name") if isinstance(doc, dict) else None
-    return name if isinstance(name, str) else None
-
-
 def pending(harness=None):
-    """The pending markers no lane claimed (claim_pending), as `{"task", "bundle", "warning"}`
-    oldest first, an unreadable or malformed one with a `warning` and no bundle. With `harness`,
-    only those whose archived run's harness.json names that harness (D20), and no malformed
-    one, whose run cannot be told."""
+    """The pending markers no lane claimed (claim_pending), as `{"task", "bundle", "harness",
+    "warning"}` oldest first, an unreadable or malformed one with a `warning` and no bundle, and
+    `harness` only on a marker that carries one. With `harness`, only the markers stamped with
+    that harness (R61): the run's own files never decide it, and an unstamped marker, from
+    before lanes, is left to a terminal outside every lane."""
     found = _markers(".json")
     if harness is None:
         return found
-    return [entry for entry in found
-            if "bundle" in entry and _run_harness(entry["bundle"]) == harness]
+    return [entry for entry in found if "bundle" in entry and entry.get("harness") == harness]
 
 
 def claim_pending(task_id, by_task):
     """Claims the pending marker of `task_id` for the lane of `by_task` (D20) by an atomic
     rename to <task>.json.claimed-<by_task>: of two lanes the first rename wins, and no lock is
-    taken. Only a marker whose run used the lane's harness, as its registry entry names it, is
-    claimed (R59). True when this call claimed it, False when no unclaimed marker of a run of
-    that harness is there."""
+    taken. Only a marker stamped with the lane's harness, as its registry entry names it, is
+    claimed (R59, R61). True when this call claimed it, False when no unclaimed marker of a run
+    of that harness is there."""
     paths.check_task_id(task_id)
     paths.check_task_id(by_task)
     wanted = lane_harness(by_task)
@@ -948,7 +977,7 @@ def claim_pending(task_id, by_task):
     except (PplError, OSError, UnicodeDecodeError, RecursionError):
         return False
     if not (isinstance(doc, dict) and doc.get("task") == task_id
-            and isinstance(doc.get("bundle"), str)) or _run_harness(doc["bundle"]) != wanted:
+            and isinstance(doc.get("bundle"), str) and doc.get("harness") == wanted):
         return False
     try:
         os.rename(str(pending_path(task_id)), str(claimed_path(task_id, by_task)))
@@ -961,3 +990,39 @@ def claimed(by_task):
     """The markers the lane of `by_task` claimed and has not recorded, as pending() lists them."""
     paths.check_task_id(by_task)
     return _markers(".json" + paths.CLAIMED + by_task)
+
+
+def hand_back(by_task):
+    """Hands every claim the lane of `by_task` has not recorded back to its pending marker
+    pending/<task>.json (R60), so the next lane of its harness lists it again: ppl lane close
+    and a local destroy free the lane that held it. A claim whose task has a pending marker
+    again is left as it is and reported. Returns {"claims_handed_back": [task],
+    "claims_kept": [task]}, each only when it is not empty."""
+    paths.check_task_id(by_task)
+    suffix = ".json" + paths.CLAIMED + by_task
+    folder = pending_path("X").parent
+    try:
+        names = sorted(name for name in os.listdir(str(folder)) if name.endswith(suffix))
+    except OSError:
+        names = []
+    handed, kept = [], []
+    for name in names:
+        task = name[:-len(suffix)]
+        if not paths.TASK_ID_RE.fullmatch(task):
+            kept.append(task)
+            continue
+        try:
+            # a link, not a rename: it never replaces a marker that is there again
+            os.link(str(folder / name), str(pending_path(task)))
+        except FileExistsError:
+            kept.append(task)
+            continue
+        except FileNotFoundError:
+            continue  # recorded meanwhile
+        try:
+            os.unlink(str(folder / name))
+        except FileNotFoundError:
+            pass
+        handed.append(task)
+    return {key: tasks for key, tasks in (("claims_handed_back", handed), ("claims_kept", kept))
+            if tasks}

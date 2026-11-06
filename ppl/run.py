@@ -538,6 +538,10 @@ def destroy(task_id, scope):
         result["start_dir"] = "kept" if os.path.lexists(str(start)) else "absent"
     else:
         result.update(_remove_start_dir(task_id))
+    # the lane is gone, so the reflections it claimed and did not record go back to pending
+    # for the next lane of their harness (R60). Imported here: lessons imports this module
+    from . import lessons
+    result.update(lessons.hand_back(task_id))
     return result
 
 
