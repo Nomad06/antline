@@ -3423,7 +3423,7 @@ class TestGuard(unittest.TestCase):
         # R65: hooks exist only in lane sessions, so "a hook defect must not lock the
         # operator out of unrelated sessions" no longer holds there. With --task in the
         # hook's argv an internal error denies every tool but Read, Glob and Grep, the shape a
-        # lane that cannot be confirmed gets; without it nothing changes.
+        # lane that cannot be confirmed gets. Without it nothing changes.
         def broken(_payload, _argv=()):
             raise RuntimeError("boom")
 
@@ -3558,7 +3558,7 @@ class TestPythonFloor(unittest.TestCase):
     def test_an_old_python_in_a_lane_leaves_an_unroled_session_only_its_reads(self):
         # rule: R-GUARD-PYTHON-FLOOR
         # R65: with --task in the guard's argv, a lane session, an old interpreter denies an
-        # unroled call every tool but Read, Glob and Grep; without it nothing changes
+        # unroled call every tool but Read, Glob and Grep. Without it nothing changes
         for tool in ("Bash", "Write", "Edit", "Agent", "WebFetch", "mcp__atlassian__x"):
             with self.subTest(tool=tool):
                 handled, out, err = self.floor((3, 9, 6), payload(None, tool, {}), argv=LANE)

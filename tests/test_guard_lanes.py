@@ -1194,7 +1194,7 @@ class TestLaneProtection(LaneCase):
     def test_a_command_with_a_substitution_or_here_document_left_open_is_denied(self):
         # rule: R-LANE-CROSS-WRITE
         # R68: a substitution or a here-document left open is read by its spelling alone too,
-        # so in a lane it is denied for every session; a closed one, the here-document commit
+        # so in a lane it is denied for every session. A closed one, the here-document commit
         # message among them, is read as before, and outside a lane nothing changes
         own = self.worktree[LANE_A]
         # (command, what the reason names): the here-document and git checks keep theirs

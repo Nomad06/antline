@@ -2584,7 +2584,7 @@ class TestInitInsideALane(unittest.TestCase):
 
     def test_init_in_a_lane_without_its_snapshot_names_the_owners_restart(self):
         # rule: R-INIT-HARNESS-APPLIED
-        # ledger 297: the remedy told the lane's own session to destroy its lane; it names
+        # ledger 297: the remedy told the lane's own session to destroy its lane. It names
         # the owner's restart from a terminal outside the lane (R51)
         entry = fixtures.bind_lane("DEMO-7090", "/tmp/repo")
         shutil.rmtree(Path(entry["start_dir"]) / "harness")

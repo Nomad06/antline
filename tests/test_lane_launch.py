@@ -949,7 +949,7 @@ class TestResume(LaneCase):
     def test_resume_refuses_hooks_that_cannot_run_the_cage(self):
         # rule: R-GUARD-PYTHON-FLOOR
         # M6: a pinned interpreter that vanished (a pipx venv whose base Python was removed)
-        # makes the shell exit 127, a non-blocking error, so every call is allowed; one older
+        # makes the shell exit 127, a non-blocking error, so every call is allowed. One older
         # than 3.11 meets the floor's deny. ppl lane resume checks every hook entry of the
         # lane's settings.json before it execs, and ppl doctor in the lane reports the same.
         from ppl import doctor

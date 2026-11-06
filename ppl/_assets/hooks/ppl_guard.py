@@ -3281,8 +3281,8 @@ def _blinded_write_shape(command):
         return True
     found = _command_views(command)
     if found is None:
-        # read by its spelling, a here-document's backslash-newlines joined as its views are;
-        # the raw text was searched above, so the joined one only when it differs
+        # read by its spelling, a here-document's backslash-newlines joined as its views are.
+        # The raw text was searched above, so the joined one only when it differs
         joined = _CONTINUED_LINE_RE.sub(r"\1", command)
         return joined != command and bool(BASH_WRITE_SHAPES.search(joined))
     return bool(BASH_WRITE_SHAPES.search("\n".join(found[0] + found[1] + found[3])))
@@ -3874,7 +3874,7 @@ def _decide(payload, argv=()):
                                 "whitespace or holds a control character that Claude Code may "
                                 "trim: spell the path plainly" % (tool, each))
             # Glob expands braces, so a group that could make an alternative absolute or
-            # climbing is refused (R68 AMENDED); then an absolute pattern, which lists what it
+            # climbing is refused (R68 AMENDED), then an absolute pattern, which lists what it
             # names whatever the path
             braces = _glob_brace_problem(glob) if isinstance(glob, str) else None
             if braces:
@@ -4074,7 +4074,7 @@ def main():
         # Claude Code reads exit 0 with no output as allow. A ppl-* role is
         # refused instead. Outside a lane an unroled session keeps the allow so a
         # hook defect cannot lock the operator out of unrelated sessions, unless
-        # the call asks to leave the OS sandbox; in a lane it keeps only Read,
+        # the call asks to leave the OS sandbox. In a lane it keeps only Read,
         # Glob and Grep (R65), and a decision past the deadline goes the same way
         # [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. The deny goes out before the
         # diagnostic, and a broken stderr is swallowed, since a nonzero exit

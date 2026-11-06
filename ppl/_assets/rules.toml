@@ -463,8 +463,8 @@ residual = ""
 
 [[rule]]
 id = "R-STATE-UNREADABLE-FAIL-CLOSED"
-statement = "When the active run's state cannot be read, a tool call carrying a ppl-* agent_type is denied rather than falling through every scoped check."
-scope = "active run whose state.json is missing, corrupt, malformed or past what a JSON parse reads (an integer of more than 4,300 digits, nesting too deep)"
+statement = "When the active run's state cannot be read, a JSON parse that cannot read it (an integer of more than 4,300 digits, nesting too deep) included, a tool call carrying a ppl-* agent_type is denied rather than falling through every scoped check."
+scope = "active run whose state.json is missing, corrupt or malformed"
 event = "PreToolUse"
 enforcement = "blocking"
 hook_or_check = "ppl/_assets/hooks/ppl_guard.py:bound_state, ppl/_assets/hooks/ppl_guard.py:decide"

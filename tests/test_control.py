@@ -741,7 +741,7 @@ class TestDestroyCleansUpTheLane(unittest.TestCase):
     def test_destroying_the_run_from_before_lanes_retires_its_pointer(self):
         # rule: R-LANE-LEGACY-RUN
         # ledger 283: runs/ACTIVE stayed after the destroy, so a later lane that reused the
-        # task id counted as the run from before lanes; a pointer naming another run stays
+        # task id counted as the run from before lanes. A pointer naming another run stays
         run.init("DEMO-520", "u", "/tmp/definitely-not-a-repo-xyz")
         name_as_the_legacy_run(self, "DEMO-521")
         run.destroy("DEMO-520", "local")
@@ -754,7 +754,7 @@ class TestDestroyCleansUpTheLane(unittest.TestCase):
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads a 000 file")
     def test_a_pointer_that_cannot_be_read_leaves_the_worktree_and_raises_nothing(self):
         # rule: R-LANE-LEGACY-RUN
-        # ledger 284: an unreadable runs/ACTIVE raised a traceback in destroy and in ppl lane;
+        # ledger 284: an unreadable runs/ACTIVE raised a traceback in destroy and in ppl lane.
         # destroy now leaves the worktree it cannot place, and ppl lane refuses
         main = self.checkout()
         tree = main.parent / "shop-DEMO-522"

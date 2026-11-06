@@ -1162,7 +1162,7 @@ class TestAbandonedRun(LessonsTestCase):
 
     def test_a_run_directory_left_behind_writes_no_marker_and_says_so(self):
         # ledger 285: with the run directory left behind there is no archive, and the marker
-        # path was built from None (TypeError); now no marker is written, the result says why,
+        # path was built from None (TypeError). Now no marker is written, the result says why,
         # and the destroy run again once the run directory can move leaves the marker
         built = self.build_run("DEMO-9330")
 
