@@ -37,6 +37,16 @@ def state_path(task_id):
     return paths.run_dir(task_id) / "state.json"
 
 
+def legacy_active_task():
+    """The task the single-run pointer runs/ACTIVE names, else None. ppl init wrote it before
+    lanes and nothing writes it now, so the run it names is the one from before lanes.
+    SCHEMA_INVALID when the pointer is no regular file or over lanes.READ_LIMIT."""
+    try:
+        return store.read_regular_text(paths.legacy_active_file(), lanes.READ_LIMIT).strip() or None
+    except FileNotFoundError:
+        return None
+
+
 def load(task_id, limit=None):
     state = store.read_json(state_path(task_id), limit=limit)
     if state is None:
@@ -484,9 +494,12 @@ def destroy(task_id, scope):
     nothing of it was pushed (D23), the scratch directory, the run (archived), the lane's
     registry slot and its start directory. The worktree, checkout and branch come from the
     lane's registry entry, else from its record <start>/lane.json once ppl lane close freed the
-    slot (_worktree_source), never from state.json, which the lane's own sandbox can write. A
-    lane whose run never reached ppl init goes the same way. Remote scope is an outward mutation
-    and is queued for the orchestrator, which is the only component holding GitLab credentials.
+    slot (_worktree_source), never from state.json, which the lane's own sandbox can write, but
+    for the one run from before lanes that runs/ACTIVE names. A run directory that cannot be
+    archived is left, and then the slot is still freed but the start directory and its record
+    are kept, so a retry reads the record again. A lane whose run never reached ppl init goes
+    the same way. Remote scope is an outward mutation and is queued for the orchestrator, which
+    is the only component holding GitLab credentials.
     """
     if scope not in ("local", "full"):
         raise PplError("SCHEMA_INVALID", "destroy scope must be local or full")
@@ -505,7 +518,7 @@ def destroy(task_id, scope):
 
     state = store.read_json(state_path(task_id))
     entry = lanes.entry(task_id)
-    if state is None and entry is None and _lane_record(task_id) is None:
+    if state is None and entry is None and lanes.record(task_id) is None:
         raise PplError("SCHEMA_INVALID", "no run and no lane for %s, so there is nothing to "
                        "destroy: ppl lane list shows the lanes" % task_id)
     worktree, checkout, branch, problem = _worktree_source(task_id, state, entry)
@@ -517,24 +530,14 @@ def destroy(task_id, scope):
     shutil.rmtree(os_sandbox.scratch_dir(task_id), ignore_errors=True)
     result.update(_archive_run_dir(task_id, result))
     result["lane"] = "released" if lanes.release(task_id) else "none"
-    result.update(_remove_start_dir(task_id))
+    if result.get("run_dir") == "left_behind":
+        # the record stays with the run, so the retry once it is fixed reads the record, never
+        # the state.json a role can write
+        start = lanes.start_dir(task_id)
+        result["start_dir"] = "kept" if os.path.lexists(str(start)) else "absent"
+    else:
+        result.update(_remove_start_dir(task_id))
     return result
-
-
-def _lane_record(task_id):
-    """The lane's record <start>/lane.json as a dict of strings (branch may be None), None
-    when it is missing or not that shape."""
-    try:
-        record = store.read_json(lanes.record_path(task_id), None, lanes.READ_LIMIT)
-    except (PplError, OSError, UnicodeDecodeError):
-        return None
-    if not isinstance(record, dict) or not all(
-            isinstance(record.get(key), str) and record.get(key)
-            for key in ("worktree", "checkout")):
-        return None
-    if record.get("branch") is not None and not isinstance(record.get("branch"), str):
-        return None
-    return record
 
 
 def _worktree_source(task_id, state, entry):
@@ -542,32 +545,65 @@ def _worktree_source(task_id, state, entry):
     lane's record in its start directory, both out of every lane's reach: state.json lies in
     runs/<task>, which the lane's sandbox writes, so a role there could name another lane's
     worktree in it [R-LANE-CROSS-WRITE]. A run that has a start directory but no readable
-    record is left alone, and only a run from before lanes, with neither, takes state.json's
-    repo, unless that is or lies in a live lane's worktree."""
-    record = _lane_record(task_id)
-    branch = record.get("branch") if record else None
+    record is left alone. A run with neither takes state.json's repo only when runs/ACTIVE
+    names it, the run from before lanes, and only when that path is not, and lies in no, live
+    or closed lane's worktree (_legacy_problem); any other is named for removal by hand."""
+    found = lanes.record(task_id)
+    branch = found.get("branch") if found else None
     if entry is not None:
         return entry.get("worktree"), entry.get("repo"), branch, None
-    if record is not None:
-        return record["worktree"], record["checkout"], branch, None
+    if found is not None:
+        return found["worktree"], found["checkout"], branch, None
     if os.path.lexists(str(lanes.start_dir(task_id))):
         return None, None, None, ("the lane's record %s cannot be read, and state.json is in "
                                   "its sandbox's reach, so destroy removes no worktree: remove "
                                   "it with git worktree remove once you have checked it"
                                   % lanes.record_path(task_id))
     repo = state.get("repo") if isinstance(state, dict) else None
-    if not isinstance(repo, str) or not repo:
+    if not isinstance(repo, str) or not repo or not os.path.isdir(repo):
         return None, None, None, None
-    try:
-        holder = lanes.holding_worktree(lanes.read(), repo)
-    except PplError as err:
-        return None, None, None, ("the lane registry cannot be read (%s), so %s cannot be told "
-                                  "apart from a live lane's worktree" % (err.message, repo))
-    if holder is not None:
-        return None, None, None, ("%s is, or lies in, lane %s's worktree %s, which a run "
-                                  "without a lane does not remove" % (repo, holder.get("task"),
-                                                                     holder.get("worktree")))
+    problem = _legacy_problem(task_id, repo)
+    if problem:
+        return None, None, None, problem
     return repo, None, None, None
+
+
+def _legacy_problem(task_id, repo):
+    """Why destroy may not remove the worktree `repo` that state.json names for a run with no
+    lane entry and no record, else None. Only the run runs/ACTIVE names is from before lanes;
+    any other is a lane's whose record is gone, its state.json in a role's reach. And no path
+    that is, or lies in, a live or closed lane's worktree, placed as the guard places a write
+    (escape_paths.under: through every link, in any letter case, by device and inode), with a
+    registry or record that cannot be read failing closed."""
+    from . import escape_paths
+    by_hand = ("check %s and remove it with git worktree remove --force if it is the run's"
+               % repo)
+    try:
+        named = legacy_active_task()
+    except (PplError, UnicodeDecodeError):
+        named = None
+    if named != task_id:
+        return ("run %s has no lane entry and no lane record, and runs/ACTIVE does not name it "
+                "as the run from before lanes, so destroy takes no worktree from its state.json: "
+                "%s" % (task_id, by_hand))
+    try:
+        worktrees = [(item.get("task"), item.get("worktree")) for item in lanes.read()]
+        worktrees += [(task, item["worktree"]) for task, item in lanes.records().items()]
+    except (PplError, OSError) as err:
+        return ("the lanes cannot all be read (%s), so %s cannot be told apart from a lane's "
+                "worktree: %s" % (getattr(err, "message", None) or err, repo, by_hand))
+    roots = {os.path.realpath(path): task for task, path in worktrees
+             if isinstance(path, str) and path}
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = "/"
+    landed = escape_paths.landing(repo, cwd)
+    hit = escape_paths.under(landed[0] if landed else [repo], list(roots))
+    if hit is not None:
+        return ("%s is, or lies in, lane %s's worktree %s, which a run from before lanes does "
+                "not remove" % (repo, roots.get(hit, "?"), hit))
+    return None
 
 
 def _archive_run_dir(task_id, result):

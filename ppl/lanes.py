@@ -32,6 +32,40 @@ def record_path(task_id):
     return start_dir(task_id) / RECORD_FILE
 
 
+def record(task_id):
+    """The lane's record lane.json as a dict whose worktree and checkout are strings and whose
+    branch is a string or None, else None: missing, or not that shape."""
+    try:
+        found = store.read_json(record_path(task_id), None, READ_LIMIT)
+    except (PplError, OSError, UnicodeDecodeError, RecursionError):
+        return None
+    if not isinstance(found, dict) or not all(
+            isinstance(found.get(key), str) and found.get(key) for key in ("worktree", "checkout")):
+        return None
+    if found.get("branch") is not None and not isinstance(found.get("branch"), str):
+        return None
+    return found
+
+
+def records():
+    """{task: record} of every lane start directory under PPL_HOME/lanes, the slots ppl lane
+    close freed included. SCHEMA_INVALID naming the first start directory whose record cannot
+    be read, so a caller that must know every lane's worktree fails closed."""
+    try:
+        names = sorted(os.listdir(str(paths.home() / "lanes")))
+    except FileNotFoundError:
+        return {}
+    found = {}
+    for name in names:
+        if not paths.TASK_ID_RE.fullmatch(name):
+            continue
+        item = record(name)
+        if item is None:
+            raise PplError("SCHEMA_INVALID", "%s cannot be read" % record_path(name))
+        found[name] = item
+    return found
+
+
 def _invalid(why):
     return PplError("SCHEMA_INVALID", "%s %s" % (registry_path(), why))
 
@@ -136,16 +170,6 @@ def holding(entries, path):
     target = os.path.realpath(str(path))
     for item in entries:
         if _contains(item.get("start_dir"), target) or _contains(item.get("worktree"), target):
-            return item
-    return None
-
-
-def holding_worktree(entries, path):
-    """The entry of `entries` whose worktree is or holds `path`, compared by realpath, else
-    None."""
-    target = os.path.realpath(str(path))
-    for item in entries:
-        if _contains(item.get("worktree"), target):
             return item
     return None
 
