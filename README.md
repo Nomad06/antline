@@ -19,8 +19,9 @@ test suite fails if a blocking row has no test that asserts the refusal.
 
 ## What you get
 
-- **One command from issue to merge request.** Type `/pipeline KEY-123` in Claude Code.
-  antline admits the task, records a baseline, writes and challenges a brief, implements,
+- **One command from issue to merge request.** Run `ppl lane <issue link>` in a terminal: it
+  opens a Claude Code window for that one task, and antline admits the task, records a
+  baseline, writes and challenges a brief, implements,
   tests, runs your build gates, verifies, opens the merge request and answers reviewers
   until one of them approves.
 - **Tests that can catch the code's mistakes.** The test writer gets the behavior and the
@@ -48,7 +49,7 @@ test suite fails if a blocking row has no test that asserts the refusal.
   question for you.
 - **Lessons from finished runs.** After a merge, a read-only reflector reads the run's evidence and
   proposes lessons for the harness. You accept, edit or reject each one, and none reaches an agent
-  before you do and apply the harness.
+  before you accept it and commit it in the harness repository.
 - **Models routed per role.** Strong models where the solution space is wide (the brief,
   the verification), cheaper ones on rails (code, tests), with Economy, Balanced and Max
   quality presets. A run refuses to start on a model that has not answered a probe
@@ -56,9 +57,12 @@ test suite fails if a blocking row has no test that asserts the refusal.
 - **A browser studio for setup.** `ppl serve --open` walks the six setup steps, drafts your
   project's harness from its `CLAUDE.md` for a fraction of a cent, and lets you fire
   tool calls at the real guard hook.
+- **Several tasks at once.** Each task runs in its own lane: its own window, worktree, branch,
+  hooks and agents. Three lanes run at once by default, one per harness unless the harness
+  says its gates can share the machine [R-LANE-RESOURCE-ISOLATION].
 - **Nothing installed into your project.** Python 3.11 standard library only. The code lives
-  in the installed package or a git clone, the data under `~/.ppl`, the agents in a
-  separate workspace. Your repository gets a branch and a merge request.
+  in the installed package or a git clone, the data under `~/.ppl`, each lane's agents, skill
+  and hooks in its own directory there. Your repository gets a branch and a merge request.
 
 ## Why it is different
 
@@ -84,7 +88,7 @@ The cells are the guard hook's own answers: each call was sent through
 `ppl/_assets/hooks/ppl_guard.py` from the studio's cage playground. The orchestrator's tracker
 writes open once the run reaches the merge watch and `ppl merge observed` has recorded the
 merge [R-JIRA-GATE]. The read-only agents
-also get no Edit, Write or Bash tool in their agent files [R-ROLE-TOOLS-READONLY].
+also get no Edit, Write or Bash tool in their agent definitions [R-ROLE-TOOLS-READONLY].
 Roles run only in a lane session, the window `ppl lane` starts with the run's own hooks: a
 `ppl-*` role anywhere else is refused [R-LANE-ROLE-OUTSIDE], and a lane session resumed by hand
 without the lane flags (`claude --resume`) has no guard at all [R-LANE-BARE-RESUME n/a].
@@ -124,9 +128,9 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `ppl/_assets/rules.toml` holds 196 rules, 146 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 202 rules, 156 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 3075 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 3279 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
@@ -142,7 +146,9 @@ the test writer tries to `cat` product code and the hook denies it
 
 **Cons**
 
-- One task at a time. Parallel lanes are not built yet.
+- Lanes share the machine. A worktree separates files and nothing else, so a harness runs one
+  lane at a time unless you raise its `[lanes] max`, and then nothing checks that its gates
+  keep test databases, ports and queues apart [R-LANE-RESOURCE-ISOLATION].
 - Claude only. All agents share one model family, so their blind spots are correlated.
   The provider-neutral contract exists, the adapters for other providers do not.
 - The test/main split comes from the harness's `[tests]` globs (the Java and Maven
@@ -188,8 +194,9 @@ ppl demo
 There is no PyPI package yet, so the install reads the repository.
 
 `ppl demo` plays one issue through the real `ppl` and the real guard hook in a few
-seconds. It runs offline in a throwaway sandbox (its own `HOME`, data root, workspace,
-sample git repo and a stand-in for `gh`), and the agents are scripted stand-ins, so it
+seconds. It runs offline in a throwaway sandbox (its own `HOME`, data root, sample git repo
+and a stand-in for `gh`) and starts the task the way you would, with `ppl lane`, taking the
+launch line instead of opening Claude Code. The agents are scripted stand-ins, so it
 spends no tokens and leaves your `~/.ppl` and your `~/.claude` alone. Each step prints
 one line: who acts, what they do, the answer and the rule behind it. Several of the
 answers are refusals, among them:
@@ -208,13 +215,18 @@ Then set up for real with `ppl serve --open` (the studio) or `ppl setup` (the te
 
 Upgrade with `pipx reinstall antline`, which installs the current `main` again.
 `pipx upgrade antline` can answer "already at latest version" and change nothing, since
-the version number stays the same between merges. After the reinstall, or a `git pull`
-that moves files, run `ppl setup claude` again. The hook commands in your
-`settings.local.json` hold absolute paths, so an old registration makes every tool call in
-the workspace fail with `can't open file '.../hooks/ppl_guard.py'`, and `ppl doctor` names
-the hook path that no longer exists. If you answered `global` or `manual`,
-`ppl setup claude` prints the new entries: paste them over the old ones in `~/.claude/settings.json`
-(or the file you chose).
+the version number stays the same between merges. `ppl lane` writes each lane's hook
+commands with absolute paths to this install's hook scripts and the interpreter that runs it,
+so a lane started after the reinstall uses the new install. A lane started before a
+reinstall, or a `git pull`, that moved files keeps the old paths: every tool call in it fails
+with `can't open file '.../hooks/ppl_guard.py'`, and `ppl doctor --task <id>` names the hook
+path that no longer exists. Finish it, or destroy it with `ppl destroy --scope local --task
+<id>` in a terminal, and start it again with `ppl lane <link>`.
+
+Coming from a ppl that rendered into one workspace (`~/ppl-workspace`), run `ppl setup
+claude` once: it takes back the hook entries, sandbox block, skill and `ppl-*` agents that ppl
+wrote there, each matched by ppl's own markers, and leaves them while a run started before
+lanes is unfinished.
 
 ### From a clone (contributors)
 
@@ -231,10 +243,11 @@ and `skill/`. An editable install (`pip install -e .`) also works from the clone
 
 `ppl setup` walks six steps - paths, claude, models, harness, forge, apply -
 each skippable with `s` and re-runnable with `ppl setup <step>`: the data root
-(`~/.ppl`), the hooks in an isolated workspace (`~/ppl-workspace` by default),
-a model per tier verified by a cheap probe, your harness from an example, the
-forge and the tracker (GitHub Issues for a GitHub forge, Jira for GitLab, each
-checked), and the agent files and skill. `ppl init` refuses a run until
+(`~/.ppl`), the Claude Code binary, a model per tier verified by a cheap probe, your
+harness from an example, the forge and the tracker (GitHub Issues for a GitHub forge, Jira
+for GitLab, each checked), and the default harness for `ppl lane`, checked at its commit.
+Setup writes no hooks, agents or skill: `ppl lane` renders those for each task when it starts
+one. `ppl init` refuses a run until
 `ppl setup` has recorded models, harness and apply as done [R-INIT-SETUP-COMPLETE],
 `--skip-model-check` waives models, and a harness only added and applied by hand
 gets `SETUP_INCOMPLETE` naming the `ppl setup` step to run.
@@ -262,12 +275,16 @@ and Max quality. The same presets are `ppl routing preset economy|balanced|max`.
 The studio listens on loopback only. Every request needs the session token in the link
 `ppl serve` prints [R-STUDIO-SESSION-TOKEN].
 
-After setup the studio has three more pages. **Agents** sets the model tier and effort per
+After setup the studio has four more pages. **Agents** sets the model tier and effort per
 role (or a preset for all of them), shows each role's base prompt beside its project notes
-and the agent file apply would write, and lists the blocking rules of the cage that cover that
+and the agent a lane would get, and lists the blocking rules of the cage that cover that
 role, which hold whatever its prompt says in a lane session [R-LANE-HOOK-BINDING].
 **Harness** edits, adds and creates harnesses, and applies one, which
-also makes it the active harness, as `ppl harness apply` does.
+checks it at its commit and makes it the default harness for `ppl lane`, as `ppl harness apply`
+does. A save writes the installed harness's checkout, so commit the change there: `ppl lane`
+refuses a harness with uncommitted changes [R-MEMORY-APPLIED]. **Lanes** lists the running
+lanes, each with its stage, its spend and the command that reopens its window, beside the
+machine's lane limit and the day's spend.
 
 In Expert mode the Harness page adds a raw `harness.toml` editor and the fragments beside its
 form, the Agents page adds the high-risk tier and the history of the notes and of
@@ -279,23 +296,28 @@ another tab or a terminal since the page loaded it is refused [R-STUDIO-CHANGED-
 
 ## Hooks
 
-`ppl setup claude` writes these into the workspace's `.claude/settings.local.json`
-(answer `global` or `manual` and it prints them for you to paste):
+`ppl lane` writes three hooks into each lane's `settings.json`, in the lane's start directory
+`~/.ppl/lanes/<TASK-ID>/`, and the lane's Claude Code session loads them with `--settings`.
+You register nothing by hand:
 
 ```json
 {"hooks": {
   "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_guard.py", "timeout": 5}]}],
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_guard.py --task KEY-123", "timeout": 5}]}],
   "SubagentStart": [{"matcher": "", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_dispatch.py", "timeout": 5}]}],
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_dispatch.py --task KEY-123", "timeout": 5}]}],
   "SubagentStop": [{"matcher": "", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_usage.py", "timeout": 5}]}]}}
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_usage.py --task KEY-123", "timeout": 5}]}]}}
 ```
 
-The paths are the ones `ppl setup claude` finds for your install, so use what it writes or
-prints rather than this example: under pipx the scripts sit in its venv, at
-`.../site-packages/ppl/_assets/hooks/ppl_guard.py`, and in a clone under the checkout's
-`ppl/_assets/hooks/`.
+The paths are the ones `ppl lane` finds for your install: under pipx the scripts sit in its
+venv, at `.../site-packages/ppl/_assets/hooks/ppl_guard.py`, and in a clone under the
+checkout's `ppl/_assets/hooks/`. Every hook knows its run from the `--task` at the end of its
+own command line, never from shared state, so a hook acts on its own lane's run alone
+[R-LANE-HOOK-BINDING]. The session starts with `--setting-sources local`, which keeps the
+hooks of your `~/.claude/settings.json` and of a project's `.claude/settings.json` out of it:
+a lane runs ppl's hooks, the managed settings' and whatever its start directory's
+`.claude/settings.local.json` holds, a file ppl does not write.
 
 The guard is the cage, the dispatch hook counts role dispatches, and the usage hook
 records each role's and the orchestrator's tokens in the run's `log.jsonl` when a role
@@ -310,25 +332,22 @@ has no price [R-BUDGET-USD-UNPRICED]. `ppl park` stays available. `usd_max_per_d
 `[budgets]` caps what every run on the machine spends since local midnight, and `ppl lane`
 refuses to start at it as well [R-BUDGET-USD-PER-DAY].
 
-The interpreter in those commands has to be Python 3.11 or newer, and `ppl setup
-claude` writes the one that ran it, so the hooks do not depend on which `python3`
-the `PATH` Claude Code spawns them with finds first. Under an older interpreter the
+The interpreter in those commands has to be Python 3.11 or newer, and `ppl lane` writes the
+one that runs it, so the hooks do not depend on which `python3` the `PATH` Claude Code spawns
+them with finds first. Under an older interpreter the
 guard denies every role call [R-GUARD-PYTHON-FLOOR], and `ppl doctor` reports
 `hook_runs: false` with the remedy.
 
-The recommended matcher is `.*`, so the guard sees every call. `ppl init` refuses
-a run under a matcher that leaves a guarded tool name uncovered [R-GUARD-MATCHER].
-Those names carry the default tracker prefixes and forge server names only, so an
-explicit matcher plus a custom `tracker.mcp_prefixes` or `forge.mcp_server` needs
-those names covered by hand. `ppl init` runs inside the task's lane and refuses
-outside it [R-LANE-INIT-INSIDE]. In a session
-`ppl lane` did not start the hooks carry no task, so a role there is refused and no
-run-scoped rule is enforced [R-LANE-ROLE-OUTSIDE].
+`ppl lane` registers the matcher `.*`, so the guard sees every call, and `ppl init` refuses
+a run whose registration leaves a guarded tool name uncovered [R-GUARD-MATCHER]. `ppl init`
+runs inside the task's lane and refuses outside it [R-LANE-INIT-INSIDE]. A session whose ppl
+hooks carry no task, such as one an older ppl's workspace still registers, has every `ppl-*`
+role refused and no run-scoped rule enforced [R-LANE-ROLE-OUTSIDE].
 
-`ppl doctor` reports per settings file `dispatch_hook` and `usage_hook` (registered or
-missing) and `hook_shape` (`ok` or what is wrong with the hook entries: a `type`
-other than `"command"`, no `timeout`, an interpreter or hook script that is not an
-absolute path to a file). `ppl init` refuses a run while the guard entry has such a
+`ppl doctor`, run in a lane, reports per settings file of the lane `dispatch_hook` and
+`usage_hook` (registered or missing) and `hook_shape` (`ok` or what is wrong with the hook
+entries: a `type` other than `"command"`, no `timeout`, an interpreter or hook script that is
+not an absolute path to a file). `ppl init` refuses a run while the guard entry has such a
 problem, and warns when the dispatch or the usage hook is missing or malformed, or when
 a hook script is not the one under this install's `_assets/hooks` (a clone or an older
 install left behind) [R-DOCTOR-HOOK-SHAPE]. Neither runs anything to judge the shape: the interpreter's
@@ -337,8 +356,8 @@ version is asked by `ppl doctor` when it runs the guard (`hook_runs`).
 ## Credential separation
 
 In a run on a GitHub harness (a GitHub forge or the GitHub Issues tracker) that `ppl init`
-recorded as OS-sandboxed, no role can reach GitHub. `ppl harness apply` writes an OS sandbox
-profile into the workspace's `.claude/settings.local.json`. Every pipeline Bash command then runs in Claude Code's OS sandbox
+recorded as OS-sandboxed, no role can reach GitHub. `ppl lane` writes an OS sandbox
+profile into the lane's `settings.json`. Every pipeline Bash command then runs in Claude Code's OS sandbox
 with `github.com` and every subdomain denied, which Claude Code enforces on macOS and Linux
 [R-OS-SANDBOX-NETWORK]. A role's Bash call that asks to leave the sandbox is denied by the guard
 [R-OS-SANDBOX-ROLE-NO-ESCAPE], a role's call to a GitHub MCP tool is denied
@@ -346,7 +365,7 @@ with `github.com` and every subdomain denied, which Claude Code enforces on macO
 [R-WEBFETCH-GITHUB-NO-ROLE].
 
 Only the unroled orchestrator leaves the sandbox, and only for one plain command on a `gh`, `git`
-or `ppl` that apply pinned, in a shape the guard lists, against the harness's own repository
+or `ppl` that `ppl lane` pinned, in a shape the guard lists, against the harness's own repository
 [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A fetch, push or branch delete also needs a repository whose
 local git config runs nothing and points the remote at the forge repo, and carries fixed `-c`
 words that turn off every program that config could run (a hook, an ssh command, a credential,
@@ -361,9 +380,9 @@ list's own 403, not any 403.
 
 What this costs and leaves open:
 
-- Once a profile exists, run `ppl harness apply` and `ppl setup claude` from a terminal, not
-  from a pipeline session: the profile write-denies the workspace and ppl's own config,
-  which both of them write [R-OS-SANDBOX-PROTECTED-PATHS].
+- Run `ppl lane`, `ppl harness apply` and `ppl setup` from a terminal, not from a pipeline
+  session: a lane's profile write-denies its start directory, the lane registry and ppl's own
+  config and harnesses, which they write [R-OS-SANDBOX-PROTECTED-PATHS].
 
 - While an OS sandbox profile is applied no guarded session can edit ppl's own source,
   `~/.claude` outside `projects` and `plans`, or a file outside the sandbox write scope with an
@@ -372,11 +391,12 @@ What this costs and leaves open:
   or holds the home directory or a protected path: list the narrower directories a build writes
   [R-OS-SANDBOX-PROTECTED-PATHS]. `ppl doctor` lists another settings file's write grant over a
   protected path, and any unix socket allowance, under `os_sandbox.undoing`.
-- MCP servers run outside the OS sandbox and are not checked, so register no file-writing MCP
-  server for the pipeline workspace [R-OS-SANDBOX-PROTECTED-PATHS].
-- Another `PreToolUse` hook that sees Bash (a command rewriter such as sqz or rtk, from any
-  settings file or an enabled plugin) can rewrite a call, and whether that keeps or drops
-  `dangerouslyDisableSandbox` is unverified. `ppl doctor` lists such hooks as
+- MCP servers run outside the OS sandbox and are not checked, so name no file-writing MCP
+  server in a harness: a lane loads the servers its harness names, copied from your
+  `~/.claude.json`, and no other [R-OS-SANDBOX-PROTECTED-PATHS].
+- Another `PreToolUse` hook that sees Bash (a command rewriter such as sqz or rtk, from a
+  settings source the lane loads or a plugin it enables) can rewrite a call, and whether that
+  keeps or drops `dangerouslyDisableSandbox` is unverified. `ppl doctor` lists such hooks as
   `foreign_bash_hooks` and `ppl init` warns on a GitHub run: remove or disable them for
   pipeline sessions before a GitHub run.
 - The profile keeps sandboxed commands from reading gh's config, git's credential store,
@@ -403,11 +423,14 @@ tracker and forge settings, build gates, the command shapes the test worker
 may run), `skill/` fragments and `templates/` overlays. Two examples ship in
 `ppl/_assets/defaults/harnesses/`: `example-maven` (GitLab, Maven) and `example-generic`
 (GitHub, make). Keep yours in its own git repository and install it with
-`ppl harness add <name> --source <directory or git url>`.
+`ppl harness add <name> --source <directory or git url>`: a git url is cloned, and a plain
+directory is committed as a new git repository under your own git identity. A lane runs the
+installed harness at a commit: origin's default branch after a fetch, or its local `HEAD`
+without an origin.
 
 ```bash
 ppl harness validate <name>   # --json prints {errors, warnings} as the studio shows them
-ppl harness apply <name>      # renders the agents and the skill, makes it active
+ppl harness apply <name>      # checks it at its commit, makes it the default for ppl lane
 ```
 
 `ppl harness validate` runs the check the studio runs [R-STUDIO-SAME-VALIDATION].
@@ -432,8 +455,16 @@ done and how to check it). In a fragment, `<default-branch>` is replaced with
 `repo.default_branch` when the skill is rendered, while `<worktree>`, `<TASK-ID>`,
 `<SHA>` and `<GENERATION>` are left for the orchestrator to fill in at run time.
 
-`ppl harness apply <name>` re-renders the agent files and the skill, so run it
-after any harness or routing change. A harness's `tracker.mcp_prefixes`
+A harness or routing change reaches the next lane `ppl lane` starts, which renders the
+agents and the skill from the harness commit and `routing.toml` as they are then; a running
+lane keeps what it started with. Commit a harness change in its repository, and push it when
+it has an origin: `ppl lane` refuses a harness with uncommitted changes, and until harness
+changes go through merge requests, `ppl lessons accept` and the studio's saves write the
+installed checkout and need that commit too [R-MEMORY-APPLIED]. A harness's
+`[lanes] max` (1 to 9, 1 by default) is how many lanes of it run at once: raise it only when
+its gates keep their databases, ports and queues apart per lane, for instance with `<lane>`,
+the lane's number, in a gate command or an `[env]` value [R-LANE-RESOURCE-ISOLATION]. A
+harness's `tracker.mcp_prefixes`
 replaces the default Atlassian prefixes rather than extending them: list every
 prefix your tracker server is registered under. `ppl harness validate` warns when
 the list keeps none of the defaults. A GitHub Issues tracker is `kind = "github-issues"`
@@ -447,58 +478,85 @@ with `repo` (owner/name) and an optional `task_prefix` (default `GH`, so tasks r
 status` shows what is verified. `ppl init` refuses to start a run while a model
 it would route to is unverified or stale, `ppl models verify` fixes that, and
 `--skip-model-check` records that you chose not to [R-INIT-MODELS-VERIFIED].
-After changing a tier, run `ppl models verify` and `ppl harness apply <name>`.
-`ppl routing apply` re-renders the agent files alone, for `--harness <name>` or
-the active harness. A role can carry `by_risk = { high = "good" }`, used for
+After changing a tier, run `ppl models verify`; the next lane takes the new routing, and a
+running lane keeps the copy it froze when it started, which `ppl routing show` prints there.
+A role can carry `by_risk = { high = "good" }`, used for
 runs started with `ppl init --risk high` [R-ROUTING-BY-RISK].
 
 ## Run a task
 
 ```bash
-cd ~/ppl-workspace
-claude
-> /pipeline https://tracker.example/browse/KEY-123
+ppl lane https://tracker.example/browse/KEY-123
 ```
 
-The orchestrator skill takes it from there: `ppl init --harness <name>`, a
-worktree under the harness's `repo.worktrees`, the stages of `docs/DESIGN.md`
-section 7, and a review loop until the MR is approved. A halt is a parked run
-with a code and a question, see the skill's `references/escalation.md`.
+Run it in a terminal, one per task. `ppl lane` reserves a lane, makes the worktree
+`<repo.worktrees>/<repo>-KEY-123` on a new branch `KEY-123-work` from a fresh default branch,
+writes the lane's hooks, agents, skill and MCP config under `~/.ppl/lanes/KEY-123/`, and opens
+Claude Code there with `/antline:pipeline <link>` as its first prompt. The orchestrator skill
+takes it from there: `ppl init`, the stages of `docs/DESIGN.md` section 7, and a review loop
+until the MR is approved. A halt is a parked run with a code and a question, see the skill's
+`references/escalation.md`. Without `--harness <name>` the harness is the installed one whose
+`[repo] path` holds the current directory, else the default one, and `--slug <slug>` names the
+branch `KEY-123-<slug>`.
+
+```bash
+ppl lane list                 # every lane: task, harness, stage, window open or closed
+ppl lane resume KEY-123       # reopen a lane's window with the flags it started with
+```
+
+Three lanes run at once by default (`[lanes] max` in `~/.ppl/config.toml`, 1 to 9), and one
+lane per harness unless the harness raises its own `[lanes] max`: a lane past either limit is
+refused `BUSY`, naming the lanes that hold the slots [R-LANE-RESOURCE-ISOLATION]. Reopen a lane
+with `ppl lane resume`, not a bare `claude --resume`: without the lane's flags the session has
+no guard, OS sandbox or ppl agents [R-LANE-BARE-RESUME n/a]. After the merge the orchestrator
+frees its lane with `ppl lane close`, which keeps the start directory and the worktree. A run
+started by a ppl from before lanes is finished or destroyed first: `ppl lane` names it until
+it is.
+
+What a lane leaves to you:
+
+- `ppl destroy --scope local --task KEY-123` is your step, in a terminal outside the lane: it
+  removes the lane's worktree, its branch while nothing of it was pushed, and its start
+  directory, the session's own cwd, and archives the run, so the orchestrator asks you to run
+  it, and under the OS sandbox it cannot run it itself [R-LANE-CROSS-WRITE].
+- On a GitHub harness the lane's OS sandbox lets git write only what git in a worktree writes
+  in the checkout's `.git`, so in a lane a git that rewrites `packed-refs` (deleting a packed
+  branch, `git pack-refs`), gc and maintenance, git-lfs, submodules, rerere and any git config
+  write fail, automatic gc quietly; how often a real run needs one is still to be rehearsed
+  [R-LANE-CROSS-WRITE].
+- The day cap counts what the runs record: a role's tokens count once it stops and the usage
+  hook writes them into its run's log, so the dispatch that crosses the cap has already run
+  [R-BUDGET-USD-PER-DAY].
 
 ## Watch and control it
 
 ```bash
-ppl status
+ppl lane list
+ppl status --task KEY-123
 ppl serve --open     # the studio on http://127.0.0.1:8787, the run list at /runs
-ppl recover          # always safe, always first after a restart
-ppl doctor           # hooks, setup, models, harness, forge, tracker
-ppl control set pause|resume|stop
+ppl recover --task KEY-123   # always safe, always first after a restart
+ppl doctor           # setup, models, forge, tracker; in a lane its hooks, sandbox, MCP servers
+ppl control set pause|resume|stop --task KEY-123
 ```
 
-Run `ppl doctor` and `ppl init` from the workspace: both read the hook
-registration from `.claude/settings.local.json` in the current directory, and from
-anywhere else doctor reports `registration: none`.
+In a lane's own window every `ppl` command takes its run from the lane, so `--task` can be
+left out there.
 
 ## Sandbox
 
-Four variables keep an experiment out of your installation:
+Two variables keep an experiment out of your installation:
 
-- `PPL_HOME` - the data root (default `~/.ppl`): config, routing, models, harnesses, runs.
+- `PPL_HOME` - the data root (default `~/.ppl`): config, routing, models, harnesses, lanes, runs.
 - `PPL_CLAUDE_HOME` - where `ppl doctor` looks for Claude settings (default `~/.claude`).
-- `PPL_AGENTS_DIR` - where `ppl harness apply` writes the agent files.
-- `PPL_SKILLS_DIR` - where `ppl harness apply` writes the skill.
 
 ```bash
 export PPL_HOME=$(mktemp -d) PPL_CLAUDE_HOME=$(mktemp -d)
-export PPL_AGENTS_DIR=$PPL_HOME/workspace/.claude/agents
-export PPL_SKILLS_DIR=$PPL_HOME/workspace/.claude/skills
-ppl setup --answer workspace=$PPL_HOME/workspace
+ppl setup
 ```
 
-A `claude` session started in that workspace sees the sandbox agents and skill.
-Export `PPL_HOME` in the shell that launches `claude` too, or the hooks read a
-different data root than the CLI. Check that `data_root` in `ppl doctor`'s JSON
-line is your temp dir.
+A lane started from that shell keeps everything under that data root, and `ppl lane` passes
+`PPL_HOME` to the Claude Code session it starts, so the hooks read the same data root as the
+CLI. Check that `data_root` in `ppl doctor`'s JSON line is your temp dir.
 
 `PPL_HOME/studio/cache/` holds the Claude drafts the studio reuses. Removing it with `rm -rf`
 is always safe, the next draft asks Claude again, and `ppl destroy` leaves it in place.
