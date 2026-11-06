@@ -351,6 +351,11 @@ class TestSpentToday(unittest.TestCase):
             os.environ["TZ"] = self.zone
         time.tzset()
 
+    def issues(self, **kinds):
+        """The `issues` spent_today reports for a clean sheet with `kinds` filled in."""
+        return dict({"blocked": [], "unpriced": [], "unreadable": [], "unpriced_other": []},
+                    **kinds)
+
     def make_run(self, name, prices=None, archived=False):
         root = self.home / "runs" / ("_archive/2026-11-01-%s" % name if archived else name)
         root.mkdir(parents=True)
@@ -373,13 +378,13 @@ class TestSpentToday(unittest.TestCase):
         # 23:50 yesterday and 00:10 today, Amsterdam, are 22:50Z and 23:10Z
         self.log(root, "2026-11-04T22:50:00+00:00", 3000000)
         self.log(root, "2026-11-04T23:10:00+00:00", 5000000)
-        usd, unpriced = usage.spent_today(self.now)
-        self.assertEqual((round(usd, 6), unpriced), (2.0, []))
+        usd, issues = usage.spent_today(self.now)
+        self.assertEqual((round(usd, 6), issues), (2.0, self.issues()))
 
     def test_a_run_that_spent_only_before_midnight_counts_nothing(self):
         root = self.make_run("T-1")
         self.log(root, "2026-11-04T22:50:00+00:00", 3000000)
-        self.assertEqual(usage.spent_today(self.now), (0.0, []))
+        self.assertEqual(usage.spent_today(self.now), (0.0, self.issues()))
 
     def test_an_agent_first_seen_today_counts_in_full(self):
         root = self.make_run("T-1")
@@ -405,33 +410,34 @@ class TestSpentToday(unittest.TestCase):
         # rule: R-BUDGET-USD-PER-DAY
         root = self.make_run("T-1")
         self.log(root, "2026-11-05T09:00:00+00:00", 1000000, model="n")
-        self.assertEqual(usage.spent_today(self.now), (None, ["n"]))
+        self.assertEqual(usage.spent_today(self.now), (0.0, self.issues(unpriced_other=["n"])))
+        self.assertEqual(usage.spent_today(self.now, task="T-1"),
+                         (None, self.issues(unpriced=["n"])))
 
     def test_an_unpriced_model_that_did_not_spend_today_is_not_listed(self):
         root = self.make_run("T-1", prices={})
         self.log(root, "2026-11-04T09:00:00+00:00", 1000000, model="n")
-        self.assertEqual(usage.spent_today(self.now), (0.0, []))
+        self.assertEqual(usage.spent_today(self.now), (0.0, self.issues()))
 
     def test_an_unreadable_run_is_skipped_and_listed(self):
         self.log(self.make_run("T-1"), "2026-11-05T09:00:00+00:00", 1000000)
         broken = self.make_run("T-2")
         (broken / "log.jsonl").mkdir()
         usd, issues = usage.spent_today(self.now)
-        self.assertEqual((round(usd, 6), issues), (1.0, ["unreadable: T-2"]))
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues(unreadable=["T-2"])))
 
     def test_a_log_over_the_cap_is_unreadable(self):
         root = self.make_run("T-1")
         self.log(root, "2026-11-05T09:00:00+00:00", 1)
         with mock.patch.object(usage, "DAY_LOG_LIMIT", 10):
-            self.assertEqual(usage.spent_today(self.now), (0.0, ["unreadable: T-1"]))
+            self.assertEqual(usage.spent_today(self.now), (0.0, self.issues(unreadable=["T-1"])))
 
     def test_a_corrupt_archived_state_is_skipped_and_listed(self):
         self.log(self.make_run("T-1"), "2026-11-05T09:00:00+00:00", 1000000)
         old = self.make_run("T-2", archived=True)
         (old / "state.json").write_text("{not json", encoding="utf-8")
         usd, issues = usage.spent_today(self.now)
-        self.assertEqual((round(usd, 6), len(issues)), (1.0, 1))
-        self.assertTrue(issues[0].startswith("unreadable: "), issues)
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues(unreadable=["2026-11-01-T-2"])))
 
     def test_a_counter_reset_mid_day_counts_in_full(self):
         root = self.make_run("T-1")
@@ -454,9 +460,9 @@ class TestSpentToday(unittest.TestCase):
         bad = {"m": {"input": 0, "cache_write": 0, "cache_read": 0, "output": -50.0}}
         self.log(self.make_run("T-2", prices=bad), "2026-11-05T09:00:00+00:00", 1000000)
         usd, issues = usage.spent_today(self.now)
-        self.assertEqual((round(usd, 6), issues), (1.0, ["unreadable: T-2"]))
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues(unreadable=["T-2"])))
         usd, issues = usage.spent_today(self.now, task="T-2")
-        self.assertEqual((usd, issues), (None, ["blocked: T-2"]))
+        self.assertEqual((usd, issues), (None, self.issues(blocked=["T-2"])))
 
     def test_a_malformed_count_in_another_run_is_skipped_not_raised(self):
         self.log(self.make_run("T-1"), "2026-11-05T09:00:00+00:00", 1000000)
@@ -464,7 +470,7 @@ class TestSpentToday(unittest.TestCase):
         self.log(root, "2026-11-05T09:00:00+00:00", "many")
         self.log(root, "2026-11-05T09:10:00+00:00", [1])
         usd, issues = usage.spent_today(self.now)
-        self.assertEqual((round(usd, 6), issues), (1.0, ["unreadable: T-2"]))
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues(unreadable=["T-2"])))
 
     def test_a_malformed_count_in_the_checked_runs_own_log_blocks_it(self):
         root = self.make_run("T-2")
@@ -473,17 +479,17 @@ class TestSpentToday(unittest.TestCase):
                  "models": {"m": 7}}
         with open(root / "log.jsonl", "a", encoding="utf-8") as handle:
             handle.write(json.dumps(event) + "\n")
-        self.assertEqual(usage.spent_today(self.now, task="T-2"), (None, ["blocked: T-2"]))
+        self.assertEqual(usage.spent_today(self.now, task="T-2"), (None, self.issues(blocked=["T-2"])))
 
     def test_a_live_run_over_the_read_cap_blocks_when_it_is_the_checked_run(self):
         root = self.make_run("T-1")
         self.log(root, "2026-11-05T09:00:00+00:00", 1)
         with mock.patch.object(usage, "DAY_LOG_LIMIT", 10):
-            self.assertEqual(usage.spent_today(self.now, task="T-1"), (None, ["blocked: T-1"]))
-            self.assertEqual(usage.spent_today(self.now, task="T-9"), (0.0, ["unreadable: T-1"]))
+            self.assertEqual(usage.spent_today(self.now, task="T-1"), (None, self.issues(blocked=["T-1"])))
+            self.assertEqual(usage.spent_today(self.now, task="T-9"), (0.0, self.issues(unreadable=["T-1"])))
 
     def test_no_runs_spent_nothing(self):
-        self.assertEqual(usage.spent_today(self.now), (0.0, []))
+        self.assertEqual(usage.spent_today(self.now), (0.0, self.issues()))
 
 
 if __name__ == "__main__":

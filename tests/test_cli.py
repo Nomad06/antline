@@ -1364,92 +1364,6 @@ class TestUsdCap(unittest.TestCase):
         self.assertEqual(error["error_code"], "BUDGET_EXHAUSTED")
         self.assertIn("ppl park", error["message"])
 
-    def spent(self, usd):
-        """The day's spend, as spent_today reports it: the shared test home holds the runs of
-        every other test, so the real sum is pinned in TestSpentToday."""
-        self.enterContext(mock.patch.object(usage, "spent_today", return_value=(usd, [])))
-
-    def test_a_stage_transition_over_the_day_cap_is_refused_budget_exhausted(self):
-        # rule: R-BUDGET-USD-PER-DAY
-        self.start("DAYCAP-1", 0.0, per_day=1.0)
-        self.spent(1.2)
-        for args in (("stage", "enter", "baseline"), ("transition", "done")):
-            code, _, err = call(*args, "--task", "DAYCAP-1")
-            self.assertEqual(code, 2, err)
-            error = json.loads(err)
-            self.assertEqual(error["error_code"], "BUDGET_EXHAUSTED")
-            for text in ("usd_max_per_day", "1.2", "local midnight", "ppl park"):
-                self.assertIn(text, error["message"])
-
-    def test_the_day_cap_binds_a_run_with_no_cap_of_its_own_and_park_stays(self):
-        # rule: R-BUDGET-USD-PER-DAY
-        self.start("DAYCAP-2", 0.0, per_day=1.0)
-        self.spent(1.2)
-        self.assertEqual(call("stage", "enter", "baseline", "--task", "DAYCAP-2")[0], 2)
-        code, _, err = call("park", "--blocker", "OWNER_DECISION", "--safe-next", "wait", "--task", "DAYCAP-2")
-        self.assertEqual(code, 0, err)
-
-    def test_a_day_that_cannot_be_priced_is_refused_naming_the_model(self):
-        # rule: R-BUDGET-USD-PER-DAY
-        self.start("DAYCAP-5", 0.0, per_day=1.0)
-        self.enterContext(mock.patch.object(usage, "spent_today", return_value=(None, ["n"])))
-        code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-5")
-        self.assertEqual(code, 2, err)
-        error = json.loads(err)
-        self.assertEqual(error["error_code"], "OWNER_DECISION")
-        self.assertIn('[prices."n"]', error["message"])
-
-    def test_the_day_cap_is_refused_from_the_real_usage_log(self):
-        # rule: R-BUDGET-USD-PER-DAY
-        self.start("DAYCAP-6", 0.0, per_day=1.0)
-        self.record_usage("DAYCAP-6", 1200000)
-        # the shared test home holds the runs of other tests: scan this run's own directory
-        only = [("DAYCAP-6", paths.run_dir("DAYCAP-6"), True)]
-        self.enterContext(mock.patch.object(usage, "_scan_dirs", return_value=only))
-        code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-6")
-        self.assertEqual(code, 2, err)
-        error = json.loads(err)
-        self.assertEqual(error["error_code"], "BUDGET_EXHAUSTED")
-        self.assertIn("usd_max_per_day", error["message"])
-
-    def test_a_live_run_whose_log_is_over_the_read_cap_is_refused_owner_decision(self):
-        # rule: R-BUDGET-USD-PER-DAY
-        self.start("DAYCAP-7", 0.0, per_day=100.0)
-        self.record_usage("DAYCAP-7", 1)
-        with mock.patch.object(usage, "DAY_LOG_LIMIT", 10):
-            code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-7")
-        self.assertEqual(code, 2, err)
-        error = json.loads(err)
-        self.assertEqual(error["error_code"], "OWNER_DECISION")
-        self.assertIn("DAYCAP-7", error["message"])
-
-    def test_below_the_day_cap_a_stage_enters(self):
-        # rule: R-BUDGET-USD-PER-DAY
-        self.start("DAYCAP-3", 0.0, per_day=5.0)
-        self.spent(1.2)
-        code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-3")
-        self.assertEqual(code, 0, err)
-
-    def test_usd_max_per_day_zero_is_off(self):
-        # rule: R-BUDGET-USD-PER-DAY
-        self.start("DAYCAP-4", 0.0, per_day=0.0)
-        self.spent(50.0)
-        code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-4")
-        self.assertEqual(code, 0, err)
-        self.assertEqual(config.budgets_usd_max_per_day(), 0.0)
-
-    def test_a_bad_usd_max_per_day_is_refused(self):
-        # rule: R-BUDGET-USD-PER-DAY
-        target = paths.config_file()
-        before = target.read_text(encoding="utf-8")
-        self.addCleanup(target.write_text, before, encoding="utf-8")
-        for bad in (-1, "5", True):
-            config.update("budgets", {"usd_max_per_day": bad})
-            with self.assertRaises(PplError) as caught:
-                config.budgets_usd_max_per_day()
-            self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
-            self.assertIn("usd_max_per_day", caught.exception.message)
-
     def test_transition_is_refused_once_priced_usage_reaches_the_cap(self):
         # rule: R-BUDGET-USD-CAP
         self.start("DEMO-681", 1.0)
@@ -1633,6 +1547,112 @@ class TestUsdCap(unittest.TestCase):
         self.assertIn("warning:", err)
         self.assertIn("boom", err)
         self.assertEqual(run.load("DEMO-690")["stage"], "parking")
+
+
+
+class TestDayCap(unittest.TestCase):
+    """usd_max_per_day [R-BUDGET-USD-PER-DAY], each test in a PPL_HOME of its own, so the sum
+    is over the runs the test made. Model "m" costs 1 USD per million output tokens."""
+
+    start = TestUsdCap.start
+    record_usage = TestUsdCap.record_usage
+
+    def setUp(self):
+        self.enterContext(mock.patch.dict(os.environ, {"PPL_HOME": tmphome.mkdtemp(
+            prefix="pplday-")}))
+        seed_routing()
+        mark_all_verified()
+        seed_setup()
+
+    def spend(self, task_id, output, model="m", agent=None):
+        from ppl import store
+        store.append_log(task_id, {"event": "usage", "role": "ppl-code-worker",
+                                   "agent_id": agent or "agent-%s" % model, "models": {model: {
+                                       "input": 0, "cache_write": 0, "cache_read": 0,
+                                       "output": output, "thinking": 0}}})
+
+    def refused(self, task_id, *args):
+        code, _, err = call(*(args or ("stage", "enter", "baseline")), "--task", task_id)
+        self.assertEqual(code, 2, err)
+        return json.loads(err)
+
+    def test_a_stage_transition_over_the_day_cap_is_refused_budget_exhausted(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.start("DAYCAP-1", 0.0, per_day=1.0)
+        self.spend("DAYCAP-1", 1200000)
+        for args in (("stage", "enter", "baseline"), ("transition", "done")):
+            error = self.refused("DAYCAP-1", *args)
+            self.assertEqual(error["error_code"], "BUDGET_EXHAUSTED")
+            for text in ("usd_max_per_day", "1.2", "local midnight", "ppl park"):
+                self.assertIn(text, error["message"])
+
+    def test_the_day_cap_binds_a_run_with_no_cap_of_its_own_and_park_stays(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.start("DAYCAP-2", 0.0, per_day=1.0)
+        self.spend("DAYCAP-2", 1200000)
+        self.refused("DAYCAP-2")
+        code, _, err = call("park", "--blocker", "OWNER_DECISION", "--safe-next", "wait",
+                            "--task", "DAYCAP-2")
+        self.assertEqual(code, 0, err)
+
+    def test_below_the_day_cap_a_stage_enters(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.start("DAYCAP-3", 0.0, per_day=5.0)
+        self.spend("DAYCAP-3", 1200000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-3")
+        self.assertEqual(code, 0, err)
+
+    def test_usd_max_per_day_zero_is_off(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.start("DAYCAP-4", 0.0, per_day=0.0)
+        self.spend("DAYCAP-4", 50000000)
+        code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-4")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(config.budgets_usd_max_per_day(), 0.0)
+
+    def test_a_bad_usd_max_per_day_is_refused(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        for bad in (-1, "5", True):
+            config.update("budgets", {"usd_max_per_day": bad})
+            with self.assertRaises(PplError) as caught:
+                config.budgets_usd_max_per_day()
+            self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+            self.assertIn("usd_max_per_day", caught.exception.message)
+
+    def test_the_checked_runs_own_unpriced_model_refuses_owner_decision(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.start("DAYCAP-5", 0.0, per_day=100.0)
+        self.spend("DAYCAP-5", 1000000, model="n")
+        error = self.refused("DAYCAP-5")
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        self.assertIn('[prices."n"]', error["message"])
+
+    def test_another_runs_unpriced_model_refuses_neither_a_gate_nor_ppl_lane(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.start("DAYCAP-6", 0.0, per_day=100.0)
+        self.start("DAYCAP-7", 0.0, per_day=100.0)
+        self.spend("DAYCAP-7", 1000000, model="n")
+        code, _, err = call("stage", "enter", "baseline", "--task", "DAYCAP-6")
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(usage.day_cap_problem())
+
+    def test_a_model_named_like_a_blocked_run_is_a_model_not_a_run(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.start("DAYCAP-8", 0.0, per_day=100.0)
+        self.spend("DAYCAP-8", 1000000, model="blocked: x")
+        error = self.refused("DAYCAP-8")
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        self.assertIn('[prices."blocked: x"]', error["message"])
+        self.assertNotIn("cannot be read", error["message"])
+
+    def test_a_live_run_whose_log_is_over_the_read_cap_is_refused_owner_decision(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.start("DAYCAP-9", 0.0, per_day=100.0)
+        self.spend("DAYCAP-9", 1)
+        with mock.patch.object(usage, "DAY_LOG_LIMIT", 10):
+            error = self.refused("DAYCAP-9")
+        self.assertEqual(error["error_code"], "OWNER_DECISION")
+        self.assertIn("DAYCAP-9", error["message"])
 
 
 class TestEvidenceShaDefault(unittest.TestCase):

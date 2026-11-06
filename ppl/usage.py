@@ -375,8 +375,6 @@ def spent_usd(task_id):
 
 
 DAY_LOG_LIMIT = 16 * 1024 * 1024
-UNREADABLE = "unreadable: "
-BLOCKED = "blocked: "
 
 
 def _local_midnight(now):
@@ -484,68 +482,71 @@ def _scan_dirs():
 
 def spent_today(now=None, task=None):
     """(usd, issues): what every run, live or archived, spent since local midnight, each run
-    priced with the prices `ppl init` froze into it. issues name a model that spent today
-    without a price (usd is then None), 'blocked: <task>' for the checked run when its state,
-    log or prices cannot be used, and 'unreadable: <name>' for any other such run, which is
-    skipped. Nothing here raises for one bad run. With `task`, the check is for that run: a
-    problem in its own state, log or prices is 'blocked', and in any other run, live or archived,
-    the run is skipped and named 'unreadable', so one corrupt run never stops the others."""
+    priced with the prices `ppl init` froze into it. `issues` keeps its kinds apart, as lists:
+    'blocked' names the checked run (`task`) when its state, log or prices cannot be used, or the
+    runs/ directory when it cannot be listed; 'unpriced' the models of the checked run that
+    spent today without a price; 'unreadable' any other run that cannot be used and 'unpriced_other'
+    the unpriced models of any other run, which are skipped and named. usd is None while
+    'blocked' or 'unpriced' is not empty. Nothing here raises for one bad run, and one run's
+    problems never stop another run's check."""
     midnight = _local_midnight(now)
-    usd, issues = 0.0, []
+    usd = 0.0
+    issues = {"blocked": [], "unpriced": [], "unreadable": [], "unpriced_other": []}
     try:
         scan = _scan_dirs()
     except OSError:
-        return None, [BLOCKED + "runs"]
+        return None, dict(issues, blocked=["runs"])
     for name, directory, live in scan:
+        own = name == task and live
         try:
             models = _spent_today_in(directory, midnight)
             frozen = _frozen(directory)
         except Exception:
-            issues.append((BLOCKED if name == task and live else UNREADABLE) + name)
+            issues["blocked" if own else "unreadable"].append(name)
             continue
         if not models:
             continue
         spent, unpriced = dollars(models, prices() if frozen is None else frozen)
         if unpriced:
-            issues.extend(model for model in unpriced if model not in issues)
+            found = issues["unpriced" if own else "unpriced_other"]
+            found.extend(model for model in unpriced if model not in found)
         else:
             usd += max(0.0, spent)
     if not math.isfinite(usd):
         usd = math.inf
-    models = [item for item in issues if not item.startswith((UNREADABLE, BLOCKED))]
-    blocked = [item for item in issues if item.startswith(BLOCKED)]
-    return (None if models or blocked else usd), issues
+    return (None if issues["blocked"] or issues["unpriced"] else usd), issues
 
 
 def day_cap_problem(task=None):
     """None, or (code, message) for why today's spend blocks a start or a transition
     [R-BUDGET-USD-PER-DAY]. No cap, 0 or absent, never blocks. Over the cap is BUDGET_EXHAUSTED.
-    OWNER_DECISION, as R-BUDGET-USD-UNPRICED, when the sum cannot be computed: a model that spent
-    today has no price in its run, or the checked run's own log, state or prices (`task`) cannot
-    be read or are malformed. Any other run that cannot be is skipped and named.""" 
+    OWNER_DECISION, as R-BUDGET-USD-UNPRICED, when the checked run's (`task`) own log, state or
+    prices cannot be used, or a model it spent today has no price: the blast radius stays with
+    the offending run. Any other run's problem is skipped and named, and `ppl lane` (no task)
+    never refuses for one run. runs/ itself failing to list refuses, a machine fault outside
+    every lane's scope."""
     cap = config.budgets_usd_max_per_day()
     if not cap > 0:
         return None
     spent, issues = spent_today(task=task)
     reset = ("It resets after local midnight, or when the owner raises [budgets] "
              "usd_max_per_day in %s." % paths.config_file())
-    blocked = [item[len(BLOCKED):] for item in issues if item.startswith(BLOCKED)]
+    blocked = issues["blocked"]
     if blocked:
         return ("OWNER_DECISION",
                 "the day cap (usd_max_per_day %s) cannot be checked: the log, state or prices of "
-                "the run%s %s cannot be read, are malformed or are over the %d byte read cap. "
-                "Repair or destroy %s. %s" % (cap, "s" if len(blocked) > 1 else "", ", ".join(blocked),
-                            DAY_LOG_LIMIT, "them" if len(blocked) > 1 else "it", reset))
-    unpriced = [item for item in issues if not item.startswith((UNREADABLE, BLOCKED))]
+                "%s cannot be read, are malformed or are over the %d byte read cap. "
+                "Repair or destroy it. %s" % (cap, ", ".join(blocked), DAY_LOG_LIMIT, reset))
+    unpriced = issues["unpriced"]
     if unpriced:
         return ("OWNER_DECISION",
-                "the day cap (usd_max_per_day %s) cannot be checked: today's usage has no price "
-                "in the run's table for %s. Add %s to %s and start a new run. %s"
+                "the day cap (usd_max_per_day %s) cannot be checked: this run's usage today has "
+                "no price in its table for %s. Add %s to %s and start a new run. %s"
                 % (cap, ", ".join(unpriced),
                    ", ".join('[prices."%s"]' % model for model in unpriced),
                    paths.config_file(), reset))
     if spent >= cap:
-        skipped = [item for item in issues if item.startswith(UNREADABLE)]
+        skipped = issues["unreadable"] + ["model %s" % model for model in issues["unpriced_other"]]
         return ("BUDGET_EXHAUSTED",
                 "the day cap is reached: %s USD spent since local midnight across every run, "
                 "usd_max_per_day is %s.%s %s"
