@@ -381,6 +381,10 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
         doc = harness.load(start_dir / "harness" / name)
         os_sandbox.scratch_root().mkdir(parents=True, exist_ok=True)
         _make_run_dirs(task_id, undo)
+        # what ppl destroy removes once ppl lane close has freed the slot: the start directory
+        # is out of every lane's write scope, unlike the run's state.json
+        store.write_json(lanes.record_path(task_id), {"task": task_id, "worktree": worktree,
+                                                      "checkout": checkout, "branch": branch})
         files = lane_render.render(doc, task_id, entry["lane"], start_dir, worktree,
                                    routing_config, mcp)
         argv = claude_argv(binary, session_id, start_dir, worktree, task_id, link,

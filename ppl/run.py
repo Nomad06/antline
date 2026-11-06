@@ -482,9 +482,11 @@ def park(task_id, blocker, safe_next, unsafe_to_repeat, refusals=None):
 def destroy(task_id, scope):
     """Local scope is file work and happens here: the worktree and the run's branch while
     nothing of it was pushed (D23), the scratch directory, the run (archived), the lane's
-    registry slot and its start directory. A lane whose run never reached ppl init goes the same
-    way, its worktree read from the registry. Remote scope is an outward mutation and is queued
-    for the orchestrator, which is the only component holding GitLab credentials.
+    registry slot and its start directory. The worktree, checkout and branch come from the
+    lane's registry entry, else from its record <start>/lane.json once ppl lane close freed the
+    slot (_worktree_source), never from state.json, which the lane's own sandbox can write. A
+    lane whose run never reached ppl init goes the same way. Remote scope is an outward mutation
+    and is queued for the orchestrator, which is the only component holding GitLab credentials.
     """
     if scope not in ("local", "full"):
         raise PplError("SCHEMA_INVALID", "destroy scope must be local or full")
@@ -503,21 +505,94 @@ def destroy(task_id, scope):
 
     state = store.read_json(state_path(task_id))
     entry = lanes.entry(task_id)
-    if state is None and entry is None:
+    if state is None and entry is None and _lane_record(task_id) is None:
         raise PplError("SCHEMA_INVALID", "no run and no lane for %s, so there is nothing to "
                        "destroy: ppl lane list shows the lanes" % task_id)
-    # the registry's worktree when the lane still holds one: ppl lane wrote it there, out of
-    # every sandbox's reach
-    worktree_dir = entry.get("worktree") if entry else state.get("repo")
-    result = _remove_worktree(task_id, worktree_dir, entry.get("repo") if entry else None)
+    worktree, checkout, branch, problem = _worktree_source(task_id, state, entry)
+    if problem:
+        result = {"worktree": "left_behind", "worktree_error": problem, "branch": "none"}
+    else:
+        result = _remove_worktree(task_id, worktree, checkout, branch)
     from . import os_sandbox
     shutil.rmtree(os_sandbox.scratch_dir(task_id), ignore_errors=True)
-    result["status"], result["archive"] = "released", None
+    result.update(_archive_run_dir(task_id, result))
+    result["lane"] = "released" if lanes.release(task_id) else "none"
+    result.update(_remove_start_dir(task_id))
+    return result
+
+
+def _lane_record(task_id):
+    """The lane's record <start>/lane.json as a dict of strings (branch may be None), None
+    when it is missing or not that shape."""
+    try:
+        record = store.read_json(lanes.record_path(task_id), None, lanes.READ_LIMIT)
+    except (PplError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(record, dict) or not all(
+            isinstance(record.get(key), str) and record.get(key)
+            for key in ("worktree", "checkout")):
+        return None
+    if record.get("branch") is not None and not isinstance(record.get("branch"), str):
+        return None
+    return record
+
+
+def _worktree_source(task_id, state, entry):
+    """(worktree, checkout, branch, problem) of a local destroy. The registry entry, else the
+    lane's record in its start directory, both out of every lane's reach: state.json lies in
+    runs/<task>, which the lane's sandbox writes, so a role there could name another lane's
+    worktree in it [R-LANE-CROSS-WRITE]. A run that has a start directory but no readable
+    record is left alone, and only a run from before lanes, with neither, takes state.json's
+    repo, unless that is or lies in a live lane's worktree."""
+    record = _lane_record(task_id)
+    branch = record.get("branch") if record else None
+    if entry is not None:
+        return entry.get("worktree"), entry.get("repo"), branch, None
+    if record is not None:
+        return record["worktree"], record["checkout"], branch, None
+    if os.path.lexists(str(lanes.start_dir(task_id))):
+        return None, None, None, ("the lane's record %s cannot be read, and state.json is in "
+                                  "its sandbox's reach, so destroy removes no worktree: remove "
+                                  "it with git worktree remove once you have checked it"
+                                  % lanes.record_path(task_id))
+    repo = state.get("repo") if isinstance(state, dict) else None
+    if not isinstance(repo, str) or not repo:
+        return None, None, None, None
+    try:
+        holder = lanes.holding_worktree(lanes.read(), repo)
+    except PplError as err:
+        return None, None, None, ("the lane registry cannot be read (%s), so %s cannot be told "
+                                  "apart from a live lane's worktree" % (err.message, repo))
+    if holder is not None:
+        return None, None, None, ("%s is, or lies in, lane %s's worktree %s, which a run "
+                                  "without a lane does not remove" % (repo, holder.get("task"),
+                                                                     holder.get("worktree")))
+    return repo, None, None, None
+
+
+def _archive_run_dir(task_id, result):
+    """Archive runs/<task>, or remove it when it is the empty one ppl lane made, as
+    {"status", "archive"} plus "run_dir" and "run_dir_error" when it is left: a link or no
+    directory there, or a move that fails. A run directory that cannot go never keeps the lane
+    held: the caller releases the slot either way."""
+    done = {"status": "released", "archive": None}
     directory = paths.run_dir(task_id)
-    if directory.is_dir() and not any(directory.iterdir()):
-        # the one ppl lane made for a run that never wrote into it
-        directory.rmdir()
-    elif directory.is_dir():
+    if os.path.islink(str(directory)) or (os.path.lexists(str(directory))
+                                          and not os.path.isdir(str(directory))):
+        done.update(run_dir="left_behind", run_dir_error="%s is a link or not a directory, so "
+                    "destroy leaves it" % directory)
+        return done
+    if not os.path.isdir(str(directory)):
+        return done
+    try:
+        if not any(directory.iterdir()):
+            # the one ppl lane made for a run that never wrote into it
+            directory.rmdir()
+            return done
+    except OSError:
+        # something landed in it meanwhile, a hook's log line say: it is archived instead
+        pass
+    try:
         # Logged before the move: append_log would otherwise recreate the run
         # directory it has just archived.
         store.append_log(task_id, {"event": "destroy", "scope": "local",
@@ -531,11 +606,12 @@ def destroy(task_id, scope):
         archive = paths.runs_dir() / "_archive" / ("%s-%s-%s" % (
             task_id, store.now().replace(":", ""), uuid.uuid4().hex[:8]))
         archive.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(paths.run_dir(task_id)), str(archive))
-        result["status"], result["archive"] = "archived", str(archive)
-    result["lane"] = "released" if lanes.release(task_id) else "none"
-    result.update(_remove_start_dir(task_id))
-    return result
+        shutil.move(str(directory), str(archive))
+    except (OSError, PplError) as exc:
+        done.update(run_dir="left_behind", run_dir_error=getattr(exc, "message", None) or str(exc))
+        return done
+    done.update(status="archived", archive=str(archive))
+    return done
 
 
 def _git(directory, args):
@@ -568,17 +644,19 @@ def _run_branch(task_id, worktree):
     return common, (branch if branch.startswith(task_id + "-") else None)
 
 
-def _remove_worktree(task_id, worktree, checkout):
+def _remove_worktree(task_id, worktree, checkout, branch=None):
     """Remove the run's worktree, then its branch unless refs/remotes/origin/<branch> exists,
-    as {"worktree", "branch"} states plus "branch_name" and the errors. `checkout` is the lane's
-    project checkout from the registry, None when the lane is gone: the branch is then reached
-    through the git dir the worktree named before it was removed. No config check comes first:
-    a key planted in the checkout must not block a cleanup, and the pinned words run nothing."""
+    as {"worktree", "branch"} states plus "branch_name" and the errors. `checkout` and
+    `branch` are the lane's, from its registry entry or its record, None for a run from before
+    lanes: the branch is then the worktree's HEAD when it is named for the run, reached through
+    the git dir the worktree names. No config check comes first: a key planted in the checkout
+    must not block a cleanup, and the pinned words run nothing."""
     result = {"worktree": "absent", "branch": "none"}
     if not worktree or not os.path.isdir(str(worktree)):
         return result
     worktree = str(worktree)
-    common, branch = _run_branch(task_id, worktree)
+    common, head = _run_branch(task_id, worktree)
+    branch = branch or head
     # -C <worktree> matters: without it git runs against ppl's own cwd, which is
     # not the target repository, so the removal silently did nothing and the
     # discarded exit code made the archive report success anyway, leaving an

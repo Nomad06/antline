@@ -1217,12 +1217,13 @@ def report(task_id=None, cwd=None, env=None, probe=None):
     report, the run it is about and whether the registered guard runs.
     `cwd` is the directory whose .claude/settings.local.json is read, the
     process cwd by default. The run is found as every ppl command finds it
-    (lanes.task_for_call: `task_id`, else PPL_TASK, else the lane holding
-    `cwd`), and reported as None when there is none or it cannot be read."""
+    (lanes.task_for_call: `task_id`, else PPL_TASK of `env`, else the lane
+    holding `cwd`), and reported as None when there is none or it cannot be
+    read."""
     from . import lanes, run
     inspected = inspect(cwd)
     try:
-        task_id = lanes.task_for_call(task_id, cwd)
+        task_id = lanes.task_for_call(task_id, cwd, env)
         if task_id:
             run.load(task_id)
     except PplError:

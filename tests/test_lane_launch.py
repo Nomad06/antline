@@ -237,17 +237,32 @@ class TestStart(LaneCase):
             self.assertEqual(os.listdir(directory), [])
         self.assertFalse(run.state_path(TASK).exists())
 
-    def test_a_run_directory_that_is_a_link_is_refused(self):
+    def test_a_run_directory_that_is_a_link_or_a_file_is_refused(self):
         elsewhere = self.base / "elsewhere"
         elsewhere.mkdir()
-        paths.runs_dir().mkdir(parents=True)
-        paths.run_dir(TASK).symlink_to(elsewhere)
-        message = refusal(self, "SETUP_INCOMPLETE", lane_launch.start, LINK,
-                          harness_name=HARNESS, exec_=False)
-        self.assertIn(str(paths.run_dir(TASK)), message)
-        self.assertEqual(lanes.read(), [])
-        self.assertTrue(os.path.islink(paths.run_dir(TASK)))
-        self.assertFalse(lanes.start_dir(TASK).exists())
+        for directory in (paths.run_dir(TASK), os_sandbox.scratch_dir(TASK)):
+            for kind in ("link", "file"):
+                with self.subTest(directory=directory, kind=kind):
+                    directory.parent.mkdir(parents=True, exist_ok=True)
+                    if kind == "link":
+                        directory.symlink_to(elsewhere)
+                    else:
+                        directory.write_text("x", encoding="utf-8")
+                    message = refusal(self, "SETUP_INCOMPLETE", lane_launch.start, LINK,
+                                      harness_name=HARNESS, exec_=False)
+                    self.assertIn(str(directory), message)
+                    self.assertEqual(lanes.read(), [])
+                    self.assertTrue(os.path.lexists(directory))
+                    directory.unlink()
+                    self.assert_nothing_made()
+                    self.assertFalse(self.branch_exists())
+
+    def test_start_records_the_lane_in_its_start_directory(self):
+        # R53: destroy reads the worktree from here once ppl lane close has freed the slot
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        record = json.loads(lanes.record_path(TASK).read_text(encoding="utf-8"))
+        self.assertEqual(record, {"task": TASK, "worktree": str(self.worktree),
+                                  "checkout": str(self.project), "branch": BRANCH})
 
     def test_without_an_origin_the_worktree_starts_from_the_local_default_branch(self):
         local = self.make_repo(self.base / "local")

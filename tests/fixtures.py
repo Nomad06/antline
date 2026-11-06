@@ -132,13 +132,17 @@ def older_system_python():
 
 
 def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
-              session_id="00000000-0000-4000-8000-000000000001"):
+              session_id="00000000-0000-4000-8000-000000000001", branch=None):
     """Register a lane for `task_id` and create its start directory, as `ppl lane` leaves them.
-    The entry is written directly with the given lane number. An installed harness is copied
-    to <start>/harness/<harness>, what `ppl lane` exports. Returns the entry."""
+    The entry is written directly with the given lane number, and the start directory gets the
+    lane's record lane.json (its worktree, checkout and `branch`). An installed harness is
+    copied to <start>/harness/<harness>, what `ppl lane` exports. Returns the entry."""
     from ppl import lanes, store
     start = lanes.start_dir(task_id)
     start.mkdir(parents=True, exist_ok=True)
+    store.write_json(lanes.record_path(task_id), {
+        "task": task_id, "worktree": str(worktree or repo), "checkout": str(repo),
+        "branch": branch})
     installed = paths.harness_dir(harness)
     if installed.is_dir():
         target = start / "harness" / harness

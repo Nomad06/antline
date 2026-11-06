@@ -1012,6 +1012,28 @@ class TestMcpServersWarning(unittest.TestCase):
         self.assertNotIn(self.TOKEN, json.dumps(result))
 
 
+class TestReportFindsItsRun(unittest.TestCase):
+    """doctor.report finds its run as every ppl command does, from the environment it is
+    given."""
+
+    def setUp(self):
+        self.enterContext(mock.patch.dict(os.environ, {
+            "PPL_HOME": tmphome.mkdtemp(prefix="pplhome-"), "PPL_TASK": "DEMO-1"}))
+        from ppl import run
+        for task_id in ("DEMO-1", "DEMO-2"):
+            run.init(task_id, "u", "/tmp/repo")
+        self.cwd = tmphome.mkdtemp(prefix="pplcwd-")
+
+    def test_the_report_reads_ppl_task_from_the_env_it_is_given(self):
+        given = doctor.report(cwd=self.cwd, env={"PATH": "/usr/bin", "PPL_TASK": "DEMO-2"},
+                              probe=lambda: "unknown")
+        self.assertEqual(given["task"], "DEMO-2")
+        none = doctor.report(cwd=self.cwd, env={"PATH": "/usr/bin"}, probe=lambda: "unknown")
+        self.assertIsNone(none["task"])
+        process = doctor.report(cwd=self.cwd, probe=lambda: "unknown")
+        self.assertEqual(process["task"], "DEMO-1")
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -13,6 +13,7 @@ from .errors import PplError
 
 REGISTRY_FILE = "lanes.json"
 LOCK_FILE = "lanes.lock"
+RECORD_FILE = "lane.json"
 READ_LIMIT = 1 << 20
 
 
@@ -22,6 +23,13 @@ def registry_path():
 
 def start_dir(task_id):
     return paths.home() / "lanes" / task_id
+
+
+def record_path(task_id):
+    """The lane's record in its start directory, {"task", "worktree", "checkout", "branch"} as
+    ppl lane made them. It outlives the registry entry, which ppl lane close removes, until
+    ppl destroy removes the start directory, and no lane's sandbox can write it."""
+    return start_dir(task_id) / RECORD_FILE
 
 
 def _invalid(why):
@@ -132,17 +140,28 @@ def holding(entries, path):
     return None
 
 
+def holding_worktree(entries, path):
+    """The entry of `entries` whose worktree is or holds `path`, compared by realpath, else
+    None."""
+    target = os.path.realpath(str(path))
+    for item in entries:
+        if _contains(item.get("worktree"), target):
+            return item
+    return None
+
+
 def for_path(path, limit=READ_LIMIT):
     """The registered entry whose start directory or worktree holds `path` (holding)."""
     return holding(read(limit), path)
 
 
-def task_for_call(given=None, cwd=None):
-    """The run a ppl call is about: `given` (its --task), else PPL_TASK, else the task of the
-    lane whose start directory or worktree holds `cwd` (the process cwd by default), else None.
-    Never a pointer file. SCHEMA_INVALID when --task and PPL_TASK name different runs: a lane's
-    session works on its own run, and from outside one PPL_TASK is unset."""
-    env = os.environ.get("PPL_TASK") or None
+def task_for_call(given=None, cwd=None, environ=None):
+    """The run a ppl call is about: `given` (its --task), else PPL_TASK of `environ` (the
+    process environment by default), else the task of the lane whose start directory or
+    worktree holds `cwd` (the process cwd by default), else None. Never a pointer file.
+    SCHEMA_INVALID when --task and PPL_TASK name different runs: a lane's session works on its
+    own run, and from outside one PPL_TASK is unset."""
+    env = (os.environ if environ is None else environ).get("PPL_TASK") or None
     if given and env and given != env:
         raise PplError("SCHEMA_INVALID", "--task %s and PPL_TASK=%s name different runs: a lane's "
                        "session works on its own run; unset PPL_TASK to name another from "
