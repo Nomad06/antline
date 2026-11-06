@@ -1479,8 +1479,9 @@ class TestAbandonedRun(LessonsTestCase):
         code, out, err = self.in_lane("DEMO-9360", "lane", "close")
         self.assertEqual(code, 0, err)
         result = json.loads(out)
-        self.assertEqual((result["claims_handed_back"], result["claims_kept"]),
-                         (["DEMO-9361"], ["DEMO-9362"]))
+        self.assertEqual(result["claims_handed_back"], ["DEMO-9361"])
+        self.assertEqual([kept["task"] for kept in result["claims_kept"]], ["DEMO-9362"])
+        self.assertIn("DEMO-9362.json", result["claims_kept"][0]["reason"])
         self.assertIsNone(lanes.entry("DEMO-9360"))
         self.assertFalse(lessons.claimed_path("DEMO-9361", "DEMO-9360").exists())
         self.assertTrue(lessons.claimed_path("DEMO-9362", "DEMO-9360").is_file())
@@ -1488,6 +1489,42 @@ class TestAbandonedRun(LessonsTestCase):
         code, out, err = self.in_lane("DEMO-9363", "lessons", "pending")
         self.assertEqual(code, 0, err)
         self.assertIn("DEMO-9361 %s" % handed, out.splitlines())
+
+    def test_a_hand_back_that_fails_holds_the_claim_and_still_frees_the_lane(self):
+        # N2: the slot is freed before the hand-back, so an error there is reported with the
+        # claim it held, never a crash that leaves no lane to close again
+        self.close_lane("DEMO-9374")
+        self.abandon("DEMO-9375")
+        self.abandon("DEMO-9376")
+        for task in ("DEMO-9375", "DEMO-9376"):
+            self.assertTrue(lessons.claim_pending(task, "DEMO-9374"))
+        real = os.link
+
+        def link(source, target, *rest, **more):
+            if "DEMO-9375" in str(source):
+                raise OSError(1, "Operation not permitted")
+            return real(source, target, *rest, **more)
+
+        with mock.patch.object(os, "link", side_effect=link):
+            code, out, err = self.in_lane("DEMO-9374", "lane", "close")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertIsNone(lanes.entry("DEMO-9374"))
+        self.assertEqual(result["claims_handed_back"], ["DEMO-9376"])
+        self.assertEqual([kept["task"] for kept in result["claims_kept"]], ["DEMO-9375"])
+        self.assertIn("Operation not permitted", result["claims_kept"][0]["reason"])
+        self.assertTrue(lessons.claimed_path("DEMO-9375", "DEMO-9374").is_file())
+        # a destroy goes the same way
+        self.build_run("DEMO-9377")
+        fixtures.bind_lane("DEMO-9377", "/nonexistent/repo-9377", lane=1)
+        self.abandon("DEMO-9378")
+        self.assertTrue(lessons.claim_pending("DEMO-9378", "DEMO-9377"))
+        with mock.patch.object(os, "link", side_effect=OSError(31, "Too many links")):
+            code, out, err = call("destroy", "--scope", "local", "--task", "DEMO-9377")
+        self.assertEqual(code, 0, err)
+        kept = json.loads(out)["claims_kept"]
+        self.assertEqual([item["task"] for item in kept], ["DEMO-9378"])
+        self.assertIn("Too many links", kept[0]["reason"])
 
     def test_a_local_destroy_hands_the_lanes_claims_back(self):
         # R60: a lane freed by ppl destroy --scope local hands its claims back too
@@ -1535,8 +1572,12 @@ class TestAbandonedRun(LessonsTestCase):
 
         for tool, tool_input in (("Read", {"file_path": mine + "/outcome.json"}),
                                  ("Grep", {"pattern": "x", "path": mine}),
-                                 ("Glob", {"pattern": "**/*.json", "path": mine})):
-            with self.subTest(tool=tool, allowed=True):
+                                 ("Glob", {"pattern": "**/*.json", "path": mine}),
+                                 # no path: the lane's start directory, a sibling of runs/
+                                 ("Grep", {"pattern": "x"}),
+                                 ("Grep", {"pattern": "x",
+                                           "path": str(paths.run_dir("DEMO-9366"))})):
+            with self.subTest(tool=tool, allowed=True, tool_input=tool_input):
                 self.assertIsNone(decide(tool, **tool_input))
         for tool, tool_input in (
                 ("Read", {"file_path": theirs + "/outcome.json"}),
@@ -1545,7 +1586,17 @@ class TestAbandonedRun(LessonsTestCase):
                           + "/lessons/bundle/outcome.json"}),
                 ("Grep", {"pattern": "x", "path": str(Path(mine).parents[2])}),
                 ("Glob", {"pattern": "../../../*/lessons/bundle/*.json", "path": mine}),
-                ("Glob", {"pattern": str(Path(theirs).parents[2]) + "/*/lessons/**"})):
+                ("Glob", {"pattern": str(Path(theirs).parents[2]) + "/*/lessons/**"}),
+                # N1: a search rooted above the archive reads every bundle in it
+                ("Grep", {"pattern": ".", "path": str(paths.runs_dir())}),
+                ("Grep", {"pattern": ".", "path": str(paths.home())}),
+                ("Grep", {"pattern": ".", "path": str(paths.runs_dir()),
+                          "glob": "_archive/**"}),
+                ("Grep", {"pattern": ".", "path": str(paths.runs_dir()).upper()}),
+                ("Glob", {"pattern": "_archive/*/lessons/bundle/*",
+                          "path": str(paths.runs_dir())}),
+                ("Glob", {"pattern": str(paths.runs_dir()) + "/*/*/lessons/bundle/*"}),
+                ("Glob", {"pattern": str(paths.home()) + "/**/outcome.json"})):
             with self.subTest(tool=tool, tool_input=tool_input):
                 result = decide(tool, **tool_input)
                 self.assertIsNotNone(result, tool_input)

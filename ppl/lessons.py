@@ -996,8 +996,10 @@ def hand_back(by_task):
     """Hands every claim the lane of `by_task` has not recorded back to its pending marker
     pending/<task>.json (R60), so the next lane of its harness lists it again: ppl lane close
     and a local destroy free the lane that held it. A claim whose task has a pending marker
-    again is left as it is and reported. Returns {"claims_handed_back": [task],
-    "claims_kept": [task]}, each only when it is not empty."""
+    again, or that cannot be handed back, is left as it is and reported with the reason: both
+    callers run this after the slot is freed, so an error here never stops them. Returns
+    {"claims_handed_back": [task], "claims_kept": [{"task", "reason"}]}, each only when it is
+    not empty."""
     paths.check_task_id(by_task)
     suffix = ".json" + paths.CLAIMED + by_task
     folder = pending_path("X").parent
@@ -1009,20 +1011,27 @@ def hand_back(by_task):
     for name in names:
         task = name[:-len(suffix)]
         if not paths.TASK_ID_RE.fullmatch(task):
-            kept.append(task)
+            kept.append({"task": task, "reason": "%s is not named after a task id" % name})
             continue
         try:
             # a link, not a rename: it never replaces a marker that is there again
             os.link(str(folder / name), str(pending_path(task)))
         except FileExistsError:
-            kept.append(task)
+            kept.append({"task": task, "reason": "%s is there again" % pending_path(task)})
             continue
         except FileNotFoundError:
             continue  # recorded meanwhile
+        except OSError as exc:
+            kept.append({"task": task, "reason": "it could not be handed back: %s" % exc})
+            continue
         try:
             os.unlink(str(folder / name))
         except FileNotFoundError:
             pass
+        except OSError as exc:
+            kept.append({"task": task, "reason": "%s is back, and the claim could not be "
+                                                 "removed: %s" % (pending_path(task), exc)})
+            continue
         handed.append(task)
     return {key: tasks for key, tasks in (("claims_handed_back", handed), ("claims_kept", kept))
             if tasks}
