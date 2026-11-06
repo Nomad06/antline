@@ -2017,8 +2017,7 @@ def _bash_write_targets(command, base_cwd, commands=None):
     `$(` or a backtick appends nothing.
     """
     if "$(" in command or "`" in command:
-        # read without here-document bodies, which are data: a commit message there names
-        # no write (_command_views)
+        # each here-document body is read as its own view, line by line (_command_views)
         found = _command_views(command)
         if BASH_WRITE_SHAPES.search("\n".join(found[0] + found[1]) if found else command):
             return [(None, base_cwd, False)]
@@ -2832,9 +2831,8 @@ class _Unreadable(Exception):
     """A substitution or a here-document left open."""
 
 
-# What a here-document is fed to: cat is data (a commit message), a shell or any other
-# command runs its body as commands, and an interpreter runs it as code the walk cannot
-# read [R-LANE-CROSS-WRITE].
+# What feeds a here-document to an interpreter, whose body is code the walk cannot read: the
+# usual wrappers before it, and the interpreters [R-LANE-CROSS-WRITE].
 _HEREDOC_WRAPPERS = frozenset({"env", "command", "builtin", "exec", "nohup", "nice", "time",
                                "sudo", "doas", "xargs", "timeout", "stdbuf"})
 _HEREDOC_INTERPRETERS = frozenset({"perl", "ruby", "node", "nodejs", "php", "osascript", "lua",
@@ -2842,47 +2840,28 @@ _HEREDOC_INTERPRETERS = frozenset({"perl", "ruby", "node", "nodejs", "php", "osa
                                    "irb", "julia", "jshell", "groovy"})
 
 
-def _heredoc_consumer(prefix):
-    """What the here-document that follows `prefix` is fed to, as "data" (cat), "interpreter"
-    or "commands", read off the last simple command of `prefix` past assignments, options and
-    the usual wrappers. Python and the other interpreters run code, and anything else, a shell
-    (sh, bash, zsh, dash, ksh, behind env or xargs too) among them, runs commands. cat's body
-    is data only when _heredoc_kind also finds its delimiter quoted and no pipe onward."""
+def _heredoc_feeds_interpreter(prefix):
+    """True when the here-document that follows `prefix` is fed to python or another
+    interpreter, read off the last simple command of `prefix` past assignments, options,
+    redirect words and the usual wrappers. Its body is judged as commands like every other
+    here-document's, and spelled out besides."""
     part = re.split(r"\|\||&&|[;|\n(){}]", prefix)[-1]
     for token in _shlex_tokens(part) or []:
         if (_ASSIGNMENT_WORD_RE.match(token) or token.startswith("-") or token.isdigit()
                 or token in (">", ">>", "<") or _verb_name(token) in _HEREDOC_WRAPPERS):
             continue
         name = _verb_name(token)
-        if name == "cat":
-            return "data"
-        if name.startswith("python") or name.startswith("pypy") or name in _HEREDOC_INTERPRETERS:
-            return "interpreter"
-        return "commands"
-    return "commands"
-
-
-def _heredoc_kind(text, match, prefix):
-    """How the here-document whose operator `match` found in `text` after `prefix` is judged
-    [R-LANE-CROSS-WRITE]: "data" only when it is fed to cat, its delimiter is quoted (the
-    shell then expands nothing in the body) and nothing on its line pipes it onward (cat <<'EOF'
-    | bash runs it); "interpreter" when it is fed to one; else "commands"."""
-    consumer = _heredoc_consumer(prefix)
-    if consumer != "data":
-        return consumer
-    quoted = match.group(2) is not None or match.group(3) is not None or (
-        match.group(4) is not None)
-    end = text.find("\n", match.end())
-    onward = text[match.end():len(text) if end < 0 else end].replace("||", "")
-    return "data" if quoted and "|" not in onward else "commands"
+        return (name.startswith("python") or name.startswith("pypy")
+                or name in _HEREDOC_INTERPRETERS)
+    return False
 
 
 def _mask_text(text, i, closer, inner, fed):
     """(text[i:] up to `closer` outside quotes, with each $(...) and backtick replaced by the
-    word $SUBST and the text inside each appended to `inner`, the index after `closer`). A
-    here-document body is taken out: dropped when it is data (_heredoc_kind), appended to `fed`
-    when fed to an interpreter, and appended to `inner` as commands, masked the same way, when
-    fed to a shell or any other command. Raises _Unreadable on a substitution or a
+    word $SUBST and the text inside each appended to `inner`, the index after `closer`). Every
+    here-document body is taken out of the text and appended to `inner` as commands, masked the
+    same way, whatever its consumer, its delimiter's quoting or its pipeline; one fed to an
+    interpreter is appended to `fed` as well. Raises _Unreadable on a substitution or a
     here-document left open."""
     out, pending = [], []
     quote, depth, n = None, 0, len(text)
@@ -2919,14 +2898,14 @@ def _mask_text(text, i, closer, inner, fed):
             if match:
                 word = next(group for group in match.groups()[1:] if group is not None)
                 pending.append((match.group(1) == "-", word,
-                                _heredoc_kind(text, match, "".join(out))))
+                                _heredoc_feeds_interpreter("".join(out))))
                 out.append(match.group())
                 i = match.end()
                 continue
         elif quote is None and char == "\n" and pending:
             out.append(char)
             i += 1
-            for strip_tabs, word, consumer in pending:
+            for strip_tabs, word, interpreted in pending:
                 body = []
                 while True:
                     if i >= n:
@@ -2938,10 +2917,14 @@ def _mask_text(text, i, closer, inner, fed):
                     if (line.lstrip("\t") if strip_tabs else line) == word:
                         break
                     body.append(line)
-                if consumer == "interpreter":
-                    fed.append("\n".join(body))
-                elif consumer == "commands":
-                    inner.append(_mask_text("\n".join(body), 0, None, inner, fed)[0])
+                text_of_body = "\n".join(body)
+                if interpreted:
+                    fed.append(text_of_body)
+                try:
+                    inner.append(_mask_text(text_of_body, 0, None, inner, fed)[0])
+                except _Unreadable:
+                    # a $( or a backtick left open in the body: kept raw, read by its spelling
+                    inner.append(text_of_body)
             pending = []
             continue
         elif quote is None and char == "(":
@@ -2958,9 +2941,8 @@ def _mask_text(text, i, closer, inner, fed):
 def _command_views(command):
     """([the command with every $(...) and backtick masked to the word $SUBST and every
     here-document body taken out, then the same of the text inside each substitution and of
-    each here-document body fed to a shell or another command], [each here-document body fed
-    to an interpreter]), or None when one is left open (_mask_text). A commit message in a
-    here-document fed to cat is data, not commands."""
+    each here-document body, judged as commands line by line], [each here-document body fed
+    to an interpreter]), or None when one is left open (_mask_text)."""
     inner, fed = [], []
     try:
         outer, _ = _mask_text(command, 0, None, inner, fed)
@@ -2978,10 +2960,15 @@ def _lane_git_segments(command, cwd):
     if found is None:
         return [], [command], []
     views, fed = found
-    segments = []
+    segments, unread = [], []
     for view in views:
+        if "$(" in view or "`" in view:
+            # a substitution the masking could not see, as in a here-document body after an
+            # apostrophe: the view is read by its spelling
+            unread.append(view)
+            continue
         _bash_write_targets(view, cwd if isinstance(cwd, str) else None, segments)
-    return segments, [text for tokens, text, _ in segments if tokens is None], fed
+    return segments, unread + [text for tokens, text, _ in segments if tokens is None], fed
 
 
 # What an interpreter's here-document may not spell in a lane: ppl, or a git worktree or
