@@ -285,6 +285,16 @@ class TestReviewFetchCli(unittest.TestCase):
                 self.assertEqual(self.gh.argvs, [])
                 self.assertFalse(self.target().exists())
 
+    def test_from_a_terminal_outside_the_lane_gh_is_the_lanes_pin(self):
+        # minor 5: the forge's gh comes from the facts of the lane --task names
+        store.write_json(self.facts, {"version": 1, "forge_repo": "o/r", "tracker_repo": "o/r",
+                                      "pins": {"gh": {"path": "/pin/gh", "realpath": "/pin/gh"}}})
+        with mock.patch.dict(os.environ, {"PPL_TASK": ""}):
+            code, _, err = call("review", "fetch", "--task", self.task, "--pr", "5")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(self.gh.argvs)
+        self.assertEqual({argv[0] for argv in self.gh.argvs}, {"/pin/gh"})
+
     def test_without_its_lanes_guard_facts_the_fetch_is_refused_and_runs_no_git(self):
         # R31: the snapshot and the run's repo are role-writable, so neither is taken alone
         self.facts.unlink()

@@ -2615,12 +2615,18 @@ class TestInitVerifiesTheGuardMatcher(unittest.TestCase):
         self.assertIn("Bash", doc["message"])
         self.assertIn(doctor.RECOMMENDED_MATCHER, doc["message"])
 
-    def test_init_refuses_an_incomplete_matcher_registered_globally(self):
+    def test_init_refuses_an_incomplete_matcher_in_the_start_directorys_local_settings(self):
         # rule: R-GUARD-MATCHER
-        # The hook is armed globally here and cannot see Bash in any session.
-        write_global_guard_registration(matcher=self.EDITING_TOOLS_ONLY)
-        code, _, err = init_in_lane("DEMO-9911", "--tracker-url", "u", "--repo", "/tmp/repo",
-                                    "--harness", "example-maven")
+        # The lane session loads its start directory's .claude/settings.local.json too, so a
+        # guard armed there cannot see Bash in it.
+        fixtures.bind_lane("DEMO-9911", "/tmp/repo")
+        other = lanes.start_dir("DEMO-9911") / ".claude" / "settings.local.json"
+        other.parent.mkdir(parents=True, exist_ok=True)
+        doc = with_matcher(self.EDITING_TOOLS_ONLY)(fixtures.lane_settings("DEMO-9911"))
+        other.write_text(json.dumps(doc), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"PPL_TASK": "DEMO-9911"}):
+            code, _, err = call("init", "DEMO-9911", "--tracker-url", "u", "--repo", "/tmp/repo",
+                                "--harness", "example-maven")
         self.assertEqual(code, 2)
         doc = json.loads(err)
         self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
@@ -2683,7 +2689,10 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         doc = json.loads(err)
         self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
         self.assertIn("type 'prompt'", doc["message"])
-        self.assertIn("ppl setup claude", doc["message"])
+        # R55: the hook entries come from ppl lane, which the owner runs outside the lane
+        self.assertIn("ppl lane", doc["message"])
+        self.assertIn("--task DEMO-9920", doc["message"])
+        self.assertNotIn("ppl setup claude", doc["message"])
 
     def test_init_refuses_a_guard_entry_without_a_timeout(self):
         # rule: R-DOCTOR-HOOK-SHAPE
@@ -2732,7 +2741,8 @@ class TestInitChecksTheHookShape(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("warning: ", err)
         self.assertIn(str(old), err)
-        self.assertIn("ppl setup claude", err)
+        self.assertIn("ppl lane", err)
+        self.assertNotIn("ppl setup claude", err)
 
     def test_init_prints_the_mcp_warning(self):
         # a lane with OS sandbox facts names the servers its mcp.json gives its session
@@ -2862,8 +2872,10 @@ class TestDoctorCommand(unittest.TestCase):
         code, out, err = call("doctor", "--task", "DEMO-931")
         self.assertEqual(code, 0, err)
         doc = json.loads(out.splitlines()[0])
-        self.assertEqual(doc["local"]["path"], str(lanes.start_dir("DEMO-931") / "settings.json"))
-        self.assertEqual(doc["global"]["path"], str(doctor.global_settings_path()))
+        start = lanes.start_dir("DEMO-931")
+        self.assertEqual(doc["local"]["path"], str(start / "settings.json"))
+        self.assertEqual(doc["start_local"]["path"], str(start / ".claude" / "settings.local.json"))
+        self.assertNotIn("global", doc)
 
     def test_doctor_reports_setup_models_harness_and_forge(self):
         self.addCleanup(seed_setup)
@@ -2897,14 +2909,16 @@ class TestDoctorCommand(unittest.TestCase):
         self.assertIn("config.toml", doc["config_problem"])
 
     def test_doctor_reports_unknown_for_an_unparseable_settings_file(self):
-        self.global_path.write_text('// my settings\n{"hooks": {}}', encoding="utf-8")
         init_in_lane("DEMO-932", "--tracker-url", "u", "--repo", "/tmp/repo",
              "--harness", "example-maven")
+        other = lanes.start_dir("DEMO-932") / ".claude" / "settings.local.json"
+        other.parent.mkdir(parents=True, exist_ok=True)
+        other.write_text('// my settings\n{"hooks": {}}', encoding="utf-8")
         code, out, err = call("doctor", "--task", "DEMO-932")
         self.assertEqual(code, 0, err)
         doc = json.loads(out.splitlines()[0])
         self.assertEqual(doc["registration"], "unknown")
-        self.assertIsNotNone(doc["global"]["detail"])
+        self.assertIsNotNone(doc["start_local"]["detail"])
 
 
 class TestMetricsCommandPrintsUndefinedNotZero(unittest.TestCase):
@@ -3551,6 +3565,25 @@ class TestTrackerFetch(unittest.TestCase):
         code, _, err = call("tracker", "fetch", "--task", task)
         self.assertEqual(code, 0, err)
         self.assertEqual(self.argvs()[0], GH_VIEW.split(" "))
+
+    def test_from_a_terminal_outside_the_lane_gh_is_the_lanes_pin(self):
+        # minor 5: the repository and the gh come from the same lane's facts, the one --task
+        # names, with PPL_TASK unset and the cwd in no lane
+        task = self.run_with("GH-7")
+        pinned = Path(tmphome.mkdtemp(prefix="ghpin-")) / "gh"
+        pinned.write_text(GH_STUB.replace('os.environ["GH_STUB_LOG"]',
+                                          'os.environ["GH_STUB_LOG"] + ".pinned"'),
+                          encoding="utf-8")
+        pinned.chmod(0o755)
+        self.write_guard_facts(task, pins={"gh": {"path": str(pinned),
+                                                  "realpath": str(pinned)}})
+        with mock.patch.dict(os.environ, {"PPL_TASK": ""}):
+            code, _, err = call("tracker", "fetch", "--task", task)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.argvs(), [])
+        pinned_log = Path(str(self.log) + ".pinned").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([json.loads(line) for line in pinned_log],
+                         [GH_VIEW.split(" "), GH_PARENT.split(" "), GH_SUBS.split(" ")])
 
     def test_without_its_lanes_guard_facts_the_snapshot_repo_is_not_taken(self):
         # R31: the snapshot sits in role-writable runs/, so a run whose lane has no facts is
@@ -4258,35 +4291,60 @@ class TestInitRequiresTheOsSandbox(unittest.TestCase):
         config.set_active_harness("gh-issues")
         self.addCleanup(config.set_active_harness, "example-maven")
 
+    def lane_init(self, task, profile=True, other=None):
+        """ppl init in a GitHub lane whose session runs inside the OS sandbox: its facts record
+        BLOCK, its settings.json carries it when `profile`, and `other` is written to its start
+        directory's .claude/settings.local.json."""
+        managed = Path(tmphome.mkdtemp(prefix="pplmanaged-")) / "managed-settings.json"
+        fixtures.bind_lane(task, "/tmp/repo", harness="gh-issues")
+        start = lanes.start_dir(task)
+        (start / "os_sandbox.json").write_text(json.dumps(
+            {"version": 1, "workspace": str(start), "write_scope": [],
+             "written_sandbox": self.BLOCK, "pins": {}}), encoding="utf-8")
+        settings = fixtures.lane_settings(task)
+        if profile:
+            settings["sandbox"] = self.BLOCK
+        write_lane_settings(task, settings)
+        if other is not None:
+            (start / ".claude").mkdir(exist_ok=True)
+            (start / ".claude" / "settings.local.json").write_text(json.dumps(other),
+                                                                  encoding="utf-8")
+        with mock.patch.dict(os.environ, {"PPL_TASK": task, "SANDBOX_RUNTIME": "1"}), \
+                mock.patch.object(doctor, "probe_github", lambda env: "denied"), \
+                mock.patch.object(doctor, "managed_settings_path", lambda: managed):
+            return call("init", task, "--tracker-url", "u", "--harness", "gh-issues")
+
     def test_init_requires_the_lane_sandbox_profile_on_a_github_harness(self):
         # rule: R-OS-SANDBOX-INIT-REQUIRED
-        managed = Path(tmphome.mkdtemp(prefix="pplmanaged-")) / "managed-settings.json"
-        results = {}
-        for task, profile in (("GH-8201", False), ("GH-8202", True)):
-            fixtures.bind_lane(task, "/tmp/repo", harness="gh-issues")
-            start = lanes.start_dir(task)
-            (start / "os_sandbox.json").write_text(json.dumps(
-                {"version": 1, "workspace": str(start), "write_scope": [],
-                 "written_sandbox": self.BLOCK, "pins": {}}), encoding="utf-8")
-            settings = fixtures.lane_settings(task)
-            if profile:
-                settings["sandbox"] = self.BLOCK
-            write_lane_settings(task, settings)
-            with mock.patch.dict(os.environ, {"PPL_TASK": task, "SANDBOX_RUNTIME": "1"}), \
-                    mock.patch.object(doctor, "probe_github", lambda env: "denied"), \
-                    mock.patch.object(doctor, "managed_settings_path", lambda: managed):
-                results[task] = call("init", task, "--tracker-url", "u", "--harness", "gh-issues")
-        code, _, err = results["GH-8201"]
+        code, _, err = self.lane_init("GH-8201", profile=False)
         self.assertEqual(code, 2, err)
         doc = json.loads(err)
         self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
         self.assertIn("profile", doc["message"])
         self.assertIn(str(lanes.start_dir("GH-8201") / "settings.json"), doc["message"])
         self.assertFalse(paths.run_dir("GH-8201").exists())
-        code, out, err = results["GH-8202"]
+        code, out, err = self.lane_init("GH-8202")
         self.assertEqual(code, 0, err)
         _, shown, _ = call("show", "--task", "GH-8202", "--json")
         self.assertIs(json.loads(shown)["os_sandboxed"], True)
+
+    def test_a_guard_in_the_operators_user_settings_does_not_refuse_a_lane_init(self):
+        # rule: R-OS-SANDBOX-INIT-REQUIRED
+        # R56: --setting-sources local keeps the user settings out of the lane session
+        path = write_global_guard_registration()
+        self.addCleanup(path.unlink)
+        code, out, err = self.lane_init("GH-8203")
+        self.assertEqual(code, 0, err)
+
+    def test_a_second_guard_the_lane_session_loads_is_refused(self):
+        # rule: R-OS-SANDBOX-INIT-REQUIRED
+        code, _, err = self.lane_init("GH-8204", other=fixtures.lane_settings("GH-8204"))
+        self.assertEqual(code, 2, err)
+        message = json.loads(err)["message"]
+        self.assertIn("registered both", message)
+        self.assertIn(str(lanes.start_dir("GH-8204") / ".claude" / "settings.local.json"), message)
+        self.assertNotIn("every session", message)
+        self.assertFalse(paths.run_dir("GH-8204").exists())
 
     def start(self, state, registration, *flags, harness="gh-issues", task=None):
         facts = {"state": state, "env_marker": state == "on", "profile": state == "on",
@@ -4309,14 +4367,14 @@ class TestInitRequiresTheOsSandbox(unittest.TestCase):
         self.assertIn("--no-os-sandbox", doc["message"])
         self.assertFalse(paths.run_dir(task).exists())
 
-    def test_init_refuses_when_the_guard_is_only_global(self):
+    def test_init_refuses_when_the_guard_is_only_in_the_start_local_settings(self):
         # rule: R-OS-SANDBOX-INIT-REQUIRED
-        task, code, _, err = self.start("on", "global")
+        task, code, _, err = self.start("on", "start_local")
         self.assertEqual(code, 2)
         doc = json.loads(err)
         self.assertEqual(doc["error_code"], "SCHEMA_INVALID")
-        self.assertIn("registered global", doc["message"])
-        self.assertIn("settings.local.json", doc["message"])
+        self.assertIn("registered start_local", doc["message"])
+        self.assertIn("settings.json", doc["message"])
         self.assertFalse(paths.run_dir(task).exists())
 
     def test_init_refuses_when_the_guard_is_absent(self):

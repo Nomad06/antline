@@ -131,16 +131,18 @@ def os_sandbox_problem(inspected, cwd=None):
     doctor.inspect of the lane, `cwd` the lane's start directory (the lane this call is in when
     None)."""
     facts = doctor.os_sandbox_facts(cwd)
-    settings = (inspected.get("local") or {}).get("path") or "the lane's settings.json"
+    settings = doctor.local_settings_path(cwd)
     if facts["state"] != "on":
         return ("this harness reaches GitHub and the OS sandbox is %s for this session (%s): "
                 "start the task's session with ppl lane <link>, or pass --no-os-sandbox to "
                 "record a run without it" % (facts["state"], _why_off(facts, settings)))
     if inspected["registration"] != "local":
+        other = (inspected.get("start_local") or {}).get("path") or \
+            "its start directory's .claude/settings.local.json"
         return ("the guard hook is registered %s, not in the lane's %s alone: ppl lane renders "
-                "it there, and one in the Claude home's settings.json fires in every session. "
-                "Fix that, or pass --no-os-sandbox to record a run without the OS sandbox"
-                % (inspected["registration"], settings))
+                "it there, and the lane session loads %s as well, so a guard there would run "
+                "beside it. Fix that, or pass --no-os-sandbox to record a run without the OS "
+                "sandbox" % (inspected["registration"], settings, other))
     return None
 
 
@@ -277,12 +279,14 @@ def cmd_doctor(args):
     print(json.dumps(result, sort_keys=True))
     lane = result.get("lane")
     if not lane:
-        # outside a lane only the machine is checked
+        # outside a lane only the machine is checked, and a lane named but not confirmed says why
+        if result.get("lane_problem"):
+            print(result["lane_problem"])
         warning = doctor.github_token_warning()
         if warning:
             print("warning: %s" % warning)
         return 0
-    where = str(lanes.start_dir(lane))
+    where = result["start_dir"]
     for line in (result.get("lane_guard_problem"), doctor.matcher_problem(result),
                  doctor.guard_shape_problem(where), doctor.dispatch_warning(where),
                  doctor.usage_warning(where), doctor.hook_location_warning(where)):
@@ -864,7 +868,8 @@ def _review_repo(task_id):
             raise PplError("SCHEMA_INVALID",
                            "%s names no GitHub forge repository (forge_repo is %r), so ppl "
                            "review fetch reaches none: %s"
-                           % (os_sandbox.FACTS_FILE, forge_repo, os_sandbox.RENDERED_BY_LANE))
+                           % (os_sandbox.FACTS_FILE, forge_repo,
+                              os_sandbox.rendered_by_lane(task_id)))
         repo = repo or forge_repo
     return os_sandbox.pinned_repo("forge_repo", repo, task_id)
 
@@ -881,7 +886,8 @@ def cmd_review_fetch(args):
     if args.pr is None or args.pr < 1:
         raise PplError("SCHEMA_INVALID", "review fetch requires --pr <number>")
     repo = _review_repo(task_id)
-    doc = github_fetch.fetch(repo, args.pr)
+    # gh from the same lane's facts as the repository, whatever lane the cwd is in
+    doc = github_fetch.fetch(repo, args.pr, gh=os_sandbox.gh_path(task_id))
     store.checked_run_path(paths.run_dir(task_id))
     store.checked_run_path(target.parent)
     store.checked_run_path(target)
@@ -1072,6 +1078,8 @@ def cmd_harness(args):
     if args.action == "apply":
         result = harness.apply(args.name)
         print("default harness: %s at %s" % (result["active"], result["commit"]))
+        for warning in result["warnings"]:
+            print("warning: %s" % warning)
         unverified = [row for row in models.status() if row["state"] != "verified"]
         if unverified:
             print("warning: models not verified: %s (run ppl models verify)"
@@ -1292,7 +1300,7 @@ def _lessons_review(args):
     else:
         lessons.edit(name, args.target, args.cue, args.lesson)
         print("edited %s" % args.target)
-    print("run ppl harness apply %s to render it" % name)
+    print(lessons.lane_hint(name))
     return 0
 
 

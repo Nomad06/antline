@@ -514,6 +514,13 @@ def _clear_marker(task_id):
         pass
 
 
+def lane_hint(name):
+    """What follows an owner's change to a harness's memory.toml: a lane runs only what is
+    committed in the harness repository, at its origin's default head when it has one."""
+    return ("commit memory.toml in harness %s's repository, and push it when it has an origin: "
+            "the next lane ppl lane starts renders it" % name)
+
+
 def bundle(task_id):
     """`ppl lessons bundle`: the merged run's bundle for ppl-reflector and its path, or None
     when config.toml [lessons] reflect is false. Refused ILLEGAL_TRANSITION unless the run is

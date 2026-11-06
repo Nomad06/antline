@@ -25,7 +25,7 @@ from ppl import config, doctor, forges, lanes, models, paths, setup, trackers
 from ppl.trackers import github_issues
 
 
-# The shape ppl setup claude writes: the interpreter that ran setup, then the hook.
+# The shape ppl lane renders without its --task: the interpreter that ran ppl, then the hook.
 GUARD_COMMAND = "/usr/local/bin/python3.12 /home/dev/antline/hooks/ppl_guard.py"
 
 # A registration that names only the file-editing tools - the matcher a first
@@ -59,18 +59,22 @@ def write_settings(path, guarded=True, other_hooks=True, matchers=(doctor.RECOMM
 
 
 class TestRegistration(unittest.TestCase):
-    """In a lane, the session's own settings are the lane's settings.json."""
+    """In a lane, the session loads two settings sources (R56): the lane's settings.json, its
+    --settings file, and its start directory's .claude/settings.local.json, the local source of
+    its cwd. --setting-sources local keeps the operator's user settings out, so doctor does not
+    read them there."""
 
     def setUp(self):
         self.local_dir = bind_lane_at("DEMO-41")
         self.local_path = self.local_dir / "settings.json"
+        self.other_path = self.local_dir / ".claude" / "settings.local.json"
         self.global_path = doctor.global_settings_path()
-        for p in (self.local_path, self.global_path):
+        for p in (self.local_path, self.other_path, self.global_path):
             if p.exists():
                 p.unlink()
 
     def tearDown(self):
-        for p in (self.local_path, self.global_path):
+        for p in (self.local_path, self.other_path, self.global_path):
             if p.exists():
                 p.unlink()
 
@@ -81,14 +85,25 @@ class TestRegistration(unittest.TestCase):
         write_settings(self.local_path)
         self.assertEqual(doctor.registration(cwd=self.local_dir), "local")
 
-    def test_global_only(self):
-        write_settings(self.global_path)
-        self.assertEqual(doctor.registration(cwd=self.local_dir), "global")
+    def test_the_start_directorys_local_source_only(self):
+        write_settings(self.other_path)
+        self.assertEqual(doctor.registration(cwd=self.local_dir), "start_local")
 
     def test_both(self):
         write_settings(self.local_path)
-        write_settings(self.global_path)
+        write_settings(self.other_path)
         self.assertEqual(doctor.registration(cwd=self.local_dir), "both")
+
+    def test_the_operators_user_settings_are_not_read_in_a_lane(self):
+        # R56: a guard there, or a file that does not parse, does not fire in a lane session
+        write_settings(self.local_path)
+        write_settings(self.global_path)
+        result = doctor.inspect(cwd=self.local_dir)
+        self.assertEqual(result["registration"], "local")
+        self.assertNotIn("global", result)
+        self.global_path.write_text("// my settings\nnot json", encoding="utf-8")
+        self.assertEqual(doctor.registration(cwd=self.local_dir), "local")
+        self.assertEqual(doctor.registered_guard_commands(cwd=self.local_dir), [GUARD_COMMAND])
 
     def test_the_guard_is_recognised_whatever_interpreter_runs_it(self):
         # Matched on the hook script, not the interpreter: an entry written by
@@ -113,13 +128,13 @@ class TestRegistration(unittest.TestCase):
         self.local_path.write_text("// my settings\nnot json", encoding="utf-8")
         self.assertEqual(doctor.registration(cwd=self.local_dir), "unknown")
 
-    def test_malformed_local_file_does_not_hide_a_confirmed_global_yes(self):
+    def test_malformed_local_file_does_not_hide_a_confirmed_start_local_yes(self):
         self.local_path.parent.mkdir(parents=True, exist_ok=True)
         self.local_path.write_text("not json", encoding="utf-8")
-        write_settings(self.global_path)
-        self.assertEqual(doctor.registration(cwd=self.local_dir), "global")
+        write_settings(self.other_path)
+        self.assertEqual(doctor.registration(cwd=self.local_dir), "start_local")
 
-    def test_a_confirmed_local_yes_does_not_rescue_an_unreadable_global_file(self):
+    def test_a_confirmed_local_yes_does_not_rescue_an_unreadable_start_local_file(self):
         # Round 3, Finding 1: isolated=true asserts two things - the hook
         # fires here (a confirmed local yes) AND it does not fire elsewhere
         # (a confirmed global no). A local yes only answers the first half.
@@ -128,7 +143,8 @@ class TestRegistration(unittest.TestCase):
         # contain an armed hook that fires in every session, exactly the
         # thing isolation is supposed to rule out.
         write_settings(self.local_path)
-        self.global_path.write_text("// my settings\nnot json", encoding="utf-8")
+        self.other_path.parent.mkdir(parents=True, exist_ok=True)
+        self.other_path.write_text("// my settings\nnot json", encoding="utf-8")
         self.assertEqual(doctor.registration(cwd=self.local_dir), "unknown")
 
     def test_non_object_json_is_unknown(self):
@@ -150,7 +166,7 @@ class TestRegistration(unittest.TestCase):
         self.assertEqual(result["registration"], "unknown")
         self.assertEqual(result["local"]["state"], "unknown")
         self.assertIn(str(self.local_path), result["local"]["detail"])
-        self.assertEqual(result["global"]["path"], str(self.global_path))
+        self.assertEqual(result["start_local"]["path"], str(self.other_path))
 
     @unittest.skipIf(os.name != "posix" or os.getuid() == 0,
                      "chmod-based unreadable file needs a non-root POSIX user")
@@ -604,11 +620,13 @@ class TestHookRuns(unittest.TestCase):
     def setUp(self):
         self.local_dir = bind_lane_at("DEMO-42")
         self.local_path = self.local_dir / "settings.json"
+        self.other_path = self.local_dir / ".claude" / "settings.local.json"
         self.global_path = doctor.global_settings_path()
-        for p in (self.local_path, self.global_path):
+        for p in (self.local_path, self.other_path, self.global_path):
             if p.exists():
                 p.unlink()
-        self.addCleanup(lambda: self.global_path.exists() and self.global_path.unlink())
+        for p in (self.other_path, self.global_path):
+            self.addCleanup(lambda p=p: p.exists() and p.unlink())
 
     def fake_guard(self, body):
         """A stand-in guard script: GUARD_MARKER matches its file name, `body` decides."""
@@ -653,7 +671,11 @@ class TestHookRuns(unittest.TestCase):
         self.assertIs(result["ok"], False)
         self.assertIn("re.error: unknown extension ?> at position 13", result["problem"])
         self.assertNotIn("second line", result["problem"])
-        self.assertIn("ppl setup claude", result["problem"])
+        # R55: the lane's hooks come from ppl lane, started again from a terminal outside it
+        self.assertIn("ppl lane", result["problem"])
+        self.assertIn("--task DEMO-42", result["problem"])
+        self.assertIn("outside the lane", result["problem"])
+        self.assertNotIn("ppl setup claude", result["problem"])
 
     def test_a_guard_that_exits_zero_but_writes_stderr_reports_false(self):
         # the shape the old-interpreter floor takes: exit 0, one stderr line
@@ -666,7 +688,7 @@ class TestHookRuns(unittest.TestCase):
         self.assertIn("Python 3.9.6 is older than 3.11", result["problem"])
 
     def test_the_remedy_is_named_once_when_the_hook_already_names_it(self):
-        # The interpreter floor's own line already says to run ppl setup claude.
+        # The interpreter floor's own line already says to start the lane with ppl lane.
         import io
         hooks = str(fixtures.SOURCE / "hooks")
         if hooks not in sys.path:
@@ -681,7 +703,7 @@ class TestHookRuns(unittest.TestCase):
         result = doctor.hook_runs(cwd=self.local_dir)
         self.assertIs(result["ok"], False)
         self.assertIn("Python 3.9.6", result["problem"])
-        self.assertEqual(result["problem"].count("ppl setup claude"), 1, result["problem"])
+        self.assertEqual(result["problem"].count("ppl lane"), 1, result["problem"])
 
     def test_a_guard_that_exits_nonzero_silently_reports_false(self):
         command, _ = self.fake_guard("import sys\nsys.exit(3)\n")
@@ -721,14 +743,17 @@ class TestHookRuns(unittest.TestCase):
         self.assertIs(result["ok"], False)
         self.assertIn("did not finish", result["problem"])
 
-    def test_every_registered_guard_command_is_run(self):
+    def test_every_guard_command_the_lane_loads_is_run_and_none_it_does_not(self):
         good, _ = self.fake_guard("import sys\nsys.stdin.read()\n")
-        bad, _ = self.fake_guard("import sys\nsys.stderr.write('broken global\\n')\nsys.exit(1)\n")
+        bad, _ = self.fake_guard("import sys\nsys.stderr.write('broken local\\n')\nsys.exit(1)\n")
+        user, _ = self.fake_guard("import sys\nsys.stderr.write('user hook\\n')\nsys.exit(1)\n")
         write_settings(self.local_path, command=good)
-        write_settings(self.global_path, command=bad)
+        write_settings(self.global_path, command=user)
+        self.assertEqual(doctor.hook_runs(cwd=self.local_dir), {"ok": True, "problem": None})
+        write_settings(self.other_path, command=bad)
         result = doctor.hook_runs(cwd=self.local_dir)
         self.assertIs(result["ok"], False)
-        self.assertIn("broken global", result["problem"])
+        self.assertIn("broken local", result["problem"])
 
     def test_the_lanes_guard_with_its_task_runs_the_real_guard_clean(self):
         command = setup.hook_entries(fixtures.SOURCE, "DEMO-42")["PreToolUse"]["hooks"][0]["command"]
@@ -792,7 +817,7 @@ class TestHookShape(unittest.TestCase):
         self.assertIn("type 'prompt'", self.local()["hook_shape"])
         problem = doctor.guard_shape_problem(cwd=self.local_dir)
         self.assertIn(str(self.local_path), problem)
-        self.assertIn("ppl setup claude", problem)
+        self.assertIn("ppl lane", problem)
 
     def test_a_guard_entry_without_a_timeout_is_reported(self):
         self.write(guard={"timeout": None}, dispatch={})
@@ -824,11 +849,13 @@ class TestHookShape(unittest.TestCase):
                           % shlex.quote(sys.executable)}, dispatch={})
         self.assertIn("/nonexistent/hooks/ppl_guard.py", self.local()["hook_shape"])
 
-    def test_a_guard_registered_at_the_old_hooks_path_names_ppl_setup_claude(self):
+    def test_a_guard_registered_at_the_old_hooks_path_names_ppl_lane(self):
         old = os.path.join(tmphome.mkdtemp(prefix="oldroot-"), "hooks", "ppl_guard.py")
         self.write(guard={"command": "%s %s" % (shlex.quote(sys.executable), shlex.quote(old))},
                    dispatch={})
-        self.assertIn("ppl setup claude", doctor.guard_shape_problem(cwd=self.local_dir))
+        problem = doctor.guard_shape_problem(cwd=self.local_dir)
+        self.assertIn("ppl lane", problem)
+        self.assertNotIn("ppl setup claude", problem)
 
     def test_a_guard_run_as_a_bare_script_is_reported(self):
         self.write(guard={"command": str(fixtures.SOURCE / "hooks" / "ppl_guard.py")}, dispatch={})
@@ -854,7 +881,7 @@ class TestHookShape(unittest.TestCase):
         self.assertEqual((local["hook_shape"], local["dispatch_hook"]), ("ok", "missing"))
         warning = doctor.dispatch_warning(cwd=self.local_dir)
         self.assertIn("ppl_dispatch.py", warning)
-        self.assertIn("ppl setup claude", warning)
+        self.assertIn("ppl lane", warning)
 
     def test_a_dispatch_hook_in_the_global_file_counts_for_a_local_guard(self):
         self.write(guard={})
@@ -885,15 +912,16 @@ class TestHookShape(unittest.TestCase):
 
     def test_the_report_says_whether_the_usage_hook_is_registered(self):
         start = bind_lane_at("DEMO-43")
+        other = start / ".claude" / "settings.local.json"
         self.write(guard={}, dispatch={}, path=start / "settings.json")
-        self.write(guard={}, dispatch={}, usage={}, path=self.global_path)
+        self.write(guard={}, dispatch={}, usage={}, path=other)
         with mock.patch.object(doctor, "hook_runs", return_value={"ok": True, "problem": None}):
             result = doctor.report(cwd=str(start))
         self.assertEqual(result["local"]["usage_hook"], "missing")
-        self.assertEqual(result["global"]["usage_hook"], "registered")
-        self.global_path.unlink()
+        self.assertEqual(result["start_local"]["usage_hook"], "registered")
+        other.unlink()
         self.assertEqual(doctor.inspect(cwd=str(start))["local"]["usage_hook"], "missing")
-        self.assertEqual(doctor.inspect(cwd=str(start))["global"]["usage_hook"], "missing")
+        self.assertEqual(doctor.inspect(cwd=str(start))["start_local"]["usage_hook"], "missing")
 
     def test_usage_warning_when_the_guard_is_registered_without_it(self):
         self.write(guard={}, dispatch={})
@@ -901,7 +929,7 @@ class TestHookShape(unittest.TestCase):
         self.assertIn("ppl_usage.py", warning)
         self.assertIn("SubagentStop", warning)
         self.assertIn("tokens are not recorded", warning)
-        self.assertIn("ppl setup claude", warning)
+        self.assertIn("ppl lane", warning)
         self.write(guard={}, dispatch={}, usage={"type": "prompt"})
         self.assertIn("type 'prompt'", doctor.usage_warning(cwd=self.local_dir))
         self.assertIn("ppl_usage.py", self.local()["hook_shape"])
@@ -924,7 +952,8 @@ class TestHookShape(unittest.TestCase):
         self.assertIn(str(elsewhere), warning)
         # the warning names the resolved directory, a symlinked checkout included
         self.assertIn(str((paths.root() / "hooks").resolve()), warning)
-        self.assertIn("ppl setup claude", warning)
+        self.assertIn("ppl lane", warning)
+        self.assertNotIn("ppl setup claude", warning)
         self.assertNotIn("ppl_dispatch.py", warning)
 
     def test_a_symlink_loop_in_a_hook_path_does_not_crash_the_warning(self):
@@ -961,7 +990,7 @@ class TestHookShape(unittest.TestCase):
             result = doctor.report(cwd=str(start))
         self.assertEqual(result["local"]["dispatch_hook"], "missing")
         self.assertIn("no timeout", result["local"]["hook_shape"])
-        self.assertEqual(result["global"]["dispatch_hook"], "missing")
+        self.assertEqual(result["start_local"]["dispatch_hook"], "missing")
 
 
 class TestMcpServersWarning(unittest.TestCase):
@@ -1083,6 +1112,42 @@ class TestReportOutsideALane(unittest.TestCase):
         self.assertIsNone(json.loads(out.getvalue().splitlines()[0])["lane"])
         self.assertNotIn("ppl_guard", out.getvalue())
         self.assertFalse(marker.exists())
+
+    def test_a_lane_doctor_cannot_confirm_is_named_with_its_reason(self):
+        # minor 1: PPL_TASK names the lane, and the registry it would be confirmed in is broken
+        lanes.registry_path().parent.mkdir(parents=True, exist_ok=True)
+        lanes.registry_path().write_text("not json", encoding="utf-8")
+        env = {"PATH": "/usr/bin", "PPL_TASK": "DEMO-48"}
+        result = doctor.report(cwd=str(self.cwd), env=env, probe=lambda: "unknown")
+        self.assertIsNone(result["lane"])
+        self.assertIn("lanes.json", result["lane_problem"])
+        lanes.registry_path().write_text('{"version": 1, "lanes": []}', encoding="utf-8")
+        result = doctor.report(cwd=str(self.cwd), env=env, probe=lambda: "unknown")
+        self.assertIn("DEMO-48 is not registered", result["lane_problem"])
+        self.assertIn("ppl lane resume DEMO-48", result["lane_problem"])
+        result = doctor.report(cwd=str(self.cwd), env={"PATH": "/usr/bin"},
+                               probe=lambda: "unknown")
+        self.assertNotIn("lane_problem", result)
+        from ppl import cli
+        lanes.registry_path().write_text("not json", encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"PPL_TASK": "DEMO-48"}), \
+                redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["doctor"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn("lanes.json", out.getvalue().splitlines()[1])
+
+
+class TestLaneGuardProblem(unittest.TestCase):
+    """The lane-guard refusal names the lane's task and the owner's step outside the lane."""
+
+    def test_the_remedy_names_the_task_and_an_owner_step_outside_the_lane(self):
+        start = bind_lane_at("DEMO-49")
+        problem = doctor.lane_guard_problem(lanes.entry("DEMO-49"))
+        self.assertIn(str(start / "settings.json"), problem)
+        self.assertIn("ppl destroy --scope local --task DEMO-49", problem)
+        self.assertIn("outside the lane", problem)
+        self.assertNotIn("<task>", problem)
 
 
 class TestReportFindsItsRun(unittest.TestCase):
@@ -1214,9 +1279,13 @@ class TestForeignBashHooks(unittest.TestCase):
     def test_the_report_and_the_warning_name_them(self):
         self.write(doctor.global_settings_path(), self.pre_tool_use(("Bash", "sqz compress")))
         start = bind_lane_at("GH-46")
+        # R56: in a lane only the sources its session loads are read, the user settings not
+        self.write(start / ".claude" / "settings.local.json",
+                   self.pre_tool_use(("Bash", "rtk rewrite")))
+        self.write(start / ".claude" / "settings.json", self.pre_tool_use(("Bash", "proj hook")))
         result = doctor.report(cwd=str(start), env={"PATH": "/usr/bin"},
                                probe=lambda: "unknown")
-        self.assertEqual([item["hook"] for item in result["foreign_bash_hooks"]], ["sqz"])
+        self.assertEqual([item["hook"] for item in result["foreign_bash_hooks"]], ["rtk"])
         warning = doctor.foreign_bash_hooks_warning(str(self.cwd))
         self.assertIn("sqz", warning)
         self.assertIn("remove or disable", warning)
@@ -1224,10 +1293,12 @@ class TestForeignBashHooks(unittest.TestCase):
 
 
 class TestOsSandboxFacts(unittest.TestCase):
-    BLOCK = {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": True}
-
     """In a lane: the profile is the sandbox block of its settings.json, which must equal the
-    written_sandbox of its os_sandbox.json."""
+    written_sandbox of its os_sandbox.json, and what may undo it is read from the sources the
+    lane session loads (R56): that file, its start directory's .claude/settings.local.json and
+    the managed settings."""
+
+    BLOCK = {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": True}
 
     def setUp(self):
         self.home = Path(tmphome.mkdtemp(prefix="pplhome-"))
@@ -1285,9 +1356,9 @@ class TestOsSandboxFacts(unittest.TestCase):
         with mock.patch.object(doctor, "_native_windows", lambda: True):
             self.assertEqual(self.facts()["state"], "unavailable")
 
-    def test_excluded_commands_in_user_settings_undo_the_boundary(self):
+    def test_excluded_commands_in_the_start_directorys_local_settings_undo_the_boundary(self):
         self.set_profile()
-        path = doctor.global_settings_path()
+        path = self.cwd / ".claude" / "settings.local.json"
         self.write_settings(path, {"sandbox": {"excludedCommands": ["docker *"]}})
         facts = self.facts()
         self.assertEqual(facts["state"], "off")
@@ -1295,19 +1366,29 @@ class TestOsSandboxFacts(unittest.TestCase):
         self.assertIn(str(path), facts["undoing"][0])
         self.assertIn("sandbox.excludedCommands", facts["undoing"][0])
 
-    def test_project_local_and_managed_settings_are_scanned_too(self):
+    def test_the_start_local_and_managed_settings_are_scanned_too(self):
         self.set_profile()
-        self.write_settings(self.cwd / ".claude" / "settings.json",
+        self.write_settings(self.cwd / ".claude" / "settings.local.json",
                             {"sandbox": {"enabled": False}})
         self.write_settings(self.managed, {"sandbox": {"excludedCommands": ["x"]}})
         undoing = " ".join(self.facts()["undoing"])
-        self.assertIn(str(self.cwd / ".claude" / "settings.json"), undoing)
+        self.assertIn(str(self.cwd / ".claude" / "settings.local.json"), undoing)
         self.assertIn("sandbox.enabled", undoing)
         self.assertIn(str(self.managed), undoing)
 
-    def test_allow_unsandboxed_false_is_reported(self):
+    def test_user_and_project_settings_a_lane_does_not_load_are_not_read(self):
+        # R56: --setting-sources local keeps both out of the lane session
         self.set_profile()
         self.write_settings(doctor.global_settings_path(),
+                            {"sandbox": {"excludedCommands": ["docker *"]}})
+        self.write_settings(self.cwd / ".claude" / "settings.json",
+                            {"sandbox": {"enabled": False}})
+        facts = self.facts()
+        self.assertEqual((facts["state"], facts["undoing"]), ("on", []))
+
+    def test_allow_unsandboxed_false_is_reported(self):
+        self.set_profile()
+        self.write_settings(self.cwd / ".claude" / "settings.local.json",
                             {"sandbox": {"allowUnsandboxedCommands": False}})
         facts = self.facts()
         self.assertIn("sandbox.allowUnsandboxedCommands", facts["undoing"][0])
@@ -1315,10 +1396,10 @@ class TestOsSandboxFacts(unittest.TestCase):
 
     def test_another_sources_write_grant_over_a_protected_path_is_undoing(self):
         self.set_profile()
-        self.write_settings(doctor.global_settings_path(),
+        self.write_settings(self.cwd / ".claude" / "settings.local.json",
                             {"sandbox": {"filesystem": {"allowWrite": [str(self.claude),
                                                                        "/var/cache/x"]}}})
-        self.write_settings(self.cwd / ".claude" / "settings.json",
+        self.write_settings(self.managed,
                             {"permissions": {"additionalDirectories": [str(self.home)]}})
         facts = self.facts()
         undoing = " ".join(facts["undoing"])
@@ -1336,7 +1417,7 @@ class TestOsSandboxFacts(unittest.TestCase):
 
     def test_unix_socket_allowances_are_undoing(self):
         self.set_profile()
-        self.write_settings(doctor.global_settings_path(), {"sandbox": {"network": {
+        self.write_settings(self.cwd / ".claude" / "settings.local.json", {"sandbox": {"network": {
             "allowUnixSockets": ["/var/run/docker.sock"]}}})
         self.write_settings(self.managed, {"sandbox": {"network": {"allowAllUnixSockets": True}}})
         undoing = " ".join(self.facts()["undoing"])

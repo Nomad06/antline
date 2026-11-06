@@ -16,16 +16,17 @@ import stringprep
 import unicodedata
 import urllib.parse
 
-from . import boundary, escape_git, escape_paths, paths, store
+from . import boundary, escape_git, escape_paths, lanes, paths, store
 # protected_paths is ppl.escape's as well, the name the brief and the rule rows give it.
 from .escape_paths import EDIT_TOOLS, FACTS_FILE, PIN_NAMES, protected_paths  # noqa: F401
 
 FLAG = "dangerouslyDisableSandbox"
-# Where the guard facts a lane's calls are checked against come from: ppl lane renders them into
-# the lane's start directory (escape_paths.FACTS_FILE there) when the lane starts.
-APPLY = ("ppl lane renders the guard facts into the lane's start directory PPL_HOME/lanes/<task> "
-         "when it starts the lane: destroy the lane with ppl destroy --scope local --task <task> "
-         "and start it again with ppl lane <link>")
+def facts_hint(task_id=None):
+    """Where the guard facts a lane's calls are checked against come from: ppl lane renders
+    them into the lane's start directory (escape_paths.FACTS_FILE there) when the lane starts,
+    so rendering them again is the owner's step outside the lane."""
+    return ("ppl lane renders the guard facts into the lane's start directory PPL_HOME/lanes/%s "
+            "when it starts the lane: %s" % (task_id or "<task>", lanes.restart_hint(task_id)))
 
 # What the shell reads as more than one plain word, outside single quotes.
 _REFUSED = frozenset(";&|<>()`{}*?[$")
@@ -334,7 +335,7 @@ def decide(payload, facts_file, state):
     except ValueError as err:
         return ("OWNER_DECISION",
                 "the guard's OS sandbox facts are unusable (%s), so a command outside the OS "
-                "sandbox cannot be checked: %s" % (err, APPLY))
+                "sandbox cannot be checked: %s" % (err, facts_hint(task_id)))
     if facts is None and not task_id:
         return None
     if facts is None:
@@ -345,7 +346,7 @@ def decide(payload, facts_file, state):
                     "harness gets its profile and pins from `ppl lane`" % task_id)
         return ("OWNER_DECISION",
                 "%s is missing while run %s is active, so no gh, git or ppl is pinned for a "
-                "command outside the OS sandbox: %s" % (FACTS_FILE, task_id, APPLY))
+                "command outside the OS sandbox: %s" % (FACTS_FILE, task_id, facts_hint(task_id)))
     agent_id = payload.get("agent_id")
     if agent is not None or agent_id is not None:
         return ("BOUNDARY_VIOLATION",
@@ -463,8 +464,10 @@ def _task_id(run_state):
 def orchestrator_shape(argv, cwd, facts, state):
     """Why the orchestrator may not run `argv` outside the OS sandbox, or None. `state` is
     the active run's state, or None with no run."""
+    task_id = (state or {}).get("task_id") if isinstance(state, dict) else None
     if facts is None:
-        return "%s is missing, so no gh, git or ppl is pinned: %s" % (FACTS_FILE, APPLY)
+        return "%s is missing, so no gh, git or ppl is pinned: %s" % (FACTS_FILE,
+                                                                     facts_hint(task_id))
     if not argv:
         return "the command is empty"
     for name in PIN_NAMES:
@@ -473,7 +476,8 @@ def orchestrator_shape(argv, cwd, facts, state):
             continue
         if os.path.realpath(pin["path"]) != pin["realpath"]:
             return ("the pinned %s %s no longer resolves to %s, the binary the profile protects: "
-                    "%s" % (name, pin["path"], pin["realpath"], APPLY))
+                    "%s" % (name, pin["path"], pin["realpath"],
+                            facts_hint(facts.get("task") or task_id)))
         if name == "git":
             # -C names the repository, so the cwd plays no part
             return escape_git.git_shape(argv, facts, state)

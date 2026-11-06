@@ -27,7 +27,7 @@ temporary (no labels filed yet) or a gap (nothing records it at all):
   and the reason names the model [R-METRIC-COST-NEEDS-PRICES].
 - **tokens per accepted task** and **tokens by role** are the mean of the four
   token counts per accepted run, and the counts summed per role over those
-  runs. They need no prices but do need the usage hook (`ppl setup claude`),
+  runs. They need no prices but do need the usage hook (a lane's, `ppl lane`),
   so they are undefined until an accepted run has recorded usage
   [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED].
 - **human minutes** is undefined always: it IS buildable (a `--minutes` flag on `ppl label`, or a
@@ -350,8 +350,8 @@ def _usage_metrics(run_records, producer_key):
     usages = [u for u in (usage.run_usage(directory) for _, directory in accepted)
               if _run_models(u)]
     if not usages:
-        why = ("%d accepted task(s) but no usage recorded - install the usage hook "
-               "with `ppl setup claude`" % len(accepted))
+        why = ("%d accepted task(s) but no usage recorded - the usage hook of a lane `ppl "
+               "lane` starts records it" % len(accepted))
         return tuple(_metric(None, why) for _ in range(3))
     try:
         table, table_error = usage.prices(), None

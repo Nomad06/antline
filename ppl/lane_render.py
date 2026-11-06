@@ -142,7 +142,7 @@ def _settings(doc, task_id, start, worktree):
 def render(doc, task_id, lane, start, worktree, routing_config, mcp_source):
     """Write the lane's session files under `start` and return their paths:
     {"settings", "agents_json" (the text), "plugin", "mcp", "routing", "facts"}; facts is None
-    when the harness needs no OS sandbox, which is when `harness apply` writes none either.
+    when the harness needs no OS sandbox.
     Everything is built before anything is written, so a refusal leaves the directory as it was."""
     start = Path(start)
     paths.check_task_id(task_id)

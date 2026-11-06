@@ -19,7 +19,7 @@ judgement. `ppl` decides them; you request them and act on the exit code.
   call hoping for a different answer; fix what the message says is wrong, or escalate.
 - **1** - an unexpected crash, not a routed error. Do not retry in a loop. If it recurs on a
   retry, treat it as `OWNER_DECISION` and park.
-- `MODELS_UNVERIFIED`, `SETUP_INCOMPLETE` and `HARNESS_NOT_APPLIED` are installation faults,
+- `MODELS_UNVERIFIED` and `SETUP_INCOMPLETE` are installation faults,
   not run blockers - stop, print the message to the operator, do not park or escalate a run
   that does not exist yet.
 

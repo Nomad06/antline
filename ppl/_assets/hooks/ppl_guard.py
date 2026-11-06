@@ -964,9 +964,13 @@ def protected_edit_denial(payload, argv=()):
     try:
         facts = escape.load_facts(facts_file(argv))
     except ValueError as err:
+        try:
+            task = lanes.hook_task(argv)
+        except Exception:
+            task = None
         return ("OWNER_DECISION",
                 "the guard's OS sandbox facts are unusable (%s), so an edit tool's target cannot "
-                "be checked against the write scope: %s" % (err, escape.APPLY))
+                "be checked against the write scope: %s" % (err, escape.facts_hint(task)))
     reason = escape.edit_denial(payload, home, facts, _names_a_lane(argv))
     return ("BOUNDARY_VIOLATION", reason) if reason else None
 

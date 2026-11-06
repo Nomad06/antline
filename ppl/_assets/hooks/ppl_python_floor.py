@@ -37,11 +37,13 @@ def refuse_old_python(version_info, hook, event, stdin, stdout, stderr):
             "permissionDecision": "deny",
             "permissionDecisionReason":
                 "BOUNDARY_VIOLATION %s runs on Python %s and needs %s or newer, so the role "
-                "call is refused. Run `ppl setup claude` under Python %s or newer to pin "
-                "that interpreter in the hook entries." % (hook, found, floor, floor)}}))
+                "call is refused. The lane's hook entries pin the interpreter that ran `ppl "
+                "lane`: the owner starts the lane under Python %s or newer." % (hook, found,
+                                                                               floor, floor)}}))
     try:
-        stderr.write("%s: Python %s is older than the %s antline needs, run `ppl setup claude` "
-                     "under Python %s or newer\n" % (hook, found, floor, floor))
+        stderr.write("%s: Python %s is older than the %s antline needs: start the lane with "
+                     "`ppl lane` under Python %s or newer, which pins that interpreter in its "
+                     "hook entries\n" % (hook, found, floor, floor))
     except Exception:
         pass
     return True

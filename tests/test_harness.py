@@ -1279,7 +1279,8 @@ class TestApplySetsTheDefault(HarnessTestCase):
         config.update("harness", {"memory_sha256": "0" * 64})
         before = self.files()
         result = harness.apply("mine")
-        self.assertEqual(result, {"active": "mine", "commit": self.head()})
+        self.assertEqual(result, {"active": "mine", "commit": self.head(),
+                                  "warnings": harness.verify("mine", "mine")["warnings"]})
         self.assertEqual(config.active_harness(), "mine")
         self.assertEqual(config.load()["harness"], {"active": "mine"})
         self.assertEqual(self.files(), before)
@@ -1310,6 +1311,22 @@ class TestApplySetsTheDefault(HarnessTestCase):
             harness.apply("mine")
         self.assertEqual(caught.exception.code, "HARNESS_INVALID")
         self.assertIsNone(config.active_harness())
+
+    def test_apply_returns_the_warnings_the_check_finds(self):
+        path = self.target / "harness.toml"
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            "skills = []", 'skills = ["team-kb"]', 1), encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.target), "-c", "user.name=t", "-c",
+                        "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "-am",
+                        "kb"], check=True, capture_output=True)
+        with mock.patch.dict(os.environ, {"PPL_CLAUDE_HOME": tmphome.mkdtemp(prefix="pplc-")}):
+            result = harness.apply("mine")
+            code, out, err = call("harness", "apply", "mine")
+        team_kb = [warning for warning in result["warnings"] if "team-kb" in warning]
+        self.assertEqual(len(team_kb), 1, result)
+        self.assertEqual(code, 0, err)
+        for warning in result["warnings"]:
+            self.assertIn("warning: %s" % warning, out)
 
     def test_the_cli_prints_the_default_and_its_commit(self):
         with mock.patch.object(models, "claude_version", lambda binary="claude": "9.9.9"):

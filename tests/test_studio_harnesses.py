@@ -137,7 +137,8 @@ class TestHarnessApi(HarnessApiTestCase):
         self.assertEqual(job["state"], "done", job)
         head = subprocess.run(["git", "-C", str(paths.harness_dir("demo")), "rev-parse", "HEAD"],
                               capture_output=True, text=True, check=True).stdout.strip()
-        self.assertEqual(job["result"], {"active": "demo", "commit": head})
+        self.assertEqual(job["result"], {"active": "demo", "commit": head,
+                                         "warnings": harness.verify("demo", "demo")["warnings"]})
         self.assertEqual(self.rendered_files(), [])
 
     def test_adding_from_a_directory_runs_as_a_job(self):

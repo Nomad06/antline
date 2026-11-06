@@ -842,7 +842,8 @@ class TestOwnerReview(LessonsTestCase):
     memory.toml."""
 
     KEY = "harness:example-maven:memory.toml"
-    APPLY = "run ppl harness apply example-maven to render it"
+    APPLY = ("commit memory.toml in harness example-maven's repository, and push it when it "
+             "has an origin: the next lane ppl lane starts renders it")
 
     def setUp(self):
         super().setUp()

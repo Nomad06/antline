@@ -330,6 +330,10 @@ class TestFailClosed(OsSandboxCase):
                     result = self.decide(pr_create(), agent=agent, cwd=cwd)
                     self.assertIn("OWNER_DECISION", self.deny_reason(result))
                     self.assertIn("ppl lane renders the guard facts", self.deny_reason(result))
+                    # R55: an owner step outside the lane, for this lane's own task
+                    self.assertIn("--task %s" % TASK, self.deny_reason(result))
+                    self.assertIn("outside the lane", self.deny_reason(result))
+                    self.assertNotIn("<task>", self.deny_reason(result))
 
     def test_missing_facts_on_a_run_without_the_profile_name_the_real_fix(self):
         # rule: R-OS-SANDBOX-FAIL-CLOSED

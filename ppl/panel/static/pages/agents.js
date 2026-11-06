@@ -191,7 +191,7 @@ function LessonsSection() {
   });
   return html`<section>
     <h2>Lessons</h2>
-    <p class="muted">Finished runs propose lessons. A lesson reaches the agents only when you accept it here and then apply.</p>
+    <p class="muted">Finished runs propose lessons. A lesson reaches the agents of the next lane once you accept it here and commit memory.toml in the harness repository.</p>
     ${message ? html`<${Notice} kind="ok">${message}<//>` : null}
     ${problem ? html`<${Notice} kind="error">${problem}<//>` : null}
     ${(data.skipped || []).map((item) => html`<${Notice} key=${item.path} kind="warn">Skipped proposals file ${item.path}: ${item.reason}<//>`)}

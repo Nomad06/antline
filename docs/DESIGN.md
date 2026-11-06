@@ -2772,7 +2772,6 @@ Free text does not route. Closed dictionary:
 | `EXTERNAL_BLOCKED` | forge/tracker/CI unavailable or a dependency is blocked | park, retry on next tick |
 | `SETUP_INCOMPLETE` | `ppl setup` has not recorded a step `ppl init` needs [R-INIT-SETUP-COMPLETE] | run the named `ppl setup <step>`, no run exists yet |
 | `MODELS_UNVERIFIED` | a model the run would route to is unverified or stale [R-INIT-MODELS-VERIFIED] | `ppl models verify`, or `--skip-model-check` |
-| `HARNESS_NOT_APPLIED` | `ppl routing apply` names no harness and none is the default | `ppl harness apply <name>` |
 | `HARNESS_INVALID` | a harness file fails validation | fix it, then `ppl harness validate <name>` |
 | `TIMED_OUT` | no `ppl` activity was recorded since the run's inactivity deadline (6.9) | `ppl recover`, inspect the stuck attempt, then resume or re-brief |
 | `VERIFICATION_UNAVAILABLE` | `ppl verdict record` parks the run [R-VERIFICATION-UNAVAILABLE-PARK]: the second consecutive INCONCLUSIVE/ERROR/CANCELLED/TIMEOUT verdict on the same `candidate_sha` (6.10) | inspect why the verifier keeps failing to reach a result on this sha, never just redispatch a third time |

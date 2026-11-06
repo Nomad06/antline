@@ -38,6 +38,7 @@ import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from . import lanes
 from .errors import PplError
 
 GUARD_MARKER = "ppl_guard.py"
@@ -81,7 +82,6 @@ def _lane_at(cwd=None):
     start directory or worktree holds it; without, the lane a ppl call is in, resolved as
     cli.resolve_task resolves its run (PPL_TASK, then the process cwd). A registry that cannot
     be read is no lane here: ppl init and ppl lane refuse it on their own."""
-    from . import lanes
     try:
         if cwd is not None:
             return lanes.for_path(cwd)
@@ -111,6 +111,29 @@ def session_dir(cwd=None):
     if entry is not None:
         return Path(str(entry.get("start_dir")))
     return Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd())
+
+
+def _sides(cwd=None):
+    """[(name, path)] of the two settings files a guard registration is read from. In a lane,
+    the two sources its session loads (R56): its settings.json ("local") and its start
+    directory's .claude/settings.local.json ("start_local"), the local source of its cwd, since
+    --setting-sources local keeps the Claude home's settings.json and a project settings.json
+    out. Elsewhere, the directory's .claude/settings.local.json ("local") and the Claude home's
+    settings.json ("global")."""
+    entry = _lane_at(cwd)
+    if entry is not None:
+        start = Path(str(entry.get("start_dir")))
+        return [("local", lane_settings_path(entry)),
+                ("start_local", start / ".claude" / "settings.local.json")]
+    return [("local", local_settings_path(cwd)), ("global", global_settings_path())]
+
+
+def hook_remedy(cwd=None):
+    """How the hook entries of the session are written again: in a lane ppl lane renders them,
+    pinned to the interpreter that runs it, so the owner starts the lane again outside it."""
+    entry = _lane_at(cwd)
+    return ("ppl lane renders the hook entries, pinned to the interpreter that runs it (Python "
+            "3.11 or newer): %s" % lanes.restart_hint(entry.get("task") if entry else None))
 
 
 def _guard_matchers(doc):
@@ -144,11 +167,9 @@ def _has_guard(doc):
 # `ppl doctor` runs each registered guard command once on a payload the cage
 # allows and that writes nothing: an unroled Read of /dev/null.
 HOOK_RUN_TIMEOUT_SECONDS = 10
-HOOK_RUN_REMEDY = "ppl setup claude"
-# What a lane whose settings.json does not register its own guard is told.
-LANE_SETTINGS_REMEDY = ("ppl lane renders it with every hook ending in --task <task>: destroy the "
-                        "lane with ppl destroy --scope local --task <task> and start it again "
-                        "with ppl lane <link>")
+# The command a hook remedy names, also in the interpreter floor's own line, so a problem that
+# already names it is not told it twice.
+HOOK_RUN_REMEDY = "ppl lane"
 
 
 def _guard_commands(doc):
@@ -166,7 +187,6 @@ def _guard_commands(doc):
 
 def _command_task(command):
     """The task a guard command names after its script as `--task <id>`, else None."""
-    from . import lanes
     try:
         words = shlex.split(command)
     except ValueError:
@@ -186,28 +206,30 @@ def lane_guard_problem(entry):
     with: a run starts only under its own lane's guard."""
     task = entry.get("task")
     path = lane_settings_path(entry)
+    remedy = ("ppl lane renders it with every hook ending in --task %s: %s"
+              % (task, lanes.restart_hint(task)))
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return ("lane %s's %s cannot be read (%s), so the guard of its session cannot be "
-                "confirmed: %s" % (task, path, exc, LANE_SETTINGS_REMEDY))
+                "confirmed: %s" % (task, path, exc, remedy))
     commands = _guard_commands(doc)
     if not commands:
         return ("lane %s's %s registers no guard hook (%s), so its session would run unguarded: "
-                "%s" % (task, path, GUARD_MARKER, LANE_SETTINGS_REMEDY))
+                "%s" % (task, path, GUARD_MARKER, remedy))
     for command in commands:
         if _command_task(command) != task:
             return ("lane %s's %s registers the guard hook `%s`, whose command line does not end "
                     "in --task %s, so it does not bind its calls to this run: %s"
-                    % (task, path, command, task, LANE_SETTINGS_REMEDY))
+                    % (task, path, command, task, remedy))
     return None
 
 
 def registered_guard_commands(cwd=None):
-    """Every guard command in the local and the global settings file, each once.
+    """Every guard command in the two settings files of the session (_sides), each once.
     A file that cannot be read or parsed contributes none, `inspect` reports it."""
     commands = []
-    for path in (local_settings_path(cwd), global_settings_path()):
+    for _, path in _sides(cwd):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -268,8 +290,7 @@ def hook_runs(cwd=None, workspace=None):
             message = "the registered guard hook `%s` %s" % (command, problem.rstrip("."))
             # The interpreter floor's own line already names the remedy.
             if HOOK_RUN_REMEDY not in problem:
-                message += ". Run `%s` to register it with the interpreter that runs ppl" \
-                    % HOOK_RUN_REMEDY
+                message += ". %s" % hook_remedy(cwd)
             return {"ok": False, "problem": message + "."}
     return {"ok": True, "problem": None}
 
@@ -411,10 +432,10 @@ def _command_problems(command, marker):
 
 
 def _readable_settings(cwd):
-    """(path, parsed document) of each settings file that exists and parses
-    into an object. `inspect` reports the others."""
+    """(path, parsed document) of each of the session's two settings files (_sides) that
+    exists and parses into an object. `inspect` reports the others."""
     found = []
-    for path in (local_settings_path(cwd), global_settings_path()):
+    for _, path in _sides(cwd):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -433,9 +454,8 @@ def guard_shape_problem(cwd=None):
                 for marker, text in _shape_problems(doc, path) if marker == GUARD_MARKER]
     if not problems:
         return None
-    return ("%s. Run `ppl setup claude` to write the hook entries again (README.md \"Hooks\"), "
-            "and `ppl doctor`, which runs the hook and reports an interpreter older than Python "
-            "3.11." % "; ".join(problems))
+    return ("%s. %s. `ppl doctor` runs the hook and reports an interpreter older than Python "
+            "3.11." % ("; ".join(problems), hook_remedy(cwd)))
 
 
 def _hook_warning(cwd, event, marker, name, consequence):
@@ -449,11 +469,10 @@ def _hook_warning(cwd, event, marker, name, consequence):
                 for found, text in _shape_problems(doc, path) if found == marker]
     if not any(_hooks_of(doc, event, marker) for _, doc in settings):
         problems.append("the %s %s hook (%s) is registered in neither %s nor %s"
-                        % (event, name, marker, local_settings_path(cwd), global_settings_path()))
+                        % ((event, name, marker) + tuple(path for _, path in _sides(cwd))))
     if not problems:
         return None
-    return ("%s. %s: run `ppl setup claude` to write the hook entries again."
-            % ("; ".join(problems), consequence))
+    return ("%s. %s. %s." % ("; ".join(problems), consequence, hook_remedy(cwd)))
 
 
 def dispatch_warning(cwd=None):
@@ -508,8 +527,8 @@ def hook_location_warning(cwd=None):
                         found.append("%s: the %s hook runs %s" % (path, marker, script))
     if not found:
         return None
-    return ("%s, not the hook of this install under %s. Run `ppl setup claude` to point the "
-            "entries at this install's hooks." % ("; ".join(found), hooks_dir))
+    return ("%s, not the hook of this install under %s. %s." % ("; ".join(found), hooks_dir,
+                                                                hook_remedy(cwd)))
 
 
 def matcher_covers(matcher, tool_name):
@@ -639,29 +658,33 @@ def inspect(cwd=None):
 
     `matcher` is the coverage verdict over the confirmed registrations (see
     `_matcher_verdict`), and each side carries the `uncovered` names behind it.
+
+    In a lane the second side is not the Claude home's settings.json, which the lane session
+    does not load, but its start directory's .claude/settings.local.json, which it does
+    (_sides, R56): the result then carries `start_local` in place of `global`, and a
+    registration only there reads "start_local".
     """
-    local_path = local_settings_path(cwd)
-    global_path = global_settings_path()
-    local = _location(local_path)
-    global_ = _location(global_path)
-    local_state, global_state = local["state"], global_["state"]
-    if global_state == "unknown":
+    (own_name, own_path), (other_name, other_path) = _sides(cwd)
+    own = _location(own_path)
+    other = _location(other_path)
+    own_state, other_state = own["state"], other["state"]
+    if other_state == "unknown":
         where = "unknown"
-    elif local_state == "yes" and global_state == "yes":
+    elif own_state == "yes" and other_state == "yes":
         where = "both"
-    elif local_state == "yes":
-        where = "local"
-    elif global_state == "yes":
-        where = "global"
-    elif local_state == "unknown":
+    elif own_state == "yes":
+        where = own_name
+    elif other_state == "yes":
+        where = other_name
+    elif own_state == "unknown":
         where = "unknown"
     else:
         where = "none"
     return {
         "registration": where,
-        "matcher": _matcher_verdict(local, global_),
-        "local": dict(local, path=str(local_path)),
-        "global": dict(global_, path=str(global_path)),
+        "matcher": _matcher_verdict(own, other),
+        own_name: dict(own, path=str(own_path)),
+        other_name: dict(other, path=str(other_path)),
     }
 
 
@@ -690,7 +713,7 @@ def matcher_problem(inspected):
     an unreadable file is reported as "unknown".
     """
     problems = []
-    for side in (inspected.get("local"), inspected.get("global")):
+    for side in (inspected.get("local"), inspected.get("global"), inspected.get("start_local")):
         if not side or side.get("state") != "yes" or not side.get("uncovered"):
             continue
         names = side["uncovered"]
@@ -1062,10 +1085,12 @@ def _plugin_hook_files(names):
 
 
 def _settings_sources(cwd=None):
-    """Every settings file the session may load, each once: the user's, the session
-    directory's project and local ones, the session's own (local_settings_path: in a lane its
-    settings.json beside the start directory's .claude/settings.local.json) and the managed
-    one."""
+    """Every settings file the session loads, each once. In a lane (R56): its settings.json,
+    its start directory's .claude/settings.local.json and the managed one, which no
+    --setting-sources keeps out, and never the Claude home's or a project settings.json.
+    Elsewhere: the user's, the directory's project and local ones and the managed one."""
+    if _lane_at(cwd) is not None:
+        return tuple(path for _, path in _sides(cwd)) + (managed_settings_path(),)
     base = session_dir(cwd)
     return tuple(dict.fromkeys((global_settings_path(), base / ".claude" / "settings.json",
                                 base / ".claude" / "settings.local.json",
@@ -1073,8 +1098,10 @@ def _settings_sources(cwd=None):
 
 
 def foreign_bash_hooks(cwd=None):
-    """Every PreToolUse hook other than ppl's guard whose matcher passes Bash, from the user,
-    project, local and managed settings and the hooks/hooks.json of each enabled plugin, as
+    """Every PreToolUse hook other than ppl's guard whose matcher passes Bash, from the settings
+    the session loads (_settings_sources: in a lane its settings.json, its start directory's
+    .claude/settings.local.json and the managed settings, R56; elsewhere the user, project,
+    local and managed settings) and the hooks/hooks.json of each plugin they enable, as
     {"source": file, "hook": _hook_label}. Such a hook may rewrite a Bash call with
     updatedInput, and whether that keeps dangerouslyDisableSandbox is unverified."""
     documents = [(path, _json_object(path)) for path in _settings_sources(cwd)]
@@ -1224,8 +1251,8 @@ def _undoing(cwd, recorded=None):
     the unsandboxed retry switched off, a write grant (sandbox.filesystem.allowWrite or
     permissions.additionalDirectories) over a protected path, and any unix socket allowance.
     ppl's own block in the session's settings, the one the facts record, is not another source.
-    In a lane its start directory's .claude/settings.local.json is read too, the local source
-    its session loads beside its settings.json."""
+    The sources are the ones the session loads (_settings_sources): in a lane its settings.json,
+    its start directory's .claude/settings.local.json and the managed settings (R56)."""
     recorded = recorded or {}
     base = session_dir(cwd)
     local = local_settings_path(cwd)
@@ -1309,29 +1336,46 @@ def report(task_id=None, cwd=None, env=None, probe=None):
     """What `ppl doctor` prints as JSON. The lane is found as every ppl command finds its run
     (lanes.task_for_call: `task_id`, else PPL_TASK of `env`, else the lane holding `cwd`, the
     process cwd by default), and `task` is that run when its state can be read, else None.
+    `lane_problem` says why a lane was named and cannot be confirmed (a registry that cannot be
+    read, a task with no entry), and `start_dir` is the confirmed lane's start directory.
     Outside a lane (`lane` None) it checks the machine alone: the setup report, the models, the
     harnesses, the Claude Code binary and the GitHub token variables. In a lane it adds where
     the guard is registered in the lane's settings.json and the Claude home's, the lane guard's
     task, the OS sandbox facts, the foreign Bash hooks, the MCP servers and whether the lane's
     guard runs."""
-    from . import lanes, run
+    from . import run
+    problem = None
     try:
         task_id = lanes.task_for_call(task_id, cwd, env)
-        entry = lanes.entry(task_id) if task_id else None
-    except PplError:
-        task_id, entry = None, None
+    except PplError as err:
+        task_id, problem = None, err.message
+    entry = None
+    if task_id:
+        try:
+            entry = lanes.entry(task_id)
+        except PplError as err:
+            problem = ("lane %s cannot be confirmed, the lane registry cannot be read (%s): "
+                       "repair %s, then run ppl lane resume %s"
+                       % (task_id, err.message, lanes.registry_path(), task_id))
+        else:
+            if entry is None:
+                problem = ("lane %s is not registered: run ppl lane resume %s"
+                           % (task_id, task_id))
     try:
         if task_id:
             run.load(task_id)
     except PplError:
         task_id = None
     result = {"lane": entry.get("task") if entry else None, "task": task_id}
+    if problem:
+        result["lane_problem"] = problem
     result.update(inspect_setup(env))
     result["claude_binary"] = claude_binary()
     result["github_token_env"] = github_token_names(env)
     if entry is None:
         return result
     where = str(entry.get("start_dir"))
+    result["start_dir"] = where
     result.update(inspect(where))
     result["lane_guard_problem"] = lane_guard_problem(entry)
     result["os_sandbox"] = os_sandbox_facts(where, env, probe)

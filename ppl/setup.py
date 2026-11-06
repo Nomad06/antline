@@ -201,10 +201,12 @@ def _without_ppl_hooks(hooks):
 def _clean_settings(path, recorded):
     """Take ppl's hook entries out of an old workspace's settings.local.json, with the sandbox
     block only when it equals the one apply recorded and the allow entries apply recorded.
-    Everything else in the file stays. Failed, with the file untouched, when it is no JSON
-    object."""
+    Everything else in the file stays. Returns (removed, left): a file that is a symbolic link
+    (a dotfiles checkout, say) is left as it is, and what ppl would have removed from it is
+    named in `left` for the owner to remove by hand. Failed, with the file untouched, when it
+    is no JSON object."""
     if not path.is_file():
-        return []
+        return [], []
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -234,9 +236,12 @@ def _clean_settings(path, recorded):
             permissions.pop("allow")
         if not permissions:
             doc.pop("permissions")
+    if removed and path.is_symlink():
+        return [], ["%s as it is, a link to %s: remove %s there by hand"
+                    % (path, os.path.realpath(path), "; ".join(removed))]
     if removed:
         _replace_file(path, doc)
-    return ["%s from %s" % (item, path) for item in removed]
+    return ["%s from %s" % (item, path) for item in removed], []
 
 
 def _generated_agent(path):
@@ -246,7 +251,8 @@ def _generated_agent(path):
         head = path.read_text(encoding="utf-8").split("\n", 2)[:2]
     except (OSError, UnicodeDecodeError):
         return False
-    return head == ["---", routing.GENERATED_NOTICE]
+    return head[:1] == ["---"] and head[1:] in ([routing.GENERATED_NOTICE],
+                                                [routing.LEGACY_GENERATED_NOTICE])
 
 
 def _clean_agents(directory):
@@ -268,7 +274,9 @@ def _clean_skill(directory):
         text = (directory / "SKILL.md").read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
-    if not text.partition("\n---\n")[2].startswith(harness.SKILL_NOTICE + "\n"):
+    tail = text.partition("\n---\n")[2]
+    if not any(tail.startswith(notice + "\n")
+               for notice in (harness.SKILL_NOTICE, harness.LEGACY_SKILL_NOTICE)):
         return []
     shutil.rmtree(directory)
     return [str(directory)]
@@ -286,25 +294,26 @@ def clean_old_workspace():
     hook entries, sandbox block and allow entries in <workspace>/.claude/settings.local.json,
     the rendered pipeline skill and the ppl-* agent files, each matched by ppl's own markers,
     and PPL_HOME/os_sandbox.json, then the [claude] workspace, hooks, agents_dir and skills_dir
-    keys. Returns (removed, kept): every path or entry removed, and why nothing was while a run
-    from before lanes is not finished (lane_launch._legacy_run_problem): its session still
-    runs under those hooks and that skill."""
+    keys. Returns (removed, left, kept): every path or entry removed, what was left for the
+    owner (a settings file that is a link), and why nothing was removed while a run from
+    before lanes is not finished (lane_launch._legacy_run_problem): its session still runs
+    under those hooks and that skill."""
     from . import lane_launch
     current = config.section("claude")
     facts = paths.home() / os_sandbox.FACTS_FILE
     if not any(key in current for key in LEGACY_CLAUDE_KEYS) and not os.path.lexists(facts):
-        return [], None
+        return [], [], None
     try:
         problem = lane_launch._legacy_run_problem()
     except PplError as exc:
         problem = "the run runs/ACTIVE names cannot be read: %s" % exc.message
     if problem:
-        return [], problem
+        return [], [], problem
     workspace = current.get("workspace") if isinstance(current.get("workspace"), str) else ""
-    removed = []
+    removed, left = [], []
     if workspace:
-        removed += _clean_settings(Path(workspace) / ".claude" / "settings.local.json",
-                                   _recorded_facts())
+        removed, left = _clean_settings(Path(workspace) / ".claude" / "settings.local.json",
+                                        _recorded_facts())
     agents = _old_dir(current, "agents_dir", workspace, "agents")
     if agents is not None:
         removed += _clean_agents(agents)
@@ -315,7 +324,7 @@ def clean_old_workspace():
         facts.unlink()
         removed.append(str(facts))
     config.remove("claude", LEGACY_CLAUDE_KEYS)
-    return removed, None
+    return removed, left, None
 
 
 def _step_paths(p):
@@ -328,13 +337,15 @@ def _step_claude(p):
     current = config.section("claude")
     binary = p.ask("claude_binary", "Claude Code binary", current.get("binary") or "claude")
     config.update("claude", {"binary": binary})
-    removed, kept = clean_old_workspace()
+    removed, left, kept = clean_old_workspace()
     if kept:
         p.emit("what an older ppl wrote for the workspace %s stays as it is: %s. Run ppl setup "
                "claude again once that run is finished or destroyed"
                % (current.get("workspace") or "-", kept))
     for item in removed:
         p.emit("removed %s" % item)
+    for item in left:
+        p.emit("left %s" % item)
 
 
 def _step_models(p, probe):
@@ -649,9 +660,16 @@ def _step_forge(p, forge_check, tracker_check):
 
 def _step_apply(p):
     name = _target_harness()
-    result = harness.apply(name)
+    try:
+        result = harness.apply(name)
+    except PplError as exc:
+        # an uncommitted change in the harness repository (OWNER_DECISION), say after an
+        # in-place forge answer, fails this step with its reason and the wizard goes on
+        raise Failed(exc.message)
     config.remove("harness", ["pending"])
     p.emit("harness %s at %s is the default for ppl lane" % (result["active"], result["commit"]))
+    for warning in result["warnings"]:
+        p.emit("warning: %s" % warning)
 
 
 def _default_forge_check(settings, claude_json, workspace):

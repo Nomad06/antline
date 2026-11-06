@@ -35,6 +35,13 @@ def ok_forge(*args, **kwargs):
     return {"ok": True, "detail": "ok"}
 
 
+def run_cli(*argv):
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = cli.main(list(argv))
+    return code, out.getvalue(), err.getvalue()
+
+
 class SetupTestCase(unittest.TestCase):
     def setUp(self):
         self.enterContext(fixtures.git_identity())
@@ -127,14 +134,31 @@ class TestNonInteractive(SetupTestCase):
         self.assertFalse(paths.harness_dir("mine.replacing").exists())
         self.answers["harness_from"] = "mine"
         # apply takes a committed harness only, so the owner commits the hand edit first
-        with self.assertRaises(PplError) as caught:
-            setup.run(**kwargs)
-        self.assertEqual(caught.exception.code, "OWNER_DECISION")
-        self.assertIn("harness.toml", caught.exception.message)
+        refused = setup.run(**kwargs)
+        self.assertEqual(refused["failed"], ["apply"])
+        self.assertIn("harness.toml", refused["reasons"]["apply"])
         self.git("commit", "-q", "-am", "hand-added gate")
         third = setup.run(**kwargs)
-        self.assertEqual(third["done"], list(setup.STEPS))
+        self.assertEqual(third["done"], ["apply"])
         self.assertEqual(harness_toml.read_text(encoding="utf-8"), edited)
+
+    def test_an_apply_the_harness_repo_refuses_fails_the_step_not_the_wizard(self):
+        # R55: an in-place forge change dirties the installed harness repository, and the apply
+        # step after it reports the refusal as its reason instead of stopping the wizard
+        setup.run(answers=self.answers, non_interactive=True, probe=ok_probe,
+                  forge_check=ok_forge, emit=self.lines.append)
+        self.answers.update(forge="gitlab", gitlab_mcp_server="GitLab-MCP")
+        result = setup.run(steps=["forge", "apply"], answers=self.answers, non_interactive=True,
+                           forge_check=ok_forge, emit=self.lines.append)
+        self.assertEqual((result["done"], result["failed"]), (["forge"], ["apply"]))
+        self.assertIn("uncommitted changes", result["reasons"]["apply"])
+        self.assertIn("harness.toml", result["reasons"]["apply"])
+        self.assertNotIn("apply", config.steps_state()["done"])
+        code, out, err = run_cli("setup", "apply", "--non-interactive")
+        self.assertEqual(code, 2)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(json.loads(err)["error_code"], "SETUP_INCOMPLETE")
+        self.assertIn("apply: ", json.loads(err)["message"])
 
     def test_replace_harness_yes_replaces_a_differing_installed_harness(self):
         setup.run(answers=self.answers, non_interactive=True, probe=ok_probe,
@@ -725,14 +749,17 @@ class TestOldWorkspaceCleanup(SetupTestCase):
         agents.mkdir()
         from ppl import routing
         (agents / "ppl-code-worker.md").write_text(
-            "---\n%s\nname: ppl-code-worker\n---\nbody\n" % routing.GENERATED_NOTICE,
+            "---\n%s\nname: ppl-code-worker\n---\nbody\n" % routing.LEGACY_GENERATED_NOTICE,
+            encoding="utf-8")
+        (agents / "ppl-verifier.md").write_text(
+            "---\n%s\nname: ppl-verifier\n---\nbody\n" % routing.GENERATED_NOTICE,
             encoding="utf-8")
         (agents / "ppl-mine.md").write_text("---\nname: ppl-mine\n---\nmy own agent\n",
                                             encoding="utf-8")
         (agents / "helper.md").write_text("---\nname: helper\n---\nmine\n", encoding="utf-8")
         skill = self.claude / "skills" / "pipeline"
         (skill / "references").mkdir(parents=True)
-        notice = harness.SKILL_NOTICE + "\n" if skill_notice else ""
+        notice = harness.LEGACY_SKILL_NOTICE + "\n" if skill_notice else ""
         (skill / "SKILL.md").write_text("---\nname: pipeline\n---\n%ssteps\n" % notice,
                                         encoding="utf-8")
         (skill / "references" / "gates.md").write_text("gates\n", encoding="utf-8")
@@ -765,6 +792,7 @@ class TestOldWorkspaceCleanup(SetupTestCase):
         self.assertEqual(config.load()["claude"], {"binary": "/opt/claude"})
         said = "\n".join(self.lines)
         for removed in (str(path), str(agents / "ppl-code-worker.md"),
+                        str(agents / "ppl-verifier.md"),
                         str(self.claude / "skills" / "pipeline"), str(self.facts),
                         "ppl_guard.py", "ppl_dispatch.py", "ppl_usage.py", "sandbox",
                         self.ALLOW[0], self.ALLOW[1]):
@@ -815,6 +843,57 @@ class TestOldWorkspaceCleanup(SetupTestCase):
         self.assertTrue((self.claude / "skills" / "pipeline" / "SKILL.md").is_file())
         self.assertTrue(self.facts.exists())
         self.assertEqual(config.load()["claude"]["workspace"], str(self.workspace))
+
+    def test_a_linked_settings_file_is_left_as_it_is_and_reported(self):
+        path = self.write_workspace()
+        target = Path(tmphome.mkdtemp(prefix="ppldotfiles-")) / "settings.local.json"
+        path.rename(target)
+        path.symlink_to(target)
+        before = target.read_bytes()
+        result = self.run_claude()
+        self.assertEqual(result["done"], ["claude"])
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(os.readlink(path), str(target))
+        self.assertEqual(target.read_bytes(), before)
+        said = "\n".join(self.lines)
+        self.assertIn("left %s as it is" % path, said)
+        self.assertIn(str(target), said)
+        self.assertIn("ppl_guard.py", said)
+        self.assertFalse((self.claude / "agents" / "ppl-code-worker.md").exists())
+
+    def test_a_linked_agent_and_a_linked_pipeline_dir_stay_and_their_targets_too(self):
+        from ppl import routing
+        self.write_workspace()
+        elsewhere = Path(tmphome.mkdtemp(prefix="ppldotfiles-"))
+        agent = elsewhere / "ppl-briefer.md"
+        agent.write_text("---\n%s\nname: ppl-briefer\n---\n" % routing.LEGACY_GENERATED_NOTICE,
+                         encoding="utf-8")
+        (self.claude / "agents" / "ppl-briefer.md").symlink_to(agent)
+        skills = self.claude / "skills"
+        shutil.move(str(skills / "pipeline"), str(elsewhere / "pipeline"))
+        (skills / "pipeline").symlink_to(elsewhere / "pipeline")
+        self.run_claude()
+        self.assertTrue((self.claude / "agents" / "ppl-briefer.md").is_symlink())
+        self.assertTrue(agent.is_file())
+        self.assertTrue((skills / "pipeline").is_symlink())
+        self.assertTrue((elsewhere / "pipeline" / "SKILL.md").is_file())
+        self.assertTrue((elsewhere / "pipeline" / "references" / "gates.md").is_file())
+        self.assertFalse((self.claude / "agents" / "ppl-code-worker.md").exists())
+
+    def test_an_unreadable_legacy_pointer_keeps_the_old_workspace(self):
+        path = self.write_workspace()
+        before = path.read_bytes()
+        paths.runs_dir().mkdir(parents=True, exist_ok=True)
+        paths.legacy_active_file().mkdir()
+        result = self.run_claude()
+        self.assertEqual(result["done"], ["claude"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue((self.claude / "agents" / "ppl-code-worker.md").is_file())
+        self.assertTrue(self.facts.exists())
+        self.assertEqual(config.load()["claude"]["workspace"], str(self.workspace))
+        said = "\n".join(self.lines)
+        self.assertIn("runs/ACTIVE", said)
+        self.assertIn("ppl setup claude", said)
 
     def test_with_no_old_workspace_the_step_records_the_binary_only(self):
         doc = config.load()

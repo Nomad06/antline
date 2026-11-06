@@ -302,14 +302,15 @@ class TestCostPerAcceptedTask(IsolatedFleet):
         self.assertIn("claude-x", cost["reason"])
         self.assertIn("[prices", cost["reason"])
 
-    def test_cost_is_undefined_without_usage_naming_ppl_setup_claude(self):
+    def test_cost_is_undefined_without_usage_naming_ppl_lane(self):
         # rule: R-METRIC-SAMPLE-DEPENDENT-UNDEFINED
         write_prices(PRICED)
         done_run("a1")
         report = metrics.compute()["overall"]
         for key in ("cost_per_accepted_task", "tokens_per_accepted_task", "tokens_by_role"):
             self.assertFalse(report[key]["defined"], key)
-            self.assertIn("ppl setup claude", report[key]["reason"])
+            self.assertIn("ppl lane", report[key]["reason"])
+            self.assertNotIn("ppl setup claude", report[key]["reason"])
 
     def test_cost_is_undefined_when_nothing_reached_done(self):
         # rule: R-METRIC-SAMPLE-DEPENDENT-UNDEFINED

@@ -29,8 +29,8 @@ def _blocked(why):
     return github_issues._blocked(why, COMMAND)
 
 
-def _gh(runner, argv, what):
-    code, out, err = github_issues._gh(runner, argv, what, COMMAND)
+def _gh(runner, argv, what, gh=None):
+    code, out, err = github_issues._gh(runner, argv, what, COMMAND, gh=gh)
     if code != 0:
         raise _blocked("gh %s failed: %s" % (" ".join(argv[:2]),
                                              err.strip()[:300] or "exit %s" % code))
@@ -119,9 +119,10 @@ def _review(review):
             "submitted_at": review.get("submitted_at")}
 
 
-def fetch(repo, pr, runner=None):
-    """{"fetched_at", "pr", "threads", "reviews"} of pull request `pr` of `repo`. Any gh
-    failure is EXTERNAL_BLOCKED."""
+def fetch(repo, pr, runner=None, gh=None):
+    """{"fetched_at", "pr", "threads", "reviews"} of pull request `pr` of `repo`, read with
+    `gh` (the pinned gh of the lane this call is in when None). Any gh failure is
+    EXTERNAL_BLOCKED."""
     import subprocess
     runner = runner or subprocess.run
     if not (isinstance(repo, str) and _REPO.fullmatch(repo)):
@@ -130,12 +131,12 @@ def fetch(repo, pr, runner=None):
         raise PplError("SCHEMA_INVALID", "the pull request number must be a positive integer")
     base = "repos/%s/pulls/%d" % (repo, pr)
     comments = _pages(_gh(runner, ["api", base + "/comments", "--paginate"],
-                          "the review comments"), "the review comments")
-    reviews = _pages(_gh(runner, ["api", base + "/reviews", "--paginate"], "the reviews"),
+                          "the review comments", gh), "the review comments")
+    reviews = _pages(_gh(runner, ["api", base + "/reviews", "--paginate"], "the reviews", gh),
                      "the reviews")
     owner, name = repo.split("/")
     graph = _gh(runner, ["api", "graphql", "-f", "query=" + _QUERY % (owner, name, pr)],
-                "the review thread states")
+                "the review thread states", gh)
     return {"fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "pr": pr, "threads": _threads(comments, _resolved(graph)),
             "reviews": [_review(review) for review in reviews]}

@@ -364,11 +364,13 @@ def profile(doc, workspace, pin_map, worktree=None, task=None):
     return {"sandbox": sandbox, "allow": _allow_entries(doc, pin_map)}
 
 
-# What a lane whose guard facts are missing or unreadable is told: ppl lane renders them, and
-# only when the lane starts.
-RENDERED_BY_LANE = ("ppl lane renders it into the lane's start directory when the lane starts: "
-                    "destroy the lane with ppl destroy --scope local --task <task> and start it "
-                    "again with ppl lane <link>")
+def rendered_by_lane(task_id=None):
+    """What a lane whose guard facts are missing or unreadable is told: ppl lane renders them,
+    and only when the lane starts, so rendering them again is the owner's step outside the
+    lane."""
+    from . import lanes
+    return "ppl lane renders it into the lane's start directory when the lane starts: %s" \
+        % lanes.restart_hint(task_id)
 
 
 def facts_path(task_id=None):
@@ -387,20 +389,21 @@ def load_facts(task_id=None):
     path = facts_path(task_id)
     if path is None:
         return None
+    task = path.parent.name
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:
         raise PplError("SETUP_INCOMPLETE", "cannot read %s: %s. %s"
-                       % (path, exc, RENDERED_BY_LANE))
+                       % (path, exc, rendered_by_lane(task)))
     try:
         doc = json.loads(text)
     except ValueError:
         doc = None
     if not isinstance(doc, dict):
         raise PplError("SETUP_INCOMPLETE", "%s is not a JSON object. %s"
-                       % (path, RENDERED_BY_LANE))
+                       % (path, rendered_by_lane(task)))
     return doc
 
 
@@ -422,12 +425,15 @@ def pinned_repo(key, snapshot_repo, task_id=None):
         raise PplError("SCHEMA_INVALID",
                        "the run's harness snapshot names %r as its repository and %s names %r "
                        "as %s, so this command reaches neither: restore the run's harness.json, "
-                       "or %s" % (snapshot_repo, FACTS_FILE, repo, key, RENDERED_BY_LANE))
+                       "which a role can write, since %s is what ppl lane rendered for the lane"
+                       % (snapshot_repo, FACTS_FILE, repo, key, FACTS_FILE))
     return repo
 
 
 def gh_path(task_id=None):
-    """The gh the lane's guard facts pin (load_facts), else a bare gh."""
+    """The gh the guard facts of the lane of `task_id` pin (load_facts: the lane this call is
+    in when None), else a bare gh. A command that reaches GitHub for a run passes its task, so
+    its gh and its repository (pinned_repo) come from the same lane."""
     try:
         doc = load_facts(task_id)
         path = doc["pins"]["gh"]["path"] if doc else None

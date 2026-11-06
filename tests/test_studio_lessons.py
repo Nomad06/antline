@@ -11,7 +11,8 @@ import panel_client
 from ppl import config, harness, lessons, memory, paths, routing, store
 from ppl.studio import files
 
-APPLY = "run ppl harness apply demo to render it"
+APPLY = ("commit memory.toml in harness demo's repository, and push it when it has an origin: "
+         "the next lane ppl lane starts renders it")
 
 
 class LessonsApiCase(panel_client.StudioTestCase):

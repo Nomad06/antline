@@ -66,6 +66,15 @@ def records():
     return found
 
 
+def restart_hint(task_id=None):
+    """The owner's step that renders a lane's start directory again: ppl destroy removes the
+    session's own start directory, worktree and unpushed branch, so it is run in a terminal
+    outside the lane, never from the lane's session (R51). `task_id` fills the command, a
+    placeholder when it is not known."""
+    return ("the owner starts the lane again, in a terminal outside the lane: ppl destroy "
+            "--scope local --task %s, then ppl lane <link>" % (task_id or "<task>"))
+
+
 def _invalid(why):
     return PplError("SCHEMA_INVALID", "%s %s" % (registry_path(), why))
 
