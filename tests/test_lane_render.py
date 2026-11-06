@@ -102,6 +102,20 @@ class TestSettings(LaneRenderCase):
         facts = json.loads(result["facts"].read_text(encoding="utf-8"))
         self.assertEqual(facts["write_scope"], allow)
 
+    def test_the_profile_write_denies_the_checkouts_shared_git_parts(self):
+        # rule: R-LANE-SHARED-GIT-DIR
+        doc, start = self.sandboxed()
+        result = self.render(doc, start)
+        filesystem = json.loads(result["settings"].read_text(encoding="utf-8"))[
+            "sandbox"]["filesystem"]
+        facts = json.loads(result["facts"].read_text(encoding="utf-8"))
+        git_dir = os.path.join(os_sandbox.checkout(doc), ".git")
+        self.assertIn(git_dir, filesystem["allowWrite"])
+        for name in ("config", "hooks", "info"):
+            self.assertIn(os.path.join(git_dir, name), filesystem["denyWrite"])
+            self.assertIn(os.path.join(git_dir, name), facts["deny_write"])
+            self.assertNotIn(os.path.join(git_dir, name), filesystem["allowWrite"])
+
     def test_a_harness_without_the_os_sandbox_gets_no_profile_and_no_facts(self):
         doc, start = self.lane()
         result = self.render(doc, start)

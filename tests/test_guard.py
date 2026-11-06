@@ -1890,6 +1890,19 @@ class TestGuard(unittest.TestCase):
             "ppl-code-worker", "Bash", {"command": "python3 -m ppl transition done"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
+    def test_a_role_running_any_ppl_module_is_denied(self):
+        # rule: R-GUARD-PPL-CLI-DENIED
+        # ppl/__main__.py calls cli.main too, and python takes -m glued or behind its flags
+        for command in ("python3 -m ppl.__main__ transition done", "python3 -mppl transition done",
+                        "python3.11 -I -m ppl.cli findings status --finding-id F1 --status fixed",
+                        "python -m ppl.__main__ stage enter verification"):
+            with self.subTest(command=command):
+                result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+        # a read-only lookup through the module is still a role's
+        self.assertIsNone(decide(payload(
+            "ppl-code-worker", "Bash", {"command": "python3 -m ppl.__main__ show --task DEMO-700"})))
+
     def test_a_readonly_ppl_call_does_not_hide_a_python_dash_m_one(self):
         # rule: R-GUARD-PPL-CLI-DENIED
         result = decide(payload(

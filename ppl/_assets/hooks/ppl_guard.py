@@ -464,7 +464,9 @@ BASH_WRITE_SHAPES = re.compile(
 # bare `ppl.cli` token are a realistic accident (a worker whose PATH lacks
 # `ppl` reaches for `python3 -m` with no intent to evade anything), so
 # PPL_INVOCATION_RE below matches those shapes too, feeding the exact same
-# read-only allowlist and the exact same fail-closed default. `p''pl` (or
+# read-only allowlist and the exact same fail-closed default. Any module of the
+# package counts, `python3 -m ppl.__main__` (which runs cli.main) among them,
+# by any python, with -m glued or behind other interpreter flags. `p''pl` (or
 # base64, or any other quote/encoding trick) is not: a lexical matcher
 # cannot win an arms race against arbitrary shell quoting, and chasing this
 # one instance would buy a longer regex and a false sense of completeness,
@@ -484,7 +486,7 @@ BASH_WRITE_SHAPES = re.compile(
 # enter` among them, takes no generation, so for those this lexical check is
 # the only fence a role meets, and it is a speed bump, not a proof.
 PPL_INVOCATION_RE = re.compile(
-    r"\bpython3?\s+-m\s+ppl(?:\.cli)?(?=[\s;&|]|$)"
+    r"\bpython[0-9.]*\s+(?:-[A-Za-z]+\s+)*-m\s*ppl(?:\.\w+)*(?=[\s;&|]|$)"
     r"|\bppl\.cli(?=[\s;&|]|$)"
     # Not after a dot: `~/.ppl`, the default data root, is a directory, while
     # `bin/ppl` and `./ppl` are the launcher.
@@ -504,7 +506,7 @@ PPL_READ_ONLY_SUBCOMMANDS = frozenset({
 
 def _ppl_cli_is_state_changing(command):
     """True when `command` contains ANY invocation of the ppl CLI - directly
-    as `ppl`, or as `python3 -m ppl[.cli]` / a bare `ppl.cli` token - that is
+    as `ppl`, or as `python3 -m ppl[.<module>]` / a bare `ppl.cli` token - that is
     not provably read-only. Lexical, like every other Bash check in this
     module: it looks for a fixed set of literal shapes, at every occurrence,
     not only the first. See this module's own limit, spelled out above the
@@ -1479,7 +1481,9 @@ def _git_write_targets(args, cwd):
     any other target this cannot pin down, which for a role is a deny and for
     an unroled session is a deny only when its cwd sits inside the run's repo
     (the orchestrator's Stage 1 `git worktree add`, run from the main checkout
-    beside the repo, is not a shape this parses at all). Read-only
+    beside the repo, is not a shape this parses at all). `git worktree remove`
+    and `git worktree move` remove the worktree they name, which must name a
+    directory from the cwd, or the target is one this cannot place. Read-only
     subcommands, `add`, `commit`, and `stash push`/`stash apply` (the shapes
     references/gates.md sends a role to) write no tree path and pass.
     """
@@ -1520,6 +1524,17 @@ def _git_write_targets(args, cwd):
         if any(t in _GIT_APPLY_DRY_RUN_FLAGS for t in rest):
             return []
         return [(None, cwd, False)]
+    if sub == "worktree" and rest[:1] in (["remove"], ["move"]):
+        # git takes a worktree by its path or by a unique tail of it from anywhere in the
+        # repository, so a spelling that names no directory from the cwd cannot be placed
+        files = _positionals(rest[1:])
+        wanted = 1 if rest[0] == "remove" else 2
+        if len(files) != wanted:
+            return [(None, cwd, False)]
+        resolved = _resolve_path_against_cwd(files[0], cwd)
+        if not (resolved and os.path.isdir(resolved)):
+            return [(None, cwd, False)]
+        return [(files[0], cwd, True)] + [(f, cwd, False) for f in files[1:]]
     if sub in _GIT_TREE_REWRITERS:
         return [(None, cwd, False)]
     if sub == "reset" and any(t in ("--merge", "--keep") for t in rest):
@@ -2489,9 +2504,25 @@ def cross_lane_denial(payload, binding, lanes_list):
 _ASSIGNMENT_WORD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
+# The package or any module of it, as python -m takes it: ppl.__main__ runs cli.main too.
+_PPL_MODULE_RE = re.compile(r"ppl(?:\.\w+)*")
+
+
+def _runs_ppl_module(words):
+    """True when an interpreter's `words` name a ppl module for -m: `-m ppl[.<module>]`, or
+    the module glued to the flag, `-mppl[.<module>]`."""
+    for index, word in enumerate(words):
+        if word == "-m" and index + 1 < len(words) and _PPL_MODULE_RE.fullmatch(words[index + 1]):
+            return True
+        if word.startswith("-m") and _PPL_MODULE_RE.fullmatch(word[2:]):
+            return True
+    return False
+
+
 def _is_ppl_command(words):
     """True when `words`, a command with its wrappers taken off, runs the ppl CLI: ppl or
-    ppl.cli spelled by any path, or python -m ppl[.cli], past any assignment before it."""
+    ppl.cli spelled by any path, or python -m ppl[.<module>], past any assignment before
+    it."""
     i = 0
     while i < len(words) and _ASSIGNMENT_WORD_RE.match(words[i]):
         i += 1
@@ -2500,22 +2531,21 @@ def _is_ppl_command(words):
     verb = _verb_name(words[i])
     if verb in ("ppl", "ppl.cli"):
         return True
-    return (verb.startswith("python") and words[i + 1:i + 2] == ["-m"]
-            and words[i + 2:i + 3] in (["ppl"], ["ppl.cli"]))
+    return verb.startswith("python") and _runs_ppl_module(words[i + 1:])
 
 
 def _spells_ppl(command, segments):
     """True when `command` may run ppl under a wrapper the write walk does not unwrap
     (timeout, xargs, sudo, find -exec, stdbuf, an env -S string): ppl spelled in the raw text
-    (PPL_INVOCATION_RE), or a word shlex reads as ppl or ppl.cli by any path, or -m ppl[.cli],
-    anywhere in a segment the walk split."""
+    (PPL_INVOCATION_RE), or a word shlex reads as ppl or ppl.cli by any path, or a python with
+    -m ppl[.<module>], anywhere in a segment the walk split."""
     if PPL_INVOCATION_RE.search(command):
         return True
     for tokens, _, _ in segments:
         for index, word in enumerate(tokens or ()):
             if _verb_name(word) in ("ppl", "ppl.cli"):
                 return True
-            if word == "-m" and tokens[index + 1:index + 2] in (["ppl"], ["ppl.cli"]):
+            if _verb_name(word).startswith("python") and _runs_ppl_module(tokens[index + 1:]):
                 return True
     return False
 
@@ -2553,6 +2583,29 @@ def _task_assigned(command, segments, tasks):
     return None
 
 
+# What the shell may expand in a directory the walk took as written: a glob, a brace, a ~user.
+_UNPLACED_CHARS = frozenset("*?[{")
+
+
+def _unplaced_cwd(segments, cwd):
+    """Why the directories a command's segments run in cannot be placed, else None: the walk
+    was blinded (a $(...) or a backtick, a segment it cannot split into words), or a cd,
+    pushd, popd or env -C went where it cannot follow (a variable, cd -, pushd +N, a bare cd)
+    or to a glob, a brace or a ~user it takes as written. A session cwd of None places
+    nothing to begin with and is not counted."""
+    if not isinstance(cwd, str):
+        return None
+    if not segments or any(tokens is None for tokens, _, _ in segments):
+        return "a $(...), a backtick or a word the shell may split otherwise"
+    for _, _, where in segments:
+        if where is None:
+            return "a cd, pushd, popd or env -C to a variable, cd -, pushd +N or a bare cd"
+        if any(char in _UNPLACED_CHARS for char in where) or any(
+                part.startswith("~") for part in where.split("/")):
+            return "a cd to %s, which the shell expands" % where
+    return None
+
+
 def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
     """("BOUNDARY_VIOLATION", reason) when a Bash command of a session bound to a lane may run
     ppl on another lane's run, else None [R-LANE-CROSS-TASK], for the orchestrator and every
@@ -2566,7 +2619,9 @@ def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
     - ppl run in a directory inside another lane's start directory or worktree, where a bare
       ppl with no PPL_TASK takes that lane's run (cli.resolve_task reads lanes.for_path), the
       cwd followed through cd, pushd, popd and env -C as the write walk follows it, and the
-      session's own cwd where the walk recognises no ppl segment.
+      session's own cwd where the walk recognises no ppl segment;
+    - a command that runs or spells ppl where that cwd cannot be placed (_unplaced_cwd): the
+      walk blinded by a substitution, or a cd it cannot follow or that the shell expands.
     A task with no lane is no other lane's run: a pending reflection names a destroyed run's
     task. `lanes_list` is the registry as read for this call: None, it could not be read, and
     a command that may run ppl or sets PPL_TASK gets ("OWNER_DECISION", why)."""
@@ -2604,6 +2659,12 @@ def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
                 "its own run, and a command that runs ppl may not name %s anywhere, so name %s "
                 "or leave the task out (ppl reads PPL_TASK)"
                 % (binding.task, named, named, binding.task))
+    unplaced = _unplaced_cwd(segments, cwd)
+    if unplaced:
+        return ("BOUNDARY_VIOLATION",
+                "lane %s may not run ppl where the guard cannot tell the directory it runs in "
+                "(%s): a ppl run from inside another lane takes that lane's run, so spell the "
+                "directory plainly, or leave the cd out" % (binding.task, unplaced))
     for where in places or [cwd if isinstance(cwd, str) else None]:
         # the lane's own directories are its own, whatever else a registry entry names there
         if not where or (binding.entry and lanes.holding([binding.entry], where)):
@@ -2616,6 +2677,58 @@ def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
                     "directories" % (binding.task, where, holder["task"], holder["task"],
                                      binding.task))
     return None
+
+
+# The read forms of git config, the only ones a role runs in a lane [R-LANE-SHARED-GIT-DIR]:
+# the options of the old syntax and the verbs of the new one.
+_GIT_CONFIG_READ_OPTIONS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch",
+                                      "--list", "-l", "--show-origin", "--show-scope"})
+_GIT_CONFIG_READ_VERBS = frozenset({"get", "list"})
+
+
+def _git_config_write(words):
+    """True when `words`, what follows a git, run git config in any form but a read: past
+    git's own options (-C, -c, --git-dir, ...), the subcommand is config, and neither a read
+    verb (get, list) follows it nor a read option (--get, --list, ...) is among its words."""
+    i = 0
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in _GIT_GLOBAL_VALUE_FLAGS else 1
+    if words[i:i + 1] != ["config"]:
+        return False
+    rest = words[i + 1:]
+    if rest[:1] and rest[0] in _GIT_CONFIG_READ_VERBS:
+        return False
+    return not any(word in _GIT_CONFIG_READ_OPTIONS for word in rest)
+
+
+_GIT_CONFIG_SPELLED_RE = re.compile(r"\bgit\b[\s\S]*\bconfig\b")
+
+
+def role_git_config_denial(command, agent, binding, cwd=None):
+    """("BOUNDARY_VIOLATION", reason) when a ppl-* role in a lane runs git config in a write
+    form, else None [R-LANE-SHARED-GIT-DIR]. Git in a worktree writes its config into the
+    project checkout's shared .git/config, which every lane on that checkout and the
+    operator's own git read, so a hook or a core.hooksPath set there runs in their git. Any
+    word read as git counts, by any path and behind any wrapper, and a command the write walk
+    cannot split, with git and config spelled in it, fails closed."""
+    if not (isinstance(command, str) and binding.task and not binding.problem
+            and escape.is_role(agent)):
+        return None
+    segments = []
+    _bash_write_targets(command, cwd if isinstance(cwd, str) else None, segments)
+    blinded = not segments or any(tokens is None for tokens, _, _ in segments)
+    found = blinded and _GIT_CONFIG_SPELLED_RE.search(command)
+    for tokens, _, _ in segments:
+        for index, word in enumerate(tokens or ()):
+            if _verb_name(word) == "git" and _git_config_write(tokens[index + 1:]):
+                found = True
+    if not found:
+        return None
+    return ("BOUNDARY_VIOLATION",
+            "%s may not write git config in lane %s: the project checkout's .git/config is "
+            "shared by every lane on it and by the operator's own git, so only its reads "
+            "(--get, --get-all, --get-regexp, --list, get, list) are a role's" % (agent,
+                                                                                   binding.task))
 
 
 def _decide(payload, argv=()):
@@ -2744,10 +2857,11 @@ def _decide(payload, argv=()):
     if binding().problem:
         return None
 
-    # R-LANE-START-DIR-PROTECTED, R-LANE-CROSS-WRITE, R-LANE-CROSS-TASK: before the bound
-    # run's state is read, so a lane before ppl init is held to them as after it, and the
-    # start directories for a session in no lane too. The registry is read for the other
-    # lanes, the binding having read only this lane's entry.
+    # R-LANE-START-DIR-PROTECTED, R-LANE-CROSS-WRITE, R-LANE-CROSS-TASK and
+    # R-LANE-SHARED-GIT-DIR: before the bound run's state is read, so a lane before ppl init
+    # is held to them as after it, and the start directories for a session in no lane too.
+    # The registry is read for the other lanes, the binding having read only this lane's
+    # entry.
     if tool in WRITE_TOOLS or tool == "Bash":
         try:
             listed = lanes.read(_READ_LIMIT)
@@ -2755,8 +2869,10 @@ def _decide(payload, argv=()):
             listed = None
         refusal = cross_lane_denial(payload, binding(), listed)
         if refusal is None and tool == "Bash":
-            refusal = ppl_task_mismatch(tool_input.get("command"), binding(), listed,
-                                        payload.get("cwd"))
+            refusal = (ppl_task_mismatch(tool_input.get("command"), binding(), listed,
+                                         payload.get("cwd"))
+                       or role_git_config_denial(tool_input.get("command"), agent, binding(),
+                                                 payload.get("cwd")))
         if refusal:
             return deny(*refusal)
 

@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -75,6 +76,76 @@ class TestScope(Home):
                                  os.path.realpath(os.path.expanduser("~/.npm"))])
         self.assertNotIn(str(base / "real"), scope)
         self.assertNotIn(str(base / "real" / ".worktrees"), scope)
+
+    def test_a_lanes_profile_write_denies_the_shared_git_config_hooks_and_info(self):
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R33: the lane's allowWrite takes in the checkout's .git, and its denyWrite, which
+        # wins, keeps out what every lane and the operator's own git read and run there
+        base = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplrepo-")))
+        worktree = base / ".worktrees" / "repo-KEY-7"
+        lane_doc = doc(forge="gitlab", checkout=str(base))
+        shared = [str(base / ".git" / name) for name in ("config", "hooks", "info")]
+        lane = os_sandbox.profile(lane_doc, "/srv/ws", PINS, worktree=worktree)
+        filesystem = lane["sandbox"]["filesystem"]
+        self.assertIn(str(base / ".git"), filesystem["allowWrite"])
+        for entry in shared:
+            self.assertIn(entry, filesystem["denyWrite"])
+            self.assertNotIn(entry, filesystem["allowWrite"])
+        facts = os_sandbox.facts(lane_doc, "/srv/ws", PINS, worktree=worktree)
+        for entry in shared:
+            self.assertIn(entry, facts["deny_write"])
+        # outside a lane the whole checkout is in scope, as before
+        plain = os_sandbox.profile(lane_doc, "/srv/ws", PINS)["sandbox"]["filesystem"]
+        for entry in shared:
+            self.assertNotIn(entry, plain["denyWrite"])
+
+    def test_git_in_a_worktree_never_writes_the_shared_config_hooks_or_info(self):
+        # R33: what a lane runs in its worktree (commit, add, branch, stash, rebase, reset,
+        # checkout) leaves the checkout's .git/config, hooks and info as they were, so the
+        # lane's profile can write-deny them
+        root = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplgit-")))
+        checkout, worktree = root / "checkout", root / "worktree"
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+
+        def git(directory, *args):
+            subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                            "-c", "commit.gpgsign=false", "-C", str(directory)] + list(args),
+                           check=True, capture_output=True, env=env, timeout=60)
+
+        def shared():
+            found = {}
+            for name in ("config", "hooks", "info"):
+                top = checkout / ".git" / name
+                for path in [top] + sorted(top.rglob("*")):
+                    if path.is_file():
+                        found[str(path)] = (path.read_bytes(), path.stat().st_mtime_ns)
+            return found
+
+        checkout.mkdir()
+        git(checkout, "init", "-q", "-b", "main")
+        (checkout / "a.txt").write_text("a\n", encoding="utf-8")
+        git(checkout, "add", "a.txt")
+        git(checkout, "commit", "-q", "-m", "base")
+        git(checkout, "worktree", "add", "-q", "-b", "lane", str(worktree))
+        before = shared()
+        (worktree / "b.txt").write_text("b\n", encoding="utf-8")
+        git(worktree, "add", "b.txt")
+        git(worktree, "commit", "-q", "-m", "lane work")
+        git(worktree, "branch", "side", "main")
+        (worktree / "a.txt").write_text("changed\n", encoding="utf-8")
+        git(worktree, "stash", "push", "-q")
+        git(worktree, "stash", "pop", "-q")
+        git(worktree, "checkout", "-q", "--", "a.txt")
+        git(worktree, "checkout", "-q", "side")
+        (worktree / "c.txt").write_text("c\n", encoding="utf-8")
+        git(worktree, "add", "c.txt")
+        git(worktree, "commit", "-q", "-m", "side work")
+        git(worktree, "checkout", "-q", "lane")
+        git(worktree, "rebase", "-q", "side")
+        git(worktree, "reset", "-q", "--soft", "HEAD~1")
+        git(worktree, "reset", "-q", "--hard", "HEAD")
+        git(worktree, "switch", "-q", "-c", "lane-2")
+        self.assertEqual(shared(), before)
 
     def test_allow_write_follows_the_scope_and_expands_home(self):
         scope = os_sandbox.write_scope(doc(os_sandbox={"allow_write": ["~/.npm"]}))

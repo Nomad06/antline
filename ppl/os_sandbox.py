@@ -185,8 +185,9 @@ def facts(doc, workspace, pin_map, worktree=None):
             "tracker_repo": tracker_repo,
             "scratch": _real(scratch_root()),
             "write_scope": write_scope(doc, worktree),
-            "deny_write": list(dict.fromkeys(os.path.realpath(entry)
-                                             for entry in deny_write(workspace, pin_map))),
+            "deny_write": list(dict.fromkeys(
+                os.path.realpath(entry)
+                for entry in _lane_deny_write(doc, workspace, pin_map, worktree))),
             "pins": {name: dict(pin_map[name]) for name in PIN_NAMES}}
 
 
@@ -277,10 +278,34 @@ def deny_read(doc):
     return entries
 
 
+def shared_git(doc):
+    """What every lane on the checkout and the operator's own git read and run from its .git,
+    and git in a worktree never writes: config, hooks and info, each as found and
+    `realpath`-ed. A lane's profile write-denies them inside its allowance of that .git, so
+    no lane plants a hook, a core.hooksPath or an attribute there [R-LANE-SHARED-GIT-DIR]."""
+    git_dir = os.path.join(checkout(doc), ".git")
+    entries = []
+    for name in ("config", "hooks", "info"):
+        for entry in (os.path.join(git_dir, name), os.path.realpath(os.path.join(git_dir, name))):
+            if entry not in entries:
+                entries.append(entry)
+    return entries
+
+
+def _lane_deny_write(doc, workspace, pin_map, worktree):
+    """deny_write, with the checkout's shared .git parts for a lane (`worktree` given)."""
+    denied = deny_write(workspace, pin_map)
+    if worktree is not None:
+        denied.extend(entry for entry in shared_git(doc) if entry not in denied)
+    return denied
+
+
 def profile(doc, workspace, pin_map, worktree=None):
     """The sandbox settings block and the permissions.allow entries ppl owns, for a lane
-    whose own `worktree` is given or for the workspace (write_scope)."""
-    denied = deny_write(workspace, pin_map)
+    whose own `worktree` is given or for the workspace (write_scope). A lane's denyWrite also
+    holds the checkout's shared .git parts (shared_git), which its allowWrite's .git would
+    otherwise take in: a denyWrite entry wins over an allowWrite one."""
+    denied = _lane_deny_write(doc, workspace, pin_map, worktree)
     sandbox = {"enabled": True,
                "failIfUnavailable": True,
                "allowUnsandboxedCommands": True,

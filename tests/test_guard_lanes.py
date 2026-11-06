@@ -657,6 +657,10 @@ class TestLaneProtection(LaneCase):
                     "python3 -m ppl show --task %s" % theirs,
                     "/opt/pin/bin/ppl show --task %s" % theirs,
                     "ppl lane close %s" % theirs, "ppl lane resume %s" % theirs,
+                    # any module of the package runs the CLI, ppl.__main__ among them
+                    "python3 -m ppl.__main__ show --task %s" % theirs,
+                    "python3 -mppl show --task %s" % theirs,
+                    "python3.11 -I -m ppl.cli show --task %s" % theirs,
                     "ppl show --task $(echo %s)" % theirs,
                     # bare ppl takes its run from a cwd inside a lane once PPL_TASK is gone
                     "cd %s && PPL_TASK= ppl show" % worktree,
@@ -675,6 +679,97 @@ class TestLaneProtection(LaneCase):
                 reason = self.deny_reason(self.bash("ppl show", cwd=cwd))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn(theirs, reason)
+
+    def test_ppl_where_the_guard_cannot_place_the_cwd_is_denied(self):
+        # rule: R-LANE-CROSS-TASK
+        # a bare ppl with no PPL_TASK takes its run from the lane holding its cwd, so a cwd the
+        # walk cannot place fails closed: blinded by a substitution, a cd to a variable, cd -,
+        # a glob or a ~user, whatever directory it would have reached
+        alias = os.path.join(real(tmphome.mkdtemp(prefix="pplalias-")), "b")
+        os.symlink(self.worktree[LANE_B], alias)
+        for command in ("cd %s && env -u PPL_TASK ppl show $(true)" % alias,
+                        "cd %s && env -u PPL_TASK ppl show `true`" % alias,
+                        "cd %s/.. && cd *5102 && env -u PPL_TASK ppl show" % self.worktree[LANE_A],
+                        'cd "$X" && env -u PPL_TASK ppl show', "cd - && ppl show",
+                        'env -C "$D" ppl show', "pushd +1 && ppl show",
+                        "cd ~bob && ppl show", "ppl show --task %s $(true)" % LANE_A):
+            for agent in (None, "ppl-verifier"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("cannot tell the directory", reason)
+        # a directory it can place is judged by where it is
+        for command in ("cd %s && env -u PPL_TASK ppl show" % self.worktree[LANE_A],
+                        "cd /tmp && ls *.log; cd %s && ppl show" % lanes.start_dir(LANE_A)):
+            with self.subTest(placed=command):
+                self.assertIsNone(self.bash(command))
+
+    def test_git_worktree_remove_or_move_of_another_lanes_worktree_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # git removes the worktree it names, and takes a unique tail of its path from anywhere
+        # in the repository, which the guard cannot place
+        theirs = self.worktree[LANE_B]
+        for command in ("git worktree remove --force %s" % theirs,
+                        "git -C %s worktree remove %s" % (self.checkout, theirs),
+                        "cd %s/.worktrees && git worktree remove -f shop-%s"
+                        % (self.checkout, LANE_B),
+                        "git worktree move %s /tmp/moved" % theirs,
+                        "git worktree move %s %s/moved" % (self.worktree[LANE_A], theirs),
+                        "git worktree remove shop-%s" % LANE_B):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        reason = self.deny_reason(self.bash("git worktree remove --force %s" % theirs))
+        self.assertIn("lane %s's worktree" % LANE_B, reason)
+        self.assertIsNone(self.bash("git worktree list"))
+
+    def test_the_shared_git_config_hooks_and_info_are_denied(self):
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R33: every lane on the checkout and the operator's own git read and run them
+        git_dir = self.checkout + "/.git"
+        targets = (git_dir + "/config", git_dir + "/hooks/pre-commit",
+                   git_dir + "/info/attributes")
+        for agent in (None, "ppl-code-worker", "general-purpose"):
+            for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+                for target in targets:
+                    with self.subTest(agent=agent, tool=tool, target=target):
+                        reason = self.deny_reason(self.decide(agent, tool,
+                                                              edit_input(tool, target)))
+                        self.assertIn("BOUNDARY_VIOLATION", reason)
+                        self.assertIn("project checkout", reason)
+            for command in ("echo x >> %s/config" % git_dir,
+                            "cp /tmp/h %s/hooks/post-checkout" % git_dir,
+                            "tee %s/info/exclude" % git_dir,
+                            "cd %s && echo x > ../../.git/hooks/pre-push" % self.worktree[LANE_A]):
+                with self.subTest(agent=agent, command=command):
+                    reason = self.deny_reason(self.bash(command, agent=agent,
+                                                        cwd=self.worktree[LANE_A]))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("project checkout", reason)
+
+    def test_a_role_may_not_write_git_config_in_a_lane(self):
+        # rule: R-LANE-SHARED-GIT-DIR
+        # git config in a worktree writes the checkout's shared .git/config
+        own = self.worktree[LANE_A]
+        for command in ("git -C %s config core.hooksPath /tmp/h" % own,
+                        "git config --local core.hooksPath /tmp/h",
+                        "git config set core.hooksPath /tmp/h",
+                        "git config --add include.path /tmp/x", "git config --unset user.name",
+                        "timeout 5 git config core.fsmonitor /tmp/x",
+                        "/usr/bin/git -c a.b=c config filter.x.smudge /tmp/x",
+                        "git config core.hooksPath $(echo /tmp/h)", "git config core.hooksPath"):
+            for agent in ("ppl-code-worker", "ppl-verifier"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("may not write git config", reason)
+        for command in ("git config --get user.name", "git config --get-all remote.origin.url",
+                        "git config --get-regexp ^user", "git config --list",
+                        "git config -l --show-origin", "git config get user.name",
+                        "git config list", "git log --grep config"):
+            with self.subTest(read=command):
+                self.assertIsNone(self.bash(command, agent="ppl-verifier", cwd=own))
 
     def test_ppl_behind_a_wrapper_the_walk_does_not_unwrap_is_still_judged(self):
         # rule: R-LANE-CROSS-TASK
