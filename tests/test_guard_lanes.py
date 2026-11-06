@@ -964,6 +964,7 @@ class TestLaneProtection(LaneCase):
     def test_a_command_word_the_shell_builds_is_read_by_its_raw_spelling(self):
         # rule: R-LANE-CROSS-WRITE
         # rule: R-LANE-SHARED-GIT-DIR
+        # rule: R-LANE-CROSS-TASK
         # R47: a command word a substitution builds may be git or ppl with its subcommand built
         # too, so the raw text of the command, substitution or here-document body that holds
         # it is read by its spelling: git worktree for every session, git config for a role,
@@ -995,6 +996,42 @@ class TestLaneProtection(LaneCase):
         for agent in (None, "ppl-code-worker"):
             with self.subTest(allowed=commit, agent=agent):
                 self.assertIsNone(self.bash(commit, agent=agent, cwd=own))
+
+    def test_a_word_the_shell_builds_behind_a_wrapper_is_read_by_its_raw_spelling(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R47: any word of a segment the shell builds counts, not only its command word, so a
+        # git built behind a wrapper the walk does not unwrap (sudo, timeout, xargs, stdbuf)
+        # is read by the raw spelling of its segment, git then worktree or config each as a
+        # word of its own, while a word that is an argument of a git whose subcommand is read is
+        # judged by that subcommand (R40)
+        own = self.worktree[LANE_A]
+        for command in ("sudo $(echo git) worktree prune",
+                        "timeout 5 $(echo git) $(echo worktree) prune",
+                        "xargs $(echo git) worktree prune < /dev/null",
+                        "stdbuf -o0 `which git` worktree remove ../shop-%s" % LANE_B,
+                        "nice timeout 5 $(echo git) worktree prune",
+                        "timeout 5 $(echo ppl) show --task %s" % LANE_B):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        reason = self.deny_reason(self.bash("timeout 5 $(echo git) config core.hooksPath /tmp/h",
+                                            agent="ppl-code-worker", cwd=own))
+        self.assertIn("may not write git config", reason)
+        # config in a path, a file name or an option is no git config, a read of git config is
+        # judged in its own segment, and a git whose subcommand is read is judged by it
+        for command in ("git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "timeout 5 git log $(git merge-base HEAD main)..HEAD -- config",
+                        "git -C \"$(git rev-parse --show-toplevel)\" log -- config",
+                        "cat \"$(git rev-parse --show-toplevel)/config/app.yml\"",
+                        "$(git rev-parse --show-toplevel)/scripts/check-config.sh",
+                        "cd \"$(git rev-parse --show-toplevel)\" && git config --get user.name",
+                        "git commit -m \"$(cat <<'EOF'\nLet git read the config once\n\n"
+                        "`load_config` keeps the result\nEOF\n)\""):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
 
     def test_a_substitution_nested_past_the_recursion_limit_is_read_by_its_spelling(self):
         # rule: R-LANE-CROSS-WRITE

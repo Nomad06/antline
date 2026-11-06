@@ -2911,12 +2911,13 @@ def _quoted_body_commands(text, spelled):
 
 def _mask_text(text, i, closer, inner, fed, unsure, spelled):
     """(text[i:] up to `closer` outside quotes, with each $(...) and backtick replaced by the
-    word $SUBST and the text inside each appended to `inner`, the index after `closer`). Every
-    here-document body is taken out of the text and appended to `inner` as commands, masked the
-    same way, whatever its consumer or its pipeline; one fed to an interpreter is appended to
-    `fed` as well. `inner` takes (masked, raw) pairs, raw being the text the view was masked
-    from: the text inside the substitution, or the body as judged. The guard does not model
-    bash's here-document expansion, so the body is read by its delimiter's spelling
+    word $SUBST and the text inside each appended to `inner`, the same text with its
+    substitutions as written, the index after `closer`). Every here-document body is taken out
+    of both texts and appended to `inner` as commands, masked the same way, whatever its
+    consumer or its pipeline; one fed to an interpreter is appended to `fed` as well. `inner`
+    takes (masked, raw) pairs, raw being the view with its substitutions as written and its
+    here-document bodies, each a view of its own, out. The guard does not model bash's
+    here-document expansion, so the body is read by its delimiter's spelling
     [R-LANE-CROSS-WRITE]:
     - under exactly <<'WORD' or <<-'WORD' bash expands nothing: the lines that parse are the
       commands, and each line that leaves a quote open goes to `spelled` (_quoted_body_commands);
@@ -2928,6 +2929,8 @@ def _mask_text(text, i, closer, inner, fed, unsure, spelled):
     Raises _Unreadable on a substitution or a here-document left open, and RecursionError on
     substitutions nested past the interpreter's recursion limit."""
     out, pending = [], []
+    # (index in `out`, the substitution as written) for each $SUBST, for the raw text
+    written = []
     quote, depth, n = None, 0, len(text)
     # where the simple command being read starts in `out`, and whether its here-documents
     # feed an interpreter, None until a word of it tells (_heredoc_feeds_interpreter)
@@ -2945,12 +2948,13 @@ def _mask_text(text, i, closer, inner, fed, unsure, spelled):
             continue
         if quote is None and closer is not None and char == closer and (
                 closer == "`" or depth == 0):
-            return "".join(out), i + 1
+            return "".join(out), _as_written(out, written), i + 1
         if text.startswith("$(", i) or char == "`":
             start = i + (1 if char == "`" else 2)
-            body, i = _mask_text(text, start, "`" if char == "`" else ")", inner, fed, unsure,
-                                 spelled)
-            inner.append((body, text[start:i - 1]))
+            body, raw, i = _mask_text(text, start, "`" if char == "`" else ")", inner, fed,
+                                      unsure, spelled)
+            inner.append((body, raw))
+            written.append((len(out), "`%s`" % raw if char == "`" else "$(%s)" % raw))
             out.append("$SUBST")
             continue
         if char == '"':
@@ -2995,8 +2999,7 @@ def _mask_text(text, i, closer, inner, fed, unsure, spelled):
                             or any(_outside_quotes(line) is None for line in body)):
                         unsure.append(text_of_body)
                 try:
-                    inner.append((_mask_text(judged, 0, None, inner, fed, unsure, spelled)[0],
-                                  judged))
+                    inner.append(_mask_text(judged, 0, None, inner, fed, unsure, spelled)[:2])
                 except _Unreadable:
                     # a $( or a backtick left open in the body: kept raw, read by its spelling
                     inner.append((judged, judged))
@@ -3012,7 +3015,17 @@ def _mask_text(text, i, closer, inner, fed, unsure, spelled):
             command_at, feeds = len(out), None
     if closer is not None:
         raise _Unreadable("%s left open" % closer)
-    return "".join(out), n
+    return "".join(out), _as_written(out, written), n
+
+
+def _as_written(out, written):
+    """The text `out` holds with each $SUBST at an index of `written` put back as written."""
+    if not written:
+        return "".join(out)
+    raw = list(out)
+    for at, text in written:
+        raw[at] = text
+    return "".join(raw)
 
 
 def _command_views(command):
@@ -3020,8 +3033,8 @@ def _command_views(command):
     here-document body taken out, then the same of the text inside each substitution and of
     each here-document body, judged as commands line by line), (each here-document body fed
     to an interpreter), (each body bash may read otherwise than the masking), (each line of a
-    body under <<'WORD' that leaves a quote open, to be read by its spelling only), (the raw
-    text each view was masked from, the first the command itself)), or None when a
+    body under <<'WORD' that leaves a quote open, to be read by its spelling only), (each view
+    with its substitutions as written and the here-document bodies in it out)), or None when a
     substitution or a here-document is left open, or substitutions are nested past what the
     masking reads (_mask_text), and the command is read by its spelling. Read once per
     command: every check of a decision asks for the same views, and they are shared, so the
@@ -3033,11 +3046,11 @@ def _command_views(command):
 def _read_views(command):
     inner, fed, unsure, spelled = [], [], [], []
     try:
-        outer, _ = _mask_text(command, 0, None, inner, fed, unsure, spelled)
+        outer, raw, _ = _mask_text(command, 0, None, inner, fed, unsure, spelled)
     except (_Unreadable, RecursionError):
         return None
     return ((outer,) + tuple(view for view, _ in inner), tuple(fed), tuple(unsure),
-            tuple(spelled), (command,) + tuple(raw for _, raw in inner))
+            tuple(spelled), (raw,) + tuple(raw for _, raw in inner))
 
 
 @functools.lru_cache(maxsize=8)
@@ -3054,27 +3067,53 @@ def _blinded_write_shape(command):
     return bool(found and BASH_WRITE_SHAPES.search("\n".join(found[0] + found[1] + found[3])))
 
 
-def _built_command_word(segments):
-    """The command word the shell builds ($ or a backtick in it) that one of `segments`, as the
-    write walk reads them, runs, else None."""
-    for tokens, start, _ in segments:
-        word = tokens[start] if tokens and start < len(tokens) else ""
+def _built_word(tokens):
+    """The first of a segment's `tokens` the shell builds ($ or a backtick in it), whatever its
+    place: the command word, a wrapper's operand the walk does not unwrap (sudo, timeout,
+    xargs, stdbuf) or an argument, else None. The words after a git whose subcommand the walk
+    reads are that git's own, judged by the subcommand [R-LANE-CROSS-WRITE]."""
+    for index, word in enumerate(tokens or ()):
+        if _verb_name(word) == "git":
+            sub, _, problem = _git_subcommand(tokens[index + 1:])
+            if sub and not problem:
+                return None
         if "$" in word or "`" in word:
             return word
     return None
 
 
+def _built_raws(view, raw):
+    """The raw text, as written, of each segment of the masked `view` that holds a word the
+    shell builds (_built_word): the segments of `view` and of `raw`, its text as written, read
+    by the write walk's splitting with backslash-newlines joined, paired when they split alike,
+    else `raw` whole, as when a substitution holds a separator."""
+    masked = [text for text, _, _ in _write_segments(_CONTINUED_LINE_RE.sub(r"\1", view))]
+    written = [text for text, _, _ in _write_segments(_CONTINUED_LINE_RE.sub(r"\1", raw))]
+    if len(masked) != len(written):
+        return [raw]
+    found = []
+    for text, as_written in zip(masked, written):
+        if "$" not in text and "`" not in text:
+            continue
+        walked = []
+        _bash_write_targets(text, None, walked)
+        if any(_built_word(tokens) for tokens, _, _ in walked):
+            found.append(as_written)
+    return found or [raw]
+
+
 def _lane_git_segments(command, cwd):
     """(every segment the write walk reads over each view of `command` (_command_views), the
     texts it could not read as words, the here-document bodies fed to an interpreter, the raw
-    texts of the views whose command word the shell builds): the whole command is unread when
-    the masking cannot read it, else each segment the walk cannot split, each line of a body
-    under <<'WORD' that does not parse, and the raw text of each view, the command, the text
-    inside a substitution or a here-document body, where a segment's command word is one the
-    shell builds, which may be git or ppl with its subcommand built too [R-LANE-CROSS-WRITE]."""
+    texts where a word is one the shell builds): the whole command is unread when the masking
+    cannot read it, else each segment the walk cannot split and each line of a body under
+    <<'WORD' that does not parse. A segment holding a word the shell builds (_built_word) may
+    run git or ppl with its subcommand built too, so its text as written, its substitutions in
+    it and here-document bodies out (_built_raws), is read by its spelling
+    [R-LANE-CROSS-WRITE]."""
     found = _command_views(command)
     if found is None:
-        return [], [command], (), ()
+        return [], [command], (), []
     views, fed, _, spelled, raws = found
     segments, unread, built = [], list(spelled), []
     for view, raw in zip(views, raws):
@@ -3085,20 +3124,33 @@ def _lane_git_segments(command, cwd):
             continue
         walked = len(segments)
         _bash_write_targets(view, cwd if isinstance(cwd, str) else None, segments)
-        if _built_command_word(segments[walked:]):
-            built.append(raw)
-    return (segments, unread + built + [text for tokens, text, _ in segments if tokens is None],
-            fed, built)
+        if any(_built_word(tokens) for tokens, _, _ in segments[walked:]):
+            built.extend(_built_raws(view, raw))
+    return (segments, unread + [text for tokens, text, _ in segments if tokens is None], fed,
+            built)
 
 
 # What an interpreter's here-document may not spell in a lane: ppl, or a git worktree or
 # config call, which the walk cannot read inside code.
 _INTERPRETED_SPELLING_RE = re.compile(
     r"(?<![\w.-])ppl\b|\bgit\b[\s\S]*?\b(?:worktree|config)\b")
-# ppl spelled as a command in the raw text of a view whose command word the shell builds
-# ($(echo ppl), `which ppl`, /usr/local/bin/ppl, -m ppl.cli), and not ~/.ppl, a ppl/ directory
-# or a test_ppl.py file [R-LANE-CROSS-WRITE].
+# What the text as written of a segment holding a word the shell builds may not spell in a
+# lane [R-LANE-CROSS-WRITE]: git by any path, then worktree or config, each a word of its own
+# (not .git/config, src/config, check-config.sh or -Dconfig=x), or an alias or include set
+# after it, and ppl as a command ($(echo ppl), `which ppl`, /usr/local/bin/ppl, -m ppl.cli),
+# not ~/.ppl, a ppl/ directory or a test_ppl.py file.
+_GIT_WORD_RE = re.compile(r"(?<![\w.-])git(?![\w./-])")
+_WORKTREE_WORD_RE = re.compile(r"(?<![\w./-])worktree(?![\w./-])")
+_CONFIG_WORD_RE = re.compile(r"(?<![\w./-])config(?![\w./-])")
+_ALIAS_SET_RE = re.compile(r"(?:-c\s*|--config-env[\s=]*)[\"']?(?:alias|include)", re.IGNORECASE)
 _PPL_SPELLED_RE = re.compile(r"(?<![\w.-])ppl(?:\.\w+)*(?![\w./-])")
+
+
+def _git_then(word_re, text):
+    """True when `word_re` matches in `text` after its first git word (_GIT_WORD_RE): one
+    search each, so a text with many git words is read in one pass."""
+    git = _GIT_WORD_RE.search(text)
+    return bool(git and word_re.search(text, git.end()))
 
 
 def lane_heredoc_denial(command, binding):
@@ -3138,10 +3190,12 @@ def lane_git_denial(command, agent, binding, cwd=None):
       alias or include set on its command line (-c, --config-env, keys in any case), config
       handed in from elsewhere by GIT_CONFIG_*, HOME or XDG_CONFIG_HOME, or a global option
       the guard does not read, which may take a value and shift the words (_git_subcommand);
-    - a command word the shell builds, for every session [R-LANE-CROSS-WRITE]: before a
-      worktree, config or ppl word, and with the raw text of the command, substitution or
-      here-document body that holds it read by its spelling as well (_lane_git_segments), so
-      a git or a ppl whose subcommand is built too is judged by its spelling.
+    - a command word the shell builds before a worktree, config or ppl word, for every
+      session [R-LANE-CROSS-WRITE];
+    - a segment holding a word the shell builds, in any place but after a git whose
+      subcommand the walk reads, is read as written by its spelling (_lane_git_segments): git
+      then worktree, or for a role config, each a word of its own, an alias or include set
+      after git, or ppl, so a git or a ppl built behind a wrapper is judged by its spelling.
     Aliases in the operator's own global config are the operator's, and the checkout's
     .git/config is kept from the lanes (R-LANE-SHARED-GIT-DIR)."""
     if not (isinstance(command, str) and binding.task and not binding.problem):
@@ -3158,14 +3212,17 @@ def lane_git_denial(command, agent, binding, cwd=None):
     # only what the walk could not read as words is judged by its spelling: a git whose
     # subcommand it reads, a commit whose message is a substitution among them, is judged by
     # that subcommand
-    worktree = any(_GIT_WORKTREE_SPELLED_RE.search(text) for text in unread)
-    config = role and any(_GIT_CONFIG_SPELLED_RE.search(text) for text in unread)
-    untrusted = (any(_GIT_ALIAS_SPELLED_RE.search(text) for text in unread)
+    worktree = (any(_GIT_WORKTREE_SPELLED_RE.search(text) for text in unread)
+                or any(_git_then(_WORKTREE_WORD_RE, text) for text in built))
+    config = role and (any(_GIT_CONFIG_SPELLED_RE.search(text) for text in unread)
+                       or any(_git_then(_CONFIG_WORD_RE, text) for text in built))
+    untrusted = ((any(_GIT_ALIAS_SPELLED_RE.search(text) for text in unread)
+                  or any(_git_then(_ALIAS_SET_RE, text) for text in built))
                  and "an alias or include set on the command line")
     if not untrusted and any(_PPL_SPELLED_RE.search(text) for text in built):
-        untrusted = ("the command word %s, which the shell builds, where ppl is spelled"
-                     % _built_command_word(segments))
-    runs_git = any(re.search(r"\bgit\b", text) for text in unread)
+        untrusted = "a word the shell builds where ppl is spelled"
+    runs_git = (any(re.search(r"\bgit\b", text) for text in unread)
+                or any(_GIT_WORD_RE.search(text) for text in built))
     for tokens, start, _ in segments:
         if tokens is None:
             continue
@@ -3194,7 +3251,7 @@ def lane_git_denial(command, agent, binding, cwd=None):
         moved = [word for tokens, _, _ in segments for word in tokens or ()
                  if _GIT_CONFIG_ENV_RE.match(word)]
         if moved or any(re.search(r"(?:GIT_CONFIG\w*|HOME|XDG_CONFIG_HOME)=", text)
-                        for text in unread):
+                        for text in unread + built):
             untrusted = untrusted or ("%s, which hands git config from elsewhere"
                                       % (moved[0].split("=", 1)[0] + "=" if moved
                                          else "an environment assignment"))
