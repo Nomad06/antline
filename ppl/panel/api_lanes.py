@@ -11,17 +11,18 @@ SHOWN = ("lane", "task", "harness", "stage", "outcome", "alive", "resume")
 def _usd(task):
     try:
         return status.usd_text(task)
-    except (PplError, OSError, ValueError, KeyError, TypeError) as exc:
-        return "usd unknown, %s" % (getattr(exc, "message", None) or exc)
+    except (PplError, OSError, ValueError, KeyError, TypeError):
+        return ""
 
 
 def _day():
-    """Today's machine spend against [budgets] usd_max_per_day (0, no cap). `issues` keeps the
-    kinds of runs spent_today could not count, as it returns them."""
+    """Today's machine spend against [budgets] usd_max_per_day (0, no cap). `issues` counts, per
+    kind, the runs spent_today could not count; the runs' names stay out of the response."""
     day = {"usd": None, "cap": None, "issues": {}, "error": None}
     try:
         day["cap"] = config.budgets_usd_max_per_day()
-        day["usd"], day["issues"] = usage.spent_today()
+        day["usd"], issues = usage.spent_today()
+        day["issues"] = {kind: len(names) for kind, names in issues.items()}
     except (PplError, OSError, ValueError) as exc:
         day["error"] = getattr(exc, "message", None) or str(exc)
     return day
@@ -35,8 +36,8 @@ def overview(params, body, query):
         answer["error"] = exc.message
     try:
         rows = lane_launch.listing()
-    except PplError as exc:
-        answer["error"] = exc.message
+    except (PplError, OSError) as exc:
+        answer["error"] = getattr(exc, "message", None) or str(exc)
         return answer
     for row in rows:
         shown = {key: row.get(key) for key in SHOWN}

@@ -17,7 +17,7 @@ function dayLine(day) {
 
 function uncounted(day) {
   const issues = day && day.issues && typeof day.issues === "object" ? day.issues : {};
-  return Object.values(issues).reduce((sum, list) => sum + (Array.isArray(list) ? list.length : 0), 0);
+  return Object.values(issues).reduce((sum, count) => sum + (Number.isInteger(count) ? count : 0), 0);
 }
 
 export function LanesPage() {

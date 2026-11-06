@@ -22,7 +22,7 @@ import panel_client
 HOME = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_HOME"] = HOME
 
-from ppl import control, findings, lanes, paths, run, store
+from ppl import control, findings, lanes, paths, run, status as status_mod, store, usage as usage_mod
 from ppl.errors import PplError
 from ppl.panel import server, session
 
@@ -641,8 +641,50 @@ class TestLanesApi(panel_client.StudioTestCase):
         self.assertEqual(payload["lanes"][0]["stage"], "<script>alert(1)</script>")
 
     def test_api_lanes_is_get_only(self):
-        status, _, _ = panel_client.call("POST", "/api/lanes", {})
-        self.assertNotEqual(status, 200)
+        status, payload, _ = panel_client.call("POST", "/api/lanes", {})
+        self.assertEqual((status, payload["error_code"]), (405, "SCHEMA_INVALID"))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads a 000 file")
+    def test_api_lanes_with_a_registry_it_cannot_open_returns_the_error_not_a_500(self):
+        lanes._write([self._lane(1, "LN-1")])
+        os.chmod(lanes.registry_path(), 0)
+        self.addCleanup(os.chmod, lanes.registry_path(), 0o600)
+        status, payload, _ = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["lanes"], [])
+        self.assertTrue(payload["error"])
+
+    def test_a_lane_whose_spend_cannot_be_read_has_an_empty_usd_and_the_response_stays_200(self):
+        lanes._write([self._lane(1, "LN-1"), self._lane(2, "LN-2")])
+        real = status_mod.usd_text
+
+        def usd_text(task):
+            if task == "LN-1":
+                raise PplError("SCHEMA_INVALID", "bad state")
+            return real(task)
+        with mock.patch.object(status_mod, "usd_text", usd_text):
+            code, payload, _ = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["lanes"][0]["usd"], "")
+        self.assertTrue(payload["lanes"][1]["usd"].startswith("usd "))
+
+    def test_the_day_error_path_keeps_the_lanes_and_the_response_200(self):
+        lanes._write([self._lane(1, "LN-1")])
+        with mock.patch.object(usage_mod, "spent_today", side_effect=PplError("SCHEMA_INVALID", "bad runs")):
+            code, payload, _ = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(payload["lanes"]), 1)
+        self.assertEqual(payload["day"]["error"], "bad runs")
+        self.assertIsNone(payload["day"]["usd"])
+
+    def test_the_day_reports_counts_of_uncounted_runs_not_their_names(self):
+        lanes._write([self._lane(1, "LN-1")])
+        issues = {"blocked": [], "unpriced": [], "unreadable": ["SECRET-1", "SECRET-2"],
+                  "unpriced_other": []}
+        with mock.patch.object(usage_mod, "spent_today", return_value=(1.5, issues)):
+            _, payload, _ = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(payload["day"]["issues"]["unreadable"], 2)
+        self.assertNotIn("SECRET", json.dumps(payload))
 
 
 class TestPanelRowOsSandbox(unittest.TestCase):
