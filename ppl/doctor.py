@@ -1,7 +1,9 @@
-"""Where the PreToolUse guard hook is registered, in the settings of the session's own and the
-Claude home's, and whether each registration can fire. In a lane the session's own settings are
-the settings.json `ppl lane` rendered into the lane's start directory (lane_settings_path), whose
-hooks carry the lane's task on their command line; `ppl init` refuses a run whose lane settings
+"""Where the PreToolUse guard hook is registered, in the session's own settings and one other
+side, and whether each registration can fire. In a lane the session's own settings are the
+settings.json `ppl lane` rendered into the lane's start directory (lane_settings_path), whose
+hooks carry the lane's task on their command line, and the other side is the start
+directory's .claude/settings.local.json, which the lane session loads, not the Claude home's
+settings.json, which it does not (_sides, R56); `ppl init` refuses a run whose lane settings
 register no guard naming its task (lane_guard_problem). Outside a lane `ppl doctor` checks the
 machine alone: the setup steps, the models, the harnesses and the Claude Code binary.
 
@@ -1373,8 +1375,8 @@ def report(task_id=None, cwd=None, env=None, probe=None):
     read, a task with no entry), and `start_dir` is the confirmed lane's start directory.
     Outside a lane (`lane` None) it checks the machine alone: the setup report, the models, the
     harnesses, the Claude Code binary and the GitHub token variables. In a lane it adds where
-    the guard is registered in the lane's settings.json and the Claude home's, the lane guard's
-    task, every hook's interpreter and script (lane_hooks, what ppl lane resume refuses on),
+    the guard is registered in the lane's settings.json and its start directory's
+    .claude/settings.local.json (inspect), the lane guard's task, every hook's interpreter and script (lane_hooks, what ppl lane resume refuses on),
     the OS sandbox facts, the foreign Bash hooks, the MCP servers and whether the lane's guard
     runs."""
     from . import run

@@ -219,6 +219,21 @@ class TestPinnedGit(unittest.TestCase):
         self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
         self.assertTrue(marker.exists())
 
+    def test_the_import_takes_every_file_whatever_the_operators_excludes_file(self):
+        # ledger 93: the import's git add obeyed the operator's global core.excludesFile, so a
+        # harness file it matched was left out of the import commit without a word
+        ignore = Path(tmphome.mkdtemp(prefix="pplignore-")) / "ignore"
+        ignore.write_text("*.toml\n", encoding="utf-8")
+        config = Path(tmphome.mkdtemp(prefix="pplgitcfg-")) / "gitconfig"
+        config.write_text("[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n"
+                          "[core]\n\texcludesFile = %s\n" % ignore, encoding="utf-8")
+        source = fixtures.SOURCE / "defaults" / "harnesses" / "example-generic"
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config),
+                                          "GIT_CONFIG_NOSYSTEM": "1"}):
+            harness.add(str(source), name="excluded-import")
+        listed = git(paths.harness_dir("excluded-import"), "ls-files").split()
+        self.assertIn("harness.toml", listed)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -318,7 +318,7 @@ class TestOpenBlockingOnOwnDiff(unittest.TestCase):
         # just the wrong shape) made it vanish from open_blocking_on_own_diff
         # and opened the done gate - rc=0 - exactly the "an unpopulated
         # registry gated nothing" shape this cycle keeps finding. The guard
-        # hook's active_state() was hardened to fail CLOSED on this class in
+        # hook's state reader (now bound_state()) was hardened to fail CLOSED on this class in
         # cycle 1. The registry did not get the same treatment until now.
         record = findings.add(self.task, "blocking", "e", self.head, "Foo.java")
         path = (Path(os.environ["PPL_HOME"]) / "runs" / self.task / "findings"

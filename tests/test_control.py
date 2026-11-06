@@ -738,6 +738,42 @@ class TestDestroyCleansUpTheLane(unittest.TestCase):
         self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
         self.assertIn("DEMO-476", caught.exception.message)
 
+    def test_destroying_the_run_from_before_lanes_retires_its_pointer(self):
+        # rule: R-LANE-LEGACY-RUN
+        # ledger 283: runs/ACTIVE stayed after the destroy, so a later lane that reused the
+        # task id counted as the run from before lanes; a pointer naming another run stays
+        run.init("DEMO-520", "u", "/tmp/definitely-not-a-repo-xyz")
+        name_as_the_legacy_run(self, "DEMO-521")
+        run.destroy("DEMO-520", "local")
+        self.assertEqual(paths.legacy_active_file().read_text(encoding="utf-8"), "DEMO-521\n")
+        run.init("DEMO-521", "u", "/tmp/definitely-not-a-repo-xyz")
+        result = run.destroy("DEMO-521", "local")
+        self.assertEqual((result["status"], result["pointer"]), ("archived", "retired"))
+        self.assertFalse(os.path.lexists(paths.legacy_active_file()))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads a 000 file")
+    def test_a_pointer_that_cannot_be_read_leaves_the_worktree_and_raises_nothing(self):
+        # rule: R-LANE-LEGACY-RUN
+        # ledger 284: an unreadable runs/ACTIVE raised a traceback in destroy and in ppl lane;
+        # destroy now leaves the worktree it cannot place, and ppl lane refuses
+        main = self.checkout()
+        tree = main.parent / "shop-DEMO-522"
+        self.git(main, "worktree", "add", "-q", "-b", "DEMO-522-work", str(tree))
+        run.init("DEMO-522", "u", str(tree))
+        name_as_the_legacy_run(self, "DEMO-522")
+        pointer = paths.legacy_active_file()
+        os.chmod(pointer, 0)
+        self.addCleanup(os.chmod, pointer, 0o600)
+        result = run.destroy("DEMO-522", "local")
+        self.assertEqual(result["worktree"], "left_behind")
+        self.assertIn("runs/ACTIVE cannot be read", result["worktree_error"])
+        self.assertTrue(tree.is_dir())
+        from ppl import lane_launch
+        with self.assertRaises(PplError) as caught:
+            lane_launch.start("KEY-1", exec_=False)
+        self.assertEqual(caught.exception.code, "OWNER_DECISION")
+        self.assertIn("runs/ACTIVE cannot be read", caught.exception.message)
+
     def test_a_lane_whose_state_cannot_be_parsed_is_destroyed_all_the_same(self):
         # rule: R-LANE-CROSS-WRITE
         # Final review I2: destroy takes the worktree from the lane's entry or record, so a

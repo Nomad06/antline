@@ -190,10 +190,8 @@ def _lane_harness(args, entry):
                        "runs the harness its lane exported" % (args.harness, args.task_id, name))
     snapshot = os.path.join(str(entry.get("start_dir")), "harness", str(name))
     if not os.path.isfile(os.path.join(snapshot, "harness.toml")):
-        raise PplError("SETUP_INCOMPLETE",
-                       "lane %s has no harness snapshot at %s: destroy the lane with ppl destroy "
-                       "--scope local --task %s and start it again with ppl lane <link>"
-                       % (args.task_id, snapshot, args.task_id))
+        raise PplError("SETUP_INCOMPLETE", "lane %s has no harness snapshot at %s: %s"
+                       % (args.task_id, snapshot, lanes.restart_hint(args.task_id)))
     return harness.load(snapshot)
 
 
@@ -1367,9 +1365,32 @@ def _lane_close_task(args):
     return resolve_task(argparse.Namespace(task=args.rest or args.task))
 
 
+# The flags each form of ppl lane takes, as argparse names them. Any other one given is
+# refused, never ignored: close --no-exec used to close the lane.
+_LANE_FLAGS = {"list": ("json",), "resume": ("no_exec",), "close": ("task",),
+               "start": ("harness", "slug", "no_exec")}
+_LANE_FLAG_NAMES = {"harness": "--harness", "slug": "--slug", "no_exec": "--no-exec",
+                    "task": "--task", "json": "--json"}
+
+
+def _lane_flags(args):
+    """SCHEMA_INVALID when `ppl lane` is given a flag its form does not take, or list a task."""
+    form = args.target if args.target in _LANE_FLAGS else "start"
+    extra = [flag for name, flag in _LANE_FLAG_NAMES.items()
+             if getattr(args, name) not in (None, False) and name not in _LANE_FLAGS[form]]
+    if form == "list" and args.rest:
+        extra.insert(0, args.rest)
+    if extra:
+        what = "ppl lane %s" % form if form != "start" else "ppl lane <link>"
+        raise PplError("SCHEMA_INVALID", "%s does not take %s: it takes %s"
+                       % (what, ", ".join(extra),
+                          ", ".join(_LANE_FLAG_NAMES[name] for name in _LANE_FLAGS[form])))
+
+
 def cmd_lane(args):
     # The first word is read by hand: list, resume and close are verbs, anything else is a
     # task link or id (task ids cannot be these words).
+    _lane_flags(args)
     if args.target == "list":
         rows = lane_launch.listing()
         print(json.dumps(rows, indent=2, sort_keys=True) if args.json else lane_launch.text(rows))
@@ -1384,7 +1405,8 @@ def cmd_lane(args):
         if args.rest:
             raise PplError("SCHEMA_INVALID", "ppl lane takes one task link or id, and %r is a "
                            "second" % args.rest)
-        result = lane_launch.start(args.target, harness_name=args.harness, slug=args.slug,
+        result = lane_launch.start(args.target, harness_name=args.harness,
+                                   slug="work" if args.slug is None else args.slug,
                                    exec_=not args.no_exec)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -1721,7 +1743,7 @@ def build_parser():
     p.add_argument("rest", nargs="?", help="the task id after resume or close")
     p.add_argument("--harness", help="the installed harness (default: the one whose [repo] path "
                                      "holds the cwd, else the default harness)")
-    p.add_argument("--slug", default="work", help="the branch is <TASK-ID>-<slug>")
+    p.add_argument("--slug", help="the branch is <TASK-ID>-<slug> (default: work)")
     p.add_argument("--no-exec", action="store_true",
                    help="print {argv, env, cwd} as JSON instead of starting claude")
     p.add_argument("--task", help="close: the task whose lane to free (default: PPL_TASK, else "

@@ -1160,6 +1160,24 @@ class TestAbandonedRun(LessonsTestCase):
                           "blocker": None, "why": "spec was wrong"})
         self.assertFalse(built["directory"].exists())
 
+    def test_a_run_directory_left_behind_writes_no_marker_and_says_so(self):
+        # ledger 285: with the run directory left behind there is no archive, and the marker
+        # path was built from None (TypeError); now no marker is written, the result says why,
+        # and the destroy run again once the run directory can move leaves the marker
+        built = self.build_run("DEMO-9330")
+
+        def stuck(source, target):
+            raise OSError("the run directory is busy")
+        with mock.patch.object(run.shutil, "move", stuck):
+            result = lessons.destroy_with_reflection("DEMO-9330", "gave up")
+        self.assertEqual((result["run_dir"], result["archive"]), ("left_behind", None))
+        self.assertEqual(result["reflection"], "left_behind")
+        self.assertIn(str(built["directory"]), result["reflection_error"])
+        self.assertFalse(lessons.pending_path("DEMO-9330").exists())
+        result = lessons.destroy_with_reflection("DEMO-9330", "gave up")
+        self.assertEqual((result["status"], result["reflection"]), ("archived", "pending"))
+        self.assertTrue(lessons.pending_path("DEMO-9330").is_file())
+
     def test_a_resumed_run_has_a_null_blocker(self):
         # build_run parks the run once and resumes it, and parking.json stays on disk
         built = self.build_run("DEMO-9313")

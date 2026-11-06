@@ -2582,6 +2582,20 @@ class TestInitInsideALane(unittest.TestCase):
             encoding="utf-8"))
         self.assertEqual(frozen["task"]["key_pattern"], "^[A-Z][A-Z0-9]+-[0-9]+$")
 
+    def test_init_in_a_lane_without_its_snapshot_names_the_owners_restart(self):
+        # rule: R-INIT-HARNESS-APPLIED
+        # ledger 297: the remedy told the lane's own session to destroy its lane; it names
+        # the owner's restart from a terminal outside the lane (R51)
+        entry = fixtures.bind_lane("DEMO-7090", "/tmp/repo")
+        shutil.rmtree(Path(entry["start_dir"]) / "harness")
+        code, _, err = self.init("DEMO-7090")
+        self.assertEqual(code, 2)
+        error = json.loads(err)
+        self.assertEqual(error["error_code"], "SETUP_INCOMPLETE")
+        self.assertIn("in a terminal outside the lane", error["message"])
+        self.assertIn("ppl destroy --scope local --task DEMO-7090", error["message"])
+        self.assertNotIn("destroy the lane", error["message"])
+
     def test_init_with_another_harness_than_the_lanes_is_refused(self):
         # rule: R-INIT-HARNESS-APPLIED
         fixtures.install_harness("example-generic")

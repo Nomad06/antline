@@ -294,8 +294,9 @@ def clean_old_workspace():
     hook entries, sandbox block and allow entries in <workspace>/.claude/settings.local.json,
     the rendered pipeline skill and the ppl-* agent files, each matched by ppl's own markers,
     and PPL_HOME/os_sandbox.json, then the [claude] workspace, hooks, agents_dir and skills_dir
-    keys. Returns (removed, left, kept): every path or entry removed, what was left for the
-    owner (a settings file that is a link), and why nothing was removed while a run from
+    keys, the workspace key and the facts kept while anything was left. Returns (removed, left,
+    kept): every path or entry removed, what was left for the owner (a settings file that is a
+    link), and why nothing was removed while a run from
     before lanes is not finished (lane_launch._legacy_run_problem): its session still runs
     under those hooks and that skill."""
     from . import lane_launch
@@ -320,6 +321,11 @@ def clean_old_workspace():
     skills = _old_dir(current, "skills_dir", workspace, "skills")
     if skills is not None:
         removed += _clean_skill(skills / "pipeline")
+    if left:
+        # the workspace key and the facts stay with what was left, so a rerun finds the
+        # workspace and names it again
+        config.remove("claude", [key for key in LEGACY_CLAUDE_KEYS if key != "workspace"])
+        return removed, left, None
     if os.path.lexists(facts):
         facts.unlink()
         removed.append(str(facts))

@@ -902,6 +902,14 @@ def destroy_with_reflection(task_id, why):
     result = run.destroy(task_id, "local")
     if outcome["ended"] == "merged":
         result["why"] = why
+    if result.get("archive") is None:
+        # the run directory was left behind: a marker names an archived bundle only, and the
+        # destroy run again once the directory can move builds and archives it
+        result["reflection"] = "left_behind"
+        result["reflection_error"] = ("%s was not archived, so no reflection marker is "
+                                      "written: clear what run_dir_error names, then run this "
+                                      "destroy again" % run.state_path(task_id).parent)
+        return result
     bundle_path = result["archive"] + "/lessons/bundle"
     marker = {"task": task_id, "bundle": bundle_path}
     if stamp is not None:

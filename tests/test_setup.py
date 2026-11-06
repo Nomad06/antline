@@ -860,6 +860,15 @@ class TestOldWorkspaceCleanup(SetupTestCase):
         self.assertIn(str(target), said)
         self.assertIn("ppl_guard.py", said)
         self.assertFalse((self.claude / "agents" / "ppl-code-worker.md").exists())
+        # ledger 296: what was left keeps the workspace key and the facts, so a rerun finds
+        # the workspace and names what is left again
+        self.assertEqual(config.load()["claude"]["workspace"], str(self.workspace))
+        self.assertTrue(self.facts.exists())
+        self.lines.clear()
+        self.run_claude()
+        again = "\n".join(self.lines)
+        self.assertIn("left %s as it is" % path, again)
+        self.assertIn("ppl_guard.py", again)
 
     def test_a_linked_agent_and_a_linked_pipeline_dir_stay_and_their_targets_too(self):
         from ppl import routing

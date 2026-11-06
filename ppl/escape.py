@@ -293,14 +293,15 @@ def webfetch_github(tool_input):
     return any(_is_github_host(host) for host in hosts)
 
 
-def decide(payload, facts_file, state):
+def decide(payload, facts_file, state, task=None):
     """None to let a flagged call go on to the guard's other checks, else (code, reason).
     `facts_file` is the path of the guard facts the session runs under (load_facts), read
     only past the role checks and the binding. `state` is the guard's bound_state reader, a
     callable answering (task_id, run state or None) for the run the hook's own command line
     binds it to, and raising when that lane cannot be confirmed. It is called only past the
     role checks so a ppl-* role is refused before any file is read. A run state already read,
-    or None, is taken as well.
+    or None, is taken as well. `task` is the task the hook's command line names, for the
+    refusal's remedy when that lane cannot be confirmed.
 
     While the guard facts exist or the session is bound to a run, every flagged call is the
     pipeline's whatever its cwd, since a cwd and the run's recorded repo are both in a role's
@@ -325,8 +326,9 @@ def decide(payload, facts_file, state):
             return ("OWNER_DECISION",
                     "the run this session is bound to cannot be read (%s), so a command outside "
                     "the OS sandbox cannot be checked: repair PPL_HOME/lanes.json or the run's "
-                    "state.json, or run ppl lane resume <task>"
-                    % _short(getattr(err, "message", None) or type(err).__name__))
+                    "state.json, or run ppl lane resume %s"
+                    % (_short(getattr(err, "message", None) or type(err).__name__),
+                       task or "<task>"))
     else:
         run_state = state if isinstance(state, dict) else None
         task_id = (run_state or {}).get("task_id")

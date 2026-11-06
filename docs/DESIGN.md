@@ -2556,7 +2556,9 @@ escalated, the blocker of `parking.json` while it is parked or escalated and `nu
 (a resume leaves `parking.json` on disk), and the owner's line. A run whose merge
 `ppl merge observed` recorded gets `{ended: "merged", merged_sha}` instead, as
 `ppl lessons bundle` writes it, and the owner's line goes in the command's result. The archive
-keeps the bundle, and a pending marker `PPL_HOME/lessons/pending/<task>.json` names it. The next
+keeps the bundle, and a pending marker `PPL_HOME/lessons/pending/<task>.json` names it. When
+the run directory stays behind unarchived, the result says `"reflection": "left_behind"` with
+the reason and leaves no marker; the destroy run again once the directory moves leaves it. The next
 orchestrator session lists the markers with `ppl lessons pending` and reflects on each. A run
 whose proposals are already recorded is archived with no new bundle and no marker, and the
 result says `"reflection": "recorded"`: the bundle those proposals came from stays in the

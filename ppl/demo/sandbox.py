@@ -98,9 +98,22 @@ class Sandbox:
 
     def guard_argv(self):
         """The guard hook's command line as the lane's settings.json registers it for
-        PreToolUse: it ends in --task TASK, which binds the hook to TASK's lane."""
-        settings = json.loads(self.lane_settings().read_text(encoding="utf-8"))
-        return shlex.split(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
+        PreToolUse, the entry whose command runs ppl_guard.py: it ends in --task TASK, which
+        binds the hook to TASK's lane. SCHEMA_INVALID when the settings cannot be read or
+        register no such entry."""
+        try:
+            path = self.lane_settings()
+            settings = json.loads(path.read_text(encoding="utf-8"))
+            commands = [hook.get("command") for entry in settings["hooks"]["PreToolUse"]
+                        for hook in entry["hooks"]]
+            for command in commands:
+                if isinstance(command, str) and "ppl_guard.py" in command:
+                    return shlex.split(command)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            raise PplError("SCHEMA_INVALID", "demo sandbox: the lane's settings.json cannot "
+                           "be read for its guard: %s" % error) from error
+        raise PplError("SCHEMA_INVALID", "demo sandbox: %s registers no ppl_guard.py for "
+                       "PreToolUse" % path)
 
     def guard(self, payload):
         try:

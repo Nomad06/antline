@@ -2121,43 +2121,50 @@ def _has_dotdot(path):
     return ".." in str(path).split("/")
 
 
-# R68 AMENDED: a ppl-test-worker Glob pattern's braces are not expanded. One that could hide
-# a path in an alternative is refused instead [R-TEST-WORKER-READ-TOOLS].
+# R68 AMENDED 2: a ppl-test-worker Glob pattern's braces are not expanded. A brace group is
+# allowed only when every alternative is a plain name, so none can be empty, absolute, ~ or
+# climb with .. [R-TEST-WORKER-READ-TOOLS].
 _BRACE_DEPTH_LIMIT = 4
-# A dot at an alternative's edge, which joins a dot beside the group into ..
-_BRACE_EDGE_DOT_RE = re.compile(r"(?:^|[{,])\.|\.(?:$|[},])")
+# A plain brace alternative: runs of these characters joined by single dots, no dot at
+# either end. A nested group counts as one character of a run.
+_BRACE_NAME_RE = re.compile(r"[A-Za-z0-9_*?+-]+(?:\.[A-Za-z0-9_*?+-]+)*")
 
 
 def _glob_brace_problem(pattern):
     """Why ppl-test-worker's Glob `pattern` is refused for its braces, else None: a [ class
-    beside a { (a class can hold a brace or a comma that pairs them otherwise), a /, ~ or ..
-    inside a brace group, or a dot at an alternative's edge that a dot beside the group makes
-    .. of, braces unbalanced, or nested deeper than _BRACE_DEPTH_LIMIT. One pass, no expansion:
-    a backslash takes the next character as written, and a group's text is judged with its
-    backslashes out."""
+    beside a { (a class can hold a brace or a comma that pairs them otherwise), a brace group
+    with an alternative that is not a plain name (_BRACE_NAME_RE: an empty one, a /, a ~, a
+    .., a dot at an end, a space, a backslash or any other character among them), braces
+    unbalanced, or nested deeper than _BRACE_DEPTH_LIMIT. One pass, no expansion."""
     if "{" not in pattern and "}" not in pattern:
         return None
     if "[" in pattern and "{" in pattern:
         return "a [ class beside a { brace"
-    opened, index = [], 0
+    groups, index = [], 0
     while index < len(pattern):
         char = pattern[index]
         if char == "\\":
+            # taken as written: outside a group it opens nothing, inside one it is no name
+            if groups:
+                groups[-1].append(pattern[index:index + 2])
             index += 2
             continue
         if char == "{":
-            opened.append(index)
-            if len(opened) > _BRACE_DEPTH_LIMIT:
+            groups.append([])
+            if len(groups) > _BRACE_DEPTH_LIMIT:
                 return "braces nested deeper than %d" % _BRACE_DEPTH_LIMIT
         elif char == "}":
-            if not opened:
+            if not groups:
                 return "unbalanced braces"
-            inside = pattern[opened.pop() + 1:index].replace("\\", "")
-            if ("/" in inside or "~" in inside or ".." in inside
-                    or _BRACE_EDGE_DOT_RE.search(inside)):
-                return "a /, ~ or .. inside a brace group"
+            alternatives = "".join(groups.pop()).split(",")
+            if not all(_BRACE_NAME_RE.fullmatch(each) for each in alternatives):
+                return "a brace alternative that is not a plain name"
+            if groups:
+                groups[-1].append("x")
+        elif groups:
+            groups[-1].append(char)
         index += 1
-    return "unbalanced braces" if opened else None
+    return "unbalanced braces" if groups else None
 
 
 def _dotdot_reason(tool, path):
@@ -2892,10 +2899,14 @@ def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
                 % (binding.task, named, named, binding.task))
     unplaced = _unplaced_cwd(segments, cwd)
     if unplaced:
+        # the remedy names a cd only where the cause is one
+        remedy = ("spell the directory plainly, or leave the cd out"
+                  if unplaced.startswith("a cd") else
+                  "run ppl as a plain command of its own, from the lane's own directories")
         return ("BOUNDARY_VIOLATION",
                 "lane %s may not run ppl where the guard cannot tell the directory it runs in "
-                "(%s): a ppl run from inside another lane takes that lane's run, so spell the "
-                "directory plainly, or leave the cd out" % (binding.task, unplaced))
+                "(%s): a ppl run from inside another lane takes that lane's run, so %s"
+                % (binding.task, unplaced, remedy))
     for where in places or [cwd if isinstance(cwd, str) else None]:
         # the lane's own directories are its own, whatever else a registry entry names there
         if not where or (binding.entry and lanes.holding([binding.entry], where)):
@@ -3583,6 +3594,15 @@ def lane_git_denial(command, agent, binding, cwd=None):
     return None
 
 
+def _named_task(argv):
+    """The task the hook's command line names, read from its words alone (no file), else
+    None: what a refusal's remedy names when the lane cannot be confirmed."""
+    try:
+        return lanes.hook_task(argv)
+    except ValueError:
+        return None
+
+
 def _decide(payload, argv=()):
     """The decision on one tool call, for the hook whose command line is `argv`."""
     if not isinstance(payload, dict):
@@ -3606,7 +3626,8 @@ def _decide(payload, argv=()):
     # refused from the call alone. One the escape check lets through still meets every
     # check below, the tracker gate and the forge denials included.
     if escape.flagged(payload):
-        refusal = escape.decide(payload, facts_file(argv), lambda: bound_state(binding()))
+        refusal = escape.decide(payload, facts_file(argv), lambda: bound_state(binding()),
+                                _named_task(argv))
         if refusal:
             return deny(*refusal)
 
@@ -3859,7 +3880,8 @@ def _decide(payload, argv=()):
             if braces:
                 return deny("BOUNDARY_VIOLATION",
                             "ppl-test-worker gives Glob the pattern %s, which has %s: keep "
-                            "braces to plain alternatives of names, or glob twice" % (glob, braces))
+                            "each brace alternative to a plain name such as {ts,tsx}, or glob "
+                            "twice" % (glob, braces))
             if isinstance(glob, str) and os.path.isabs(os.path.expanduser(glob)):
                 return deny("BOUNDARY_VIOLATION",
                             "ppl-test-worker gives Glob the absolute pattern %s: pass the test "

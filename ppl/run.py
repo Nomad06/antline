@@ -546,11 +546,26 @@ def destroy(task_id, scope):
         result["start_dir"] = "kept" if os.path.lexists(str(start)) else "absent"
     else:
         result.update(_remove_start_dir(task_id))
+    if result.get("run_dir") != "left_behind" and _retire_pointer(task_id):
+        result["pointer"] = "retired"
     # the lane is gone, so the reflections it claimed and did not record go back to pending
     # for the next lane of their harness (R60). Imported here: lessons imports this module
     from . import lessons
     result.update(lessons.hand_back(task_id))
     return result
+
+
+def _retire_pointer(task_id):
+    """Remove runs/ACTIVE when it names `task_id`, the run from before lanes that destroy has
+    just archived, so a later lane that reuses the task id is not taken for it. True when it
+    went; a pointer that cannot be read or names another run stays."""
+    try:
+        if legacy_active_task() != task_id:
+            return False
+        os.unlink(str(paths.legacy_active_file()))
+    except (PplError, OSError, UnicodeDecodeError):
+        return False
+    return True
 
 
 def _worktree_source(task_id, state, entry, found):
@@ -593,8 +608,10 @@ def _legacy_problem(task_id, repo):
                % repo)
     try:
         named = legacy_active_task()
-    except (PplError, UnicodeDecodeError):
-        named = None
+    except (PplError, OSError, UnicodeDecodeError) as err:
+        return ("runs/ACTIVE cannot be read (%s), so destroy cannot tell whether %s is the run "
+                "from before lanes and takes no worktree from its state.json: %s"
+                % (getattr(err, "message", None) or err, task_id, by_hand))
     if named != task_id:
         return ("run %s has no lane entry and no lane record, and runs/ACTIVE does not name it "
                 "as the run from before lanes, so destroy takes no worktree from its state.json: "
@@ -659,8 +676,23 @@ def _archive_run_dir(task_id, result):
     except (OSError, PplError) as exc:
         done.update(run_dir="left_behind", run_dir_error=getattr(exc, "message", None) or str(exc))
         return done
+    _stamp_archived_log(archive)
     done.update(status="archived", archive=str(archive))
     return done
+
+
+def _stamp_archived_log(archive):
+    """Set the archived log.jsonl's times to now (R69). Until the move the log was the lane
+    sandbox's to backdate, and the day cap skips an archived run whose log was last written
+    before local midnight (usage._quiet_since), so the time it trusts is one ppl wrote, out of
+    every sandbox. A link there is left as it is; a log that cannot be stamped is skipped,
+    since the destroy's own log line just wrote it."""
+    log = os.path.join(str(archive), "log.jsonl")
+    try:
+        if os.path.isfile(log) and not os.path.islink(log):
+            os.utime(log)
+    except OSError:
+        pass
 
 
 def _git(directory, args):

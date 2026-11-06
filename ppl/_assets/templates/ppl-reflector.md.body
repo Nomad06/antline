@@ -6,7 +6,9 @@ You are pointed at a bundle directory. Its files:
 `outcome.json` (how the run ended), `brief.json`, `challenge.json`, `findings.json`,
 `verdicts.json`, `gates.json`, `timeline.json`, `threads.json`, `memory-in-effect.json`
 (the lessons that were in effect during the run) and `remarks/<thread id>.json` (one file
-per reviewer thread). Read what you need with Read, Grep and Glob. Do not look anywhere else.
+per reviewer thread). Read what you need with Read, Grep and Glob, and give Grep and Glob the
+bundle directory as `path` with a relative `pattern` of plain names, `*` and `**`: the lane's
+guard places their search by that path. Do not look anywhere else.
 
 Rules:
 - Each proposal names one role, a cue, the lesson, and at least one evidence reference from

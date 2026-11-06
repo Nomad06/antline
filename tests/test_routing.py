@@ -202,6 +202,13 @@ class TestRouting(unittest.TestCase):
         self.assertNotIn("Bash", text.split("---")[1])
         self.assertNotIn("Write", text.split("---")[1])
 
+    def test_the_reflector_is_told_to_give_grep_and_glob_the_bundle_as_path(self):
+        # ledger 339: in a lane the guard refuses a reflector Grep or Glob without a path
+        # inside its claimed bundle, so the prompt says to pass the bundle directory as path
+        text = " ".join(routing.render("ppl-reflector", self.doc).split())
+        self.assertIn("give Grep and Glob the bundle directory as `path`", text)
+        self.assertIn("a relative `pattern` of plain names, `*` and `**`", text)
+
     def test_tiers_name_provider_and_model(self):
         tiers = routing.tiers()
         self.assertEqual(sorted(tiers), ["average", "good", "heavy", "light"])

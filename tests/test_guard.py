@@ -2048,14 +2048,17 @@ class TestGuard(unittest.TestCase):
 
     def test_test_worker_glob_braces_that_could_hide_a_path_are_denied(self):
         # rule: R-TEST-WORKER-READ-TOOLS
-        # R68 AMENDED: Glob expands braces, so an alternative of a relative pattern could be
-        # absolute, start with ~ or climb with ..; the guard expands nothing and refuses a
-        # brace group that holds /, ~ or .., a dot at an alternative's edge beside a dot, a
-        # [ class beside a { (a class can hold a brace or a comma), unbalanced braces and
-        # braces nested deeper than 4
+        # R68 AMENDED 2: Glob expands braces, so an alternative of a relative pattern could
+        # be absolute, start with ~ or climb with .., an empty one included ({,}/abs/** is
+        # /abs/**). The guard expands nothing: every alternative of a brace group must be a
+        # plain name (runs of A-Z a-z 0-9 _ * ? + - joined by single dots), and a [ class
+        # beside a { (a class can hold a brace or a comma), unbalanced braces and braces
+        # nested deeper than 4 are refused
         start = str(lanes.start_dir("DEMO-700"))
         test_dir = "/tmp/repo/source/core/orders/src/test"
-        for pattern in ("{[,]/tmp/repo/**,x}", "{/tmp/repo/source/core/orders/**,x}",
+        for pattern in ("{,}/tmp/repo/**", "{,x}/etc/**", "{.,x}/**", "{}/x", "{a,b }/x",
+                        "{a.,b}/x", "{a..b,c}/x",
+                        "{[,]/tmp/repo/**,x}", "{/tmp/repo/source/core/orders/**,x}",
                         "{~/x,y}", "{a/../..,b}", "{a,{b,/tmp/repo/**}}/x", ".{.,x}/main/**",
                         "{x,.}./main/**", "{a,b", "a}b/*.java", "{a,{b,{c,{d,{e,f}}}}}",
                         "[{]*.java", "{a\\/b,c}/*.java"):

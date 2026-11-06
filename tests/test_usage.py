@@ -13,7 +13,7 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import config, paths, usage
+from ppl import config, paths, run, usage
 from ppl.errors import PplError
 
 USAGE = {"input_tokens": 2, "cache_creation_input_tokens": 30848,
@@ -425,6 +425,31 @@ class TestSpentToday(unittest.TestCase):
         (usd, _), read = self.read_logs()
         self.assertEqual(round(usd, 6), 2.0)
         self.assertIn(str(archived), read)
+
+    def test_a_run_destroyed_today_counts_whatever_mtime_its_sandbox_left(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        # R69: until destroy moves it, the run's log is its lane sandbox's to backdate, so
+        # destroy stamps the archived log with the time it archived it, outside every sandbox
+        live = self.make_run("TT-3")
+        self.log(live, "2026-11-05T09:00:00+00:00", 1000000)
+        yesterday = time.mktime((2026, 11, 4, 18, 0, 0, 0, 0, -1))
+        real_move = run.shutil.move
+
+        def backdated_move(source, target):
+            # the sandbox's last word, after destroy's own log line and before the move
+            os.utime(os.path.join(source, "log.jsonl"), (yesterday, yesterday))
+            return real_move(source, target)
+        with mock.patch.object(run.shutil, "move", backdated_move):
+            result = run.destroy("TT-3", "local")
+        self.assertEqual(result["status"], "archived")
+        log = os.path.join(result["archive"], "log.jsonl")
+        self.assertGreaterEqual(os.stat(log).st_mtime, self._midnight())
+        (usd, issues), read = self.read_logs()
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues()))
+        self.assertIn(result["archive"], read)
+
+    def _midnight(self):
+        return time.mktime((2026, 11, 5, 0, 0, 0, 0, 0, -1))
 
     def test_a_live_run_last_written_before_midnight_is_still_read(self):
         # rule: R-BUDGET-USD-PER-DAY

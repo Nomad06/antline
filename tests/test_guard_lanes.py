@@ -115,6 +115,20 @@ class TestTheHookBinding(LaneCase):
             with self.subTest(tool=call["tool_name"]):
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(ppl_guard.decide(call)))
 
+    def test_a_call_outside_the_sandbox_in_an_unconfirmed_lane_names_the_lane(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        # ledger 165: the refusal ended "run ppl lane resume <task>", the placeholder, though
+        # the hook's own command line names the task
+        repo = self.lane(LANE_A)
+        run.init(UNREGISTERED, "u", repo)
+        result = ppl_guard.decide(payload(None, "Bash", {"command": "gh pr view 1",
+                                                         "dangerouslyDisableSandbox": True}),
+                                  argv(UNREGISTERED))
+        reason = self.deny_reason(result)
+        self.assertIn("OWNER_DECISION", reason)
+        self.assertIn("or run ppl lane resume %s" % UNREGISTERED, reason)
+        self.assertNotIn("<task>", reason)
+
     def test_an_unregistered_lane_denies_roles_and_unroled_writes_but_allows_reads(self):
         # rule: R-LANE-HOOK-BINDING
         repo = self.lane(LANE_A)
@@ -744,6 +758,12 @@ class TestLaneProtection(LaneCase):
         reason = self.deny_reason(ppl_guard.decide(
             payload(None, "Bash", {"command": "ppl show"}, None), argv(LANE_A)))
         self.assertIn("names no cwd", reason)
+        # ledger 213: the remedy names a cd only where the command has one
+        self.assertNotIn("leave the cd out", reason)
+        reason = self.deny_reason(self.bash("eval true; env -u PPL_TASK ppl show"))
+        self.assertNotIn("leave the cd out", reason)
+        self.assertIn("plain command of its own", reason)
+        self.assertIn("leave the cd out", self.deny_reason(self.bash('cd "$X" && ppl show')))
         for command in ("ppl show", "cd %s && ppl show" % self.worktree[LANE_A],
                         "if true; then echo x; fi"):
             with self.subTest(allowed=command):

@@ -53,8 +53,8 @@ def on_start(payload, argv=()):
     Scoped by agent_type, not by cwd (post-branch review, finding 2). This
     used to count only when the payload's cwd sat inside the run's repo, and
     the documented layout puts the orchestrator's session - whose cwd every
-    subagent inherits - BESIDE the worktree, not under it (DESIGN 5.4, README
-    "The isolated launch directory"). So in exactly the prescribed arrangement
+    subagent inherits - BESIDE the worktree, not under it (DESIGN 5.7: a lane's
+    session starts in its start directory). So in exactly the prescribed arrangement
     the counter never moved, and `ppl stage enter`'s hard-cap check
     (ppl/cli.py:check_dispatch_budget, self-described as "the whole of" the
     enforcement) compared against zero for the life of the run - the same bug

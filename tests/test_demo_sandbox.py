@@ -99,6 +99,48 @@ class TestSandbox(unittest.TestCase):
         # the operator's shell: PPL_TASK comes with the lane, which build starts
         self.assertIsNone(other.env.get("PPL_TASK"))
 
+    def test_a_callers_git_config_from_the_environment_is_dropped(self):
+        # ledger 356: GIT_CONFIG_COUNT/KEY_n/VALUE_n of the caller would add to, or shift, the
+        # sandbox's own url rewrite
+        caller = {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                  "GIT_CONFIG_VALUE_0": "/evil", "GIT_CONFIG_KEY_1": "alias.st",
+                  "GIT_CONFIG_VALUE_1": "!touch /tmp/pwned"}
+        with mock.patch.dict(os.environ, caller):
+            other = sandbox.Sandbox.create()
+        self.addCleanup(other.remove)
+        self.assertEqual(other.env["GIT_CONFIG_COUNT"], "1")
+        self.assertEqual(other.env["GIT_CONFIG_KEY_0"], "url.%s.insteadOf" % other.remote)
+        self.assertEqual(other.env["GIT_CONFIG_VALUE_0"], sample.REMOTE)
+        for name in ("GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"):
+            self.assertNotIn(name, other.env)
+
+    def test_the_guard_command_is_the_ppl_guard_entry_or_a_ppl_error(self):
+        # ledger 356: the first PreToolUse entry was taken whatever it ran, and a settings.json
+        # that could not be read raised past the demo's own error
+        other = sandbox.Sandbox.create()
+        self.addCleanup(other.remove)
+        other.start = other.root / "start"
+        other.start.mkdir()
+        guard = "/usr/bin/python3 /x/ppl/_assets/hooks/ppl_guard.py --task GH-1"
+        settings = {"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "/bin/echo other"}]},
+            {"matcher": ".*", "hooks": [{"type": "command", "command": guard}]}]}}
+        other.lane_settings().write_text(json.dumps(settings), encoding="utf-8")
+        self.assertEqual(other.guard_argv()[-3:], ["/x/ppl/_assets/hooks/ppl_guard.py",
+                                                   "--task", "GH-1"])
+        for text in ("{not json", json.dumps({"hooks": {}}), json.dumps({"hooks": {
+                "PreToolUse": [{"hooks": [{"command": "/bin/echo other"}]}]}})):
+            with self.subTest(settings=text):
+                other.lane_settings().write_text(text, encoding="utf-8")
+                with self.assertRaises(PplError) as caught:
+                    other.guard_argv()
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        other.lane_settings().unlink()
+        with self.assertRaises(PplError) as caught:
+            other.guard_argv()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertEqual(other.guard({"tool_name": "Bash"})["decision"], "error")
+
     def test_a_hostile_xdg_git_config_of_the_caller_is_never_read(self):
         xdg = Path(tmphome.mkdtemp(prefix="xdg-"))
         (xdg / "git").mkdir()

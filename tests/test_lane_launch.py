@@ -461,6 +461,22 @@ class TestStart(LaneCase):
         self.assertEqual(claude["argv"], self.launch_line(entry)[1:])
         self.assertEqual(entry["pid"], claude["pid"])
 
+    def test_a_relative_ppl_home_is_made_absolute_once(self):
+        # ledger 122: claude starts in the start directory, so a relative PPL_HOME gave a
+        # relative start directory in the registry and a --settings that resolved nowhere
+        previous = os.getcwd()
+        os.chdir(str(self.base))
+        self.addCleanup(os.chdir, previous)
+        os.environ["PPL_HOME"] = os.path.relpath(os.environ["PPL_HOME"], str(self.base))
+        self.assertFalse(os.path.isabs(os.environ["PPL_HOME"]))
+        started = lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        settings = started["argv"][started["argv"].index("--settings") + 1]
+        self.assertTrue(os.path.isabs(settings), settings)
+        self.assertTrue(os.path.isfile(settings))
+        self.assertTrue(os.path.isabs(lanes.entry(TASK)["start_dir"]))
+        self.assertEqual(started["env"]["PPL_HOME"], os.environ["PPL_HOME"])
+        self.assertTrue(os.path.isabs(started["env"]["PPL_HOME"]))
+
     def test_an_existing_branch_is_refused_naming_branch_delete(self):
         # rule: R-LANE-LAUNCH-NO-CLOBBER
         git(self.project, "branch", BRANCH)
@@ -1025,6 +1041,36 @@ class TestList(LaneCase):
                     self.assertEqual(rows["KEY-2"]["stage"], "unknown")
                     self.assertIn("unreadable", rows["KEY-2"]["outcome"])
                     self.assertEqual(answer["lanes"][1]["usd"], "usd unreadable")
+
+
+class TestLaneFlags(LaneCase):
+    def test_a_flag_the_form_does_not_take_is_refused_not_ignored(self):
+        # ledger 127: ppl lane close --no-exec used to close the lane, the flag ignored
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        before = lanes.read()
+        for args, flag in ((("close", "--no-exec"), "--no-exec"),
+                           (("close", "--json"), "--json"),
+                           (("list", TASK), TASK),
+                           (("list", "--harness", HARNESS), "--harness"),
+                           (("list", "--slug", "x"), "--slug"),
+                           # --no-exec too, so a resume or a start that is not refused
+                           # execs nothing
+                           (("resume", TASK, "--slug", "x", "--no-exec"), "--slug"),
+                           (("resume", TASK, "--task", TASK, "--no-exec"), "--task"),
+                           (("resume", TASK, "--json", "--no-exec"), "--json"),
+                           (("OPS-9", "--json", "--no-exec"), "--json"),
+                           (("OPS-9", "--task", TASK, "--no-exec"), "--task")):
+            with self.subTest(args=args):
+                code, _, err = call("lane", *args)
+                self.assertEqual(code, 2, err)
+                error = json.loads(err)
+                self.assertEqual(error["error_code"], "SCHEMA_INVALID")
+                self.assertIn(flag, error["message"])
+                self.assertEqual(lanes.read(), before)
+        code, out, err = call("lane", "list", "--json")
+        self.assertEqual(code, 0, err)
+        code, out, err = call("lane", "resume", TASK, "--no-exec")
+        self.assertEqual(code, 0, err)
 
 
 class TestClose(LaneCase):

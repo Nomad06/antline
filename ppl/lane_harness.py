@@ -68,7 +68,8 @@ def _is_repository_root(directory):
 def import_directory(directory, name):
     """Turn a copied plain directory into a git repository with one commit,
     `Import <name>`, under the operator's own git identity. Does nothing when the
-    directory already is a repository."""
+    directory already is a repository. The add runs with no core.excludesFile, so the
+    operator's global ignore patterns leave no harness file out of the commit."""
     if _is_repository_root(directory):
         return
     for key in ("user.name", "user.email"):
@@ -78,9 +79,11 @@ def import_directory(directory, name):
                            "importing harness %s needs a git identity to commit it: run "
                            "`git config --global user.name \"<you>\"` and `git config --global "
                            "user.email \"<you@example.com>\"`" % name)
+    pins = {"add": escape_git.OPERATOR_PINNED_CONFIG + ["-c", "core.excludesFile="],
+            "commit": _IMPORT_PINS}
     for args in (["init", "-q", "-b", "main"], ["add", "-A"],
                  ["commit", "-q", "-m", "Import %s" % name]):
-        result = git(directory, args, pins=_IMPORT_PINS if args[0] == "commit" else None)
+        result = git(directory, args, pins=pins.get(args[0]))
         if result.returncode != 0:
             raise PplError("SETUP_INCOMPLETE", "git %s failed importing harness %s: %s"
                            % (args[0], name, stderr_text(result)))

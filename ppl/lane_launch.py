@@ -102,8 +102,14 @@ def _merged(state):
 def _legacy_run_problem():
     """Why the run the old single-run pointer (runs/ACTIVE) names blocks a lane, or None: its
     state.json exists (a destroyed run's is archived) and its merge is not recorded. Nothing
-    writes the pointer now, so the run it names was started before lanes (D19)."""
-    task_id = run.legacy_active_task()
+    writes the pointer now, so the run it names was started before lanes (D19). A pointer that
+    cannot be read refuses as well: the run it may name cannot be told apart."""
+    try:
+        task_id = run.legacy_active_task()
+    except (OSError, UnicodeDecodeError) as exc:
+        return ("runs/ACTIVE cannot be read (%s), so a run started before lanes cannot be ruled "
+                "out: fix its permissions, or remove %s once no such run is left, then run ppl "
+                "lane again" % (exc, paths.legacy_active_file()))
     if not task_id:
         return None
     state = store.read_json(run.state_path(task_id), None, lanes.READ_LIMIT)
@@ -343,6 +349,11 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
     inherited environment, and the directory to run it in."""
     if not (isinstance(slug, str) and _SLUG.fullmatch(slug)):
         raise PplError("SCHEMA_INVALID", "--slug %r must be 1 to 40 of a-z, 0-9 and '-'" % (slug,))
+    # once, before any path is made: claude starts in the start directory, so a relative
+    # PPL_HOME would leave a relative start directory in the registry and the launch line
+    home = os.environ.get("PPL_HOME")
+    if home and not os.path.isabs(home):
+        os.environ["PPL_HOME"] = os.path.abspath(home)
     problem = _legacy_run_problem()
     if problem:
         raise PplError("OWNER_DECISION", problem)

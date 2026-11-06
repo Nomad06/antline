@@ -466,11 +466,13 @@ def _quiet_since(directory, midnight):
     """True when an archived run's log.jsonl was last written before `midnight`, so nothing
     in it is today's spend. For an archived run alone: it lies outside every lane's reach, so
     its mtime is the owner's, while a live run's files, their mtime among them, are its
-    lane's sandbox's to set. A log that cannot be stat'ed is read as before."""
+    lane's sandbox's to set, and ppl destroy stamps the archived log with the time it moved
+    it (R69). A log that is no regular file, or cannot be stat'ed, is read as before."""
     try:
-        return os.stat(os.path.join(str(directory), "log.jsonl")).st_mtime < midnight
+        info = os.lstat(os.path.join(str(directory), "log.jsonl"))
     except OSError:
         return False
+    return stat.S_ISREG(info.st_mode) and info.st_mtime < midnight
 
 
 def _scan_dirs():
