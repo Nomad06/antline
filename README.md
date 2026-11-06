@@ -335,7 +335,8 @@ refuses to start at it as well [R-BUDGET-USD-PER-DAY].
 The interpreter in those commands has to be Python 3.11 or newer, and `ppl lane` writes the
 one that runs it, so the hooks do not depend on which `python3` the `PATH` Claude Code spawns
 them with finds first. Under an older interpreter the
-guard denies every role call [R-GUARD-PYTHON-FLOOR], and `ppl doctor` reports
+guard denies every role call, and every other call but Read, Glob and Grep
+[R-GUARD-PYTHON-FLOOR], and `ppl doctor` reports
 `hook_runs: false` with the remedy.
 
 `ppl lane` registers the matcher `.*`, so the guard sees every call, and `ppl init` refuses

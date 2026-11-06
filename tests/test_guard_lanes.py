@@ -1171,6 +1171,34 @@ class TestLaneProtection(LaneCase):
                 self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": command},
                                                            own)))
 
+    def test_a_command_with_a_substitution_or_here_document_left_open_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R68: a substitution or a here-document left open is read by its spelling alone too,
+        # so in a lane it is denied for every session; a closed one, the here-document commit
+        # message among them, is read as before, and outside a lane nothing changes
+        own = self.worktree[LANE_A]
+        # (command, what the reason names): the here-document and git checks keep theirs
+        for command, why in (("echo $(git worktree prune", "git worktree"),
+                             ("echo `git worktree prune", "git worktree"),
+                             ("ls $(ls", "left open"),
+                             ("cat <<'EOF'\ngit worktree prune\n", "git worktree"),
+                             ("cat <<'EOF'\nhello\n", "left open"),
+                             ("cat <<EOF\nhello", "here-document")):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn(why, reason)
+        for command in ("git commit -m \"$(cat <<'EOF'\nFix the cart\n\nIt's done\nEOF\n)\"",
+                        "grep -c x <<'EOF'\nhello\nEOF", "echo $(git rev-parse HEAD)"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+        for command in ("ls $(ls", "cat <<'EOF'\nhello\n"):
+            with self.subTest(no_lane=command):
+                self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": command},
+                                                           own)))
+
     def test_a_long_command_read_by_its_spelling_is_decided_in_time(self):
         # rule: R-LANE-CROSS-WRITE
         # Final review, ledger 263: a 32 KiB orchestrator command of git words behind

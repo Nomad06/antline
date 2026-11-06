@@ -1011,9 +1011,13 @@ forge, as an allowlist of the adapter's read shapes, and under GitLab every Bash
 is denied [R-REVIEW-RESPONDER-BASH-SHAPES].
 
 The hook's own failure modes are decided the same way. When `decide()` raises, the call is
-denied for any role in `boundary.ROLE_RULES` (all seven generated roles) and allowed for an
-unroled session, so a hook defect cannot lock
-the operator out of unrelated work [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A call that asks to
+denied for any role in `boundary.ROLE_RULES` (all seven generated roles)
+[R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. Outside a lane it is
+allowed for an unroled session, so a hook defect cannot lock the operator out of unrelated
+work; in a lane, whose hook commands carry `--task`, an unroled session keeps only Read, Glob
+and Grep [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. In a lane the guard also gives its decision a
+3.0 s deadline, inside the 5 s hook timeout after which Claude Code allows the call, and a
+decision that outruns it is refused the same way [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A call that asks to
 run outside the OS sandbox is the exception: it is denied whoever makes it
 [R-OS-SANDBOX-FAIL-CLOSED]. A role's Bash command
 longer than 4096 characters is denied before any pattern runs, so a padded command cannot
@@ -1026,7 +1030,8 @@ until a reader appeared), and does not log the deny of the doctor's own probe be
 [R-GUARD-DENIAL-LOGGED]. Every hook needs Python 3.11, and
 `ppl lane` writes the interpreter that runs it into every hook entry of the lane's `settings.json`. Under an older
 interpreter each hook reads the payload before importing anything from `ppl`, denies a call
-whose `agent_type` starts with `ppl-`, writes one stderr line naming the version it found and
+whose `agent_type` starts with `ppl-`, and the guard in a lane every other call but Read, Glob
+and Grep, writes one stderr line naming the version it found and
 exits 0, where it used to die on import and leave every call allowed [R-GUARD-PYTHON-FLOOR].
 `ppl doctor` runs every registered guard command once on an unroled Read of `/dev/null`,
 marked with the session_id `ppl-doctor-hook-probe`, and

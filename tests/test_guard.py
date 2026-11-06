@@ -3,6 +3,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -2040,6 +2041,34 @@ class TestGuard(unittest.TestCase):
                 self.assertIsNotNone(result, "the call was allowed")
                 self.assertIn("absolute pattern", self.deny_reason(result))
 
+    def test_test_worker_glob_brace_alternatives_are_each_checked(self):
+        # rule: R-TEST-WORKER-READ-TOOLS
+        # R68: Glob expands braces, so an alternative of a relative pattern can be absolute,
+        # start with ~ or climb with ..; each one is checked, and braces past 64 alternatives
+        # or nested deeper than 4 are refused unread
+        start = str(lanes.start_dir("DEMO-700"))
+        test_dir = "/tmp/repo/source/core/orders/src/test"
+        for pattern, why in (("{/tmp/repo/source/core/orders/**,x}", "absolute pattern"),
+                             ("{~/x,y}", "absolute pattern"),
+                             ("{a,{b,/tmp/repo/**}}/x", "absolute pattern"),
+                             ("{..,x}/main/**", ".. segment"),
+                             ("{" + ",".join("a%d" % n for n in range(65)) + "}",
+                              "more than 64"),
+                             ("{a,b}" * 7, "more than 64"),
+                             ("{a,{b,{c,{d,{e,f}}}}}", "deeper than 4")):
+            with self.subTest(pattern=pattern):
+                result = decide(payload("ppl-test-worker", "Glob",
+                                        {"pattern": pattern, "path": test_dir}, cwd=start))
+                self.assertIsNotNone(result, "the call was allowed")
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                self.assertIn(why, self.deny_reason(result))
+        for pattern in ("**/*.{ts,tsx}", "src/**/*.{test,spec}.js", "**/*Test.{java,kt}",
+                        "{a,{b,{c,{d,e}}}}/*.java", "\\{x,/y}/*.java"):
+            with self.subTest(allowed=pattern):
+                self.assertIsNone(decide(payload("ppl-test-worker", "Glob",
+                                                 {"pattern": pattern, "path": test_dir},
+                                                 cwd=start)))
+
     def test_test_worker_glob_over_test_sources_is_allowed(self):
         self.assertIsNone(decide(payload(
             "ppl-test-worker", "Glob",
@@ -3355,6 +3384,113 @@ class TestGuard(unittest.TestCase):
                 self.assertIn("BOUNDARY_VIOLATION",
                               self.deny_reason(json.loads(stdout.getvalue())))
 
+    def run_main(self, call, argv, decision):
+        """(stdout, stderr) of the hook's main() on `call` with `argv` after the script and
+        `decision` in place of _decide."""
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(ppl_guard, "_decide", decision), \
+                mock.patch.object(sys, "argv", ["ppl_guard.py"] + list(argv)), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(call))), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            self.assertEqual(ppl_guard.main(), 0)
+        return stdout.getvalue(), stderr.getvalue()
+
+    def test_an_internal_error_in_a_lane_leaves_an_unroled_session_only_its_reads(self):
+        # rule: R-GUARD-INTERNAL-ERROR-DENIES-ROLES
+        # R65: hooks exist only in lane sessions, so "a hook defect must not lock the
+        # operator out of unrelated sessions" no longer holds there. With --task in the
+        # hook's argv an internal error denies every tool but Read, Glob and Grep, the shape a
+        # lane that cannot be confirmed gets; without it nothing changes.
+        def broken(_payload, _argv=()):
+            raise RuntimeError("boom")
+
+        reads = {"Read": {"file_path": "/tmp/x"}, "Glob": {"pattern": "*"},
+                 "Grep": {"pattern": "x"}}
+        others = {"Bash": {"command": "ls"}, "Write": {"file_path": "/tmp/x"},
+                  "Edit": {"file_path": "/tmp/x"}, "WebFetch": {"url": "https://x.example"},
+                  "Agent": {"subagent_type": "general-purpose", "prompt": "x"},
+                  "mcp__atlassian__editJiraIssue": {}}
+        for argv in (LANE, ["--task"], ["--task", "not a task"]):
+            for tool, tool_input in others.items():
+                with self.subTest(argv=argv, tool=tool):
+                    out, err = self.run_main(payload(None, tool, tool_input), argv, broken)
+                    reason = self.deny_reason(json.loads(out))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("RuntimeError", reason)
+                    self.assertIn("internal error", err)
+            for tool, tool_input in reads.items():
+                with self.subTest(argv=argv, read=tool):
+                    self.assertEqual(self.run_main(payload(None, tool, tool_input), argv,
+                                                   broken)[0], "")
+                    # a role's read is still refused
+                    out, _ = self.run_main(payload("ppl-verifier", tool, tool_input), argv,
+                                           broken)
+                    self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(json.loads(out)))
+        # outside a lane an unroled call keeps the allow
+        for tool, tool_input in others.items():
+            with self.subTest(no_lane=tool):
+                self.assertEqual(self.run_main(payload(None, tool, tool_input), [],
+                                               broken)[0], "")
+
+    def test_the_floor_and_the_guard_leave_a_lane_the_same_reads(self):
+        # R65: the floor cannot import the guard, so it names the tools itself
+        self.assertEqual(tuple(ppl_python_floor.LANE_READ_TOOLS),
+                         ppl_guard.UNCONFIRMED_LANE_TOOLS)
+
+    def test_a_decision_past_the_hook_deadline_is_refused_in_a_lane(self):
+        # rule: R-GUARD-INTERNAL-ERROR-DENIES-ROLES
+        # R66: Claude Code allows a call whose hook runs past its 5 s timeout, so in a lane
+        # the guard refuses one whose decision outruns its own deadline, in the R65 shape
+        def slow(_payload, _argv=()):
+            time.sleep(2)
+            return None
+
+        previous = signal.getsignal(signal.SIGALRM)
+        with mock.patch.object(ppl_guard, "HOOK_DEADLINE_SECONDS", 0.1):
+            start = time.perf_counter()
+            out, err = self.run_main(payload(None, "Bash", {"command": "ls"}), LANE, slow)
+            self.assertLess(time.perf_counter() - start, 1.0)
+            reason = self.deny_reason(json.loads(out))
+            self.assertIn("BOUNDARY_VIOLATION", reason)
+            self.assertIn("deadline", reason)
+            self.assertIn("deadline", err)
+            out, _ = self.run_main(payload("ppl-code-worker", "Read", {"file_path": "/tmp/x"}),
+                                   LANE, slow)
+            self.assertIn("deadline", self.deny_reason(json.loads(out)))
+            self.assertEqual(self.run_main(payload(None, "Read", {"file_path": "/tmp/x"}),
+                                           LANE, slow)[0], "")
+        # the alarm is off and the handler put back once the hook is done
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
+        self.assertIs(signal.getsignal(signal.SIGALRM), previous)
+
+    def test_outside_a_lane_a_slow_decision_runs_to_its_end(self):
+        # R66: outside a lane nothing changes: no deadline cuts the decision short
+        def slow(_payload, _argv=()):
+            time.sleep(0.3)
+            return ppl_guard.deny("BOUNDARY_VIOLATION", "decided after all")
+
+        with mock.patch.object(ppl_guard, "HOOK_DEADLINE_SECONDS", 0.05):
+            out, err = self.run_main(payload(None, "Bash", {"command": "ls"}), [], slow)
+        self.assertIn("decided after all", self.deny_reason(json.loads(out)))
+        self.assertEqual(err, "")
+
+    def test_the_hook_deadline_cuts_a_slow_search_short(self):
+        # rule: R-GUARD-INTERNAL-ERROR-DENIES-ROLES
+        # R66, ledger 247: a 32 KiB orchestrator command of repeated git words took the
+        # write-shape search past 20 s. The alarm interrupts the search itself, so the real
+        # decision is refused at the deadline in a lane.
+        command = ("git -a " * 4700)[:32 * 1024]
+        with mock.patch.object(ppl_guard, "HOOK_DEADLINE_SECONDS", 0.3):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            start = time.perf_counter()
+            with mock.patch.object(sys, "argv", ["ppl_guard.py"] + LANE), \
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(
+                        payload(None, "Bash", {"command": command})))), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                self.assertEqual(ppl_guard.main(), 0)
+            self.assertLess(time.perf_counter() - start, 2.0)
+        self.assertIn("deadline", self.deny_reason(json.loads(stdout.getvalue())))
+
     def test_brief_challenger_may_not_run_a_state_changing_ppl_command(self):
         # rule: R-GUARD-PPL-CLI-DENIED
         result = decide(payload(
@@ -3389,11 +3525,65 @@ class TestPythonFloor(unittest.TestCase):
     floor runs before any ppl import and fails closed for a role
     [R-GUARD-PYTHON-FLOOR]."""
 
-    def floor(self, version, hook_payload, event="PreToolUse"):
+    def floor(self, version, hook_payload, event="PreToolUse", argv=()):
         out, err = io.StringIO(), io.StringIO()
         handled = ppl_python_floor.refuse_old_python(
-            version, "ppl_guard", event, io.StringIO(json.dumps(hook_payload)), out, err)
+            version, "ppl_guard", event, io.StringIO(json.dumps(hook_payload)), out, err,
+            argv=argv)
         return handled, out.getvalue(), err.getvalue()
+
+    def test_an_old_python_in_a_lane_leaves_an_unroled_session_only_its_reads(self):
+        # rule: R-GUARD-PYTHON-FLOOR
+        # R65: with --task in the guard's argv, a lane session, an old interpreter denies an
+        # unroled call every tool but Read, Glob and Grep; without it nothing changes
+        for tool in ("Bash", "Write", "Edit", "Agent", "WebFetch", "mcp__atlassian__x"):
+            with self.subTest(tool=tool):
+                handled, out, err = self.floor((3, 9, 6), payload(None, tool, {}), argv=LANE)
+                self.assertTrue(handled)
+                reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn("needs 3.11 or newer", reason)
+                self.assertIn("Read, Glob and Grep", reason)
+                self.assertIn("3.9.6", err)
+        for tool in ppl_python_floor.LANE_READ_TOOLS:
+            with self.subTest(read=tool):
+                self.assertEqual(self.floor((3, 9, 6), payload(None, tool, {}), argv=LANE)[1],
+                                 "")
+                handled, out, _ = self.floor((3, 9, 6), payload("ppl-verifier", tool, {}),
+                                             argv=LANE)
+                self.assertIn("BOUNDARY_VIOLATION", json.loads(out)["hookSpecificOutput"]
+                              ["permissionDecisionReason"])
+        # a payload it cannot read names no read tool
+        out, err = io.StringIO(), io.StringIO()
+        self.assertTrue(ppl_python_floor.refuse_old_python(
+            (3, 9, 6), "ppl_guard", "PreToolUse", io.StringIO("not json"), out, err,
+            argv=LANE))
+        self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"],
+                         "deny")
+        self.assertEqual(self.floor((3, 9, 6), payload(None, "Bash", {}))[1], "")
+
+    def test_the_guard_in_a_lane_under_the_system_python_leaves_only_reads(self):
+        # rule: R-GUARD-PYTHON-FLOOR
+        found = fixtures.older_system_python()
+        if found is None:
+            self.skipTest("no python3 older than 3.11 at %s" % fixtures.SYSTEM_PYTHON)
+        interpreter, version = found
+        env = fixtures.isolated_env()
+        for tool, tool_input, denied in (("Bash", {"command": "ls"}, True),
+                                         ("Read", {"file_path": "/dev/null"}, False)):
+            with self.subTest(tool=tool):
+                result = subprocess.run(
+                    [interpreter, str(HOOKS / "ppl_guard.py")] + LANE,
+                    input=json.dumps(payload(None, tool, tool_input)),
+                    capture_output=True, text=True, env=env, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(version, result.stderr)
+                if denied:
+                    decision = json.loads(result.stdout)["hookSpecificOutput"]
+                    self.assertEqual(decision["permissionDecision"], "deny")
+                    self.assertIn("BOUNDARY_VIOLATION", decision["permissionDecisionReason"])
+                else:
+                    self.assertEqual(result.stdout, "")
 
     def test_an_old_python_denies_a_role_and_names_the_version(self):
         # rule: R-GUARD-PYTHON-FLOOR

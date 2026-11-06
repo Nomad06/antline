@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import sys
 from pathlib import Path
 
@@ -19,7 +20,8 @@ import ppl_python_floor
 # an older interpreter the hook would die here and allow every call
 # [R-GUARD-PYTHON-FLOOR]. Everything in this file parses on 3.9.
 if __name__ == "__main__" and ppl_python_floor.refuse_old_python(
-        sys.version_info, "ppl_guard", "PreToolUse", sys.stdin, sys.stdout, sys.stderr):
+        sys.version_info, "ppl_guard", "PreToolUse", sys.stdin, sys.stdout, sys.stderr,
+        argv=sys.argv[1:]):
     sys.exit(0)
 
 # parents[3] holds the ppl package this hook ships in. It goes first on sys.path
@@ -2119,6 +2121,93 @@ def _has_dotdot(path):
     return ".." in str(path).split("/")
 
 
+# R68: how far a ppl-test-worker Glob pattern's braces are expanded before the pattern is
+# refused unread [R-TEST-WORKER-READ-TOOLS].
+_BRACE_ALTERNATIVES_LIMIT = 64
+_BRACE_DEPTH_LIMIT = 4
+
+
+class _TooManyBraces(Exception):
+    """More brace alternatives, or deeper braces, than the test worker's Glob check expands."""
+
+
+def _brace_match(text):
+    """{index of an unescaped `{`: index of the `}` that closes it}, in one pass with a stack;
+    a backslash takes the next character as written, and a brace with no partner stays a
+    character."""
+    found, stack, index = {}, [], 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "{":
+            stack.append(index)
+        elif char == "}" and stack:
+            found[stack.pop()] = index
+        index += 1
+    return found
+
+
+def _expand_braces(text, start, end, match, depth):
+    """Every spelling text[start:end] gives with its braces expanded as Glob expands them:
+    the parts between the top-level commas of each matched pair, a pair without a comma
+    giving its one part. _TooManyBraces past _BRACE_ALTERNATIVES_LIMIT spellings or
+    _BRACE_DEPTH_LIMIT levels. Left to right, so the work grows with the length times the
+    spellings kept, both bounded."""
+    if depth > _BRACE_DEPTH_LIMIT:
+        raise _TooManyBraces()
+    spellings, literal, index = [""], [], start
+    while index < end:
+        char = text[index]
+        if char == "\\":
+            literal.append(text[index:index + 2])
+            index += 2
+            continue
+        close = match.get(index)
+        if close is None or close >= end:
+            literal.append(char)
+            index += 1
+            continue
+        parts, nested, at, inner = [], 0, index + 1, index + 1
+        while inner < close:
+            if text[inner] == "\\":
+                inner += 2
+                continue
+            if text[inner] == "{":
+                nested += 1
+            elif text[inner] == "}":
+                nested -= 1
+            elif text[inner] == "," and nested == 0:
+                parts.append((at, inner))
+                at = inner + 1
+            inner += 1
+        parts.append((at, close))
+        options = []
+        for part_start, part_end in parts:
+            options.extend(_expand_braces(text, part_start, part_end, match, depth + 1))
+            if len(options) > _BRACE_ALTERNATIVES_LIMIT:
+                raise _TooManyBraces()
+        if len(spellings) * len(options) > _BRACE_ALTERNATIVES_LIMIT:
+            raise _TooManyBraces()
+        head = "".join(literal)
+        literal = []
+        spellings = [spelled + head + option for spelled in spellings for option in options]
+        index = close + 1
+    tail = "".join(literal)
+    return [spelled + tail for spelled in spellings]
+
+
+def _brace_alternatives(pattern):
+    """The patterns a Glob `pattern` stands for once its braces are expanded, or None when
+    there are more than _BRACE_ALTERNATIVES_LIMIT of them or braces nest deeper than
+    _BRACE_DEPTH_LIMIT. No filesystem access."""
+    try:
+        return _expand_braces(pattern, 0, len(pattern), _brace_match(pattern), 0)
+    except _TooManyBraces:
+        return None
+
+
 def _dotdot_reason(tool, path):
     """A test-worker path with a `..` segment: the guard collapses `..` before
     a symlink is followed, the kernel after, so a link in a test directory
@@ -3183,16 +3272,17 @@ def _command_views(command):
 
 
 # Why the masking reads a command by its spelling alone, which a lane refuses
-# (lane_spelling_denial); a substitution or a here-document left open has no such cause.
+# (lane_spelling_denial).
 _SPELLED_TOO_DEEP = ("its substitutions and here-documents nest deeper than %d levels"
                      % _NESTING_LIMIT)
 _SPELLED_MASK_WORD = "it spells $SUBST, the word the guard masks a substitution with"
+_SPELLED_LEFT_OPEN = "a substitution or a here-document in it is left open"
 
 
 @functools.lru_cache(maxsize=8)
 def _read_views(command):
-    """(the views _command_views gives, None), else (None, _SPELLED_TOO_DEEP or
-    _SPELLED_MASK_WORD, or None for a substitution or a here-document left open)."""
+    """(the views _command_views gives, None), else (None, why the masking reads the command
+    by its spelling alone: _SPELLED_TOO_DEEP, _SPELLED_MASK_WORD or _SPELLED_LEFT_OPEN)."""
     # with backslash-newlines joined, as the views are when they are split (_built_raws)
     if "$SUBST" in _CONTINUED_LINE_RE.sub(r"\1", command):
         return None, _SPELLED_MASK_WORD
@@ -3202,7 +3292,7 @@ def _read_views(command):
     except (_NestedTooDeep, RecursionError):
         return None, _SPELLED_TOO_DEEP
     except _Unreadable:
-        return None, None
+        return None, _SPELLED_LEFT_OPEN
     return ((outer,) + tuple(view for view, _ in inner), tuple(fed), tuple(unsure),
             tuple(spelled), (kids,) + tuple(kids for _, kids in inner)), None
 
@@ -3411,13 +3501,13 @@ def lane_heredoc_denial(command, binding):
 
 def lane_spelling_denial(command, agent, binding, cwd=None):
     """("BOUNDARY_VIOLATION", reason) for a Bash command of a session bound to a lane that the
-    masking reads by its spelling alone because its substitutions and here-documents nest
-    deeper than _NESTING_LIMIT or it spells $SUBST (_read_views), else None
-    [R-LANE-CROSS-WRITE]. Read by its spelling, the command skips the segment walk and the
-    built-ppl check, so a git or a ppl spelled otherwise than the spelling checks read would
-    pass: such a command is denied, after the here-document and git checks, which keep their
-    reasons. Decided before the write shapes are searched, which on a long command of git
-    words takes seconds."""
+    masking reads by its spelling alone (_read_views): its substitutions and here-documents
+    nest deeper than _NESTING_LIMIT, it spells $SUBST, or a substitution or a here-document in
+    it is left open (R68). Else None [R-LANE-CROSS-WRITE]. Read by its spelling, the command
+    skips the segment walk and the built-ppl check, so a git or a ppl spelled otherwise than
+    the spelling checks read would pass: such a command is denied, after the here-document and
+    git checks, which keep their reasons. Decided before the write shapes are searched, which
+    on a long command of git words takes seconds."""
     if not (isinstance(command, str) and binding.task and not binding.problem):
         return None
     why = _read_views(command)[1]
@@ -3426,8 +3516,8 @@ def lane_spelling_denial(command, agent, binding, cwd=None):
     return (lane_heredoc_denial(command, binding) or lane_git_denial(command, agent, binding, cwd)
             or ("BOUNDARY_VIOLATION",
                 "lane %s may not run a command the guard can read only by its spelling, "
-                "since %s: write it with fewer nested substitutions, or name the variable "
-                "otherwise" % (binding.task, why)))
+                "since %s: close what is open, write it with fewer nested substitutions, or "
+                "name the variable otherwise" % (binding.task, why)))
 
 
 def lane_git_denial(command, agent, binding, cwd=None):
@@ -3801,11 +3891,21 @@ def _decide(payload, argv=()):
                                 "ppl-test-worker gives %s %r, which starts or ends with "
                                 "whitespace or holds a control character that Claude Code may "
                                 "trim: spell the path plainly" % (tool, each))
-            # an absolute pattern lists what it names whatever the path
-            if isinstance(glob, str) and os.path.isabs(os.path.expanduser(glob)):
+            # an absolute pattern lists what it names whatever the path, and Glob expands
+            # braces, so each alternative is checked as a pattern of its own (R68)
+            alternatives = _brace_alternatives(glob) if isinstance(glob, str) else []
+            if alternatives is None:
                 return deny("BOUNDARY_VIOLATION",
-                            "ppl-test-worker gives Glob the absolute pattern %s: pass the test "
-                            "directory as path and give a relative pattern" % glob)
+                            "ppl-test-worker gives Glob the pattern %s, whose braces give more "
+                            "than %d alternatives or nest deeper than %d: write it plainer"
+                            % (glob, _BRACE_ALTERNATIVES_LIMIT, _BRACE_DEPTH_LIMIT))
+            for alternative in alternatives:
+                if _has_dotdot(alternative):
+                    return deny("BOUNDARY_VIOLATION", _dotdot_reason(tool, glob))
+                if os.path.isabs(os.path.expanduser(alternative)):
+                    return deny("BOUNDARY_VIOLATION",
+                                "ppl-test-worker gives Glob the absolute pattern %s: pass the "
+                                "test directory as path and give a relative pattern" % glob)
             for raw in raws:
                 # A relative path is the session's, so it resolves against the
                 # payload cwd, never the hook process's own.
@@ -3928,6 +4028,44 @@ def decide(payload, argv=()):
     return result
 
 
+# R66: Claude Code allows a call whose hook outruns its 5 s timeout, so in a lane the guard
+# gives its decision a deadline well inside that, and a decision that outruns it refuses the
+# call as an internal error does [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A module constant, so
+# a test can shorten it.
+HOOK_DEADLINE_SECONDS = 3.0
+_DEADLINE = {"passed": False}
+
+
+class _DeadlinePassed(BaseException):
+    """Raised by the hook deadline's alarm. A BaseException, so no `except Exception` inside
+    the decision takes it for a failed read and decides on."""
+
+    def __str__(self):
+        return "the decision outran the hook's %s s deadline" % HOOK_DEADLINE_SECONDS
+
+
+def _deadline_passed(_signum, _frame):
+    _DEADLINE["passed"] = True
+    raise _DeadlinePassed()
+
+
+def _arm_deadline(seconds):
+    """Start the hook deadline: SIGALRM after `seconds` of real time raises _DeadlinePassed
+    wherever the decision is, a regex search included. Returns the step that stops it and puts
+    the old handler back, or None where no such timer can be set (no SIGALRM, not the main
+    thread)."""
+    try:
+        previous = signal.signal(signal.SIGALRM, _deadline_passed)
+    except (AttributeError, ValueError, OSError):
+        return None
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+
+    def disarm():
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    return disarm
+
+
 def main():
     # The lane binding is the hook's own command line [R-LANE-HOOK-BINDING]. The python
     # floor ran before any of it was read.
@@ -3936,32 +4074,57 @@ def main():
         payload = json.load(sys.stdin)
     except Exception:
         return 0
+    # R65: hooks exist only in lane sessions, and --task on the command line says this is one
+    lane = ppl_python_floor.in_lane(argv)
+    _DEADLINE["passed"] = False
+    disarm = None
     try:
-        result = _decide(payload, argv)
-    except Exception as err:
+        # R66: armed only in a lane and only here, on the hook's own path: outside a lane a
+        # decision runs to its end as before
+        disarm = _arm_deadline(HOOK_DEADLINE_SECONDS) if lane else None
+        try:
+            result = _decide(payload, argv)
+        finally:
+            if disarm:
+                disarm()
+        if _DEADLINE["passed"]:
+            # it passed while something inside caught everything and decided on
+            raise _DeadlinePassed()
+    except (Exception, _DeadlinePassed) as err:
         # Claude Code reads exit 0 with no output as allow. A ppl-* role is
-        # refused instead, an unroled session keeps the allow so a hook defect
-        # cannot lock the operator out of unrelated sessions, unless the call
-        # asks to leave the OS sandbox [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. The deny goes out before the
+        # refused instead. Outside a lane an unroled session keeps the allow so a
+        # hook defect cannot lock the operator out of unrelated sessions, unless
+        # the call asks to leave the OS sandbox; in a lane it keeps only Read,
+        # Glob and Grep (R65), and a decision past the deadline goes the same way
+        # [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. The deny goes out before the
         # diagnostic, and a broken stderr is swallowed, since a nonzero exit
         # would not block the call either.
+        if disarm:
+            # the alarm fires once, so a disarm it cut short is finished here
+            disarm()
+        late = isinstance(err, _DeadlinePassed)
         agent = payload.get("agent_type") if isinstance(payload, dict) else None
+        tool = payload.get("tool_name") if isinstance(payload, dict) else None
         # A call that asks to leave the OS sandbox is refused whatever its agent
         # [R-OS-SANDBOX-FAIL-CLOSED]. A check that fails reads as flagged.
         try:
             unsandboxed = escape.flagged(payload)
         except Exception:
             unsandboxed = True
-        if unsandboxed or (isinstance(agent, str) and agent in boundary.ROLE_RULES):
+        role = isinstance(agent, str) and agent in boundary.ROLE_RULES
+        if unsandboxed or role or (lane and tool not in UNCONFIRMED_LANE_TOOLS):
+            what = "unsandboxed" if unsandboxed else ("role" if role else "lane")
             refusal = deny(
                 "BOUNDARY_VIOLATION",
-                "guard internal error, %s call refused: %s"
-                % ("unsandboxed" if unsandboxed else "role", type(err).__name__))
+                "guard decision past its %s s deadline, %s call refused"
+                % (HOOK_DEADLINE_SECONDS, what) if late else
+                "guard internal error, %s call refused: %s" % (what, type(err).__name__))
             sys.stdout.write(json.dumps(refusal))
             sys.stdout.flush()
             log_denial(payload, refusal, argv)
         try:
-            sys.stderr.write("ppl_guard internal error: %s\n" % err)
+            sys.stderr.write("ppl_guard %s: %s\n" % ("deadline" if late else "internal error",
+                                                    err))
         except Exception:
             pass
         return 0
