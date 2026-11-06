@@ -376,6 +376,8 @@ class TestStart(LaneCase):
         self.assertEqual((start / "routing.toml").read_bytes(), machine.read_bytes())
 
     def test_a_third_lane_on_a_harness_with_max_one_is_busy(self):
+        # R-LANE-RESOURCE-ISOLATION: the harness limit, 1 when absent, holds a second lane of
+        # the same harness back before anything is made, whatever another harness runs
         fixtures.bind_lane("KEY-1", self.project, lane=1, harness=HARNESS)
         fixtures.bind_lane("OPS-2", self.project, lane=2, harness="other")
         before = lanes.read()

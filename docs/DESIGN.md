@@ -548,20 +548,24 @@ regardless the moment it runs them, so denying its reads would buy nothing struc
 Worktree isolation is used for change isolation, not as a security sandbox. Stated
 explicitly so nobody mistakes convenience for protection.
 
-**Per-lane resources (precondition for waves).** A worktree separates files and nothing
-else. It gives each lane its own working tree and its own `git status`, and that is the
-whole of what it gives: not a test database, not a port, not a temp directory, not a queue,
-not object storage. A typical project's local development environment makes the shared
-surface concrete: one database, one object store, one message broker, a fixed set of ports,
-all shared across every worktree on the machine, and integration tests that use
-Testcontainers bind host Docker resources the same way, against the same shared daemon. Two
-lanes of this pipeline running integration tests at the same time, in two worktrees, would
-collide on all of the above: the same schema, the same bucket names, the same broker, the
-same bound ports. No code in v1 addresses this, because v1 is one sequential lane (section 2)
-and there is nothing for it to address yet. It is written here as a precondition, not a
-feature: parallel waves (section 2, out of scope for v1) must not be turned on until per-lane
-resource separation exists for whichever of these a gate recipe actually touches, and nothing
-in this codebase enforces that precondition today [R-LANE-RESOURCE-ISOLATION n/a].
+**Per-lane resources.** A worktree separates files and nothing else. It gives each lane its
+own working tree and its own `git status`, and that is the whole of what it gives: not a test
+database, not a port, not a temp directory, not a queue, not object storage. A typical
+project's local development environment makes the shared surface concrete: one database, one
+object store, one message broker, a fixed set of ports, all shared across every worktree on
+the machine, and integration tests that use Testcontainers bind host Docker resources the same
+way, against the same shared daemon. Two lanes running integration tests at the same time, in
+two worktrees, would collide on all of the above: the same schema, the same bucket names, the
+same broker, the same bound ports. So the limit that matters is the harness's own:
+`harness.toml` `[lanes] max`, an integer from 1 to 9 and 1 when absent, is how many lanes of
+that harness run at once, beside the machine's `config.toml` `[lanes] max` (1 to 9, 3 when
+absent), and `ppl lane` refuses `BUSY` at either limit, naming the lanes that hold the slots,
+before it makes a branch, a worktree or a start directory [R-LANE-RESOURCE-ISOLATION]. A
+harness raises its limit only when its gates separate what they share: the lane number
+reaches its gate commands and `[env]` values as `<lane>` when `ppl lane` renders the skill
+(`PORT = "80<lane>"` gives lane 2 the port 802), and the session as `PPL_LANE`. No code
+checks that they do, and lanes of two harnesses share whatever their projects share
+[R-LANE-RESOURCE-ISOLATION].
 
 **A run belongs to its lane.** `ppl init` runs in the session `ppl lane` started for the task,
 which `PPL_TASK` or the cwd binds, and refuses outside it; the run takes the lane's worktree as
@@ -789,15 +793,14 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 202 rows: 155 `blocking`, 21 `soft` and 26 `n/a`. Of the
-`n/a` rows, 16 are `GAP:` - a rule this design names and no code performs - and 10 are
+As of this commit the table carries 202 rows: 156 `blocking`, 21 `soft` and 25 `n/a`. Of the
+`n/a` rows, 15 are `GAP:` - a rule this design names and no code performs - and 10 are
 `PROPERTY:`. The gaps are the honest output of the matrix: a lane session resumed by hand
 without the lane flags having no guard at all, the stage 6 preconditions being unchecked
-before the push, the session identity the isolation check of 5.4 leaves unproven, the
+before the push, the session identity a lane's hooks leave unproven (5.4), the
 harness gate recipes of section 11, the three blind spots the matrix has as GAP rows
-of its own, a foreign finding's owner not actually being notified (6.6a), per-lane resources
-(test databases, ports, temp directories, queues, object storage) having no isolation at all
-beyond the worktree's own files (5.4), the dollar budget being spent before a dispatch, whose
+of its own, a foreign finding's owner not actually being notified (6.6a), the dollar budget
+being spent before a dispatch, whose
 cost is known only after it, so the cap is checked at the next stage boundary instead (12.1),
 and six rules only prose or a convention holds: the content of a tracker write, the panel's
 own state writes, the studio's write surface, write/forbid disjointness at `ppl boundary set`,

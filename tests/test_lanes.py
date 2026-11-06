@@ -48,6 +48,7 @@ class TestRegistry(unittest.TestCase):
         self.assertFalse(lanes.release("A-1"))
 
     def test_a_full_machine_is_refused_busy_naming_the_running_tasks(self):
+        # R-LANE-RESOURCE-ISOLATION: the machine limit counts every harness's lanes
         claim("A-1", machine_max=2)
         claim("B-1", machine_max=2)
         with self.assertRaises(PplError) as caught:
