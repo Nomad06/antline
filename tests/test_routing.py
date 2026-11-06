@@ -68,6 +68,44 @@ class TestRouting(unittest.TestCase):
             routing.load()
         self.assertIn(str(frozen), caught.exception.message)
 
+    def test_an_unreadable_registry_is_refused_not_read_as_no_lane(self):
+        # D15: a lane's call never falls back to the machine's models because the registry
+        # could not be read
+        task = "DEMO-8803"
+        fixtures.bind_lane(task, "/tmp/repo-8803")
+        self.addCleanup(lanes.release, task)
+        saved = lanes.registry_path().read_bytes()
+        self.addCleanup(lanes.registry_path().write_bytes, saved)
+        lanes.registry_path().write_text("{not json", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"PPL_TASK": task}), \
+                self.assertRaises(PplError) as caught:
+            paths.routing_file()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("lanes.json", caught.exception.message)
+
+    def test_the_routing_writers_write_the_machine_file_from_a_lane(self):
+        # M7: setup, a preset and the studio write the machine's routing.toml, and never make
+        # or change a lane's frozen copy
+        from ppl import config
+        task = "DEMO-8804"
+        machine = Path(HOME) / "routing.toml"
+        saved = machine.read_bytes()
+        self.addCleanup(machine.write_bytes, saved)
+        fixtures.bind_lane(task, "/tmp/repo-8804")
+        self.addCleanup(lanes.release, task)
+        frozen = lanes.start_dir(task) / "routing.toml"
+        frozen.unlink()
+        machine.unlink()
+        with mock.patch.dict(os.environ, {"PPL_TASK": task}):
+            config.ensure()
+            self.assertTrue(machine.is_file())
+            self.assertFalse(frozen.exists())
+            frozen.write_bytes(saved)
+            routing.apply_preset("economy")
+            self.assertEqual(frozen.read_bytes(), saved)
+            from ppl.studio import files
+            self.assertEqual(files.resolve("routing"), machine)
+
     def test_load_returns_all_seven_roles(self):
         self.assertEqual(sorted(routing.load()["roles"]), [
             "ppl-brief-challenger", "ppl-briefer", "ppl-code-worker", "ppl-reflector",

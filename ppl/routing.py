@@ -313,7 +313,7 @@ def preset_document(name):
     if name not in presets.PRESETS:
         raise PplError("SCHEMA_INVALID", "unknown preset %r (presets: %s)"
                        % (name, ", ".join(presets.PRESETS)))
-    config = load(unfilled=True)
+    config = load(unfilled=True, path=paths.machine_routing_file())
     table = tiers(config)
     for role_name, spec in presets.PRESETS[name].items():
         needed = [spec["tier"]] + list(spec.get("by_risk", {}).values())
@@ -335,10 +335,11 @@ def preset_document(name):
 
 
 def apply_preset(name):
-    """`ppl routing preset`: the preset document written to routing.toml."""
+    """`ppl routing preset`: the preset document written to the machine's routing.toml, never
+    a lane's frozen copy (D15)."""
     from . import tomlout
     config = preset_document(name)
-    paths.routing_file().write_text(tomlout.dumps(config), encoding="utf-8")
+    paths.machine_routing_file().write_text(tomlout.dumps(config), encoding="utf-8")
     return config
 
 

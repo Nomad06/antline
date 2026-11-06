@@ -42,8 +42,9 @@ def ensure():
     paths.home().mkdir(parents=True, exist_ok=True)
     if not paths.config_file().is_file():
         shutil.copy(paths.defaults_dir() / "config.example.toml", paths.config_file())
-    if not paths.routing_file().is_file():
-        shutil.copy(paths.defaults_dir() / "routing.example.toml", paths.routing_file())
+    # the machine's, which a lane only reads a frozen copy of (D15)
+    if not paths.machine_routing_file().is_file():
+        shutil.copy(paths.defaults_dir() / "routing.example.toml", paths.machine_routing_file())
     return load()
 
 

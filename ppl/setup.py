@@ -350,7 +350,7 @@ def _step_claude(p):
 
 def _step_models(p, probe):
     config.ensure()
-    doc = routing.load(unfilled=True)
+    doc = routing.load(unfilled=True, path=paths.machine_routing_file())
     tiers = routing.tiers(doc)
     unknown = sorted(key[len(TIER_PREFIX):] for key in p.answers
                      if key.startswith(TIER_PREFIX) and key[len(TIER_PREFIX):] not in tiers)
@@ -364,7 +364,7 @@ def _step_models(p, probe):
             entry["model"] = model
             changed = True
     if changed:
-        paths.routing_file().write_text(tomlout.dumps(doc), encoding="utf-8")
+        paths.machine_routing_file().write_text(tomlout.dumps(doc), encoding="utf-8")
     verify = p.ask("verify", "Verify the models now, one cheap probe per model? yes/no", "yes",
                    choices=_YES + _NO)
     binary = config.section("claude").get("binary") or "claude"
