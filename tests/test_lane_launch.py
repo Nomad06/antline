@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tomllib
@@ -17,7 +18,8 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import cli, harness, lane_launch, lanes, lessons, paths, run, store, tomlout
+from ppl import (cli, config, harness, lane_launch, lanes, lessons, os_sandbox, paths, run,
+                 setup, store, tomlout)
 from ppl.errors import PplError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,6 +143,8 @@ class LaneCase(unittest.TestCase):
 
     def assert_nothing_made(self):
         self.assertFalse(lanes.start_dir(TASK).exists())
+        self.assertFalse(os.path.lexists(paths.run_dir(TASK)))
+        self.assertFalse(os.path.lexists(os_sandbox.scratch_dir(TASK)))
         self.assertFalse(self.worktree.exists())
         self.assertNotIn(str(self.worktree), git(self.project, "worktree", "list"))
         self.assertEqual(self.staging_dirs(), [])
@@ -223,6 +227,27 @@ class TestStart(LaneCase):
         self.assertEqual(lanes.entry(TASK)["worktree"], str(self.worktree))
         self.assertEqual(git(self.worktree, "rev-parse", "HEAD"), pushed)
         self.assertEqual(git(self.worktree, "rev-parse", "--abbrev-ref", "HEAD"), BRANCH)
+
+    def test_start_makes_the_run_directories_its_sandbox_cannot_make(self):
+        # R44: the lane's profile lets its Bash write runs/<task> and scratch/<task>, not their
+        # parents, so ppl lane makes both before the session starts
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        for directory in (paths.run_dir(TASK), os_sandbox.scratch_dir(TASK)):
+            self.assertTrue(directory.is_dir(), directory)
+            self.assertEqual(os.listdir(directory), [])
+        self.assertFalse(run.state_path(TASK).exists())
+
+    def test_a_run_directory_that_is_a_link_is_refused(self):
+        elsewhere = self.base / "elsewhere"
+        elsewhere.mkdir()
+        paths.runs_dir().mkdir(parents=True)
+        paths.run_dir(TASK).symlink_to(elsewhere)
+        message = refusal(self, "SETUP_INCOMPLETE", lane_launch.start, LINK,
+                          harness_name=HARNESS, exec_=False)
+        self.assertIn(str(paths.run_dir(TASK)), message)
+        self.assertEqual(lanes.read(), [])
+        self.assertTrue(os.path.islink(paths.run_dir(TASK)))
+        self.assertFalse(lanes.start_dir(TASK).exists())
 
     def test_without_an_origin_the_worktree_starts_from_the_local_default_branch(self):
         local = self.make_repo(self.base / "local")
@@ -387,6 +412,115 @@ class TestStart(LaneCase):
         self.assertTrue(self.worktree.is_dir())
         self.assertTrue(self.branch_exists())
         self.assertEqual(self.staging_dirs(), [])
+
+
+class TestTheLaneWriteScope(LaneCase):
+    """R44: under the lane's OS sandbox profile, sandboxed Bash writes only its own run under
+    PPL_HOME's runs/ and scratch/. Every path the in-lane ppl CLI writes on a normal flow lies
+    inside the rendered allowWrite and outside its denyWrite, and another lane's run does not."""
+
+    def setUp(self):
+        super().setUp()
+        self.install(HARNESS, os_sandbox={"enabled": True})
+        self.enterContext(mock.patch.object(os_sandbox, "pins",
+                                            lambda which=None: fixtures.FAKE_PINS))
+        self.enterContext(mock.patch.dict(os.environ, {
+            "PPL_LOCAL_SETTINGS_DIR": tmphome.mkdtemp(prefix="ppllocalsettings-")}))
+        for step in setup.STEPS:
+            config.mark_step(step, "done")
+        self.written = set()
+
+    def snapshot(self):
+        """{path: (type, size, mtime)} of everything under PPL_HOME, links not followed."""
+        found = {}
+        for root, dirs, files in os.walk(str(paths.home())):
+            for name in [root] + [os.path.join(root, n) for n in dirs + files]:
+                info = os.lstat(name)
+                found[name] = (stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns)
+        return found
+
+    def ppl(self, *args):
+        """`ppl <args>` as the lane's session runs it, every path it writes under PPL_HOME kept."""
+        before = self.snapshot()
+        with mock.patch.dict(os.environ, {"PPL_TASK": TASK}):
+            code, out, err = call(*args)
+        self.assertEqual(code, 0, "ppl %s: %s" % (" ".join(args), err))
+        after = self.snapshot()
+        self.written |= {path for path in set(before) | set(after)
+                         if before.get(path) != after.get(path)}
+        return out
+
+    def document(self, name, doc):
+        """A file the orchestrator writes in the run's scratch directory."""
+        path = os_sandbox.scratch_dir(TASK) / name
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return str(path)
+
+    def generation(self):
+        return str(json.loads(self.ppl("show", "--json"))["lease_generation"])
+
+    def test_the_in_lane_cli_writes_only_inside_the_rendered_allow_write(self):
+        # rule: R-LANE-CROSS-WRITE
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        fixtures.bind_lane("OPS-2", self.project, self.base / "other-tree", lane=2,
+                           harness="other")
+        run.init("OPS-2", "u", str(self.base / "other-tree"))
+        self.ppl("init", TASK, "--tracker-url", LINK, "--skip-model-check", "--no-os-sandbox")
+        self.ppl("recover")
+        self.ppl("stage", "enter", "baseline")
+        head = git(self.worktree, "rev-parse", "HEAD")
+        self.ppl("baseline", "record", self.document("baseline.json", {"base_sha": head}))
+        self.ppl("stage", "enter", "briefing")
+        brief = {"task_id": TASK, "purpose": "p", "success_outcome": "s",
+                 "governing_requirements": [], "acceptance": ["AC-1"],
+                 "allowed_write_paths": ["src/**"], "forbidden_paths": [],
+                 "verification": ["focused-tests"], "open_decisions": [],
+                 "name_contract": {"Foo.bar": "int"}}
+        self.ppl("brief", "set", self.document("brief.json", brief), "--from", "ppl-briefer")
+        revision = json.loads(self.ppl("show", "--json"))["spec_revision"]
+        challenge = {"task_id": TASK, "spec_revision": revision, "verdict": "ACCEPTED",
+                     "new_classes": [], "wire_shapes": [], "open_decisions": [],
+                     "producer": {"role": "brief-challenger"}}
+        self.ppl("brief", "challenge", self.document("challenge.json", challenge),
+                 "--generation", self.generation(), "--from", "ppl-brief-challenger")
+        for stage in ("implementation", "tests", "gates"):
+            self.ppl("stage", "enter", stage)
+        log, rc = self.document("tests.log", "ok"), self.document("tests.rc", 0)
+        self.ppl("evidence", "add", "--check", "focused-tests", "--result", "pass", "--log", log,
+                 "--rc", rc, "--generation", self.generation(), "--from", "orchestrator")
+        self.ppl("stage", "enter", "verification")
+        verdict = {"task_id": TASK, "candidate_sha": head, "spec_revision": revision,
+                   "verdict": "PASS", "acceptance_evidence": {"AC-1": "evidence:focused-tests"},
+                   "findings": [], "producer": {"role": "verifier"}}
+        self.ppl("verdict", "record", self.document("verdict.json", verdict),
+                 "--generation", self.generation(), "--from", "ppl-verifier")
+        self.ppl("stage", "enter", "mr")
+        self.ppl("mr", "set", "--iid", "1", "--url", "https://forge.example/mr/1")
+        self.ppl("stage", "enter", "review")
+        self.ppl("review", "answered", "--thread", "t1", "--sha", head, "--classification",
+                 "NEEDS_REPLY_ONLY", "--generation", self.generation())
+        self.ppl("review", "approved", "--sha", head)
+        self.ppl("park", "--blocker", "OWNER_DECISION", "--safe-next", "ask the owner")
+
+        settings = json.loads((lanes.start_dir(TASK) / "settings.json").read_text(
+            encoding="utf-8"))
+        filesystem = settings["sandbox"]["filesystem"]
+
+        def under(path, entries):
+            real = os.path.realpath(path)
+            return any(real == os.path.realpath(entry)
+                       or real.startswith(os.path.realpath(entry).rstrip(os.sep) + os.sep)
+                       for entry in entries)
+
+        self.assertTrue(any(under(path, [paths.run_dir(TASK)]) for path in self.written))
+        self.assertEqual(sorted(path for path in self.written
+                                if not under(path, filesystem["allowWrite"])), [])
+        self.assertEqual(sorted(path for path in self.written
+                                if under(path, filesystem["denyWrite"])), [])
+        for other in (paths.run_dir("OPS-2"), paths.runs_dir() / "_archive",
+                      paths.runs_dir(), os_sandbox.scratch_dir("OPS-2"),
+                      lanes.registry_path()):
+            self.assertFalse(under(other, filesystem["allowWrite"]), other)
 
 
 class TestCheckoutGit(LaneCase):

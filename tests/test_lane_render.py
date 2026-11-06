@@ -91,11 +91,12 @@ class TestSettings(LaneRenderCase):
         self.assertEqual(facts["written_sandbox"], settings["sandbox"])
         self.assertEqual(facts["written_allow"], settings["permissions"]["allow"])
 
-    def test_the_profile_lets_bash_write_only_its_own_worktree_and_the_checkouts_git(self):
+    def test_the_profile_lets_bash_write_only_its_own_run_worktree_and_the_checkouts_git(self):
         # rule: R-LANE-CROSS-WRITE
         # R25, R35: a lane's sandboxed Bash writes neither the project checkout's working tree
         # nor another lane's worktree, and of the checkout's .git only what git in its own
-        # worktree writes: objects, refs, logs and its own worktrees/<id>
+        # worktree writes: objects, refs, logs and its own worktrees/<id>. R44: of runs/ and
+        # scratch/ only its own run's
         doc, start = self.sandboxed()
         worktree = self.worktree(doc)
         result = self.render(doc, start, worktree=worktree)
@@ -111,8 +112,10 @@ class TestSettings(LaneRenderCase):
             self.assertNotIn(entry, allow)
         self.assertNotIn(checkout, allow)
         self.assertNotIn(os.path.realpath(doc["repo"]["worktrees"]), allow)
-        for name in ("runs", "labels", "scratch"):
+        for name in ("runs/" + TASK, "labels", "scratch/" + TASK):
             self.assertIn(os.path.realpath(paths.home() / name), allow)
+        for name in ("runs", "runs/OPS-2", "runs/_archive", "scratch", "scratch/OPS-2"):
+            self.assertNotIn(os.path.realpath(paths.home() / name), allow)
         facts = json.loads(result["facts"].read_text(encoding="utf-8"))
         self.assertEqual(facts["write_scope"], allow)
 

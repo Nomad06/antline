@@ -70,11 +70,11 @@ class TestScope(Home):
         self.assertEqual(scope, [home + "/runs", home + "/labels", home + "/scratch",
                                  str(base / "real"), str(base / "real" / ".worktrees")])
 
-    def test_a_lanes_write_scope_is_its_own_worktree_and_its_git_dir(self):
+    def test_a_lanes_write_scope_is_its_own_run_worktree_and_git_dir(self):
         # rule: R-LANE-CROSS-WRITE
         # R25, R35: git in a worktree writes the checkout's .git objects, refs and logs and its
         # own worktrees/<id>, and the lane writes nothing else of the checkout's .git, of the
-        # checkout or of another lane's worktree
+        # checkout or of another lane's worktree. R44: of runs/ and scratch/ only its own run's
         base = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplrepo-")))
         (base / "real").mkdir()
         (base / "link").symlink_to(base / "real")
@@ -83,18 +83,21 @@ class TestScope(Home):
         fake_worktree(base / "link", base / "link" / ".worktrees" / "real-KEY-8")
         scope = os_sandbox.write_scope(doc(checkout=str(base / "link"),
                                            os_sandbox={"allow_write": ["~/.npm"]}),
-                                       worktree=worktree)
+                                       worktree=worktree, task="KEY-7")
         home = os.environ["PPL_HOME"]
         git_dir = base / "real" / ".git"
-        self.assertEqual(scope, [home + "/runs", home + "/labels", home + "/scratch",
+        self.assertEqual(scope, [home + "/runs/KEY-7", home + "/labels", home + "/scratch/KEY-7",
                                  str(git_dir / "objects"), str(git_dir / "refs"),
                                  str(git_dir / "logs"), str(git_dir / "worktrees" / "real-KEY-7"),
                                  str(base / "real" / ".worktrees" / "real-KEY-7"),
                                  os.path.realpath(os.path.expanduser("~/.npm"))])
         for entry in (base / "real", base / "real" / ".worktrees", git_dir,
                       git_dir / "worktrees", git_dir / "worktrees" / "real-KEY-8",
-                      git_dir / "packed-refs"):
+                      git_dir / "packed-refs", home + "/runs", home + "/runs/KEY-8",
+                      home + "/runs/_archive", home + "/scratch", home + "/scratch/KEY-8"):
             self.assertNotIn(str(entry), scope)
+        with self.assertRaises(ValueError):
+            os_sandbox.write_scope(doc(checkout=str(base / "link")), worktree=worktree)
 
     def test_a_worktree_with_no_git_dir_of_the_checkout_is_refused(self):
         # rule: R-LANE-CROSS-WRITE
@@ -106,7 +109,7 @@ class TestScope(Home):
             if text is not None:
                 (worktree / ".git").write_text(text, encoding="utf-8")
             with self.subTest(text=text), self.assertRaises(PplError) as caught:
-                os_sandbox.write_scope(doc(checkout=str(base)), worktree=worktree)
+                os_sandbox.write_scope(doc(checkout=str(base)), worktree=worktree, task="KEY-7")
             self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
 
     def test_a_lanes_profile_write_denies_the_shared_git_config_hooks_and_info(self):
@@ -120,14 +123,14 @@ class TestScope(Home):
         lane_doc = doc(forge="gitlab", checkout=str(base))
         denied = [str(base / ".git" / name) for name in ("config", "hooks", "info")]
         denied += [str(own / "gitdir"), str(own / "commondir")]
-        lane = os_sandbox.profile(lane_doc, "/srv/ws", PINS, worktree=worktree)
+        lane = os_sandbox.profile(lane_doc, "/srv/ws", PINS, worktree=worktree, task="KEY-7")
         filesystem = lane["sandbox"]["filesystem"]
         self.assertIn(str(own), filesystem["allowWrite"])
         self.assertNotIn(str(base / ".git"), filesystem["allowWrite"])
         for entry in denied:
             self.assertIn(entry, filesystem["denyWrite"])
             self.assertNotIn(entry, filesystem["allowWrite"])
-        facts = os_sandbox.facts(lane_doc, "/srv/ws", PINS, worktree=worktree)
+        facts = os_sandbox.facts(lane_doc, "/srv/ws", PINS, worktree=worktree, task="KEY-7")
         self.assertEqual(facts["write_scope"], filesystem["allowWrite"])
         for entry in denied:
             self.assertIn(entry, facts["deny_write"])

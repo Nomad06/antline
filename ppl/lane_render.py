@@ -120,8 +120,8 @@ def _write_private(path, text):
 def _settings(doc, task_id, start, worktree):
     """(settings, facts, pins): the settings document and what the sandbox facts are made from,
     None for both when the harness needs no profile. The profile lets the lane's Bash write its
-    own `worktree` and the checkout's .git, never the checkout's working tree or another
-    lane's worktree (os_sandbox.write_scope)."""
+    own run, its own `worktree` and what git there writes in the checkout's .git, never another
+    lane's run, the checkout's working tree or another lane's worktree (os_sandbox.write_scope)."""
     hooks = {event: [entry] for event, entry in setup.hook_entries(paths.root(), task_id).items()}
     settings = {"hooks": hooks}
     if not os_sandbox.needed(doc):
@@ -130,10 +130,10 @@ def _settings(doc, task_id, start, worktree):
     problem = os_sandbox.layout_problem(doc, start) or os_sandbox.repo_problem(doc)
     if problem:
         raise PplError("SETUP_INCOMPLETE", problem)
-    prof = os_sandbox.profile(doc, start, pin_map, worktree)
+    prof = os_sandbox.profile(doc, start, pin_map, worktree, task_id)
     settings["sandbox"] = prof["sandbox"]
     settings["permissions"] = {"allow": prof["allow"]}
-    facts = os_sandbox.facts(doc, start, pin_map, worktree)
+    facts = os_sandbox.facts(doc, start, pin_map, worktree, task_id)
     facts["written_sandbox"] = prof["sandbox"]
     facts["written_allow"] = prof["allow"]
     return settings, facts, pin_map

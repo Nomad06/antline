@@ -1410,7 +1410,7 @@ class TestLaneProtection(LaneCase):
                 for name in ("gh", "git", "ppl")}
         start = lanes.start_dir(LANE_A)
         facts = os_sandbox.facts(harness.load("gh-lane"), start, pins,
-                                 worktree=self.worktree[LANE_A])
+                                 worktree=self.worktree[LANE_A], task=LANE_A)
         store.write_json(start / os_sandbox.FACTS_FILE, facts)
         command = {"command": pins["gh"]["path"] + " auth status",
                    "dangerouslyDisableSandbox": True}

@@ -280,6 +280,21 @@ def _add_worktree(doc, checkout, worktree, branch, default, undo):
                  lambda: _remove_worktree(checkout, worktree)))
 
 
+def _make_run_dirs(task_id, undo):
+    """Make the run's directories under runs/ and scratch/, which the lane's OS sandbox lets
+    its Bash write but not create, since making one writes its parent (os_sandbox.write_scope).
+    One left by an earlier run of the task is kept, and one that is a link or no directory is
+    refused: the profile resolves each path it allows, so a link there would widen it."""
+    for directory in (paths.run_dir(task_id), os_sandbox.scratch_dir(task_id)):
+        if os.path.islink(str(directory)) or (os.path.lexists(str(directory))
+                                              and not os.path.isdir(str(directory))):
+            raise PplError("SETUP_INCOMPLETE", "%s is a link or not a directory: remove it, "
+                           "then run ppl lane again" % directory)
+        if not os.path.lexists(str(directory)):
+            directory.mkdir(parents=True)
+            undo.append(("remove %s" % directory, lambda made=directory: _remove_tree(made)))
+
+
 def _remove_tree(path):
     if os.path.lexists(str(path)):
         shutil.rmtree(str(path))
@@ -365,6 +380,7 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
         undo.append(("remove %s" % start_dir, lambda: _remove_tree(start_dir)))
         doc = harness.load(start_dir / "harness" / name)
         os_sandbox.scratch_root().mkdir(parents=True, exist_ok=True)
+        _make_run_dirs(task_id, undo)
         files = lane_render.render(doc, task_id, entry["lane"], start_dir, worktree,
                                    routing_config, mcp)
         argv = claude_argv(binary, session_id, start_dir, worktree, task_id, link,
