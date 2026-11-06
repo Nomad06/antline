@@ -740,6 +740,44 @@ class TestLaneProtection(LaneCase):
                 self.assertIsNone(self.bash(command))
                 self.assertIsNone(self.bash(command, agent="ppl-verifier"))
 
+    def test_a_git_whose_subcommand_cannot_be_trusted_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R37: the guard reads git's subcommand past its global options, each as git.c reads
+        # it, so an option it does not know fails closed, and so does an alias or include set
+        # on the command line or config handed in from elsewhere, which can turn a word into
+        # git worktree
+        theirs = self.worktree[LANE_B]
+        for command in ("git --attr-source HEAD worktree remove %s" % theirs,
+                        "git --shallow-file /dev/null worktree prune",
+                        "git --frobnicate x worktree remove %s" % theirs,
+                        "git -C%s status" % self.checkout,
+                        "timeout 5 git --frobnicate x worktree prune",
+                        "git -c alias.wt=worktree wt remove %s" % theirs,
+                        "git -c Alias.Wt=worktree wt remove %s" % theirs,
+                        "git --config-env=alias.wt=WT wt remove %s" % theirs,
+                        "git --config-env alias.wt=WT wt prune",
+                        "git -c include.path=/tmp/aliases wt prune",
+                        "git -c includeIf.onbranch:x.path=/tmp/aliases wt prune",
+                        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wt GIT_CONFIG_VALUE_0=worktree "
+                        "git wt prune",
+                        "env GIT_CONFIG_GLOBAL=/tmp/cfg git wt prune",
+                        "HOME=/tmp/fakehome git wt prune",
+                        "git -c alias.st=status st $(true)"):
+            for agent in (None, "ppl-code-worker", "general-purpose"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("git", reason)
+        # a role's git config past an option the table now reads
+        reason = self.deny_reason(self.bash("git --attr-source HEAD config core.hooksPath /x",
+                                            agent="ppl-code-worker"))
+        self.assertIn("may not write git config", reason)
+        for command in ("git --no-pager log -1", "git -C %s status" % self.worktree[LANE_A],
+                        "git -c core.quotepath=off status", "git --attr-source HEAD log -1",
+                        "grep -rn git --include=*.py .", "git --version"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command))
+
     def test_writes_under_the_checkouts_git_dir_are_denied(self):
         # rule: R-LANE-SHARED-GIT-DIR
         # R33, R35: the shared config, hooks and info, which every lane on the checkout and

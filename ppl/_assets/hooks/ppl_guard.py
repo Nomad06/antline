@@ -1455,10 +1455,22 @@ def _positionals(args, value_flags=frozenset()):
 
 
 # git's own global options sit between "git" and the subcommand, and these
-# take a value. `-C <dir>` matters most: every path operand after it is relative to
-# <dir>, from whatever cwd the command ran in.
-_GIT_GLOBAL_VALUE_FLAGS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--exec-path",
-                                     "--namespace", "--super-prefix", "--config-env"})
+# take a value as the next word, as git.c's handle_options reads them (git 2.46, with
+# --super-prefix from before 2.40). `-C <dir>` matters most: every path operand after it
+# is relative to <dir>, from whatever cwd the command ran in.
+_GIT_GLOBAL_VALUE_FLAGS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                     "--super-prefix", "--config-env", "--attr-source",
+                                     "--shallow-file"})
+# The global options that take their value glued with `=` only, or none: a bare
+# --exec-path prints the exec path and runs nothing.
+_GIT_GLOBAL_GLUED = ("--git-dir=", "--work-tree=", "--namespace=", "--super-prefix=",
+                     "--config-env=", "--attr-source=", "--exec-path=", "--list-cmds=")
+_GIT_GLOBAL_FLAGS = frozenset({"-p", "--paginate", "-P", "--no-pager", "--no-replace-objects",
+                               "--no-lazy-fetch", "--no-optional-locks", "--no-advice", "--bare",
+                               "--literal-pathspecs", "--no-literal-pathspecs",
+                               "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs",
+                               "--exec-path", "--html-path", "--man-path", "--info-path",
+                               "-h", "--help", "-v", "--version"})
 # Subcommands that rewrite the working tree from history or from a diff with
 # no path operand this could name: the whole tree is the target.
 _GIT_TREE_REWRITERS = frozenset({"merge", "rebase", "cherry-pick", "pull", "revert", "am",
@@ -2684,15 +2696,46 @@ _GIT_CONFIG_ACTIONS = frozenset({"--add", "--replace-all", "--unset", "--unset-a
                                  "--rename-section", "--remove-section", "--edit", "-e"})
 
 
+# A config key a command line may not set for git in a lane: an alias turns a word into
+# another subcommand, and an include brings in a file that can define one. Keys are read
+# in any letter case, as git reads a section name.
+_GIT_ALIAS_KEY_RE = re.compile(r"(?:alias|include|includeif)\.", re.IGNORECASE)
+# An environment variable that hands git config from elsewhere, an alias with it: the
+# GIT_CONFIG_* family, and a HOME or XDG_CONFIG_HOME that moves the global config.
+_GIT_CONFIG_ENV_RE = re.compile(r"^(?:GIT_CONFIG\w*|HOME|XDG_CONFIG_HOME)=")
+_GIT_ALIAS_SPELLED_RE = re.compile(
+    r"\bgit\b[\s\S]*(?:-c\s*|--config-env[\s=]*)[\"']?(?:alias|include)", re.IGNORECASE)
+
+
 def _git_subcommand(words):
-    """(subcommand, the words after it) of what follows a git, past git's own options (-C, -c,
-    --git-dir, ...), or (None, [])."""
+    """(subcommand, the words after it, problem) of what follows a git, past git's own
+    options, each read as git.c reads it. `problem` is why the subcommand cannot be trusted:
+    an option this does not read, which may take a value and shift every word after it, a
+    value-taking option with no value, or an alias or include set on the command line (-c,
+    --config-env), which can make a word another subcommand. (None, [], None) when no
+    subcommand follows."""
     i = 0
     while i < len(words) and words[i].startswith("-"):
-        i += 2 if words[i] in _GIT_GLOBAL_VALUE_FLAGS else 1
+        word = words[i]
+        if word in _GIT_GLOBAL_VALUE_FLAGS:
+            if i + 1 >= len(words):
+                return None, [], "%s with no value" % word
+            if word in ("-c", "--config-env") and _GIT_ALIAS_KEY_RE.match(words[i + 1]):
+                return None, [], "%s %s, an alias or include set on the command line" % (
+                    word, words[i + 1])
+            i += 2
+        elif word.startswith(_GIT_GLOBAL_GLUED):
+            if (word.startswith("--config-env=")
+                    and _GIT_ALIAS_KEY_RE.match(word[len("--config-env="):])):
+                return None, [], "%s, an alias or include set on the command line" % word
+            i += 1
+        elif word in _GIT_GLOBAL_FLAGS:
+            i += 1
+        else:
+            return None, [], "the option %s, which the guard does not read" % word
     if i >= len(words):
-        return None, []
-    return words[i], words[i + 1:]
+        return None, [], None
+    return words[i], words[i + 1:], None
 
 
 def _git_config_write(rest):
@@ -2719,7 +2762,13 @@ def lane_git_denial(command, agent, binding, cwd=None):
       the guard reads, and ppl lane makes and ppl destroy removes a lane's own;
     - git config in any form but a read, for a ppl-* role [R-LANE-SHARED-GIT-DIR]: git in a
       worktree writes its config into the project checkout's shared .git/config, which every
-      lane on that checkout and the operator's own git read."""
+      lane on that checkout and the operator's own git read;
+    - a git whose subcommand cannot be trusted, for every session [R-LANE-CROSS-WRITE]: an
+      alias or include set on its command line (-c, --config-env, keys in any case), config
+      handed in from elsewhere by GIT_CONFIG_*, HOME or XDG_CONFIG_HOME, or a global option
+      the guard does not read, which may take a value and shift the words (_git_subcommand).
+    Aliases in the operator's own global config are the operator's, and the checkout's
+    .git/config is kept from the lanes (R-LANE-SHARED-GIT-DIR)."""
     if not (isinstance(command, str) and binding.task and not binding.problem):
         return None
     role = escape.is_role(agent)
@@ -2728,15 +2777,37 @@ def lane_git_denial(command, agent, binding, cwd=None):
     blinded = not segments or any(tokens is None for tokens, _, _ in segments)
     worktree = blinded and _GIT_WORKTREE_SPELLED_RE.search(command)
     config = blinded and role and _GIT_CONFIG_SPELLED_RE.search(command)
-    for tokens, _, _ in segments:
+    untrusted = (blinded and _GIT_ALIAS_SPELLED_RE.search(command)
+                 and "an alias or include set on the command line")
+    runs_git = False
+    for tokens, start, _ in segments:
         for index, word in enumerate(tokens or ()):
             if _verb_name(word) != "git":
                 continue
-            sub, rest = _git_subcommand(tokens[index + 1:])
+            runs_git = True
+            sub, rest, problem = _git_subcommand(tokens[index + 1:])
+            # an option it cannot read shifts every word after it: in command position the
+            # git is refused, elsewhere (a wrapper's operand, a search word) when a
+            # subcommand it guards follows anywhere
+            if problem and ("alias or include" in problem or index == start
+                            or {"worktree", "config"} & set(tokens[index + 1:])):
+                untrusted = untrusted or problem
             if sub == "worktree" and rest[:1] != ["list"]:
                 worktree = True
             if sub == "config" and role and _git_config_write(rest):
                 config = True
+    if runs_git or (blinded and re.search(r"\bgit\b", command)):
+        moved = [word for tokens, _, _ in segments for word in tokens or ()
+                 if _GIT_CONFIG_ENV_RE.match(word)]
+        if moved or (blinded and re.search(r"(?:GIT_CONFIG\w*|HOME|XDG_CONFIG_HOME)=", command)):
+            untrusted = untrusted or ("%s, which hands git config from elsewhere"
+                                      % (moved[0].split("=", 1)[0] + "=" if moved
+                                         else "an environment assignment"))
+    if untrusted:
+        return ("BOUNDARY_VIOLATION",
+                "lane %s may not run git with %s: the guard reads git's subcommand to keep "
+                "git worktree and a role's git config in bounds, and that could make it "
+                "another" % (binding.task, untrusted))
     if worktree:
         return ("BOUNDARY_VIOLATION",
                 "lane %s may not run git worktree but git worktree list: git takes a worktree "
