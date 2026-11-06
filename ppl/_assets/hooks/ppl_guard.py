@@ -2121,91 +2121,43 @@ def _has_dotdot(path):
     return ".." in str(path).split("/")
 
 
-# R68: how far a ppl-test-worker Glob pattern's braces are expanded before the pattern is
-# refused unread [R-TEST-WORKER-READ-TOOLS].
-_BRACE_ALTERNATIVES_LIMIT = 64
+# R68 AMENDED: a ppl-test-worker Glob pattern's braces are not expanded. One that could hide
+# a path in an alternative is refused instead [R-TEST-WORKER-READ-TOOLS].
 _BRACE_DEPTH_LIMIT = 4
+# A dot at an alternative's edge, which joins a dot beside the group into ..
+_BRACE_EDGE_DOT_RE = re.compile(r"(?:^|[{,])\.|\.(?:$|[},])")
 
 
-class _TooManyBraces(Exception):
-    """More brace alternatives, or deeper braces, than the test worker's Glob check expands."""
-
-
-def _brace_match(text):
-    """{index of an unescaped `{`: index of the `}` that closes it}, in one pass with a stack;
-    a backslash takes the next character as written, and a brace with no partner stays a
-    character."""
-    found, stack, index = {}, [], 0
-    while index < len(text):
-        char = text[index]
+def _glob_brace_problem(pattern):
+    """Why ppl-test-worker's Glob `pattern` is refused for its braces, else None: a [ class
+    beside a { (a class can hold a brace or a comma that pairs them otherwise), a /, ~ or ..
+    inside a brace group, or a dot at an alternative's edge that a dot beside the group makes
+    .. of, braces unbalanced, or nested deeper than _BRACE_DEPTH_LIMIT. One pass, no expansion:
+    a backslash takes the next character as written, and a group's text is judged with its
+    backslashes out."""
+    if "{" not in pattern and "}" not in pattern:
+        return None
+    if "[" in pattern and "{" in pattern:
+        return "a [ class beside a { brace"
+    opened, index = [], 0
+    while index < len(pattern):
+        char = pattern[index]
         if char == "\\":
             index += 2
             continue
         if char == "{":
-            stack.append(index)
-        elif char == "}" and stack:
-            found[stack.pop()] = index
+            opened.append(index)
+            if len(opened) > _BRACE_DEPTH_LIMIT:
+                return "braces nested deeper than %d" % _BRACE_DEPTH_LIMIT
+        elif char == "}":
+            if not opened:
+                return "unbalanced braces"
+            inside = pattern[opened.pop() + 1:index].replace("\\", "")
+            if ("/" in inside or "~" in inside or ".." in inside
+                    or _BRACE_EDGE_DOT_RE.search(inside)):
+                return "a /, ~ or .. inside a brace group"
         index += 1
-    return found
-
-
-def _expand_braces(text, start, end, match, depth):
-    """Every spelling text[start:end] gives with its braces expanded as Glob expands them:
-    the parts between the top-level commas of each matched pair, a pair without a comma
-    giving its one part. _TooManyBraces past _BRACE_ALTERNATIVES_LIMIT spellings or
-    _BRACE_DEPTH_LIMIT levels. Left to right, so the work grows with the length times the
-    spellings kept, both bounded."""
-    if depth > _BRACE_DEPTH_LIMIT:
-        raise _TooManyBraces()
-    spellings, literal, index = [""], [], start
-    while index < end:
-        char = text[index]
-        if char == "\\":
-            literal.append(text[index:index + 2])
-            index += 2
-            continue
-        close = match.get(index)
-        if close is None or close >= end:
-            literal.append(char)
-            index += 1
-            continue
-        parts, nested, at, inner = [], 0, index + 1, index + 1
-        while inner < close:
-            if text[inner] == "\\":
-                inner += 2
-                continue
-            if text[inner] == "{":
-                nested += 1
-            elif text[inner] == "}":
-                nested -= 1
-            elif text[inner] == "," and nested == 0:
-                parts.append((at, inner))
-                at = inner + 1
-            inner += 1
-        parts.append((at, close))
-        options = []
-        for part_start, part_end in parts:
-            options.extend(_expand_braces(text, part_start, part_end, match, depth + 1))
-            if len(options) > _BRACE_ALTERNATIVES_LIMIT:
-                raise _TooManyBraces()
-        if len(spellings) * len(options) > _BRACE_ALTERNATIVES_LIMIT:
-            raise _TooManyBraces()
-        head = "".join(literal)
-        literal = []
-        spellings = [spelled + head + option for spelled in spellings for option in options]
-        index = close + 1
-    tail = "".join(literal)
-    return [spelled + tail for spelled in spellings]
-
-
-def _brace_alternatives(pattern):
-    """The patterns a Glob `pattern` stands for once its braces are expanded, or None when
-    there are more than _BRACE_ALTERNATIVES_LIMIT of them or braces nest deeper than
-    _BRACE_DEPTH_LIMIT. No filesystem access."""
-    try:
-        return _expand_braces(pattern, 0, len(pattern), _brace_match(pattern), 0)
-    except _TooManyBraces:
-        return None
+    return "unbalanced braces" if opened else None
 
 
 def _dotdot_reason(tool, path):
@@ -2234,6 +2186,15 @@ def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state, p
         if agent == "ppl-test-worker" and raw and _has_dotdot(raw):
             return deny("BOUNDARY_VIOLATION", _dotdot_reason("Bash write", raw))
         resolved = _resolve_path_against_cwd(raw, seg_cwd) if raw else None
+        if resolved is None and raw is None and ("$(" in command or "`" in command):
+            # the walk reads no target of a command holding one (_bash_write_targets), so
+            # the cause is that, not a path it could not resolve (M9)
+            return deny("BOUNDARY_VIOLATION",
+                        "a write-shaped Bash command that holds a $(...) or a backtick, in a "
+                        "here-document body too, is not read for where it writes, denied "
+                        "rather than allowed: write the file with the Write tool, or keep "
+                        "the substitution or the backtick out of the command that writes: %s"
+                        % command)
         if resolved is None:
             return deny("BOUNDARY_VIOLATION",
                         "a write-shaped Bash command's target could not be "
@@ -3891,21 +3852,18 @@ def _decide(payload, argv=()):
                                 "ppl-test-worker gives %s %r, which starts or ends with "
                                 "whitespace or holds a control character that Claude Code may "
                                 "trim: spell the path plainly" % (tool, each))
-            # an absolute pattern lists what it names whatever the path, and Glob expands
-            # braces, so each alternative is checked as a pattern of its own (R68)
-            alternatives = _brace_alternatives(glob) if isinstance(glob, str) else []
-            if alternatives is None:
+            # Glob expands braces, so a group that could make an alternative absolute or
+            # climbing is refused (R68 AMENDED); then an absolute pattern, which lists what it
+            # names whatever the path
+            braces = _glob_brace_problem(glob) if isinstance(glob, str) else None
+            if braces:
                 return deny("BOUNDARY_VIOLATION",
-                            "ppl-test-worker gives Glob the pattern %s, whose braces give more "
-                            "than %d alternatives or nest deeper than %d: write it plainer"
-                            % (glob, _BRACE_ALTERNATIVES_LIMIT, _BRACE_DEPTH_LIMIT))
-            for alternative in alternatives:
-                if _has_dotdot(alternative):
-                    return deny("BOUNDARY_VIOLATION", _dotdot_reason(tool, glob))
-                if os.path.isabs(os.path.expanduser(alternative)):
-                    return deny("BOUNDARY_VIOLATION",
-                                "ppl-test-worker gives Glob the absolute pattern %s: pass the "
-                                "test directory as path and give a relative pattern" % glob)
+                            "ppl-test-worker gives Glob the pattern %s, which has %s: keep "
+                            "braces to plain alternatives of names, or glob twice" % (glob, braces))
+            if isinstance(glob, str) and os.path.isabs(os.path.expanduser(glob)):
+                return deny("BOUNDARY_VIOLATION",
+                            "ppl-test-worker gives Glob the absolute pattern %s: pass the test "
+                            "directory as path and give a relative pattern" % glob)
             for raw in raws:
                 # A relative path is the session's, so it resolves against the
                 # payload cwd, never the hook process's own.

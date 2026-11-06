@@ -128,7 +128,7 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `ppl/_assets/rules.toml` holds 202 rules, 156 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 205 rules, 159 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
   refusal. The suite has 3279 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
@@ -221,7 +221,13 @@ so a lane started after the reinstall uses the new install. A lane started befor
 reinstall, or a `git pull`, that moved files keeps the old paths: every tool call in it fails
 with `can't open file '.../hooks/ppl_guard.py'`, and `ppl doctor --task <id>` names the hook
 path that no longer exists. Finish it, or destroy it with `ppl destroy --scope local --task
-<id>` in a terminal, and start it again with `ppl lane <link>`.
+<id>` in a terminal, and start it again with `ppl lane <link>`. The hook commands also name the
+interpreter that ran `ppl lane`. If that interpreter goes away, as a pipx venv's does when its
+base Python is removed, the shell exits 127, which Claude Code reads as a non-blocking error,
+and every call in the lane is allowed: `ppl lane resume` refuses `SETUP_INCOMPLETE` while a
+hook's interpreter or script is gone or the interpreter is older than 3.11, and `ppl doctor
+--task <id>` lists the same under `lane_hooks` [R-GUARD-PYTHON-FLOOR]. Put a Python 3.11 or
+newer back at that path, or start the lane again.
 
 Coming from a ppl that rendered into one workspace (`~/ppl-workspace`), run `ppl setup
 claude` once: it takes back the hook entries, sandbox block, skill and `ppl-*` agents that ppl
@@ -511,8 +517,11 @@ refused `BUSY`, naming the lanes that hold the slots [R-LANE-RESOURCE-ISOLATION]
 with `ppl lane resume`, not a bare `claude --resume`: without the lane's flags the session has
 no guard, OS sandbox or ppl agents [R-LANE-BARE-RESUME n/a]. After the merge the orchestrator
 frees its lane with `ppl lane close`, which keeps the start directory and the worktree. A run
-started by a ppl from before lanes is finished or destroyed first: `ppl lane` names it until
-it is.
+started by a ppl from before lanes cannot be finished in a lane: its old hooks carry no
+`--task`, so every `ppl-*` role is denied, and bare `ppl` no longer finds it
+[R-LANE-LEGACY-RUN]. Finish it before
+you upgrade, or destroy it with `ppl destroy --scope local --task <id>`; until then `ppl lane`
+refuses, naming it [R-LANE-LEGACY-RUN].
 
 What a lane leaves to you:
 

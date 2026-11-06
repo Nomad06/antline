@@ -94,6 +94,13 @@ def run_dir(task_id):
     return runs_dir() / check_task_id(task_id)
 
 
+def label_dir(task_id):
+    """Where `ppl label` keeps the task's labels, PPL_HOME/labels/<task>, outside the run
+    directory so destroy never moves them, and the only part of labels a lane's sandbox
+    writes, which ppl lane makes before the session starts."""
+    return home() / "labels" / check_task_id(task_id)
+
+
 def pending_marker(task_id):
     """The marker a run destroyed with reflection leaves while its reflection is not recorded:
     PPL_HOME/lessons/pending/<task>.json."""

@@ -122,9 +122,10 @@ class TestSettings(LaneRenderCase):
             self.assertNotIn(entry, allow)
         self.assertNotIn(checkout, allow)
         self.assertNotIn(os.path.realpath(doc["repo"]["worktrees"]), allow)
-        for name in ("runs/" + TASK, "labels", "scratch/" + TASK):
+        for name in ("runs/" + TASK, "labels/" + TASK, "scratch/" + TASK):
             self.assertIn(os.path.realpath(paths.home() / name), allow)
-        for name in ("runs", "runs/OPS-2", "runs/_archive", "scratch", "scratch/OPS-2"):
+        for name in ("runs", "runs/OPS-2", "runs/_archive", "scratch", "scratch/OPS-2",
+                     "labels", "labels/OPS-2"):
             self.assertNotIn(os.path.realpath(paths.home() / name), allow)
         facts = json.loads(result["facts"].read_text(encoding="utf-8"))
         self.assertEqual(facts["write_scope"], allow)
@@ -246,6 +247,7 @@ class TestMcpSourceIsOperatorOwned(LaneRenderCase):
         (self.project / ".mcp.json").write_text(json.dumps({"mcpServers": doc}), encoding="utf-8")
 
     def test_a_project_mcp_json_is_not_copied_and_the_lane_is_refused(self):
+        # rule: R-LANE-PROJECT-MCP-NOT-COPIED
         self.user({"mcpServers": {"atlassian": {"command": "a"}}})
         self.project_file({"GitLab-MCP": {"command": "evil"}})
         source = lane_render.mcp_source(project_dir=str(self.project))

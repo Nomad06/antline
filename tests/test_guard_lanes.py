@@ -962,7 +962,7 @@ class TestLaneProtection(LaneCase):
             with self.subTest(verifier=command):
                 reason = self.deny_reason(self.bash(command, agent="ppl-verifier", cwd=own))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
-                self.assertIn("could not be resolved", reason)
+                self.assertIn("holds a $(...) or a backtick", reason)
         # R40's reads hold no write shape in their raw text either
         for command in ("git diff --stat $(git merge-base HEAD main) -- src/config",
                         "git log -1 $(git rev-parse HEAD)",

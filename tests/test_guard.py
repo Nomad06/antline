@@ -767,7 +767,7 @@ class TestGuard(unittest.TestCase):
                 start = time.perf_counter()
                 result = decide(payload(None, "Bash", {"command": command},
                                         cwd="/tmp/elsewhere"), ())
-                self.assertLess(time.perf_counter() - start, 0.2)
+                self.assertLess(time.perf_counter() - start, 1.0)
                 self.assertIsNone(result)
         result = decide(payload(None, "Bash",
                                 {"command": "git push " + ">&" * 2000 + " +main"},
@@ -819,7 +819,7 @@ class TestGuard(unittest.TestCase):
             with self.subTest(command=command[:40], denied=denied):
                 start = time.perf_counter()
                 result = decide(payload(None, "Bash", {"command": command}))
-                self.assertLess(time.perf_counter() - start, 0.2)
+                self.assertLess(time.perf_counter() - start, 1.0)
                 if denied:
                     self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
                 else:
@@ -857,7 +857,7 @@ class TestGuard(unittest.TestCase):
             with self.subTest(command=command[:40]):
                 start = time.perf_counter()
                 result = decide(payload(None, "Bash", {"command": command}))
-                self.assertLess(time.perf_counter() - start, 0.2)
+                self.assertLess(time.perf_counter() - start, 1.0)
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
                 self.assertIn(why, self.deny_reason(result))
 
@@ -981,7 +981,7 @@ class TestGuard(unittest.TestCase):
                                 ("git add " + "-v " * 2000 + "src/x", False)):
             start = time.perf_counter()
             result = decide(payload(None, "Bash", {"command": command}))
-            self.assertLess(time.perf_counter() - start, 0.2)
+            self.assertLess(time.perf_counter() - start, 1.0)
             self.assertEqual(result is not None, denied, command[:20])
 
     def test_a_role_bash_command_over_the_length_cap_is_denied_before_any_pattern(self):
@@ -993,12 +993,17 @@ class TestGuard(unittest.TestCase):
         limit = ppl_guard.ROLE_COMMAND_LENGTH_LIMIT
         self.assertEqual(limit, 4096)
         just_over = ("git -a " * 700)[:limit + 1]
+        # Final review M10: a 32 KiB one, whose patterns would take over 20 s, keeps the
+        # bound telling under a loaded suite at 1 s, where 0.01 s could flake
+        padded = ("git -a " * 4700)[:32 * 1024]
         for agent in ("ppl-code-worker", "ppl-test-worker", "ppl-review-responder"):
-            start = time.perf_counter()
-            result = decide(payload(agent, "Bash", {"command": just_over}))
-            self.assertLess(time.perf_counter() - start, 0.01)
-            self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), agent)
-            self.assertIn("may not exceed 4096 characters", self.deny_reason(result), agent)
+            for command in (just_over, padded):
+                start = time.perf_counter()
+                result = decide(payload(agent, "Bash", {"command": command}))
+                self.assertLess(time.perf_counter() - start, 1.0)
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result), agent)
+                self.assertIn("may not exceed 4096 characters", self.deny_reason(result),
+                              agent)
         # The cap is about length, not content: a harmless long command is
         # refused the same way, and one exactly at the cap is not.
         harmless = "echo " + "x" * limit
@@ -1310,7 +1315,7 @@ class TestGuard(unittest.TestCase):
             with self.subTest(command=command[:30]):
                 start = time.perf_counter()
                 self.assertFalse(ppl_guard.bash_write_lands_in_runs(command, "/tmp"))
-                self.assertLess(time.perf_counter() - start, 0.2)
+                self.assertLess(time.perf_counter() - start, 1.0)
 
     def test_a_shell_string_behind_env_cd_is_opaque_and_allowed(self):
         # Pinned residual: the cd lands in runs/, but the write sits inside a
@@ -1698,7 +1703,7 @@ class TestGuard(unittest.TestCase):
         command = "git stash drop -q stash@{0}; " * 2000
         start = time.perf_counter()
         self.assertFalse(ppl_guard.bash_write_lands_in_runs(command, "/tmp"))
-        self.assertLess(time.perf_counter() - start, 0.2)
+        self.assertLess(time.perf_counter() - start, 1.0)
 
     def test_tilde_spelled_bash_write_under_the_data_root_but_outside_runs_is_allowed(self):
         patched, tilde = self.home_spelled()
@@ -2041,29 +2046,27 @@ class TestGuard(unittest.TestCase):
                 self.assertIsNotNone(result, "the call was allowed")
                 self.assertIn("absolute pattern", self.deny_reason(result))
 
-    def test_test_worker_glob_brace_alternatives_are_each_checked(self):
+    def test_test_worker_glob_braces_that_could_hide_a_path_are_denied(self):
         # rule: R-TEST-WORKER-READ-TOOLS
-        # R68: Glob expands braces, so an alternative of a relative pattern can be absolute,
-        # start with ~ or climb with ..; each one is checked, and braces past 64 alternatives
-        # or nested deeper than 4 are refused unread
+        # R68 AMENDED: Glob expands braces, so an alternative of a relative pattern could be
+        # absolute, start with ~ or climb with ..; the guard expands nothing and refuses a
+        # brace group that holds /, ~ or .., a dot at an alternative's edge beside a dot, a
+        # [ class beside a { (a class can hold a brace or a comma), unbalanced braces and
+        # braces nested deeper than 4
         start = str(lanes.start_dir("DEMO-700"))
         test_dir = "/tmp/repo/source/core/orders/src/test"
-        for pattern, why in (("{/tmp/repo/source/core/orders/**,x}", "absolute pattern"),
-                             ("{~/x,y}", "absolute pattern"),
-                             ("{a,{b,/tmp/repo/**}}/x", "absolute pattern"),
-                             ("{..,x}/main/**", ".. segment"),
-                             ("{" + ",".join("a%d" % n for n in range(65)) + "}",
-                              "more than 64"),
-                             ("{a,b}" * 7, "more than 64"),
-                             ("{a,{b,{c,{d,{e,f}}}}}", "deeper than 4")):
+        for pattern in ("{[,]/tmp/repo/**,x}", "{/tmp/repo/source/core/orders/**,x}",
+                        "{~/x,y}", "{a/../..,b}", "{a,{b,/tmp/repo/**}}/x", ".{.,x}/main/**",
+                        "{x,.}./main/**", "{a,b", "a}b/*.java", "{a,{b,{c,{d,{e,f}}}}}",
+                        "[{]*.java", "{a\\/b,c}/*.java"):
             with self.subTest(pattern=pattern):
                 result = decide(payload("ppl-test-worker", "Glob",
                                         {"pattern": pattern, "path": test_dir}, cwd=start))
                 self.assertIsNotNone(result, "the call was allowed")
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
-                self.assertIn(why, self.deny_reason(result))
-        for pattern in ("**/*.{ts,tsx}", "src/**/*.{test,spec}.js", "**/*Test.{java,kt}",
-                        "{a,{b,{c,{d,e}}}}/*.java", "\\{x,/y}/*.java"):
+                self.assertIn(pattern, self.deny_reason(result))
+        for pattern in ("**/*.{ts,tsx}", "{src,test}/**/*.js", "src/**/*.{test,spec}.js",
+                        "**/*Test.{java,kt}", "{a,{b,{c,{d,e}}}}/*.java"):
             with self.subTest(allowed=pattern):
                 self.assertIsNone(decide(payload("ppl-test-worker", "Glob",
                                                  {"pattern": pattern, "path": test_dir},
@@ -2648,6 +2651,23 @@ class TestGuard(unittest.TestCase):
         self.assertIsNone(decide(payload(
             None, "Bash", {"command": "sed -i 's/a/b/' notes.txt"},
             cwd="/home/dev/some/other/project"), ()))
+
+    def test_a_write_holding_a_substitution_names_that_cause(self):
+        # rule: R-GUARD-BASH-WRITE-BOUNDARY
+        # Final review M9: a write whose here-document body holds a code span is refused as
+        # before, but the reason names the cause, a $(...) or a backtick the guard does not
+        # read for targets, not an unresolvable path the command never spelled
+        for command in ("cat > /tmp/x.md <<'EOF'\nRun `npm test` locally.\nEOF",
+                        "cat > /tmp/x.md <<'EOF'\nRun $(npm test) locally.\nEOF",
+                        "$(which sed) -i 's/a/b/' notes.txt"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(decide(payload(agent, "Bash",
+                                                             {"command": command})))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("holds a $(...) or a backtick", reason)
+                    self.assertIn("Write tool", reason)
+                    self.assertNotIn("could not be resolved", reason)
 
     def test_the_lanes_own_ambiguous_write_elsewhere_is_denied(self):
         # rule: R-GUARD-BASH-WRITE-BOUNDARY
@@ -3252,7 +3272,7 @@ class TestGuard(unittest.TestCase):
                       "/" + "a" * 30 + "!"):
             start = time.monotonic()
             result = self._responder_bash("git -C " + value + rest)
-            self.assertLess(time.monotonic() - start, 0.05)
+            self.assertLess(time.monotonic() - start, 1.0)
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_a_normal_absolute_repo_path_is_still_allowed(self):

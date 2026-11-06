@@ -86,7 +86,8 @@ class TestScope(Home):
                                        worktree=worktree, task="KEY-7")
         home = os.environ["PPL_HOME"]
         git_dir = base / "real" / ".git"
-        self.assertEqual(scope, [home + "/runs/KEY-7", home + "/labels", home + "/scratch/KEY-7",
+        self.assertEqual(scope, [home + "/runs/KEY-7", home + "/labels/KEY-7",
+                                 home + "/scratch/KEY-7",
                                  str(git_dir / "objects"), str(git_dir / "refs"),
                                  str(git_dir / "logs"), str(git_dir / "worktrees" / "real-KEY-7"),
                                  str(base / "real" / ".worktrees" / "real-KEY-7"),
@@ -94,7 +95,8 @@ class TestScope(Home):
         for entry in (base / "real", base / "real" / ".worktrees", git_dir,
                       git_dir / "worktrees", git_dir / "worktrees" / "real-KEY-8",
                       git_dir / "packed-refs", home + "/runs", home + "/runs/KEY-8",
-                      home + "/runs/_archive", home + "/scratch", home + "/scratch/KEY-8"):
+                      home + "/runs/_archive", home + "/scratch", home + "/scratch/KEY-8",
+                      home + "/labels", home + "/labels/KEY-8"):
             self.assertNotIn(str(entry), scope)
         with self.assertRaises(ValueError):
             os_sandbox.write_scope(doc(checkout=str(base / "link")), worktree=worktree)

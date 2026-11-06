@@ -462,6 +462,17 @@ def _frozen(directory):
     return table
 
 
+def _quiet_since(directory, midnight):
+    """True when an archived run's log.jsonl was last written before `midnight`, so nothing
+    in it is today's spend. For an archived run alone: it lies outside every lane's reach, so
+    its mtime is the owner's, while a live run's files, their mtime among them, are its
+    lane's sandbox's to set. A log that cannot be stat'ed is read as before."""
+    try:
+        return os.stat(os.path.join(str(directory), "log.jsonl")).st_mtime < midnight
+    except OSError:
+        return False
+
+
 def _scan_dirs():
     """[(name, directory, live)]. A live run is a directory under runs/ with a state.json or a
     log.jsonl, the ones a lane's sandbox can write; an archived one lies under runs/_archive."""
@@ -488,7 +499,9 @@ def spent_today(now=None, task=None):
     spent today without a price; 'unreadable' any other run that cannot be used and 'unpriced_other'
     the unpriced models of any other run, which are skipped and named. usd is None while
     'blocked' or 'unpriced' is not empty. Nothing here raises for one bad run, and one run's
-    problems never stop another run's check."""
+    problems never stop another run's check. An archived run whose log was last written before
+    midnight is skipped unread (_quiet_since), so the archive's size does not weigh on every
+    stage gate."""
     midnight = _local_midnight(now)
     usd = 0.0
     issues = {"blocked": [], "unpriced": [], "unreadable": [], "unpriced_other": []}
@@ -498,6 +511,8 @@ def spent_today(now=None, task=None):
         return None, dict(issues, blocked=["runs"])
     for name, directory, live in scan:
         own = name == task and live
+        if not live and _quiet_since(directory, midnight):
+            continue
         try:
             models = _spent_today_in(directory, midnight)
             frozen = _frozen(directory)

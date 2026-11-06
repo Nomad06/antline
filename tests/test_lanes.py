@@ -16,8 +16,21 @@ from ppl import lanes, store
 from ppl.errors import PplError
 
 
-def _claim_task(task_id, queue):
+def _claim_task(task_id, queue, barrier=None, pause=0.0):
+    """Claim the one slot in a spawned child. With `pause`, the registry read inside the lock
+    sleeps that long after reading, so a second claim that does not wait for the lock reads
+    the same empty registry; with `barrier`, both children reach the claim together."""
     try:
+        if pause:
+            read = lanes.read
+
+            def slow(*args, **kwargs):
+                found = read(*args, **kwargs)
+                time.sleep(pause)
+                return found
+            lanes.read = slow
+        if barrier is not None:
+            barrier.wait(60)
         entry = lanes.claim(task_id, "h", "a" * 40, "/r", "/w", "s", 1, 1)
         queue.put(("ok", entry["lane"]))
     except PplError as err:
@@ -122,9 +135,13 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(lanes.for_path(wt / "src")["task"], "A-1")
 
     def test_two_processes_racing_for_the_last_slot_get_one_lane(self):
+        # Final review M8: the two claims meet at a barrier and each one's registry read
+        # sleeps inside the lock, so their critical sections overlap whenever the lock does
+        # not hold them apart (without it both read an empty registry and both take lane 1)
         context = multiprocessing.get_context("spawn")
         queue = context.Queue()
-        procs = [context.Process(target=_claim_task, args=(task, queue))
+        barrier = context.Barrier(2)
+        procs = [context.Process(target=_claim_task, args=(task, queue, barrier, 0.3))
                  for task in ("A-1", "B-1")]
         for proc in procs:
             proc.start()

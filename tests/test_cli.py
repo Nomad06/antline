@@ -2652,6 +2652,8 @@ class TestBareCommandsFindTheirRun(unittest.TestCase):
                                            "with ppl lane <link>")
 
     def test_task_and_ppl_task_naming_different_runs_are_refused(self):
+        # rule: R-LANE-CROSS-TASK
+        # R29, the CLI half of the guard row: in a lane --task may not name another run
         elsewhere = tmphome.mkdtemp(prefix="pplelsewhere-")
         code, _, err = self.status_of(elsewhere, "DEMO-7020", "--task", "DEMO-7021")
         self.assertEqual(code, 2)

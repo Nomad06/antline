@@ -831,7 +831,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 202 rows: 156 `blocking`, 21 `soft` and 25 `n/a`. Of the
+As of this commit the table carries 205 rows: 159 `blocking`, 21 `soft` and 25 `n/a`. Of the
 `n/a` rows, 15 are `GAP:` - a rule this design names and no code performs - and 10 are
 `PROPERTY:`. The gaps are the honest output of the matrix: a lane session resumed by hand
 without the lane flags having no guard at all, the stage 6 preconditions being unchecked
@@ -1090,8 +1090,9 @@ without the lock, since every writer replaces the file whole.
 
 1. Ends with `OWNER_DECISION` while `runs/ACTIVE`, the pointer of the ppl before lanes, names a
    run whose `state.json` exists and whose merge is not recorded, naming `ppl destroy --scope
-   local --task <id>`, and with `BUDGET_EXHAUSTED` once the machine has spent `[budgets]
-   usd_max_per_day` since local midnight [R-BUDGET-USD-PER-DAY].
+   local --task <id>`: a lane cannot finish that run, so it is finished before the upgrade, or
+   destroyed [R-LANE-LEGACY-RUN]. It ends with `BUDGET_EXHAUSTED` once the machine has spent
+   `[budgets] usd_max_per_day` since local midnight [R-BUDGET-USD-PER-DAY].
 2. Picks the harness: `--harness`, else the installed one whose `[repo] path` holds the cwd,
    else the default one `ppl harness apply` recorded.
 3. Takes the harness's commit, origin's default branch after a fetch or the local `HEAD`
@@ -1107,9 +1108,10 @@ without the lock, since every writer replaces the file whole.
    or the local one, once the checkout's local config passes its check
    [R-LANE-LAUNCH-GIT-CONFIG]. A branch or a worktree path that already exists ends the call
    with `ILLEGAL_TRANSITION` naming the command that removes it, and so does a start directory
-   an earlier lane of the task left.
+   an earlier lane of the task left, so the undo never deletes work the call did not make
+   [R-LANE-LAUNCH-NO-CLOBBER].
 7. Moves the export into the start directory `PPL_HOME/lanes/<TASK-ID>/`, makes
-   `runs/<TASK-ID>` and `scratch/<TASK-ID>`, records the worktree, checkout, branch and harness
+   `runs/<TASK-ID>`, `labels/<TASK-ID>` and `scratch/<TASK-ID>`, records the worktree, checkout, branch and harness
    in `lane.json`, and renders `settings.json`, `agents.json`, the skill plugin, `mcp.json`,
    the frozen `routing.toml` and, on a GitHub harness, `os_sandbox.json` (5.1, 5.6). The agents
    JSON may be at most 122,880 bytes, under Linux's 131,072-byte limit on one argument, else
@@ -1118,8 +1120,9 @@ without the lock, since every writer replaces the file whole.
    local-scope entry of the checkout): the forge's server must be there, and one of the
    tracker's prefixes; a server reachable only as a claude.ai connector is not in that file,
    and the call ends with `SETUP_INCOMPLETE` saying to add it with `claude mcp add --scope
-   user`. A project's own `.mcp.json` and settings files are left out, since whoever commits
-   to the project would otherwise choose what the session starts outside the OS sandbox.
+   user`. A project's own `.mcp.json` and settings files are never copied into the lane, since
+   whoever commits to the project would otherwise choose what the session starts outside the
+   OS sandbox [R-LANE-PROJECT-MCP-NOT-COPIED].
 8. Runs claude in the start directory with the run's own flags and nothing else, adding
    `PPL_LANE`, `PPL_TASK` and an absolute `PPL_HOME` to the environment it inherits:
 
@@ -1143,7 +1146,10 @@ cwd, so the start directory is protected whole [R-LANE-START-DIR-PROTECTED].
 **Around a running lane.** `ppl lane list [--json]` prints every lane, its stage, whether its
 window is open (the recorded claude process exists) and the `ppl lane resume <TASK-ID>` that
 reopens it; resume starts the session again with `--resume <uuid>` and the same files, no new
-slot and no new render. A session resumed by hand with `claude --resume` and without the lane
+slot and no new render. It refuses `SETUP_INCOMPLETE` first while a hook entry of the lane's
+`settings.json` names an interpreter or a script that is gone, or an interpreter older than
+3.11, since Claude Code allows every call whose hook cannot start, and `ppl doctor` in the lane
+lists the same under `lane_hooks` [R-GUARD-PYTHON-FLOOR]. A session resumed by hand with `claude --resume` and without the lane
 flags has no guard, no OS sandbox and no ppl agents [R-LANE-BARE-RESUME n/a]. A slot is freed
 by `ppl lane close`, which the stage-8 skill runs, or by `ppl destroy --scope local`. Close
 frees the slot only once `state.json` records the merge and no reflection marker of the run is
@@ -1163,15 +1169,21 @@ writes no lane's start directory, `PPL_HOME/lanes` or the registry
 writes neither the checkout's shared `.git/config`, `.git/hooks` and `.git/info` nor another
 lane's git dir [R-LANE-SHARED-GIT-DIR]. The guard's Bash half of each is lexical. The boundary
 for a harness with the OS sandbox profile is the profile's write scope, which holds only the
-lane's own `runs/<TASK-ID>` and `scratch/<TASK-ID>`, `PPL_HOME/labels`, of the checkout's
+lane's own `runs/<TASK-ID>`, `scratch/<TASK-ID>` and `labels/<TASK-ID>`, of the checkout's
 `.git` only `objects`, `refs`, `logs` and the lane's own `worktrees/<id>`, its own worktree and
 the harness's `[os_sandbox] allow_write`: never the checkout's working tree, another lane's run
-or worktree, the run archive or the registry [R-LANE-CROSS-WRITE]. A harness with no profile
+or worktree, another task's labels, the run archive or the registry [R-LANE-CROSS-WRITE]. A harness with no profile
 has the guard alone. Under that scope a git that rewrites `.git/packed-refs` (deleting a packed
 branch, `git pack-refs`), gc and maintenance, git-lfs, submodules, rerere and any git config
 write fail in a lane, and automatic gc and maintenance fail quietly: the owner's live rehearsal
-is still to show how often a run needs one [R-LANE-CROSS-WRITE]. The `ppl` commands a lane runs
-inside the sandbox write only its own run's files, `ppl label` the labels; `ppl lane close` and
+is still to show how often a run needs one [R-LANE-CROSS-WRITE]. The shared `objects`, `refs`
+and `logs` stay writable to every lane on the checkout, so a lane's sandbox can still move
+another lane's branch, or delete or corrupt the object store and with it every lane's unpushed
+commits and the checkout's own history; a later plan gives each lane a clone that borrows the
+checkout's objects through alternates, which leaves the checkout's `.git` read-only to every
+lane [R-LANE-CROSS-WRITE]. The `ppl` commands a lane runs
+inside the sandbox write only its own run's files, `ppl label` its own task's labels, which
+`ppl lane` makes with the run's directories; `ppl lane close` and
 the two lessons commands leave it as pinned orchestrator shapes (5.4)
 [R-OS-SANDBOX-ORCHESTRATOR-SHAPE].
 

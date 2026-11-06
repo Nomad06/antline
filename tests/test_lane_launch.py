@@ -148,6 +148,7 @@ class LaneCase(unittest.TestCase):
         self.assertFalse(lanes.start_dir(TASK).exists())
         self.assertFalse(os.path.lexists(paths.run_dir(TASK)))
         self.assertFalse(os.path.lexists(os_sandbox.scratch_dir(TASK)))
+        self.assertFalse(os.path.lexists(paths.label_dir(TASK)))
         self.assertFalse(self.worktree.exists())
         self.assertNotIn(str(self.worktree), git(self.project, "worktree", "list"))
         self.assertEqual(self.staging_dirs(), [])
@@ -269,10 +270,12 @@ class TestStart(LaneCase):
         self.assertEqual(git(self.worktree, "rev-parse", "--abbrev-ref", "HEAD"), BRANCH)
 
     def test_start_makes_the_run_directories_its_sandbox_cannot_make(self):
-        # R44: the lane's profile lets its Bash write runs/<task> and scratch/<task>, not their
-        # parents, so ppl lane makes both before the session starts
+        # R44: the lane's profile lets its Bash write runs/<task>, scratch/<task> and
+        # labels/<task> (M3), not their parents, so ppl lane makes all three before the
+        # session starts
         lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
-        for directory in (paths.run_dir(TASK), os_sandbox.scratch_dir(TASK)):
+        for directory in (paths.run_dir(TASK), os_sandbox.scratch_dir(TASK),
+                          paths.label_dir(TASK)):
             self.assertTrue(directory.is_dir(), directory)
             self.assertEqual(os.listdir(directory), [])
         self.assertFalse(run.state_path(TASK).exists())
@@ -280,7 +283,8 @@ class TestStart(LaneCase):
     def test_a_run_directory_that_is_a_link_or_a_file_is_refused(self):
         elsewhere = self.base / "elsewhere"
         elsewhere.mkdir()
-        for directory in (paths.run_dir(TASK), os_sandbox.scratch_dir(TASK)):
+        for directory in (paths.run_dir(TASK), os_sandbox.scratch_dir(TASK),
+                          paths.label_dir(TASK)):
             for kind in ("link", "file"):
                 with self.subTest(directory=directory, kind=kind):
                     directory.parent.mkdir(parents=True, exist_ok=True)
@@ -412,6 +416,7 @@ class TestStart(LaneCase):
         self.assert_nothing_made()
 
     def test_a_legacy_active_run_blocks_start_until_finished(self):
+        # rule: R-LANE-LEGACY-RUN
         state = {"task_id": "OLD-1", "stage": "implementation", "mr": {"merged_sha": None}}
         store.write_json(run.state_path("OLD-1"), state)
         paths.legacy_active_file().write_text("OLD-1\n", encoding="utf-8")
@@ -427,6 +432,7 @@ class TestStart(LaneCase):
         self.assertIsNotNone(lanes.entry(TASK))
 
     def test_a_legacy_active_run_blocks_start_even_when_its_task_holds_a_lane(self):
+        # rule: R-LANE-LEGACY-RUN
         # nothing writes runs/ACTIVE now, so whatever it names is a run from before lanes
         fixtures.bind_lane("OLD-2", self.project, self.base / "old-tree", harness="other")
         store.write_json(run.state_path("OLD-2"), {"task_id": "OLD-2", "stage": "review",
@@ -456,6 +462,7 @@ class TestStart(LaneCase):
         self.assertEqual(entry["pid"], claude["pid"])
 
     def test_an_existing_branch_is_refused_naming_branch_delete(self):
+        # rule: R-LANE-LAUNCH-NO-CLOBBER
         git(self.project, "branch", BRANCH)
         message = refusal(self, "ILLEGAL_TRANSITION", lane_launch.start, LINK,
                           harness_name=HARNESS, exec_=False)
@@ -464,7 +471,24 @@ class TestStart(LaneCase):
         self.assertEqual(lanes.read(), [])
         self.assert_nothing_made()
 
+    def test_an_existing_worktree_path_is_refused_and_kept(self):
+        # rule: R-LANE-LAUNCH-NO-CLOBBER
+        # the undo after a failed start removes only what the call made, so a worktree path
+        # that already holds work is refused and left as it is
+        self.worktree.mkdir(parents=True)
+        (self.worktree / "wip.txt").write_text("not mine to delete\n", encoding="utf-8")
+        message = refusal(self, "ILLEGAL_TRANSITION", lane_launch.start, LINK,
+                          harness_name=HARNESS, exec_=False)
+        self.assertIn("the worktree path %s already exists" % self.worktree, message)
+        self.assertEqual((self.worktree / "wip.txt").read_text(encoding="utf-8"),
+                         "not mine to delete\n")
+        self.assertEqual(lanes.read(), [])
+        self.assertFalse(self.branch_exists())
+        self.assertFalse(lanes.start_dir(TASK).exists())
+        self.assertEqual(self.staging_dirs(), [])
+
     def test_a_start_directory_left_by_an_earlier_lane_is_refused_and_kept(self):
+        # rule: R-LANE-LAUNCH-NO-CLOBBER
         left = lanes.start_dir(TASK)
         left.mkdir(parents=True)
         (left / "settings.json").write_text("{}\n", encoding="utf-8")
@@ -667,6 +691,9 @@ class TestTheLaneWriteScope(LaneCase):
                  "NEEDS_REPLY_ONLY", "--generation", self.generation())
         self.ppl("review", "approved", "--sha", head)
         self.ppl("park", "--blocker", "OWNER_DECISION", "--safe-next", "ask the owner")
+        # M3: the label of the accepted SHA lands in labels/<task>, which ppl lane made
+        self.ppl("label", "--sha", head, "--actual", "correct")
+        self.assertTrue((paths.label_dir(TASK) / ("%s.json" % head)).is_file())
 
         filesystem = self.filesystem()
         self.assertTrue(any(under(path, [paths.run_dir(TASK)]) for path in self.written))
@@ -676,7 +703,8 @@ class TestTheLaneWriteScope(LaneCase):
                                 if under(path, filesystem["denyWrite"])), [])
         for other in (paths.run_dir("OPS-2"), paths.runs_dir() / "_archive",
                       paths.runs_dir(), os_sandbox.scratch_dir("OPS-2"),
-                      lanes.registry_path()):
+                      lanes.registry_path(), paths.home() / "labels",
+                      paths.label_dir("OPS-2")):
             self.assertFalse(under(other, filesystem["allowWrite"]), other)
 
 
@@ -891,6 +919,49 @@ class TestResume(LaneCase):
     def test_resume_without_a_lane_is_refused(self):
         message = refusal(self, "SCHEMA_INVALID", lane_launch.resume, TASK, exec_=False)
         self.assertIn("ppl lane list", message)
+
+    def rewrite_hooks(self, old, new):
+        """Replace `old` with `new` in every hook command of the lane's settings.json."""
+        path = lanes.start_dir(TASK) / "settings.json"
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        for entries in settings["hooks"].values():
+            for entry in entries:
+                for hook in entry["hooks"]:
+                    hook["command"] = hook["command"].replace(old, new)
+        path.write_text(json.dumps(settings), encoding="utf-8")
+
+    def test_resume_refuses_hooks_that_cannot_run_the_cage(self):
+        # rule: R-GUARD-PYTHON-FLOOR
+        # M6: a pinned interpreter that vanished (a pipx venv whose base Python was removed)
+        # makes the shell exit 127, a non-blocking error, so every call is allowed; one older
+        # than 3.11 meets the floor's deny. ppl lane resume checks every hook entry of the
+        # lane's settings.json before it execs, and ppl doctor in the lane reports the same.
+        from ppl import doctor
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertEqual(doctor.report(TASK)["lane_hooks"], [])
+        old = self.base / "bin" / "oldpython"
+        old.write_text("#!/bin/sh\necho 3.9.6\n", encoding="utf-8")
+        old.chmod(0o755)
+        hooks = str(ROOT / "ppl" / "_assets" / "hooks")
+        for wrong, why in (("/nonexistent/bin/python3.12", "not an executable file"),
+                           (str(old), "older than the 3.11"),
+                           (hooks, "not an absolute path to a file")):
+            with self.subTest(why=why):
+                replaced = hooks if wrong == hooks else sys.executable
+                self.rewrite_hooks(replaced, wrong if wrong != hooks else "/nonexistent/hooks")
+                message = refusal(self, "SETUP_INCOMPLETE", lane_launch.resume, TASK,
+                                  exec_=False)
+                self.assertIn(why, message)
+                self.assertIn("ppl_guard.py", message)
+                self.assertIn("ppl destroy --scope local --task %s" % TASK, message)
+                done = self.ppl("lane", "resume", TASK)
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertFalse(self.stub_out.exists())
+                self.assertTrue(any(why in line for line in doctor.report(TASK)["lane_hooks"]))
+                self.rewrite_hooks(wrong if wrong != hooks else "/nonexistent/hooks", replaced)
+        self.assertEqual(doctor.report(TASK)["lane_hooks"], [])
+        self.assertEqual(lane_launch.resume(TASK, exec_=False)["cwd"],
+                         str(lanes.start_dir(TASK)))
 
 
 class TestList(LaneCase):

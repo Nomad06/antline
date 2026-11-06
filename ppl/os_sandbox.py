@@ -117,15 +117,16 @@ def worktree_git_dir(doc, worktree):
 
 def write_scope(doc, worktree=None, task=None):
     """Where a sandboxed command may write, each entry resolved. For a lane, given its
-    `worktree` and its `task`: the run's own directory runs/<task>, labels and the run's
+    `worktree` and its `task`: the run's own directory runs/<task>, its labels/<task> and its
     scratch/<task>, the parts of the checkout's common .git that git in a worktree writes
     (objects, refs, logs) and its own git dir there (worktree_git_dir), and the lane's own
-    worktree, so no lane's Bash writes another lane's run, the checkout's working tree, another
-    lane's worktree or git dir, or the shared config, hooks, info and packed-refs. The ppl CLI
-    in a lane writes its own run's files and nothing else under runs/ or scratch/, and ppl lane
-    makes both directories before the session starts, since making one needs a write in its
-    parent. With no worktree, outside a lane: runs, labels and scratch whole, the whole
-    checkout and the whole worktrees root. [os_sandbox] allow_write is added to either."""
+    worktree, so no lane's Bash writes another lane's run or labels, the checkout's working
+    tree, another lane's worktree or git dir, or the shared config, hooks, info and
+    packed-refs. The ppl CLI in a lane writes its own run's files and nothing else under runs/,
+    labels/ or scratch/, and ppl lane makes the three directories before the session starts,
+    since making one needs a write in its parent. With no worktree, outside a lane: runs,
+    labels and scratch whole, the whole checkout and the whole worktrees root. [os_sandbox]
+    allow_write is added to either."""
     checkout_dir, worktrees = _repo(doc)
     if worktree is None:
         scope = [paths.runs_dir(), paths.home() / "labels", scratch_root(), checkout_dir,
@@ -133,7 +134,7 @@ def write_scope(doc, worktree=None, task=None):
     else:
         if task is None:
             raise ValueError("a lane's write scope needs its task")
-        scope = [paths.run_dir(task), paths.home() / "labels", scratch_dir(task)]
+        scope = [paths.run_dir(task), paths.label_dir(task), scratch_dir(task)]
         git_dir = os.path.join(checkout(doc), ".git")
         scope.extend(os.path.join(git_dir, name) for name in _COMMON_GIT_WRITES)
         scope.extend([worktree_git_dir(doc, worktree), worktree])
@@ -269,12 +270,13 @@ def _allow_entries(doc, pin_map):
 
 
 def deny_write(workspace, pin_map):
-    """The profile's filesystem.denyWrite: the workspace and the directory of each pin's path
-    and realpath, each as given and `realpath`-ed, then every path escape_paths protects from
-    edit tools (the git, ssh and gh config, Claude Code's settings, ppl's config, harnesses,
-    guard facts and code, the workspace's .claude and .mcp.json, the pins). A deny wins over an
-    allow from any settings source, so the boundary does not rest on no other source granting
-    a write there."""
+    """The profile's filesystem.denyWrite: the workspace, for a lane its start directory, and
+    the directory of each pin's path and realpath, each as given and `realpath`-ed, then every
+    path escape_paths protects from edit tools (the git, ssh and gh config, Claude Code's
+    settings, ppl's config, harnesses, guard facts and code, the workspace as a whole, which
+    in a lane holds its settings.json, mcp.json, agents and skill plugin, the pins). A deny
+    wins over an allow from any settings source, so the boundary does not rest on no other
+    source granting a write there."""
     from . import escape_paths
     entries = [_real(workspace)]
     for name in PIN_NAMES:

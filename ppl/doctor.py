@@ -431,6 +431,39 @@ def _command_problems(command, marker):
     return found
 
 
+def lane_hook_problems(start_dir):
+    """What keeps a ppl hook of the lane's settings.json in `start_dir` from running as the
+    cage, one line each, [] when nothing does: for the guard, dispatch and usage hooks, an
+    interpreter or script that does not exist (_command_problems), and an interpreter older
+    than the floor or not a Python (_interpreter_problem, which runs it once to ask). A
+    pinned interpreter that vanished makes the shell exit 127, a non-blocking error, so every
+    call is allowed. A settings.json that cannot be read, or that registers none of a hook,
+    counts too [R-GUARD-PYTHON-FLOOR]."""
+    from . import store
+    path = Path(str(start_dir)) / "settings.json"
+    try:
+        doc = store.read_json(path)
+    except (PplError, OSError) as exc:
+        return ["%s cannot be read: %s" % (path, getattr(exc, "message", None) or exc)]
+    if not isinstance(doc, dict):
+        return ["%s is missing or not an object" % path]
+    problems, asked = [], {}
+    for event, marker in HOOK_EVENTS:
+        hooks = _hooks_of(doc, event, marker)
+        if not hooks:
+            problems.append("%s registers no %s hook" % (path, marker))
+        for hook in hooks:
+            command = str(hook.get("command", ""))
+            found = _command_problems(command, marker)
+            if not found:
+                interpreter = command.split(" ", 1)[0]
+                if interpreter not in asked:
+                    asked[interpreter] = _interpreter_problem(command)
+                found = [asked[interpreter]] if asked[interpreter] else []
+            problems += ["%s: the %s hook %s" % (path, marker, text) for text in found]
+    return problems
+
+
 def _readable_settings(cwd):
     """(path, parsed document) of each of the session's two settings files (_sides) that
     exists and parses into an object. `inspect` reports the others."""
@@ -1341,8 +1374,9 @@ def report(task_id=None, cwd=None, env=None, probe=None):
     Outside a lane (`lane` None) it checks the machine alone: the setup report, the models, the
     harnesses, the Claude Code binary and the GitHub token variables. In a lane it adds where
     the guard is registered in the lane's settings.json and the Claude home's, the lane guard's
-    task, the OS sandbox facts, the foreign Bash hooks, the MCP servers and whether the lane's
-    guard runs."""
+    task, every hook's interpreter and script (lane_hooks, what ppl lane resume refuses on),
+    the OS sandbox facts, the foreign Bash hooks, the MCP servers and whether the lane's guard
+    runs."""
     from . import run
     problem = None
     try:
@@ -1378,6 +1412,7 @@ def report(task_id=None, cwd=None, env=None, probe=None):
     result["start_dir"] = where
     result.update(inspect(where))
     result["lane_guard_problem"] = lane_guard_problem(entry)
+    result["lane_hooks"] = lane_hook_problems(where)
     result["os_sandbox"] = os_sandbox_facts(where, env, probe)
     result["foreign_bash_hooks"] = foreign_bash_hooks(where)
     result["mcp_servers"] = mcp_server_names(where)

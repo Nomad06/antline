@@ -109,8 +109,9 @@ def _legacy_run_problem():
     state = store.read_json(run.state_path(task_id), None, lanes.READ_LIMIT)
     if state is None or _merged(state):
         return None
-    return ("run %s was started before lanes and is not finished: finish it, or destroy it "
-            "with `ppl destroy --scope local --task %s`, then run ppl lane again"
+    return ("run %s was started by a ppl from before lanes and is not finished, and a lane "
+            "cannot finish it: finish it with that ppl before you upgrade, or destroy it with "
+            "`ppl destroy --scope local --task %s`, then run ppl lane again"
             % (task_id, task_id))
 
 
@@ -278,11 +279,13 @@ def _add_worktree(doc, checkout, worktree, branch, default, undo):
 
 
 def _make_run_dirs(task_id, undo):
-    """Make the run's directories under runs/ and scratch/, which the lane's OS sandbox lets
-    its Bash write but not create, since making one writes its parent (os_sandbox.write_scope).
-    One left by an earlier run of the task is kept, and one that is a link or no directory is
-    refused: the profile resolves each path it allows, so a link there would widen it."""
-    for directory in (paths.run_dir(task_id), os_sandbox.scratch_dir(task_id)):
+    """Make the run's directories under runs/, labels/ and scratch/, which the lane's OS
+    sandbox lets its Bash write but not create, since making one writes its parent
+    (os_sandbox.write_scope). One left by an earlier run of the task is kept, and one that is
+    a link or no directory is refused: the profile resolves each path it allows, so a link
+    there would widen it."""
+    for directory in (paths.run_dir(task_id), paths.label_dir(task_id),
+                      os_sandbox.scratch_dir(task_id)):
         if os.path.islink(str(directory)) or (os.path.lexists(str(directory))
                                               and not os.path.isdir(str(directory))):
             raise PplError("SETUP_INCOMPLETE", "%s is a link or not a directory: remove it, "
@@ -410,9 +413,19 @@ def _lane(task_id):
 
 def resume(task_id, exec_=True):
     """Re-launch the lane's session with the flags it started with: no new claim and no
-    re-render. With exec_=False return {"argv", "env", "cwd"}, as start does."""
+    re-render. With exec_=False return {"argv", "env", "cwd"}, as start does. Refused
+    SETUP_INCOMPLETE first when a hook entry of the lane's settings.json names an interpreter
+    or a script that is gone, or an interpreter older than 3.11 (doctor.lane_hook_problems):
+    Claude Code allows every call whose hook cannot start."""
+    from . import doctor
     entry = _lane(task_id)
     start_dir = Path(entry["start_dir"])
+    problems = doctor.lane_hook_problems(start_dir)
+    if problems:
+        raise PplError("SETUP_INCOMPLETE", "lane %s's hooks cannot run, and Claude Code allows "
+                       "every call whose hook cannot start: %s. Put a Python 3.11 or newer back "
+                       "where the hooks name it, or %s"
+                       % (task_id, "; ".join(problems), lanes.restart_hint(task_id)))
     path = start_dir / "agents.json"
     try:
         agents_json = store.read_regular_text(path, lane_render.MAX_AGENTS_BYTES)

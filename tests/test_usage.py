@@ -397,6 +397,47 @@ class TestSpentToday(unittest.TestCase):
         self.log(self.make_run("T-2", archived=True), "2026-11-05T10:00:00+00:00", 2000000)
         self.assertEqual(round(usage.spent_today(self.now)[0], 6), 3.0)
 
+    def read_logs(self):
+        """(spent_today(self.now), the run directories whose log it read)."""
+        read, real = [], usage._log_events
+
+        def log_events(directory):
+            read.append(str(directory))
+            return real(directory)
+        with mock.patch.object(usage, "_log_events", log_events):
+            return usage.spent_today(self.now), read
+
+    def test_an_archived_run_last_written_before_midnight_is_not_read(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        # M5: the day cap read every archived run's whole log at every stage gate. An
+        # archived run lies outside every lane's reach, so its log's mtime is the owner's, and
+        # one last written before local midnight holds nothing of today's: it is skipped
+        archived = self.make_run("T-2", archived=True)
+        self.log(archived, "2026-11-05T10:00:00+00:00", 2000000)
+        yesterday = time.mktime((2026, 11, 4, 18, 0, 0, 0, 0, -1))
+        os.utime(archived / "log.jsonl", (yesterday, yesterday))
+        (usd, issues), read = self.read_logs()
+        self.assertEqual((usd, issues), (0.0, self.issues()))
+        self.assertNotIn(str(archived), read)
+        # written since midnight, it is read
+        today = time.mktime((2026, 11, 5, 11, 0, 0, 0, 0, -1))
+        os.utime(archived / "log.jsonl", (today, today))
+        (usd, _), read = self.read_logs()
+        self.assertEqual(round(usd, 6), 2.0)
+        self.assertIn(str(archived), read)
+
+    def test_a_live_run_last_written_before_midnight_is_still_read(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        # M5: a live run's files are its lane's sandbox's to write, its mtime among them, so
+        # a live run is never skipped by it
+        live = self.make_run("T-1")
+        self.log(live, "2026-11-05T09:00:00+00:00", 1000000)
+        yesterday = time.mktime((2026, 11, 4, 18, 0, 0, 0, 0, -1))
+        os.utime(live / "log.jsonl", (yesterday, yesterday))
+        (usd, issues), read = self.read_logs()
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues()))
+        self.assertIn(str(live), read)
+
     def test_each_run_is_priced_with_its_frozen_prices(self):
         # rule: R-BUDGET-USD-PER-DAY
         self.log(self.make_run("T-1"), "2026-11-05T09:00:00+00:00", 1000000)
