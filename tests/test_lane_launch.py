@@ -214,6 +214,43 @@ class TestStart(LaneCase):
         self.assertIsNone(entry["pid"])
         self.assertFalse(self.stub_out.exists())
 
+    def spend_today(self, usd, per_day):
+        """A finished run that spent `usd` today, and the day cap `per_day` in config.toml."""
+        config.update("budgets", {"usd_max_per_day": per_day})
+        config.update("prices", {"m": {"input": 0, "cache_write": 0, "cache_read": 0,
+                                       "output": 1.0}})
+        old = paths.runs_dir() / "OLD-1"
+        old.mkdir(parents=True)
+        (old / "state.json").write_text(json.dumps({"task_id": "OLD-1", "budgets": {
+            "prices": {"m": {"input": 0, "cache_write": 0, "cache_read": 0, "output": 1.0}}}}),
+            encoding="utf-8")
+        event = {"event": "usage", "role": "worker", "agent_id": "a", "at": store.now(),
+                 "models": {"m": {"input": 0, "cache_write": 0, "cache_read": 0,
+                                  "output": int(usd * 1000000), "thinking": 0}}}
+        (old / "log.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    def test_ppl_lane_refuses_when_the_day_cap_is_reached(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.spend_today(2.5, 2.0)
+        message = refusal(self, "BUDGET_EXHAUSTED", lane_launch.start, LINK,
+                          harness_name=HARNESS, exec_=False)
+        for text in ("usd_max_per_day", "2.5", "local midnight"):
+            self.assertIn(text, message)
+        self.assert_nothing_made()
+        self.assertFalse(self.stub_out.exists())
+
+    def test_ppl_lane_starts_below_the_day_cap_and_with_no_cap(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.spend_today(2.5, 3.0)
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertTrue(lanes.entry(TASK))
+
+    def test_a_zero_day_cap_does_not_refuse_ppl_lane(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.spend_today(2.5, 0.0)
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertTrue(lanes.entry(TASK))
+
     def test_start_creates_the_worktree_on_a_fresh_default_branch(self):
         other = self.base / "other"
         subprocess.run(["git", "clone", "-q", str(self.origin), str(other)], check=True)

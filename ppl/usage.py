@@ -372,3 +372,127 @@ def spent_usd(task_id):
     if unpriced:
         return None, unpriced
     return used + (priced or 0.0), []
+
+
+DAY_LOG_LIMIT = 16 * 1024 * 1024
+UNREADABLE = "unreadable: "
+
+
+def _local_midnight(now):
+    """Epoch seconds of the local calendar day's start for `now` (epoch seconds, a datetime, or
+    None for the present), in the zone the process runs in."""
+    if now is None:
+        now = time.time()
+    elif isinstance(now, datetime):
+        now = now.timestamp()
+    day = time.localtime(now)
+    return time.mktime((day.tm_year, day.tm_mon, day.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
+def _epoch(value):
+    try:
+        return _aware(_moment(value)).timestamp()
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _log_events(directory):
+    try:
+        text = store.read_regular_text(os.path.join(str(directory), "log.jsonl"), DAY_LOG_LIMIT)
+    except FileNotFoundError:
+        return []
+    events = []
+    for line in text.splitlines():
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            continue
+    return events
+
+
+def _since(now_counts, before_counts):
+    return {name: max(0, now_counts.get(name, 0) - before_counts.get(name, 0))
+            for name in now_counts}
+
+
+def _models_since(latest, baseline):
+    """The models of `latest` less those of `baseline`, a model that did not grow left out."""
+    out = {}
+    for model, counts in latest.items():
+        delta = _since(counts, baseline.get(model, {}) if isinstance(baseline.get(model), dict)
+                       else {})
+        if any(is_count(value) and value > 0 for value in delta.values()):
+            out[model] = delta
+    return out
+
+
+def _spent_today_in(directory, midnight):
+    """(models spent since `midnight`, in the order logged) of one run directory. Usage events are
+    cumulative per agent, so an agent's spend is its last reading today less its last reading
+    before midnight."""
+    before, latest = {}, {}
+    for event in _log_events(directory):
+        if not isinstance(event, dict) or event.get("event") != "usage":
+            continue
+        if "error" in event or not isinstance(event.get("models"), dict) or not event["models"]:
+            continue
+        key, stamp = event.get("agent_id"), _epoch(event.get("at"))
+        if not isinstance(key, str) or stamp is None:
+            continue
+        (latest if stamp >= midnight else before)[key] = event["models"]
+    models = {}
+    for key, readings in latest.items():
+        models = add(models, _models_since(readings, before.get(key, {})))
+    return models
+
+
+def spent_today(now=None):
+    """(usd, issues): what every run, live or archived, spent since local midnight, each run
+    priced with the prices `ppl init` froze into it. usd is None when a model that spent today
+    has no price, and `issues` then names those models, plus a run dir whose log or state cannot
+    be read, listed as 'unreadable: <dir>' and skipped, never a crash."""
+    from ppl import metrics, trail
+    midnight = _local_midnight(now)
+    usd, issues = 0.0, []
+    for task_id, directory in metrics._run_records():
+        try:
+            models = _spent_today_in(directory, midnight)
+            frozen = trail._frozen_prices(directory)
+        except (PplError, OSError, UnicodeDecodeError):
+            issues.append(UNREADABLE + str(task_id))
+            continue
+        if not models:
+            continue
+        spent, unpriced = dollars(models, prices() if frozen is None else frozen)
+        if unpriced:
+            issues.extend(model for model in unpriced if model not in issues)
+        else:
+            usd += spent
+    unpriced = [item for item in issues if not item.startswith(UNREADABLE)]
+    return (None if unpriced else usd), issues
+
+
+def day_cap_problem():
+    """Why today's spend blocks a start or a transition, or None [R-BUDGET-USD-PER-DAY]. No
+    cap, 0 or absent, never blocks. A model that spent today without a price leaves the sum
+    uncomputable, and a cap that cannot be computed is refused, as the per-run cap does."""
+    cap = config.budgets_usd_max_per_day()
+    if not cap > 0:
+        return None
+    spent, issues = spent_today()
+    reset = ("It resets after local midnight, or when the owner raises [budgets] "
+             "usd_max_per_day in %s." % paths.config_file())
+    unpriced = [item for item in issues if not item.startswith(UNREADABLE)]
+    if unpriced:
+        return ("the day cap (usd_max_per_day %s) cannot be checked: today's usage has no price "
+                "in the run's table for %s. Add %s to %s and start a new run. %s"
+                % (cap, ", ".join(unpriced),
+                   ", ".join('[prices."%s"]' % model for model in unpriced),
+                   paths.config_file(), reset))
+    if spent >= cap:
+        skipped = [item for item in issues if item.startswith(UNREADABLE)]
+        return ("the day cap is reached: %s USD spent since local midnight across every run, "
+                "usd_max_per_day is %s.%s %s"
+                % (round(spent, 4), cap,
+                   " Not counted, %s." % ", ".join(skipped) if skipped else "", reset))
+    return None

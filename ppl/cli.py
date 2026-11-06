@@ -348,8 +348,13 @@ def check_usd_budget(task_id):
     is not a finite number >= 0 counts as spent. A recorded model without a
     frozen price leaves the cap uncomputable, and a cap that cannot be computed
     is refused, never read as zero [R-BUDGET-USD-UNPRICED]. A zero cap is no cap,
-    and ppl park stays available.
+    and ppl park stays available. The machine-wide day cap is checked first, whatever
+    the run's own cap [R-BUDGET-USD-PER-DAY].
     """
+    problem = usage.day_cap_problem()
+    if problem:
+        raise PplError("BUDGET_EXHAUSTED", "%s Park the task with a handoff (ppl park) instead "
+                       "of continuing." % problem)
     budgets = run.load(task_id)["budgets"]
     cap = budgets["usd_max"]
     if not cap > 0:

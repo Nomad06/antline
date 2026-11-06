@@ -306,7 +306,9 @@ for each model under `[prices."<model id>"]`. `ppl init` copies the cap and the 
 the run, so an edit to either applies from the next run, and `ppl stage enter` and
 `ppl transition` refuse with `BUDGET_EXHAUSTED` once the manual `usd_used` plus the run's
 priced usage reaches it [R-BUDGET-USD-CAP], or with `OWNER_DECISION` while a model it used
-has no price [R-BUDGET-USD-UNPRICED]. `ppl park` stays available.
+has no price [R-BUDGET-USD-UNPRICED]. `ppl park` stays available. `usd_max_per_day` under
+`[budgets]` caps what every run on the machine spends since local midnight, and `ppl lane`
+refuses to start at it as well [R-BUDGET-USD-PER-DAY].
 
 The interpreter in those commands has to be Python 3.11 or newer, and `ppl setup
 claude` writes the one that ran it, so the hooks do not depend on which `python3`

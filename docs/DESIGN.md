@@ -789,7 +789,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 200 rows: 153 `blocking`, 21 `soft` and 26 `n/a`. Of the
+As of this commit the table carries 201 rows: 154 `blocking`, 21 `soft` and 26 `n/a`. Of the
 `n/a` rows, 16 are `GAP:` - a rule this design names and no code performs - and 10 are
 `PROPERTY:`. The gaps are the honest output of the matrix: a lane session resumed by hand
 without the lane flags having no guard at all, the stage 6 preconditions being unchecked
@@ -2709,7 +2709,12 @@ Only the exit-code rule has code behind it, the rest are recipes rendered into t
   with `BUDGET_EXHAUSTED` once dollars spent reach `usd_max` [R-BUDGET-USD-CAP], and with
   `OWNER_DECISION`, naming the model and the `[prices."<model id>"]` table to add before a new
   run, while a recorded model has no price in the run's `prices`, since a cap that cannot be
-  computed is not a cap [R-BUDGET-USD-UNPRICED]. `ppl park` stays available. Like the dispatch cap
+  computed is not a cap [R-BUDGET-USD-UNPRICED]. `ppl park` stays available.
+  A second cap spans every run on the machine: `usd_max_per_day` in the same `[budgets]` table, zero
+  or absent meaning none, is the dollars every run, live or archived, spent since local midnight,
+  each priced with its own frozen prices. At or over it `ppl stage enter`, `ppl transition` and
+  `ppl lane` refuse with `BUDGET_EXHAUSTED`, naming the day cap and the day's spend and saying
+  it resets after local midnight or when the owner raises it [R-BUDGET-USD-PER-DAY]. Like the dispatch cap
   the check comes after the fact: what a dispatch costs is known only once its role stops, so the
   dispatch that crosses the cap has already run when the next stage boundary refuses
   [R-BUDGET-USD-CAP] [R-BUDGET-USD-BEFORE-DISPATCH n/a].

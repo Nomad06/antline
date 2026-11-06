@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 
 from . import (config, escape_git, harness, lane_harness, lane_render, lanes, lessons, os_sandbox,
-               paths, routing, run, store, trackers)
+               paths, routing, run, store, trackers, usage)
 from .errors import PplError
 
 VERBS = ("list", "resume", "close")
@@ -115,8 +115,8 @@ def _legacy_run_problem():
 
 
 def _day_cap_problem():
-    """Why the day's spend blocks a new lane, or None."""
-    return None
+    """Why the day's spend blocks a new lane, or None [R-BUDGET-USD-PER-DAY]."""
+    return usage.day_cap_problem()
 
 
 def _inside(path, root):
