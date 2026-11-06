@@ -767,7 +767,7 @@ class TestLaneProtection(LaneCase):
         # substituted base, are judged as the commit and the diff they are, and only a git whose
         # subcommand the guard cannot read is judged by its spelling
         own = self.worktree[LANE_A]
-        commit = ("git commit -m \"$(cat <<'EOF'\nFix worktree config loading (lane)\n"
+        commit = ("git commit -m \"$(cat <<'EOF'\nFix worktree config loading (lane), don't\n"
                   "\nworktree notes\nEOF\n)\"")
         for command in (commit, "git diff --stat $(git merge-base HEAD main) -- src/config",
                         "git log --oneline `git merge-base HEAD main`..HEAD -- config"):
@@ -832,16 +832,25 @@ class TestLaneProtection(LaneCase):
 
     def test_a_here_document_bash_may_read_otherwise_is_denied(self):
         # rule: R-LANE-CROSS-WRITE
-        # R43: the guard does not model bash's here-document expansion, so a here-document
-        # whose delimiter is unquoted and whose body holds a backslash, or whose body leaves a
-        # quote open across a line, is denied for every session, whatever it is fed to
+        # R43, R46: the guard does not model bash's here-document expansion, so a here-document
+        # whose delimiter is not exactly <<'WORD' (bare, double-quoted, backslashed or mixed)
+        # and whose body holds a backslash or a line that leaves a quote open is denied for
+        # every session, whatever it is fed to
         own = self.worktree[LANE_A]
         for command in ("bash <<EOF\ngit work\\\\tree prune\nEOF",
                         "bash <<EOF\ngit work\\\ntree prune\nEOF",
                         "cat <<EOF\n\\$(git worktree prune)\nEOF",
                         "cat > /tmp/note.md <<EOF\nline one\\\nline two\nEOF",
-                        "bash <<'EOF'\ngit \"\nworktree\" prune\nEOF",
-                        "git commit -m \"$(cat <<'EOF'\nDon't load config twice\nEOF\n)\""):
+                        "bash <<EOF\ngit \"\nworktree\" prune\nEOF",
+                        "git commit -m \"$(cat <<EOF\nDon't load config twice\nEOF\n)\"",
+                        "git commit -m \"$(cat <<\"EOF\"\nDon't load config twice\nEOF\n)\"",
+                        "cat <<\\EOF\nDon't load config twice\nEOF",
+                        # bash reads each of these delimiters as EOF or EOFx and expands
+                        # nothing, yet only exactly <<'WORD' counts as quoted
+                        "cat <<'E'\"OF\"\nDon't load config twice\nEOF",
+                        "cat <<E\\OF\nDon't load config twice\nEOF",
+                        "cat <<'EOF'x\nDon't load config twice\nEOFx",
+                        "cat <<-\"EOF\"\n\tDon't load config twice\n\tEOF"):
             for agent in (None, "ppl-code-worker", "general-purpose"):
                 with self.subTest(command=command, agent=agent):
                     reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
@@ -849,10 +858,47 @@ class TestLaneProtection(LaneCase):
                     self.assertIn("here-document", reason)
         for command in ("bash <<'EOF'\ngit status\nEOF",
                         "cat <<'EOF'\na back\\slash in a quoted one\nEOF",
+                        "cat <<'E'\"OF\"\nplain text\nEOF",
                         "git commit -m \"$(cat <<'EOF'\nFix config handling\n\nworktree notes\n"
                         "EOF\n)\""):
             with self.subTest(allowed=command):
                 self.assertIsNone(self.bash(command, agent="ppl-code-worker", cwd=own))
+
+    def test_a_quoted_here_document_line_that_does_not_parse_is_read_by_its_spelling(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R46: bash expands nothing in a body under exactly <<'WORD' or <<-'WORD'. Each line
+        # that parses is judged as a command (R45), and one that leaves a quote open, as an
+        # apostrophe in a commit message does, is read by its spelling only and never denied
+        # for not parsing
+        own = self.worktree[LANE_A]
+        for command in ("git commit -m \"$(cat <<'EOF'\nFix the parser so it doesn't drop config"
+                        "\n\nKeep config and worktree notes apart\nEOF\n)\"",
+                        "git commit -m \"$(cat <<-'EOF'\n\tFix the parser so it doesn't drop "
+                        "config\n\n\tKeep config and worktree notes apart\n\tEOF\n)\"",
+                        # an apostrophe opens no quote over the lines after it
+                        "git commit -m \"$(cat <<'EOF'\nDon't drop `--task` from the argv\n\n"
+                        "Let git keep its worktree and config apart\nEOF\n)\"",
+                        "cat > /tmp/note.md <<'EOF'\nIt's the lane's own run\nEOF"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+        for command, why in (("cat <<'EOF' | bash\ngit worktree remove x\nEOF", "git worktree"),
+                             ("cat <<'EOF' | bash\nit's git worktree remove x\nEOF",
+                              "git worktree"),
+                             ("cat <<'EOF'\ndon't\n$(git worktree prune)\nEOF", "git worktree"),
+                             # a backslash-newline joins the lines a shell downstream runs
+                             ("cat <<'EOF' | bash\ngit work\\\ntree prune\nEOF", "git worktree"),
+                             # a line that does not parse is spelled with its backslashes out
+                             ("cat <<'EOF' | bash\ngit work\\tree x 'y\n'\nEOF", "git worktree")):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(denied=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn(why, reason)
+        reason = self.deny_reason(self.bash("cat <<'EOF' | bash\nit's git config core.x y\nEOF",
+                                            agent="ppl-code-worker", cwd=own))
+        self.assertIn("may not write git config", reason)
 
     def test_a_hyphenated_git_writer_is_a_write_shape(self):
         # rule: R-LANE-CROSS-WRITE
