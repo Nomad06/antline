@@ -1,8 +1,8 @@
 """Every route the studio registers, in one table: the /api routes it adds and
 the /static files. The run routes the panel had before the studio stay in
 server.Handler as they were."""
-from . import (api_agents, api_core, api_files, api_harness, api_lessons, api_playground, api_project, api_routing,
-               api_setup, api_static)
+from . import (api_agents, api_core, api_files, api_harness, api_lanes, api_lessons, api_playground,
+               api_project, api_routing, api_setup, api_static)
 from .router import Router
 
 
@@ -18,4 +18,5 @@ def build():
     api_lessons.register(router)
     api_harness.register(router)
     api_playground.register(router)
+    api_lanes.register(router)
     return router

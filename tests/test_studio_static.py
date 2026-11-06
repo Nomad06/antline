@@ -304,6 +304,21 @@ console.log(JSON.stringify({
                                                "code": "SCHEMA_INVALID", "events": []})
 
 
+class TestLanesPage(unittest.TestCase):
+    def test_the_lanes_page_is_in_the_manifest_and_the_nav(self):
+        self.assertIn("pages/lanes.js", api_static.MANIFEST)
+        app = (STATIC / "app.js").read_text(encoding="utf-8")
+        self.assertIn('import { LanesPage } from "./pages/lanes.js"', app)
+        self.assertIn("lanes: LanesPage", app)
+        self.assertRegex(app, r'\{ route: "lanes", label: "Lanes" \}')
+
+    def test_the_lanes_page_has_no_action_and_prints_the_resume_command_as_text(self):
+        text = (STATIC / "pages" / "lanes.js").read_text(encoding="utf-8")
+        for control in ("<button", "<${Button}", "post(", "onClick"):
+            self.assertNotIn(control, text)
+        self.assertIn("<code>${shown(row.resume)}</code>", text)
+
+
 class TestStaticRoutes(panel_client.StudioTestCase):
     def test_the_shell_is_served_at_the_root(self):
         status, body, headers = panel_client.call("GET", "/")
