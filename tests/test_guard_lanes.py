@@ -788,10 +788,15 @@ class TestLaneProtection(LaneCase):
     def test_a_here_document_is_judged_by_what_it_feeds(self):
         # rule: R-LANE-CROSS-WRITE
         # rule: R-LANE-CROSS-TASK
-        # R41: a here-document fed to cat is data, one fed to a shell or another command runs
-        # as commands, and one fed to an interpreter may not spell ppl, git worktree or git
-        # config, which the guard cannot read inside code
+        # R41 (revised): a here-document is data only when fed to cat with a quoted delimiter
+        # and no pipe onward, one fed to a shell or another command runs as commands, and
+        # one fed to an interpreter may not spell ppl, git worktree or git config, which the
+        # guard cannot read inside code
         for command in ("bash <<'EOF'\ngit worktree remove x\nEOF",
+                        "x=$(cat <<'EOF' | bash\ngit worktree remove x\nEOF\n)",
+                        "cat <<'EOF' | bash\ngit worktree remove x\nEOF",
+                        "cat <<EOF\n$(git worktree remove x)\nEOF",
+                        "cat <<EOF\n`git worktree prune`\nEOF",
                         "sh <<EOF\ngit worktree prune\nEOF",
                         "env sh <<'EOF'\ncd ..\ngit worktree prune\nEOF",
                         "bash -s <<'EOF'\ngit $(echo worktree) prune\nEOF",
@@ -809,7 +814,8 @@ class TestLaneProtection(LaneCase):
         reason = self.deny_reason(self.bash("bash <<'EOF'\ngit config core.hooksPath /tmp/h\nEOF",
                                             agent="ppl-code-worker", cwd=self.worktree[LANE_A]))
         self.assertIn("may not write git config", reason)
-        # cat's here-document is data: R40's commit and a note naming git worktree pass
+        # a quoted cat here-document with no pipe onward is data: R40's commit and a note
+        # naming git worktree pass
         commit = ("git commit -m \"$(cat <<'EOF'\nfix: worktree config loading (lane), don't\n"
                   "git worktree prune is not run here\nEOF\n)\"")
         for command in (commit, "cat > /tmp/note.md <<'EOF'\ngit worktree prune\nEOF"):

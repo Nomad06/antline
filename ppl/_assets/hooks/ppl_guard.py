@@ -2822,7 +2822,10 @@ _GIT_WORKTREE_SPELLED_RE = re.compile(r"\bgit\b[\s\S]*\bworktree\b")
 
 
 # A here-document operator and its delimiter word, plain or quoted.
-_HEREDOC_OP_RE = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([^\s;&|<>()]+))")
+# The groups: the - of <<-, a single-quoted, a double-quoted or a backslashed delimiter, and
+# a bare one. A quoted delimiter keeps the shell from expanding the body.
+_HEREDOC_OP_RE = re.compile(
+    r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\([^\s;&|<>()]+)|([^\s;&|<>()]+))")
 
 
 class _Unreadable(Exception):
@@ -2840,10 +2843,11 @@ _HEREDOC_INTERPRETERS = frozenset({"perl", "ruby", "node", "nodejs", "php", "osa
 
 
 def _heredoc_consumer(prefix):
-    """What the here-document that follows `prefix` is fed to, as "data", "interpreter" or
-    "commands", read off the last simple command of `prefix` past assignments, options and the
-    usual wrappers. cat is data, python and the other interpreters run code, and anything else, a
-    shell (sh, bash, zsh, dash, ksh, behind env or xargs too) among them, runs commands."""
+    """What the here-document that follows `prefix` is fed to, as "data" (cat), "interpreter"
+    or "commands", read off the last simple command of `prefix` past assignments, options and
+    the usual wrappers. Python and the other interpreters run code, and anything else, a shell
+    (sh, bash, zsh, dash, ksh, behind env or xargs too) among them, runs commands. cat's body
+    is data only when _heredoc_kind also finds its delimiter quoted and no pipe onward."""
     part = re.split(r"\|\||&&|[;|\n(){}]", prefix)[-1]
     for token in _shlex_tokens(part) or []:
         if (_ASSIGNMENT_WORD_RE.match(token) or token.startswith("-") or token.isdigit()
@@ -2858,10 +2862,25 @@ def _heredoc_consumer(prefix):
     return "commands"
 
 
+def _heredoc_kind(text, match, prefix):
+    """How the here-document whose operator `match` found in `text` after `prefix` is judged
+    [R-LANE-CROSS-WRITE]: "data" only when it is fed to cat, its delimiter is quoted (the
+    shell then expands nothing in the body) and nothing on its line pipes it onward (cat <<'EOF'
+    | bash runs it); "interpreter" when it is fed to one; else "commands"."""
+    consumer = _heredoc_consumer(prefix)
+    if consumer != "data":
+        return consumer
+    quoted = match.group(2) is not None or match.group(3) is not None or (
+        match.group(4) is not None)
+    end = text.find("\n", match.end())
+    onward = text[match.end():len(text) if end < 0 else end].replace("||", "")
+    return "data" if quoted and "|" not in onward else "commands"
+
+
 def _mask_text(text, i, closer, inner, fed):
     """(text[i:] up to `closer` outside quotes, with each $(...) and backtick replaced by the
     word $SUBST and the text inside each appended to `inner`, the index after `closer`). A
-    here-document body is taken out: dropped when fed to cat, which is data, appended to `fed`
+    here-document body is taken out: dropped when it is data (_heredoc_kind), appended to `fed`
     when fed to an interpreter, and appended to `inner` as commands, masked the same way, when
     fed to a shell or any other command. Raises _Unreadable on a substitution or a
     here-document left open."""
@@ -2900,7 +2919,7 @@ def _mask_text(text, i, closer, inner, fed):
             if match:
                 word = next(group for group in match.groups()[1:] if group is not None)
                 pending.append((match.group(1) == "-", word,
-                                _heredoc_consumer("".join(out))))
+                                _heredoc_kind(text, match, "".join(out))))
                 out.append(match.group())
                 i = match.end()
                 continue
