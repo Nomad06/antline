@@ -2856,16 +2856,16 @@ def _heredoc_feeds_interpreter(prefix):
     return False
 
 
-def _mask_text(text, i, closer, inner, fed, loose):
+def _mask_text(text, i, closer, inner, fed, unsure):
     """(text[i:] up to `closer` outside quotes, with each $(...) and backtick replaced by the
     word $SUBST and the text inside each appended to `inner`, the index after `closer`). Every
     here-document body is taken out of the text and appended to `inner` as commands, masked the
     same way, whatever its consumer, its delimiter's quoting or its pipeline; one fed to an
     interpreter is appended to `fed` as well. A body is masked as written, without bash's
     here-document expansion, so one whose delimiter is unquoted and that holds a backslash,
-    or one that leaves a quote open across a line, is appended to `loose` too, raw and with
-    its backslashes taken out, to be read by its spelling [R-LANE-CROSS-WRITE]. Raises
-    _Unreadable on a substitution or a here-document left open."""
+    or one that leaves a quote open across a line, which bash may read otherwise than this,
+    is appended to `unsure` too (lane_heredoc_denial). Raises _Unreadable on a substitution
+    or a here-document left open."""
     out, pending = [], []
     quote, depth, n = None, 0, len(text)
     while i < n:
@@ -2883,12 +2883,12 @@ def _mask_text(text, i, closer, inner, fed, loose):
                 closer == "`" or depth == 0):
             return "".join(out), i + 1
         if text.startswith("$(", i):
-            body, i = _mask_text(text, i + 2, ")", inner, fed, loose)
+            body, i = _mask_text(text, i + 2, ")", inner, fed, unsure)
             inner.append(body)
             out.append("$SUBST")
             continue
         if char == "`":
-            body, i = _mask_text(text, i + 1, "`", inner, fed, loose)
+            body, i = _mask_text(text, i + 1, "`", inner, fed, unsure)
             inner.append(body)
             out.append("$SUBST")
             continue
@@ -2926,10 +2926,9 @@ def _mask_text(text, i, closer, inner, fed, loose):
                     fed.append(text_of_body)
                 if ((not quoted and "\\" in text_of_body)
                         or any(_outside_quotes(line) is None for line in body)):
-                    loose.extend([text_of_body,
-                                  text_of_body.replace("\\\n", "").replace("\\", "")])
+                    unsure.append(text_of_body)
                 try:
-                    inner.append(_mask_text(text_of_body, 0, None, inner, fed, loose)[0])
+                    inner.append(_mask_text(text_of_body, 0, None, inner, fed, unsure)[0])
                 except _Unreadable:
                     # a $( or a backtick left open in the body: kept raw, read by its spelling
                     inner.append(text_of_body)
@@ -2950,14 +2949,14 @@ def _command_views(command):
     """([the command with every $(...) and backtick masked to the word $SUBST and every
     here-document body taken out, then the same of the text inside each substitution and of
     each here-document body, judged as commands line by line], [each here-document body fed
-    to an interpreter], [each body to be read by its spelling as well]), or None when one is
-    left open (_mask_text)."""
-    inner, fed, loose = [], [], []
+    to an interpreter], [each body bash may read otherwise than the masking]), or None when
+    one is left open (_mask_text)."""
+    inner, fed, unsure = [], [], []
     try:
-        outer, _ = _mask_text(command, 0, None, inner, fed, loose)
+        outer, _ = _mask_text(command, 0, None, inner, fed, unsure)
     except _Unreadable:
         return None
-    return [outer] + inner, fed, loose
+    return [outer] + inner, fed, unsure
 
 
 def _lane_git_segments(command, cwd):
@@ -2968,8 +2967,8 @@ def _lane_git_segments(command, cwd):
     found = _command_views(command)
     if found is None:
         return [], [command], []
-    views, fed, loose = found
-    segments, unread = [], list(loose)
+    views, fed, _ = found
+    segments, unread = [], []
     for view in views:
         if "$(" in view or "`" in view:
             # a substitution the masking could not see, as in a here-document body after an
@@ -2984,6 +2983,26 @@ def _lane_git_segments(command, cwd):
 # config call, which the walk cannot read inside code.
 _INTERPRETED_SPELLING_RE = re.compile(
     r"(?<![\w.-])ppl\b|\bgit\b[\s\S]*?\b(?:worktree|config)\b")
+
+
+def lane_heredoc_denial(command, binding):
+    """("BOUNDARY_VIOLATION", reason) when a Bash command of a session bound to a lane holds a
+    here-document bash may read otherwise than the guard does, else None
+    [R-LANE-CROSS-WRITE]: one whose delimiter is unquoted and whose body holds a backslash
+    (bash collapses \\\\, \\$ and \\` and joins a backslash-newline first), or whose body leaves
+    a quote open across a line. Denied for every session, whatever the body is fed to, since
+    every check that reads the command's words would read that body as written."""
+    if not (isinstance(command, str) and binding.task and not binding.problem
+            and "<<" in command):
+        return None
+    found = _command_views(command)
+    if not (found and found[2]):
+        return None
+    return ("BOUNDARY_VIOLATION",
+            "lane %s may not run a here-document whose delimiter is unquoted and whose body "
+            "holds a backslash, or whose body leaves a quote open across a line: bash may "
+            "read it otherwise than the guard, so quote the delimiter (<<'EOF') and close "
+            "each quote on its line" % binding.task)
 
 
 def lane_git_denial(command, agent, binding, cwd=None):
@@ -3212,8 +3231,9 @@ def _decide(payload, argv=()):
             listed = None
         refusal = cross_lane_denial(payload, binding(), listed)
         if refusal is None and tool == "Bash":
-            refusal = (ppl_task_mismatch(tool_input.get("command"), binding(), listed,
-                                         payload.get("cwd"))
+            refusal = (lane_heredoc_denial(tool_input.get("command"), binding())
+                       or ppl_task_mismatch(tool_input.get("command"), binding(), listed,
+                                            payload.get("cwd"))
                        or lane_git_denial(tool_input.get("command"), agent, binding(),
                                           payload.get("cwd")))
         if refusal:
