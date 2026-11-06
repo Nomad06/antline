@@ -452,6 +452,19 @@ def _check_assessment(bundle, number, item, cache, in_effect):
                                         False)}
 
 
+def lane_harness(by_task):
+    """The harness of the lane of `by_task` as its registry entry names it, the one source of a
+    lane's harness a session cannot write (R59). SETUP_INCOMPLETE when no lane is registered
+    for it."""
+    entry = lanes.entry(by_task)
+    if entry is None:
+        raise PplError("SETUP_INCOMPLETE", "PPL_TASK names %s, which holds no lane, so it has no "
+                       "harness to reflect for: start one with ppl lane <link>" % by_task)
+    name = entry.get("harness")
+    harness.check_name(name)
+    return name
+
+
 def _lane_may_record(task_id, by_task):
     """SCHEMA_INVALID unless the lane of `by_task` may record `task_id` (R57): its own run, or
     a run whose pending marker it claimed, so two lanes never record the same run."""
@@ -472,10 +485,12 @@ def record(task_id, doc, by_task=None):
     removed by a record that succeeds, and left by one that is refused, except the refusal of
     a task that is already recorded, which removes it: nothing is left to record, and a marker
     left there would send the next session to the reflector again. `by_task` is the lane the
-    call runs in, which records only its own run or a marker it claimed."""
+    call runs in, which records only its own run or a marker it claimed, and only for the
+    harness its registry entry names (R59)."""
     paths.check_task_id(task_id)
     if by_task:
         _lane_may_record(task_id, by_task)
+    own_harness = lane_harness(by_task) if by_task else None
     bundle = find_bundle(task_id, by_task)
     cache = {}
     in_effect = _read(bundle, "memory-in-effect.json", cache)
@@ -485,6 +500,11 @@ def record(task_id, doc, by_task=None):
     except PplError as exc:
         _refuse("memory-in-effect.json names a harness that is not a plain name: %s"
                 % exc.message)
+    if by_task and name != own_harness:
+        # the lane's own bundle lies in its run, which its sandbox can write (R59)
+        _refuse("the bundle's memory-in-effect.json names the harness %s, and lane %s runs %s: a "
+                "lane records lessons for its own harness only, so nothing was written"
+                % (name, by_task, own_harness))
     entries = in_effect.get("entries")
     if not isinstance(entries, list) or not all(
             isinstance(e, dict) and isinstance(e.get("id"), str) for e in entries):
@@ -917,9 +937,19 @@ def pending(harness=None):
 def claim_pending(task_id, by_task):
     """Claims the pending marker of `task_id` for the lane of `by_task` (D20) by an atomic
     rename to <task>.json.claimed-<by_task>: of two lanes the first rename wins, and no lock is
-    taken. True when this call claimed it, False when no unclaimed marker is there."""
+    taken. Only a marker whose run used the lane's harness, as its registry entry names it, is
+    claimed (R59). True when this call claimed it, False when no unclaimed marker of a run of
+    that harness is there."""
     paths.check_task_id(task_id)
     paths.check_task_id(by_task)
+    wanted = lane_harness(by_task)
+    try:
+        doc = store.read_json(pending_path(task_id), None, BUNDLE_READ_LIMIT)
+    except (PplError, OSError, UnicodeDecodeError, RecursionError):
+        return False
+    if not (isinstance(doc, dict) and doc.get("task") == task_id
+            and isinstance(doc.get("bundle"), str)) or _run_harness(doc["bundle"]) != wanted:
+        return False
     try:
         os.rename(str(pending_path(task_id)), str(claimed_path(task_id, by_task)))
     except FileNotFoundError:

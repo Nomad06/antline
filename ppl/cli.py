@@ -1320,12 +1320,7 @@ def _lessons_pending():
     if lane is None:
         markers = lessons.pending()
     else:
-        entry = lanes.entry(lane)
-        if entry is None:
-            raise PplError("SETUP_INCOMPLETE", "PPL_TASK names %s, which holds no lane, so no "
-                           "pending reflection is claimed for it: start one with ppl lane <link>"
-                           % lane)
-        for marker in lessons.pending(entry.get("harness")):
+        for marker in lessons.pending(lessons.lane_harness(lane)):
             lessons.claim_pending(marker["task"], lane)
         markers = lessons.claimed(lane)
     shown = 0

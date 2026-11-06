@@ -689,6 +689,26 @@ class TestRecord(LessonsTestCase):
         self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
         self.assertIn("ppl lessons bundle", payload["message"])
 
+    def test_a_lane_records_only_under_its_own_harness(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # R59: record runs outside the sandbox, and the lane's own bundle lies in its run, which
+        # its sandbox writes, so a lane names the harness from its registry entry, not the bundle
+        built = self.bundled("DEMO-9230")
+        fixtures.bind_lane("DEMO-9230", "/tmp/repo-9230", harness="example-maven")
+        store.write_json(built["bundle"] / "memory-in-effect.json",
+                         {"harness": "other-harness", "entries": []})
+        doc = self.doc(built, assessments=[])
+        with mock.patch.dict(os.environ, {"PPL_TASK": "DEMO-9230"}):
+            message = self.refused("SCHEMA_INVALID", built, doc)
+        self.assertIn("other-harness", message)
+        self.assertIn("example-maven", message)
+        self.assertFalse((lessons.lessons_home() / "other-harness").exists())
+        # from a terminal outside every lane the owner records as before, under the bundle's
+        lanes.release("DEMO-9230")
+        code, out, err = self.record(built, doc)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(lessons.proposals_path("other-harness", "DEMO-9230").is_file())
+
     def test_a_harness_name_that_is_not_a_plain_name_is_refused(self):
         # rule: R-LESSONS-EVIDENCE-RESOLVES
         built = self.bundled("DEMO-9216")
@@ -1327,6 +1347,9 @@ class TestAbandonedRun(LessonsTestCase):
         self.assertEqual([m["task"] for m in lessons.pending("example-maven")], ["DEMO-9340"])
         self.assertEqual([m["task"] for m in lessons.pending("other-harness")], ["DEMO-9341"])
         self.assertEqual(sorted(m["task"] for m in lessons.pending()), ["DEMO-9340", "DEMO-9341"])
+        # R59: a lane claims no marker of a run of another harness, even named directly
+        self.assertFalse(lessons.claim_pending("DEMO-9341", "DEMO-9350"))
+        self.assertTrue(lessons.pending_path("DEMO-9341").is_file())
         code, out, err = self.in_lane("DEMO-9350", "lessons", "pending")
         self.assertEqual(code, 0, err)
         self.assertEqual(out.splitlines(), ["DEMO-9340 %s" % mine])
