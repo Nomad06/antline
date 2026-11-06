@@ -2480,66 +2480,95 @@ def _claimed_bundles(task_id):
     return found
 
 
-_GLOB_CHARACTERS = "*?[{"
-# What a reflector's Glob pattern may not hold at all: extglob groups and negation, and the
-# escape, which make Glob search from another root than the one _glob_root reads.
-_GLOB_UNREAD = "()!+@\\"
+_REFLECTOR_READS = "[R-LANE-REFLECTOR-READS]"
+# A segment of a reflector's Glob pattern or Grep glob: a plain name, and one with * and ?
+# wildcards that holds a character other than a dot, so it cannot match `.` or `..`.
+_PLAIN_NAME = re.compile(r"[A-Za-z0-9._+-]+")
+_WILDCARD_NAME = re.compile(r"[A-Za-z0-9._+*?-]*[A-Za-z0-9_+-][A-Za-z0-9._+*?-]*")
 
 
-def _glob_root(pattern):
-    """The directory an absolute Glob pattern searches from: its text up to the first glob
-    character, cut back to a whole directory, or the pattern itself when it holds none."""
-    cut = min([pattern.index(char) for char in _GLOB_CHARACTERS if char in pattern]
-              or [len(pattern)])
-    head = pattern[:cut]
-    return head if cut == len(pattern) else (os.path.dirname(head) or "/")
-
-
-def reflector_archive_read_denial(tool, tool_input, payload, task_id):
-    """Why ppl-reflector in the lane of `task_id` may not make this Read, Grep or Glob, else
-    None [R-LANE-REFLECTOR-READS]. In runs/_archive, where every destroyed run lies, it reads only
-    inside the bundle of a pending marker its own lane claimed, so a lane reflects on the runs it
-    took and no other. The path, and a Glob's absolute pattern, are placed through every link
-    and in any letter case (escape_paths). A Grep or Glob whose search root holds the archive,
-    runs/ or PPL_HOME, say, would read every bundle in it and is refused. A Glob pattern with a
-    `..` segment, from any root, or with an extglob or escape character, is refused before any
-    of this, since the guard would not read the root Glob searches from."""
-    archive = str(paths.runs_dir() / "_archive")
-    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
-    pattern = tool_input.get("pattern") if tool == "Glob" else None
-    if isinstance(pattern, str) and (_has_dotdot(pattern)
-                                     or any(char in pattern for char in _GLOB_UNREAD)):
-        # fail closed on what the root cut does not model: a pattern can climb from any root
-        # with `..`, and an extglob or an escape lets Glob read another root than the guard
-        return ("ppl-reflector's Glob pattern %s has a .. segment or one of %s, which the guard "
-                "does not place: name the files below the claimed bundle without them"
-                % (pattern, " ".join(_GLOB_UNREAD)))
-    named = [read_target_path(tool_input, payload)]
-    if isinstance(pattern, str) and os.path.isabs(pattern):
-        named.append(pattern)
-    claimed = None
-    for item in named:
-        landed = escape_paths.landing(item, cwd) if isinstance(item, str) and item else None
-        if not landed or escape_paths.under(landed[0], [archive]) is None:
+def _plain_glob(pattern):
+    """True when `pattern` is a relative glob each of whose /-separated segments is `**`, `*`,
+    a plain name of A-Z a-z 0-9 . _ + - other than `.` and `..`, or such a name with * and ?
+    wildcards that holds a character other than a dot (_WILDCARD_NAME). Nothing else is read:
+    a brace, a class, an extglob, an escape, `~`, whitespace or an empty segment fails."""
+    if not isinstance(pattern, str) or not pattern or os.path.isabs(pattern):
+        return False
+    for segment in pattern.split("/"):
+        if segment in ("*", "**") or _WILDCARD_NAME.fullmatch(segment):
             continue
-        if claimed is None:
-            claimed = _claimed_bundles(task_id)
-        if not (claimed and all(escape_paths.inside(form, claimed) for form in landed[1])):
-            return ("ppl-reflector in lane %s reads the run archive only inside the bundle of a "
-                    "run this lane claimed with ppl lessons pending, and %s is not in one"
-                    % (task_id, item))
-    if tool in ("Grep", "Glob"):
-        roots = [named[0]]
-        if isinstance(pattern, str) and os.path.isabs(pattern):
-            roots.append(_glob_root(pattern))
-        archive_forms = escape_paths.landing(archive, None)[0]
-        for root in roots:
-            landed = escape_paths.landing(root, cwd) if isinstance(root, str) and root else None
-            if landed and escape_paths.under(archive_forms, landed[1]) is not None:
-                return ("ppl-reflector in lane %s searches %s, which holds the run archive, "
-                        "where it reads only inside the bundle of a run this lane claimed: "
-                        "search that bundle" % (task_id, root))
-    return None
+        if not _PLAIN_NAME.fullmatch(segment) or segment in (".", ".."):
+            return False
+    return True
+
+
+def _reflector_roots_hold(raw, cwd, task_id):
+    """True when `raw`, from `cwd`, lies inside the lane of `task_id`'s own run directory, its
+    own scratch directory or a bundle it claimed, placed through every link (escape_paths) and
+    a case variant counting where the file system says it is the same entry. The scratch
+    directory is os_sandbox.scratch_dir's, spelled here so the hook never imports that module;
+    the claims are read only when the lane's own directories do not hold `raw`."""
+    landed = escape_paths.landing(raw, cwd)
+    if not landed:
+        return False
+    roots = [str(paths.run_dir(task_id)), str(paths.home() / "scratch" / task_id)]
+    if all(escape_paths.inside(form, roots) for form in landed[1]):
+        return True
+    roots.extend(_claimed_bundles(task_id))
+    return all(escape_paths.inside(form, roots) for form in landed[1])
+
+
+def reflector_read_denial(tool, tool_input, payload, task_id):
+    """Why ppl-reflector in the lane of `task_id` may not make this Read, Grep or Glob, else
+    None [R-LANE-REFLECTOR-READS]. A Read in runs/_archive, where every destroyed run lies, is
+    allowed only inside the bundle of a pending marker its own lane claimed, so a lane reflects
+    on the runs it took and no other. Grep and Glob go through an allowlist: a Grep names a
+    path, a Glob's root is its path, else the session cwd, and either lies inside a claimed
+    bundle, the lane's own run directory or its own scratch directory (_reflector_roots_hold);
+    a Glob pattern, and a Grep glob, is relative and plain (_plain_glob). A path that starts or
+    ends with whitespace or holds a control character, which Claude Code may trim, is refused."""
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    if tool == "Read":
+        raw = read_target_path(tool_input, payload)
+    else:
+        # Glob and Grep search their path key, whatever other keys the call carries
+        raw = tool_input.get("path")
+        glob = tool_input.get("pattern" if tool == "Glob" else "glob")
+        if tool == "Glob" and isinstance(glob, str) and os.path.isabs(glob):
+            return ("ppl-reflector in lane %s gives Glob the absolute pattern %s: pass the "
+                    "directory as path and give a relative pattern of plain names, * and ** %s"
+                    % (task_id, glob, _REFLECTOR_READS))
+        if (tool == "Glob" or glob is not None) and not _plain_glob(glob):
+            return ("ppl-reflector in lane %s gives %s the pattern %r: a relative pattern whose "
+                    "segments are **, *, or a name of A-Z a-z 0-9 . _ + - with * and ? "
+                    "wildcards and not only dots and wildcards %s"
+                    % (task_id, tool, glob, _REFLECTOR_READS))
+        if tool == "Glob":
+            raw = raw or cwd
+        if not (isinstance(raw, str) and raw):
+            return ("ppl-reflector in lane %s gives %s no path it can place: pass the claimed "
+                    "bundle's directory as path %s" % (task_id, tool, _REFLECTOR_READS))
+    if isinstance(raw, str) and escape_paths.unclear(raw):
+        return ("ppl-reflector in lane %s gives %s the path %r, which starts or ends with "
+                "whitespace or holds a control character that Claude Code may trim: spell the "
+                "path plainly %s" % (task_id, tool, raw, _REFLECTOR_READS))
+    if tool != "Read":
+        if _reflector_roots_hold(raw, cwd, task_id):
+            return None
+        return ("ppl-reflector in lane %s searches only a bundle its lane claimed with ppl "
+                "lessons pending, its own run directory or its own scratch directory, and %s "
+                "is in none of them: pass one of them as path %s"
+                % (task_id, raw, _REFLECTOR_READS))
+    landed = escape_paths.landing(raw, cwd) if isinstance(raw, str) and raw else None
+    archive = str(paths.runs_dir() / "_archive")
+    if not landed or escape_paths.under(landed[0], [archive]) is None:
+        return None
+    claimed = _claimed_bundles(task_id)
+    if claimed and all(escape_paths.inside(form, claimed) for form in landed[1]):
+        return None
+    return ("ppl-reflector in lane %s reads the run archive only inside the bundle of a run this "
+            "lane claimed with ppl lessons pending, and %s is not in one %s"
+            % (task_id, raw, _REFLECTOR_READS))
 
 
 def cross_lane_denial(payload, binding, lanes_list):
@@ -3740,7 +3769,7 @@ def _decide(payload, argv=()):
                                 "channel this cage exists to close" % target)
 
     if agent == "ppl-reflector" and tool in READ_TOOLS:
-        reason = reflector_archive_read_denial(tool, tool_input, payload, task_id)
+        reason = reflector_read_denial(tool, tool_input, payload, task_id)
         if reason:
             return deny("BOUNDARY_VIOLATION", reason)
 

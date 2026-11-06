@@ -18,8 +18,8 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import (cli, evidence, findings, harness, lanes, lessons, memory, paths, review, run,
-                 store, verdict)
+from ppl import (cli, evidence, findings, harness, lanes, lessons, memory, os_sandbox, paths,
+                 review, run, store, verdict)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
 import ppl_guard
@@ -1548,10 +1548,11 @@ class TestAbandonedRun(LessonsTestCase):
                                             "--file", str(answer))
                 self.assertEqual((code, json.loads(err)["error_code"]), (2, "SCHEMA_INVALID"))
 
-    def test_the_reflector_reads_an_archived_bundle_only_of_a_run_its_lane_claimed(self):
-        # rule: R-LANE-REFLECTOR-READS
-        # R63: ppl-reflector in a lane reads the archive only inside the bundle of a marker
-        # that lane claimed, through the guard's role checks
+    def reflector_lane(self):
+        """Lane DEMO-9366 with its own run, the archived bundle it claimed (mine), one another
+        lane claimed (theirs) and one no lane claimed, its scratch directory holding a link to
+        that last one, and `decide(tool, agent=..., **tool_input)` for a call of that lane's
+        session, ppl-reflector unless `agent` says otherwise (None: no role)."""
         self.build_run("DEMO-9366")
         fixtures.bind_lane("DEMO-9366", "/nonexistent/repo-9366", lane=1)
         fixtures.bind_lane("DEMO-9367", "/nonexistent/repo-9367", lane=2)
@@ -1562,32 +1563,61 @@ class TestAbandonedRun(LessonsTestCase):
         self.assertTrue(lessons.claim_pending("DEMO-9369", "DEMO-9367"))
         # a claim that is no marker names no bundle, and breaks nothing
         lessons.claimed_path("DEMO-9373", "DEMO-9366").write_text("[1]", encoding="utf-8")
+        scratch = os_sandbox.scratch_dir("DEMO-9366")
+        scratch.mkdir(parents=True)
+        os.symlink(unclaimed, str(scratch / "link"))
         start = str(lanes.start_dir("DEMO-9366"))
 
-        def decide(tool, **tool_input):
-            return ppl_guard.decide({"hook_event_name": "PreToolUse",
-                                     "agent_type": "ppl-reflector", "tool_name": tool,
-                                     "tool_input": tool_input, "cwd": start},
-                                    ["--task", "DEMO-9366"])
+        def decide(tool, agent="ppl-reflector", **tool_input):
+            payload = {"hook_event_name": "PreToolUse", "tool_name": tool,
+                       "tool_input": tool_input, "cwd": start}
+            if agent is not None:
+                payload["agent_type"] = agent
+            return ppl_guard.decide(payload, ["--task", "DEMO-9366"])
 
+        return {"mine": mine, "theirs": theirs, "unclaimed": unclaimed, "start": start,
+                "run": str(paths.run_dir("DEMO-9366")), "scratch": str(scratch),
+                "decide": decide}
+
+    def deny_reason(self, result):
+        """The reason of a reflector call the guard refused, which names its rule."""
+        self.assertIsNotNone(result, "the call was allowed")
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("R-LANE-REFLECTOR-READS", reason)
+        return reason
+
+    def test_the_reflector_reads_an_archived_bundle_only_of_a_run_its_lane_claimed(self):
+        # rule: R-LANE-REFLECTOR-READS
+        # R63: ppl-reflector in a lane reads the archive only inside the bundle of a marker
+        # that lane claimed, through the guard's role checks. R64: it searches with Grep and
+        # Glob only from such a bundle, its own run directory or its own scratch directory.
+        lane = self.reflector_lane()
+        mine, theirs, unclaimed = lane["mine"], lane["theirs"], lane["unclaimed"]
+        decide = lane["decide"]
+        # N4: an archived run's name carries its UTC offset, so the claimed bundle's path does
+        self.assertIn("+0000", mine)
         for tool, tool_input in (("Read", {"file_path": mine + "/outcome.json"}),
                                  ("Grep", {"pattern": "x", "path": mine}),
-                                 ("Glob", {"pattern": "**/*.json", "path": mine}),
-                                 # no path: the lane's start directory, a sibling of runs/
-                                 ("Grep", {"pattern": "x"}),
-                                 ("Grep", {"pattern": "x",
-                                           "path": str(paths.run_dir("DEMO-9366"))})):
+                                 ("Grep", {"pattern": "x", "path": mine + "/outcome.json"}),
+                                 ("Grep", {"pattern": "x", "path": mine, "glob": "*.json"}),
+                                 ("Grep", {"pattern": "x", "path": lane["run"]}),
+                                 ("Glob", {"pattern": "**/*.json", "path": lane["run"]}),
+                                 ("Glob", {"pattern": "lessons-*.json",
+                                           "path": lane["scratch"]})):
             with self.subTest(tool=tool, allowed=True, tool_input=tool_input):
                 self.assertIsNone(decide(tool, **tool_input))
+        # the unclaimed bundle in another letter case: the same entry on a case-insensitive disk
+        case_variant = unclaimed.replace("DEMO-9370", "demo-9370")
         for tool, tool_input in (
                 ("Read", {"file_path": theirs + "/outcome.json"}),
                 ("Read", {"file_path": unclaimed + "/outcome.json"}),
                 ("Read", {"file_path": mine + "/../../../" + Path(theirs).parts[-3]
                           + "/lessons/bundle/outcome.json"}),
+                # Claude Code trims a path before it reads it, the guard would place it in cwd
+                ("Read", {"file_path": " " + theirs + "/outcome.json"}),
                 ("Grep", {"pattern": "x", "path": str(Path(mine).parents[2])}),
-                ("Glob", {"pattern": "../../../*/lessons/bundle/*.json", "path": mine}),
-                ("Glob", {"pattern": str(Path(theirs).parents[2]) + "/*/lessons/**"}),
-                # N1: a search rooted above the archive reads every bundle in it
+                # a search rooted at or above the archive reads every bundle in it
                 ("Grep", {"pattern": ".", "path": str(paths.runs_dir())}),
                 ("Grep", {"pattern": ".", "path": str(paths.home())}),
                 ("Grep", {"pattern": ".", "path": str(paths.runs_dir()),
@@ -1595,22 +1625,87 @@ class TestAbandonedRun(LessonsTestCase):
                 ("Grep", {"pattern": ".", "path": str(paths.runs_dir()).upper()}),
                 ("Glob", {"pattern": "_archive/*/lessons/bundle/*",
                           "path": str(paths.runs_dir())}),
-                ("Glob", {"pattern": str(paths.runs_dir()) + "/*/*/lessons/bundle/*"}),
-                ("Glob", {"pattern": str(paths.home()) + "/**/outcome.json"}),
-                # N3: a `..` segment from a root outside the archive, an escaped absolute
-                # pattern and an extglob pattern are refused whatever the root
-                ("Glob", {"pattern": "../runs/_archive/**",
-                          "path": str(paths.home() / "lanes")}),
-                ("Glob", {"pattern": "../../runs/_archive/**"}),
-                ("Glob", {"pattern": str(paths.runs_dir()) + "/\\_archive/*/lessons/bundle/*"}),
-                ("Glob", {"pattern": "*.@(json|md)", "path": start}),
-                ("Glob", {"pattern": "!(x)/**", "path": start}),
-                ("Glob", {"pattern": "+(_archive)/**", "path": str(paths.runs_dir())})):
+                ("Glob", {"pattern": "*", "path": str(paths.home())}),
+                # R64: no root but the claimed bundle, the own run and the own scratch
+                ("Grep", {"pattern": "x"}),
+                ("Glob", {"pattern": "**/*.json"}),
+                ("Glob", {"pattern": "*", "path": lane["start"]}),
+                ("Grep", {"pattern": "x", "path": theirs}),
+                ("Glob", {"pattern": "*", "path": theirs}),
+                ("Grep", {"pattern": "x", "path": unclaimed}),
+                ("Glob", {"pattern": "**/*.json", "path": unclaimed}),
+                ("Grep", {"pattern": "x", "path": case_variant}),
+                ("Glob", {"pattern": "*", "path": case_variant}),
+                # a link in the lane's own scratch directory is placed where it leads
+                ("Grep", {"pattern": "x", "path": lane["scratch"] + "/link"}),
+                ("Glob", {"pattern": "*", "path": lane["scratch"] + "/link"}),
+                # ".. " is a name to the guard and a parent once Claude Code trims it
+                ("Grep", {"pattern": ".", "path": lane["run"] + "/.. "}),
+                ("Glob", {"pattern": "*", "path": lane["run"] + "/.. "}),
+                # Glob searches its path: another key naming the claimed bundle is not it
+                ("Glob", {"pattern": "*", "path": theirs, "file_path": mine})):
             with self.subTest(tool=tool, tool_input=tool_input):
-                result = decide(tool, **tool_input)
-                self.assertIsNotNone(result, tool_input)
-                self.assertIn("BOUNDARY_VIOLATION",
-                              result["hookSpecificOutput"]["permissionDecisionReason"])
+                self.deny_reason(decide(tool, **tool_input))
+
+    def test_a_reflector_glob_pattern_is_relative_and_plain(self):
+        # rule: R-LANE-REFLECTOR-READS
+        # R64: a pattern of plain names, * and ** below the root. Braces, classes, extglobs,
+        # escapes and segments of dots and wildcards are refused whatever the root
+        lane = self.reflector_lane()
+        mine, decide = lane["mine"], lane["decide"]
+        for pattern in ("*", "**", "**/*.json", "lessons/*.md", "remarks/*.json",
+                        "outcome.json", "remarks/thread-?.json", "a+b/c_d-e.f"):
+            with self.subTest(pattern=pattern, allowed=True):
+                self.assertIsNone(decide("Glob", pattern=pattern, path=mine))
+        for glob in ("*.json", "remarks/*.json", "**/*.json"):
+            with self.subTest(tool="Grep", allowed=True, glob=glob):
+                self.assertIsNone(decide("Grep", pattern="x", path=mine, glob=glob))
+        # N4: the root goes in path, the pattern is relative, and the message says so
+        for pattern in (mine + "/**/*.json", str(Path(lane["theirs"]).parents[2]) + "/*/**",
+                        str(paths.runs_dir()) + "/\\_archive/*/lessons/bundle/*"):
+            with self.subTest(pattern=pattern, absolute=True):
+                reason = self.deny_reason(decide("Glob", pattern=pattern))
+                self.assertIn("pass the directory as path", reason)
+                self.assertIn("relative pattern", reason)
+        for pattern in ("{..,x}/**", "[.][.]/**", ".*/**", "..", "../x", "./*", ".", "*.*",
+                        "?", "**/..", "*.@(json)", "!(x)/**", "+(x)/**", "\\_archive/*",
+                        "a\\b", "{outcome,findings}.json", "[o]utcome.json", "~/x",
+                        "lessons/", "a//b", "", "a b", "*.json\n"):
+            with self.subTest(pattern=pattern):
+                self.deny_reason(decide("Glob", pattern=pattern, path=mine))
+        # a .. climbs from any root
+        for root in (mine, lane["run"], lane["scratch"], None):
+            tool_input = {"pattern": "../runs/_archive/**"}
+            if root is not None:
+                tool_input["path"] = root
+            with self.subTest(root=root):
+                self.deny_reason(decide("Glob", **tool_input))
+        # a Grep glob obeys the same allowlist, and a pattern that is no string is refused
+        for tool, tool_input in (("Grep", {"pattern": "x", "path": mine, "glob": "*.{json,md}"}),
+                                 ("Grep", {"pattern": "x", "path": mine, "glob": "../**"}),
+                                 ("Grep", {"pattern": "x", "path": mine, "glob": "*.@(json)"}),
+                                 ("Grep", {"pattern": "x", "path": mine, "glob": ["*.json"]}),
+                                 ("Glob", {"pattern": ["*"], "path": mine}),
+                                 ("Glob", {"path": mine})):
+            with self.subTest(tool=tool, tool_input=tool_input):
+                self.deny_reason(decide(tool, **tool_input))
+
+    def test_other_roles_search_as_before(self):
+        # rule: R-LANE-REFLECTOR-READS
+        # R64 holds ppl-reflector alone: another role's Grep and Glob are judged as before
+        lane = self.reflector_lane()
+        archive = str(paths.runs_dir() / "_archive")
+        for agent in ("ppl-verifier", "ppl-review-responder", "ppl-briefer", None):
+            for tool, tool_input in (("Glob", {"pattern": "../../runs/_archive/**"}),
+                                     ("Glob", {"pattern": archive + "/**/outcome.json"}),
+                                     ("Glob", {"pattern": "{..,x}/**", "path": lane["start"]}),
+                                     ("Glob", {"pattern": "*.@(json|md)",
+                                               "path": lane["theirs"]}),
+                                     ("Grep", {"pattern": "x"}),
+                                     ("Grep", {"pattern": "x", "path": lane["theirs"],
+                                               "glob": "*.{json,md}"})):
+                with self.subTest(agent=agent, tool=tool, tool_input=tool_input):
+                    self.assertIsNone(lane["decide"](tool, agent=agent, **tool_input))
 
     def test_a_lane_records_only_its_own_run_or_a_marker_it_claimed(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE

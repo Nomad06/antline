@@ -181,7 +181,7 @@ def _within(path, root):
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-def _unclear(raw):
+def unclear(raw):
     """True when `raw` starts or ends with what JavaScript's trim removes, which Claude Code
     drops before it resolves a path, or holds a control character anywhere."""
     for char in (raw[:1], raw[-1:]):
@@ -342,7 +342,7 @@ def _protected_check(raw, cwd, home, facts, who, tool):
     if not isinstance(raw, str):
         return ("%s's %s names a path that is not a string, %s, so the guard cannot tell where "
                 "it writes" % (who, tool, _shown(raw))), None
-    if _unclear(raw):
+    if unclear(raw):
         return ("%s's %s path %s starts or ends with whitespace or holds a control character, "
                 "which Claude Code may trim or read otherwise than the guard: spell the path "
                 "plainly" % (who, tool, _shown(raw))), None
