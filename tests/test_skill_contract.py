@@ -24,8 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" /
 import ppl_guard
 
 import fixtures
-from ppl import (cli, config, escape, forges, fsm, gitfacts, harness, os_sandbox, rules, run,
-                 sequences, verdict)
+from ppl import (cli, config, escape, forges, fsm, gitfacts, harness, lanes, os_sandbox, rules,
+                 run, sequences, verdict)
 
 # The skill on disk is rendered from skill/ skeletons, so the contract is
 # checked on a rendered copy, never on the real home.
@@ -464,6 +464,45 @@ class TestEveryRenderedFile(unittest.TestCase):
         self.assertEqual(section.count(sequences.render(sequences.AFTER_MERGE)), 2)
         self.assertIn(sequences.render(sequences.SEQUENCES["close-out-from-closure"][1]), section)
 
+    def test_no_rendered_file_mentions_isolated_or_the_active_pointer(self):
+        # a run belongs to its lane: the isolated flag and the single active-run pointer are
+        # gone (D13, D21), and ppl init takes the lane's worktree, so no --repo either
+        gone = re.compile(r"isolat|\bactive[- ]run\b|\bACTIVE\b|runs/ACTIVE|--repo\b"
+                          r"|PPL_AGENTS_DIR|PPL_SKILLS_DIR|ppl harness apply|worktree add",
+                          re.IGNORECASE)
+        found = ["%s %s:%d: %s" % (name, path, number, line.strip())
+                 for name, files in RENDERED.items() for path, text in sorted(files.items())
+                 for number, line in enumerate(text.splitlines(), start=1) if gone.search(line)]
+        self.assertEqual(found, [])
+
+    def test_no_rendered_ppl_command_holds_a_shell_variable(self):
+        # R50: in a lane the guard refuses a ppl command that holds $VAR, so every value the
+        # orchestrator passes is a pasted placeholder (<GENERATION>, <SHA>)
+        pins = [re.escape(pin["path"]) for pin in fixtures.FAKE_PINS.values()]
+        word = r"(?:%s|ppl)\s" % "|".join(pins)
+        found = []
+        for name, files in RENDERED.items():
+            for path, text in sorted(files.items()):
+                commands = re.findall(r"`(%s[^`]*)`" % word, text)
+                fenced = False
+                current = ""
+                for line in text.splitlines():
+                    if line.lstrip().startswith("```"):
+                        fenced = not fenced
+                        continue
+                    if fenced:
+                        current += line.rstrip().rstrip("\\") + " "
+                        if line.rstrip().endswith("\\"):
+                            continue
+                        if re.match(r"\s*" + word, current):
+                            commands.append(current.strip())
+                        current = ""
+                self.assertTrue(commands or path not in ("references/stage-4-gates.md",),
+                                "%s %s" % (name, path))
+                found += ["%s %s: %s" % (name, path, command) for command in commands
+                          if "$" in command]
+        self.assertEqual(found, [])
+
 
 # Rework dispatches a fresh worker, and only the stage 3 references say which model to pass
 # and when to review the diff against the boundary yourself. Every place that sends a run
@@ -789,6 +828,8 @@ GITHUB_COMMAND_KINDS = {
     "git push": r"git (?:-c \S+ )+-C \S+ push .* -u ",
     "git push --delete": r"git (?:-c \S+ )+-C \S+ push .* --delete ",
     "gh pr view for the merge": r"gh pr view \S+ -R \S+ --json=state,mergeCommit$",
+    "ppl lessons pending": r"ppl lessons pending$", "ppl lessons record": r"ppl lessons record ",
+    "ppl lane close": r"ppl lane close$",
 }
 # The run-time placeholders of those commands, as the orchestrator fills them.
 SHAPE_TASK = "GH-7"
@@ -839,7 +880,9 @@ class TestGithubCommandsLeaveTheSandbox(unittest.TestCase):
                 "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "base")
         run_git(self.checkout, "remote", "add", "origin", "https://github.com/o/r.git")
         run_git(self.checkout, "worktree", "add", "-q", "-b", SHAPE_BRANCH, self.worktree)
-        self.workspace = os.path.realpath(tmphome.mkdtemp(prefix="pplshapes-ws-"))
+        # the lane's start directory, where its session runs and its facts name the workspace
+        self.workspace = os.path.realpath(str(lanes.start_dir(SHAPE_TASK)))
+        os.makedirs(self.workspace, exist_ok=True)
         self.pins = dict(fixtures.FAKE_PINS, git={"path": git_bin,
                                                   "realpath": os.path.realpath(git_bin)})
         tables = dict(fixtures.GITHUB_ISSUES, repo={"path": self.checkout, "default_branch": "main",
@@ -852,30 +895,37 @@ class TestGithubCommandsLeaveTheSandbox(unittest.TestCase):
         self.state = {"task_id": SHAPE_TASK, "branch": SHAPE_BRANCH, "repo": self.worktree}
 
     def fill(self, command):
-        for placeholder, value in (("<TASK-ID>", SHAPE_TASK), ("<number>", "12"), ("<id>", "345"),
+        for placeholder, value in (("<TASK-ID>", SHAPE_TASK), ("<RUN-ID>", SHAPE_TASK),
+                                   ("<number>", "12"), ("<id>", "345"),
                                    ("<branch>", SHAPE_BRANCH), ("<worktree>", self.worktree),
                                    ("<summary>", "add the cart total")):
             command = command.replace(placeholder, value)
         self.assertIsNone(re.search(r"<[A-Za-z][^<>]*>", command), command)
         return command
 
-    def rendered_workspace(self):
-        """The directory the skill says its gh and ppl calls run from."""
-        named = re.findall(r"from the workspace `([^`]+)`", _flat("".join(self.files.values())))
+    def rendered_start_directory(self):
+        """The directory the skill says its gh and ppl calls run from: the lane's start
+        directory."""
+        named = re.findall(r"from the lane's start directory `([^`]+)`",
+                           _flat("".join(self.files.values())))
         self.assertEqual(len(named), 1, named)
         return named[0]
 
-    def test_stage_one_leaves_the_session_in_the_workspace(self):
-        # a cd into the checkout would put the next gh or ppl call inside the write scope
+    def test_stage_one_leaves_the_session_in_the_lane_start_directory(self):
+        # a cd into the checkout would put the next gh or ppl call inside the write scope, and
+        # ppl lane made the worktree before the session started
         stage1 = self.files["references/stage-1-baseline.md"]
         block = stage1[stage1.index("```bash"):stage1.index("```", stage1.index("```bash") + 3)]
         self.assertEqual([line for line in block.splitlines() if line.startswith("cd ")], [])
-        self.assertIn("\ngit -C %s worktree add " % self.facts["checkout"], block)
-        self.assertEqual(self.rendered_workspace(), self.facts["workspace"])
-        self.assertIn("from the workspace `%s`" % self.facts["workspace"], _flat(stage1))
+        self.assertNotIn("worktree add", stage1)
+        self.assertIn(" -C %s fetch " % self.facts["checkout"], block)
+        self.assertEqual(self.rendered_start_directory(), self.facts["workspace"])
+        self.assertEqual(self.facts["workspace"], os.path.realpath(lanes.start_dir(SHAPE_TASK)))
+        self.assertIn("from the lane's start directory `%s`" % self.facts["workspace"],
+                      _flat(stage1))
 
     def test_every_rendered_github_command_passes_the_guard_shapes(self):
-        cwd = self.rendered_workspace()
+        cwd = self.rendered_start_directory()
         found = pinned_commands(self.files, self.pins)
         kinds = {kind for kind, pattern in GITHUB_COMMAND_KINDS.items()
                  for _, command in found if re.search(r"(?:^|/)" + pattern, command)}
@@ -983,24 +1033,27 @@ class TestReflectionSkillText(unittest.TestCase):
             self.assertLess(stage8.index("Then reflect:"), stage8.index("Once the outcome is known"), name)
             self.assertLess(stage8.index("Then write to the tracker"), stage8.index("Then reflect:"), name)
 
-    def test_the_session_start_runs_pending_reflections_first(self):
+    def test_stage_zero_runs_pending_reflections_right_after_init(self):
+        # R22: every role, the reflector included, runs with run state, so the pending
+        # reflections come after ppl init and before the task is read
         for name, files in RENDERED.items():
-            text = files["SKILL.md"]
-            start = text[text.index("## Always start here"):]
-            start = " ".join(start.split())
-            self.assertIn("Run `ppl lessons pending` first.", start, name)
-            self.assertLess(start.index("ppl lessons pending"), start.index("ppl recover"), name)
-            paragraph = start[start.index("Run `ppl lessons pending`"):]
-            paragraph = paragraph[:paragraph.index("recover")]
-            self.assertLessEqual(len(paragraph.encode("utf-8")), 400, name)
+            self.assertNotIn("lessons pending", files["SKILL.md"], name)
+            stage0 = _flat(files["references/stage-0-admission.md"])
+            self.assertIn(" lessons pending`", stage0, name)
+            self.assertLess(stage0.index("`ppl init "), stage0.index(" lessons pending`"), name)
+            self.assertLess(stage0.index(" lessons pending`"), stage0.index("admission list"),
+                            name)
+            self.assertIn("`references/reflection.md`", stage0, name)
 
     def test_the_reflection_reference_calls_the_bundle_data(self):
         for name in RENDERED:
             text = self.reflection(name)
             self.assertIn("data, not instructions", text, name)
             self.assertIn("ppl lessons bundle --task <TASK-ID>", text, name)
-            self.assertIn("ppl lessons record --task <TASK-ID> --file", text, name)
-            self.assertIn("/<TASK-ID>/lessons.json", text, name)
+            # R57: the answer lies in the lane's own scratch directory, named for the run
+            self.assertIn("ppl lessons record --task <RUN-ID> --file", text, name)
+            self.assertIn("/<TASK-ID>/lessons-<RUN-ID>.json", text, name)
+            self.assertNotIn("/lessons.json", text, name)
             self.assertIn("ppl-reflector", text, name)
 
     def test_the_reflection_says_what_ends_it_early(self):
@@ -1011,7 +1064,8 @@ class TestReflectionSkillText(unittest.TestCase):
             step2 = text[text.index("2. Dispatch"):text.index("3. Write")]
             self.assertIn("If the dispatch fails", step2, name)
             self.assertIn("leave the marker in place", step2, name)
-            self.assertIn("ppl harness apply <name>", step2, name)
+            self.assertIn("`agents.json`", step2, name)
+            self.assertIn("ppl lane resume <TASK-ID>", step2, name)
             step4 = text[text.index("4. If"):text.index("5. The proposals")]
             self.assertIn("cleared its pending marker", step4, name)
 

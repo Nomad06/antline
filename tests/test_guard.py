@@ -2921,19 +2921,26 @@ class TestGuard(unittest.TestCase):
                 self.assertIsNone(decide(payload(
                     "ppl-code-worker", "Bash", {"command": command})))
 
-    def test_orchestrator_stage_one_worktree_setup_is_left_to_the_lane(self):
-        # SKILL.md Stage 1, verbatim shape: run from the MAIN checkout, beside
-        # the run's repo. `git worktree add` is not a shape the write boundary
-        # parses at all, so a session in no lane may still run it. In a lane
-        # ppl lane made the worktree (D6) and every git worktree but list is
-        # denied (R-LANE-CROSS-WRITE), until Task 10 drops the step.
-        call = payload(None, "Bash",
-                       {"command": "cd /home/dev/src/project && git fetch origin master "
-                                   "&& git worktree add ../project-DEMO-700 -b DEMO-700-slug "
-                                   "origin/master"},
-                       cwd="/home/dev/ppl-workspace")
-        self.assertIsNone(decide(call, ()))
-        self.assertIn("git worktree", self.deny_reason(decide(call)))
+    def test_orchestrator_stage_one_fetch_runs_in_the_lanes_worktree(self):
+        # references/stage-1-baseline.md without the OS sandbox profile, verbatim shape: ppl
+        # lane made the worktree (D6), so stage 1 only changes into it and fetches the default
+        # branch, from the lane's start directory or from inside the worktree. The worktree
+        # add it once ran is denied in a lane (R-LANE-CROSS-WRITE), and the skill says none
+        rendered = fixtures.render_skill_to(tmphome.mkdtemp(prefix="pplskill-"), "example-maven")
+        stage1 = (rendered / "references" / "stage-1-baseline.md").read_text(encoding="utf-8")
+        block = stage1.split("```bash\n", 1)[1].split("```", 1)[0]
+        self.assertEqual(block, "cd <worktree>\ngit fetch origin master\n")
+        self.assertNotIn("worktree add", stage1)
+        start = str(paths.home() / "lanes" / "DEMO-700")
+        for command in (block.replace("<worktree>", "/tmp/repo").replace("\n", " && ").rstrip(
+                " &"), "git fetch origin master"):
+            for cwd in (start, "/tmp/repo"):
+                with self.subTest(command=command, cwd=cwd):
+                    self.assertIsNone(decide(payload(None, "Bash", {"command": command},
+                                                     cwd=cwd)))
+        added = payload(None, "Bash", {"command": "git worktree add ../project-DEMO-700 -b "
+                                                  "DEMO-700-slug origin/master"}, cwd="/tmp/repo")
+        self.assertIn("git worktree", self.deny_reason(decide(added)))
 
     # --- Round 3 (post-branch review, finding 3): references/gates.md's
     # recipe redirected every log to "$RUN/...", and the write-boundary check

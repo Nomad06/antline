@@ -8,8 +8,8 @@ Only after the merge is observed and recorded, and always in plain informal Engl
 Then reflect: `references/reflection.md`.
 
 **This is enforced, not just a convention, only when `ppl doctor` reports the guard hook
-registered** (`local`, or an accepted `global`/`both`) **for this session** - the hook denies
-every tracker write unless the active run's stage is `merge_watch` and `ppl merge observed`
+registered** (`local`, or an accepted `both`) **for this session** - the hook denies
+every tracker write unless this run's stage is `merge_watch` and `ppl merge observed`
 has recorded the merge: a write tool of an MCP tracker [R-JIRA-GATE], a `gh issue` write
 of a CLI tracker [R-TRACKER-CLI-GATE] [R-LANE-BARE-RESUME n/a]. If `ppl doctor` reported
 `none` or `unknown`, this section is a rule you keep by discipline, not a cage: the run's
@@ -33,13 +33,17 @@ done` refused once the run is in `closure` means something changed after it ente
 that in place - the receipt, the verdict or the finding status on the current head - and
 run `ppl transition done` again, or escalate `OWNER_DECISION`, since `closure` has no way
 back to Stage 3 [R-DONE-FROM-CLOSURE]. The tracker gate fires for the orchestrator's own session -
-which carries no `agent_type` - whenever the run is active and `isolated` is true (the
-default), regardless of the session's cwd; the documented worktree layout in Stage 1 puts
-the worktree beside the orchestrator's session, not under it, so a cwd-only check would not
-have caught this session in the first place. With `--no-isolated`, this falls back to
-a cwd check instead (DESIGN 5.4).
+which carries no `agent_type` - too, whatever its cwd: every hook of the lane carries this
+run on its command line [R-LANE-HOOK-BINDING].
 
 Once the outcome is known, label the accepted SHA: `ppl label --sha <sha> --actual
 correct|defective|outcompeted --task <TASK-ID>`. `outcompeted` is for a correct candidate
 that a parallel implementation of the same task replaced; `ppl metrics` reports it as
 `outcompeted_rate` so design losses are counted, not only defects [R-METRIC-OUTCOMPETED].
+A label can come days later, from any terminal, since it names the task.
+
+Last, once the reflection has ended, free the lane's slot for the next task:
+`<!-- include: os/ppl --> lane close`. <!-- include: os/flag-note --> It frees the slot once
+`ppl merge observed` recorded the merge and no reflection of this run is pending, and leaves
+the start directory and the worktree: the owner removes them with `ppl destroy --scope local
+--task <TASK-ID>` in a terminal outside the lane. That ends this session's work.

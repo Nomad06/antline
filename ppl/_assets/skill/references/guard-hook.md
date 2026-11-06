@@ -12,23 +12,28 @@ hand without the lane flags has none [R-LANE-BARE-RESUME n/a].
   You are unprotected, and the only checks that actually run are the ones `ppl` itself
   performs (the state machine and the done gate) - a role staying inside its lane because
   you dispatched it correctly, not because anything physically stopped it if you did not.
-  Tell the operator, and proceed on that basis, or pause and ask them to arm it first
-  (README.md "Hooks"). The dispatch counter is a hook too (`SubagentStart`): with
+  Tell the operator, and proceed on that basis, or pause and ask them to start this session
+  again with `ppl lane resume <TASK-ID>` in a terminal outside the lane, which loads the
+  lane's settings. The dispatch counter is a hook too (`SubagentStart`): with
   `none`, run `ppl budget spend dispatch` yourself before every `ppl-*` dispatch, or the
   hard cap at `ppl stage enter` compares against zero for the whole run.
-- **`local`** - registered in this directory's `.claude/settings.local.json` only. This is
-  the isolated, recommended state; the present-tense claims in this skill hold for this run.
-- **`global`** or **`both`** - registered in `~/.claude/settings.json`, which fires in every
-  Claude Code session on the machine. Your lane's own hooks come from the settings `ppl lane`
-  rendered for it and carry this run on their command line, so this run is bound either way
-  [R-LANE-HOOK-BINDING]; tell the operator the global entry also reaches their other sessions.
+- **`local`** - registered in the lane's own `settings.json`, which `ppl lane` rendered for
+  this run with `--task <TASK-ID>` on every hook's command line, so each hook binds this run
+  whatever the cwd of the call [R-LANE-HOOK-BINDING]. This is the expected state; the
+  present-tense claims in this skill hold for this run.
+- **`start_local`** or **`both`** - a guard entry also sits in `.claude/settings.local.json`
+  of the lane's start directory, a file `ppl lane` does not write and the session loads as
+  its local settings. With `both` the lane's own entry still binds this run
+  [R-LANE-HOOK-BINDING]; tell the operator the extra entry is there. With `start_local` alone
+  the lane's own entry is gone: read it as `none`, and tell the operator to start the lane
+  again in a terminal outside it.
 - **`unknown`** - a settings file exists but could not be read or parsed. Read this the same
-  way as `none`: this check has no confirmed answer about isolation from a file it is unable
-  to read, so nothing in this skill should be taken as armed until that is fixed.
+  way as `none`: this check has no confirmed answer from a file it is unable to read, so
+  nothing in this skill should be taken as armed until that is fixed.
 
 The same JSON line carries a `matcher` field - `ok` when every registered guard entry's matcher
 passes all the tool names the hook acts on, `incomplete` when some are left out, with the
-`uncovered` list under `local`/`global` naming them. An uncovered tool is a denial that can never
+`uncovered` list under `local`/`start_local` naming them. An uncovered tool is a denial that can never
 fire, so read `incomplete` as `none` for exactly those tools, tell the operator, and expect
 `ppl init` to refuse a NEW run until the matcher is widened to the one in README.md "Hooks"
 [R-GUARD-MATCHER].

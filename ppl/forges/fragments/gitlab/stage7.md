@@ -38,7 +38,7 @@ Each tick:
    do not argue in the thread yourself.
 5. Post replies through the GitLab MCP. **You do not resolve a thread** - only the person
    who wrote the remark may [R-MCP-RESOLVE-THREAD]. After posting, record it:
-   `ppl review answered --thread <id> --sha <sha> --classification <c> --last-note-id <id> --generation $GENERATION`,
+   `ppl review answered --thread <id> --sha <sha> --classification <c> --last-note-id <id> --generation <GENERATION>`,
    so the next tick does not name the same thread again unless a newer note lands on it.
 6. Terminal condition: the MR is approved on the current head SHA. Then, in this order:
    <!-- include: sequence/close-out -->. `ppl review approved` is the only writer of the

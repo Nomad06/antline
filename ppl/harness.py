@@ -610,20 +610,21 @@ _SCRATCH_PLACEHOLDER = "<scratch>"
 _FRONTMATTER = "---\n"
 _FRONTMATTER_END = "\n---\n"
 # The sentence after each command the skill runs outside the OS sandbox: escape.decide lets the
-# orchestrator out only for one plain command on a pin, and gh and ppl only from a directory
-# no sandboxed command writes.
+# orchestrator out only for one plain command on a pin, and gh and ppl only from the lane's
+# start directory, which no sandboxed command writes.
 OS_FLAG_NOTE = ("Run each command here that starts with an absolute path exactly as written, "
                 "alone in a Bash call with `dangerouslyDisableSandbox: true`, and from the "
-                "workspace when it runs gh or ppl [R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
+                "lane's start directory when it runs gh or ppl [R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
 # Said once, in stage 1: a gh or ppl call from a directory a sandboxed command can write is
-# denied, and stage 1 leaves the session where it is.
-OS_WORKSPACE_NOTE = ("Run every `gh` and `ppl` call outside the sandbox from the workspace "
-                     "`%s`, and `cd` back there when one is denied for its cwd "
+# denied, and stage 1 leaves the session in the lane's start directory, where it started.
+OS_WORKSPACE_NOTE = ("Run every `gh` and `ppl` call outside the sandbox from the lane's start "
+                     "directory `%s`, and `cd` back there when one is denied for its cwd "
                      "[R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
-# Stage 1 under the profile: the session stays in the workspace, so a gate names the worktree.
+# Stage 1 under the profile: the session stays in the lane's start directory, so a gate names
+# the worktree.
 OS_GATES_WHERE = ("Every gate and every dispatched worker works in this worktree from now on: "
                   "each gate recipe in `references/gates.md` changes into it in a subshell, so "
-                  "this session stays in the workspace.")
+                  "this session stays in the lane's start directory.")
 _UNKNOWN_REPO = "<owner/name>"
 _UNKNOWN_WORKSPACE = "<workspace>"
 
@@ -664,16 +665,17 @@ def _fragment_file(doc, name, lane=None):
 
 
 def _os_values(doc, pins, workspace):
-    """The os/* includes. With the OS sandbox profile the GitHub commands run on the pinned
-    binaries, word for word in the shapes the guard lets out of the sandbox, each followed by
-    OS_FLAG_NOTE, and stage 1 runs git with -C instead of a cd, so the session stays in the
-    workspace its gh and ppl calls run from. The repositories, the checkout and the fetch come
-    from the os_sandbox functions the facts and the allow entries are made with, since apply
-    renders before it writes the facts. Without the profile every include is today's text."""
+    """The os/* includes. With the OS sandbox profile the GitHub commands and the ppl commands
+    that write outside the lane's own run run on the pinned binaries, word for word in the
+    shapes the guard lets out of the sandbox, each followed by OS_FLAG_NOTE, and stage 1 runs
+    git with -C instead of a cd, so the session stays in the lane's start directory its gh and
+    ppl calls run from. The repositories, the checkout and the fetch come from the os_sandbox
+    functions the facts and the allow entries are made with. Without the profile stage 1 changes
+    into the lane's worktree, where every gate runs, and the commands are the plain ones."""
     repo = doc["repo"]
     default_branch = repo["default_branch"]
     values = {("os", "gh"): "gh", ("os", "ppl"): "ppl", ("os", "flag-note"): "",
-              ("os", "cd"): "cd %s\n" % repo["path"], ("os", "git-dir"): "",
+              ("os", "cd"): "cd <worktree>\n",
               ("os", "fetch"): "git fetch origin %s" % default_branch, ("os", "stage1-note"): "",
               ("os", "push"): "git push -u origin <branch>", ("os", "destroy"): "",
               ("os", "merge-watch"): "",
@@ -695,7 +697,7 @@ def _os_values(doc, pins, workspace):
     values.update({("os", "gh"): gh, ("os", "ppl"): pins["ppl"]["path"],
                    ("os", "flag-note"): OS_FLAG_NOTE, ("os", "forge-repo"): forge_repo,
                    ("os", "tracker-repo"): tracker_repo or _UNKNOWN_REPO,
-                   ("os", "cd"): "", ("os", "git-dir"): "-C %s " % checkout,
+                   ("os", "cd"): "",
                    ("os", "fetch"): "git -C %s fetch origin %s" % (checkout, default_branch),
                    ("os", "gates-where"): OS_GATES_WHERE,
                    ("os", "stage1-note"): "\n\n" + note if note else ""})
@@ -759,7 +761,6 @@ def _values(doc, pins=None, workspace=None, lane=None):
         ("harness", "name"): installed_name(doc),
         ("harness", "default-branch"): repo["default_branch"],
         ("harness", "scratch"): str(os_sandbox.scratch_root()),
-        ("harness", "worktrees"): repo.get("worktrees") or (repo["path"].rstrip("/") + "/.worktrees"),
         ("harness", "gates"): _fragment_file(doc, "gates", lane),
         # One line: the baseline sentence also fills a table cell.
         ("harness", "baseline"): " ".join(_fragment_file(doc, "baseline", lane).split()) or _DEFAULT_BASELINE,

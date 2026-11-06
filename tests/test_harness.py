@@ -1738,10 +1738,9 @@ class TestRenderSkill(HarnessTestCase):
         maven = self.render("example-maven")
         self.assertIn("--harness example-maven", maven["references/stage-0-admission.md"])
         baseline = maven["references/stage-1-baseline.md"]
-        self.assertIn("cd /home/dev/src/project\n", baseline)
-        self.assertIn("git fetch origin master\n", baseline)
-        self.assertIn("git worktree add /home/dev/src/project/.worktrees/<repo-name>-<TASK-ID> "
-                      "-b <TASK-ID>-<short-slug> origin/master\n", baseline)
+        # ppl lane made the worktree: the session changes into it, where the gates run
+        self.assertIn("```bash\ncd <worktree>\ngit fetch origin master\n```", baseline)
+        self.assertNotIn("worktree add", baseline)
         self.assertIn("the names of tests that already fail on the base revision", baseline)
         self.assertIn("(no knowledge skills are configured for this harness)",
                       maven["references/stage-2-briefing.md"])
@@ -1876,7 +1875,8 @@ class TestRenderOsSandbox(HarnessTestCase):
                       rendered["references/stage-8-after-merge.md"])
         self.assertIn("/opt/x/gh pr close <number> -R o/r", rendered["SKILL.md"])
         # the checkout as the facts hold it, which ppl's allow entry for the fetch spells, and no
-        # cd into it: the session stays in the workspace its gh and ppl calls run from
+        # cd into it: the session stays in the lane's start directory its gh and ppl calls run
+        # from, and ppl lane made the worktree
         checkout = os.path.realpath("/home/dev/src/project")
         self.assertIn("```bash\n/usr/bin/git -c core.hooksPath=/dev/null "
                       "-c core.sshCommand=ssh -c credential.helper= -c core.askPass= "
@@ -1885,9 +1885,14 @@ class TestRenderOsSandbox(HarnessTestCase):
                       "-c protocol.git.allow=never -c push.gpgSign=false -c gpg.program= "
                       "-c core.alternateRefsCommand= -c core.fsmonitor=false -c gc.auto=0 "
                       "-c maintenance.auto=false -C %s fetch "
-                      "--no-recurse-submodules origin main\ngit -C %s worktree add "
-                      % (checkout, checkout),
+                      "--no-recurse-submodules origin main\n```" % checkout,
                       rendered["references/stage-1-baseline.md"])
+        # the ppl commands that write PPL_HOME outside the lane's own run leave the sandbox too
+        self.assertIn("`/opt/y/bin/ppl lessons pending`",
+                      rendered["references/stage-0-admission.md"])
+        self.assertIn("`/opt/y/bin/ppl lessons record --task <RUN-ID> --file ",
+                      rendered["references/reflection.md"])
+        self.assertIn("`/opt/y/bin/ppl lane close`", rendered["references/stage-8-after-merge.md"])
         self.assertIn("watching the PR. Read its state with `/opt/x/gh pr view <number> -R o/r "
                       "--json=state,mergeCommit`. Run each command here",
                       rendered["references/stage-8-after-merge.md"])
@@ -1905,10 +1910,14 @@ class TestRenderOsSandbox(HarnessTestCase):
 
     def test_a_gitlab_harness_renders_todays_commands(self):
         rendered = self.render("example-maven")
-        self.assertIn("```bash\ncd /home/dev/src/project\ngit fetch origin master\n"
-                      "git worktree add ", rendered["references/stage-1-baseline.md"])
-        self.assertIn("close the merge request,\ndelete the remote branch, then run "
-                      "`ppl destroy --scope local`. That is the only outward", rendered["SKILL.md"])
+        self.assertIn("```bash\ncd <worktree>\ngit fetch origin master\n```",
+                      rendered["references/stage-1-baseline.md"])
+        # R51: the local destroy removes the session's own cwd, so it is the owner's step
+        self.assertIn("close the merge request and\ndelete the remote branch. Then stop, and tell "
+                      "the owner to run\n`ppl destroy --scope local --task <TASK-ID>` in a "
+                      "terminal outside this lane", rendered["SKILL.md"])
+        self.assertIn("`ppl lessons pending`", rendered["references/stage-0-admission.md"])
+        self.assertIn("`ppl lane close`", rendered["references/stage-8-after-merge.md"])
         self.assertIn("keep\nwatching the MR. Once the merge is actually observed",
                       rendered["references/stage-8-after-merge.md"])
         self.assertIn("now on.\n\nThen record the baseline.",
@@ -1926,12 +1935,21 @@ class TestRenderOsSandbox(HarnessTestCase):
             rendered = harness.render_skill(harness.load("example-maven"))
         stage1 = rendered["references/stage-1-baseline.md"]
         checkout = os.path.realpath("/home/dev/src/project")
-        # git reaches GitLab from inside the sandbox, so nothing here is flagged
-        self.assertIn("```bash\ngit -C %s fetch origin master\ngit -C %s worktree add "
-                      % (checkout, checkout), stage1)
+        # git reaches GitLab from inside the sandbox, so only the pinned ppl commands that write
+        # PPL_HOME outside the lane's own run are flagged (R57, D24)
+        self.assertIn("```bash\ngit -C %s fetch origin master\n```" % checkout, stage1)
         self.assertNotIn("\ncd ", stage1)
-        for relative, text in rendered.items():
-            self.assertNotIn("dangerouslyDisableSandbox", text, relative)
+        flagged = sorted(relative for relative, text in rendered.items()
+                         if "dangerouslyDisableSandbox" in text)
+        self.assertEqual(flagged, ["references/reflection.md", "references/stage-0-admission.md",
+                                   "references/stage-8-after-merge.md"])
+        for relative in flagged:
+            self.assertEqual(re.findall(r"`(/opt/y/bin/ppl [a-z]+ [a-z]+)",
+                                        rendered[relative]),
+                             [{"references/reflection.md": "/opt/y/bin/ppl lessons record",
+                               "references/stage-0-admission.md": "/opt/y/bin/ppl lessons pending",
+                               "references/stage-8-after-merge.md": "/opt/y/bin/ppl lane close"}[
+                                 relative]], relative)
 
     def test_a_check_renders_a_github_harness_without_its_binaries_on_path(self):
         # apply looks the pins up again and refuses a missing one, a check only measures

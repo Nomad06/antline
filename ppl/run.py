@@ -513,8 +513,9 @@ def destroy(task_id, scope):
         store.append_log(task_id, {"event": "destroy", "scope": "full",
                                    "status": "queued_remote_cleanup"})
         return {"status": "queued_remote_cleanup",
-                "next": "orchestrator closes the MR and deletes the remote branch, then "
-                        "runs ppl destroy --scope local"}
+                "next": "the orchestrator closes the MR and deletes the remote branch, then "
+                        "the owner runs ppl destroy --scope local --task %s in a terminal "
+                        "outside the lane" % task_id}
 
     state = store.read_json(state_path(task_id))
     entry = lanes.entry(task_id)
