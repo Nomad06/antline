@@ -52,6 +52,15 @@ def reason(result):
     return result["hookSpecificOutput"]["permissionDecisionReason"]
 
 
+def nested_substitutions(depth, size, filler, tail):
+    """echo, `depth` substitutions nested in one another around `filler` repeated to fill the
+    command to `size` characters, then `tail`: the shape whose reading per level grew with the
+    square of the depth (R49)."""
+    room = size - len("echo ") - 3 * depth - len(tail)
+    return ("echo " + "$(" * depth + (filler * (room // len(filler) + 1))[:room] + ")" * depth
+            + tail)
+
+
 class LaneCase(unittest.TestCase):
     """Each test in its own data root: a lane registry is machine-wide state."""
 
@@ -1016,13 +1025,17 @@ class TestLaneProtection(LaneCase):
                 with self.subTest(command=command, agent=agent):
                     reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
                     self.assertIn("BOUNDARY_VIOLATION", reason)
-        reason = self.deny_reason(self.bash("timeout 5 $(echo git) config core.hooksPath /tmp/h",
-                                            agent="ppl-code-worker", cwd=own))
-        self.assertIn("may not write git config", reason)
+        # R49: a built word beside a config word is refused for every session, a role's
+        # config write among them
+        for agent in (None, "ppl-code-worker"):
+            with self.subTest(config="timeout 5 $(echo git) config", agent=agent):
+                reason = self.deny_reason(self.bash(
+                    "timeout 5 $(echo git) config core.hooksPath /tmp/h", agent=agent, cwd=own))
+                self.assertIn("a word the shell builds", reason)
         # config in a path, a file name or an option is no git config, a read of git config is
         # judged in its own segment, and a git whose subcommand is read is judged by it
         for command in ("git diff --stat $(git merge-base HEAD main) -- src/config",
-                        "timeout 5 git log $(git merge-base HEAD main)..HEAD -- config",
+                        "nice git log $(git merge-base HEAD main)..HEAD -- config",
                         "git -C \"$(git rev-parse --show-toplevel)\" log -- config",
                         "cat \"$(git rev-parse --show-toplevel)/config/app.yml\"",
                         "$(git rev-parse --show-toplevel)/scripts/check-config.sh",
@@ -1048,6 +1061,22 @@ class TestLaneProtection(LaneCase):
         reason = self.deny_reason(self.bash(command, agent="ppl-code-worker",
                                             cwd=self.worktree[LANE_A]))
         self.assertIn("git worktree", reason)
+        # R49: a command read by its spelling, nested past the 32 levels the masking reads or
+        # spelling its $SUBST mask word, keeps every denial its here-document bodies would
+        # get: a delimiter not exactly <<'WORD', an interpreter's body, a line that does not
+        # parse, read with its backslashes out
+        bodies = (("cat <<EOF | bash\ngit work\\\ntree prune\nEOF\n", "here-document"),
+                  ("python3 <<'E'\nimport subprocess\nsubprocess.run(['ppl', 'show'])\nE\n",
+                   "interpreter"),
+                  ("cat <<'E' | bash\nit's git work\\tree x\nE\n", "git worktree"))
+        for body, expected in bodies:
+            for command in (body + "echo " + "$(" * 33 + "true" + ")" * 33,
+                            body + "echo $SUBST"):
+                for agent in (None, "ppl-code-worker"):
+                    with self.subTest(command=command, agent=agent):
+                        reason = self.deny_reason(self.bash(command, agent=agent,
+                                                            cwd=self.worktree[LANE_A]))
+                        self.assertIn(expected, reason)
 
     def test_a_command_built_for_here_document_and_substitution_work_is_decided_in_time(self):
         # rule: R-LANE-CROSS-WRITE
@@ -1064,24 +1093,141 @@ class TestLaneProtection(LaneCase):
                   ("cat ", "<<'A'\"\" ", "A", ""), ("python3 ", "<<A ", "A", ""),
                   ("", "A=1 <<A ", "A", ""), ("", "cat <<A; ", "A", ""),
                   ("", "cat <<'A'\nit's\nA\n", "", ""), ("echo ", "$(true)", "", ""),
-                  ("echo ", "`true`", "", ""), ("echo ", "$(cat <<'A'\nA\n)", "", ""),
-                  ("echo ", "$(", "", "true"))
+                  ("echo ", "`true`", "", ""), ("echo ", "$(cat <<'A'\nA\n)", "", ""))
         for size, agent in ((ppl_guard.ROLE_COMMAND_LENGTH_LIMIT, "ppl-code-worker"),
                             (32 * 1024, None)):
+            commands = []
             for head, unit, term, close in shapes:
-                per = len(unit) + (len(term) + 1 if term else 0) + (1 if unit == "$(" else 0)
+                per = len(unit) + (len(term) + 1 if term else 0)
                 count = (size - len(head) - (1 if term else 0) - len(close) - len(tail)) // per
-                if unit == "$(":
-                    command = head + unit * count + close + ")" * count + tail
-                else:
-                    command = (head + unit * count
-                               + ("\n" + (term + "\n") * count if term else "") + close + tail)
+                commands.append((unit, head + unit * count
+                                 + ("\n" + (term + "\n") * count if term else "") + close + tail))
+            # R49: substitutions nested as deep as the masking reads them, filled to the size
+            commands.append(("$( x%d" % ppl_guard._NESTING_LIMIT, nested_substitutions(
+                ppl_guard._NESTING_LIMIT, size, "a;", tail)))
+            for unit, command in commands:
                 with self.subTest(size=size, unit=unit):
                     self.assertLessEqual(len(command), size)
                     start = time.perf_counter()
                     result = self.bash(command, agent=agent, cwd=own)
                     self.assertLess(time.perf_counter() - start, 0.5)
                     self.assertIn("git worktree", self.deny_reason(result))
+
+    def test_substitutions_nested_below_the_recursion_limit_are_decided_in_time(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R49: each substitution's text as written holds every level nested in it, so reading
+        # each level's text by itself grew with the square of the depth (a 32 KiB orchestrator
+        # command took 237 s, and a timeout lets the call through). Substitutions nested
+        # deeper than 32 levels are read by their spelling, and a text inside one read
+        # already is not read again, so a role command at the 4096 cap and an orchestrator
+        # command of 32 KiB, nested to any depth below the recursion limit and filled with
+        # what made each level's reading slowest, decide well inside the hook's timeout and
+        # still deny the git worktree they end with
+        own = self.worktree[LANE_A]
+        tail = "; git worktree remove ../shop-%s" % LANE_B
+        depths = (30, ppl_guard._NESTING_LIMIT, ppl_guard._NESTING_LIMIT + 1, 100, 300, 900,
+                  sys.getrecursionlimit() - 60)
+        for size, agent in ((ppl_guard.ROLE_COMMAND_LENGTH_LIMIT, "ppl-code-worker"),
+                            (32 * 1024, None)):
+            for depth in depths:
+                for filler in ("a;", "GIT_CONFIGa", "'a' ", "a "):
+                    command = nested_substitutions(depth, size, filler, tail)
+                    with self.subTest(size=size, depth=depth, filler=filler):
+                        self.assertLessEqual(len(command), size)
+                        start = time.perf_counter()
+                        result = self.bash(command, agent=agent, cwd=own)
+                        self.assertLess(time.perf_counter() - start, 0.5)
+                        self.assertIn("git worktree", self.deny_reason(result))
+
+    def test_an_assignment_that_ends_in_home_hands_git_no_config(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R49: a GIT_CONFIG_*, HOME or XDG_CONFIG_HOME assignment is read at a word's start, so
+        # JAVA_HOME= or GRADLE_USER_HOME= with a substitution beside a git is no config handed
+        # in from elsewhere, while one that does move git's config is still refused
+        own = self.worktree[LANE_A]
+        for command in ("JAVA_HOME=$(/usr/libexec/java_home -v 21) mvn -q test && git status",
+                        "export JAVA_HOME=$(/usr/libexec/java_home -v 21) && git log -1",
+                        "GRADLE_USER_HOME=$(pwd)/.gradle ./gradlew test && git diff --stat"):
+            for agent in (None, "ppl-code-worker", "ppl-verifier"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+        for command in ("HOME=$(mktemp -d) git log -1",
+                        "export HOME=$(mktemp -d) && git log -1",
+                        "GIT_CONFIG_GLOBAL=$(mktemp) git status",
+                        "export XDG_CONFIG_HOME=$(mktemp -d); git status"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("hands git config from elsewhere", reason)
+
+    def test_only_a_git_the_segment_runs_exempts_the_words_the_shell_builds(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R49: the words after a git are that git's own, judged by its subcommand (R40), only
+        # when the segment runs that git: at its command position, or behind a wrapper the
+        # walk models (env, command, nice, ...). A git an echo or sudo spells exempts no word,
+        # so a timeout'd git log whose built argument sits beside a config word is refused too
+        own = self.worktree[LANE_A]
+        for command in ("echo git status $(echo worktree) prune | bash",
+                        "sudo git log $(echo git) worktree prune",
+                        "timeout 5 git log $(git merge-base HEAD main)..HEAD -- config"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "nice git log $(git merge-base HEAD main)..HEAD -- config",
+                        "command git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "env GIT_PAGER=cat git log $(git rev-parse HEAD) -- config"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+
+    def test_a_word_the_shell_builds_beside_a_worktree_config_or_ppl_word_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R49: a word the shell builds in any place of a segment, not only its command word,
+        # may be the git or the ppl a wrapper the walk does not unwrap runs, so a segment that
+        # holds one and a worktree, config or ppl word is refused for every session, as a
+        # variable set by an earlier call (sudo $G worktree prune) shows
+        own = self.worktree[LANE_A]
+        for command in ("sudo $G worktree prune",
+                        "timeout 5 $G config core.hooksPath /tmp/h",
+                        "xargs $P worktree prune < /dev/null",
+                        "stdbuf -o0 $W ppl show"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("ls $(pwd)",
+                        "for f in $(git diff --name-only); do wc -l \"$f\"; done",
+                        "cat \"$(git rev-parse --show-toplevel)/config/app.yml\"",
+                        "git log -1 $(git rev-parse HEAD) -- config"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+
+    def test_a_git_worktree_list_a_segment_runs_is_no_git_worktree_spelled(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R49: the text as written of a segment holding a word the shell builds does not
+        # count a git worktree list it runs, at a command position, as git then worktree, so
+        # a loop over the lanes' worktrees is allowed, while one an echo or a sed spells, or
+        # a built git beside it, is still read
+        own = self.worktree[LANE_A]
+        for command in ("for w in $(git worktree list --porcelain | awk '/^worktree /{print $2}');"
+                        " do echo $w; done",
+                        "echo \"$(git worktree list)\"",
+                        "git worktree list | grep $(git rev-parse --abbrev-ref HEAD)"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+        for command in ("echo $(git worktree list) $(echo git) worktree prune",
+                        "$(echo git worktree list | sed s/list/prune/)",
+                        "echo $(git worktree list | sed 's/.*/git worktree prune/') | bash"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
 
     def test_git_worktree_in_any_form_but_list_is_denied(self):
         # rule: R-LANE-CROSS-WRITE
