@@ -486,7 +486,7 @@ def orchestrator_shape(argv, cwd, facts, state):
             return problem
         if name == "gh":
             return _gh_problem(argv[1:], facts, state)
-        return _ppl_problem(argv[1:], state)
+        return _ppl_problem(argv[1:], state, facts)
     return ("%s is not a pinned binary: only %s run outside the OS sandbox, spelled exactly"
             % (_short(argv[0]), ", ".join(facts["pins"][name]["path"] for name in PIN_NAMES)))
 
@@ -637,7 +637,40 @@ def _gh_api_problem(args, facts, state):
     return _body_file_problem(flags["-F"][len("body=@"):], facts, state)
 
 
-def _ppl_problem(args, state):
+def _lessons_record_problem(args, facts, task_id):
+    """None for `--task <T> --file <scratch>/<lane task>/lessons-<T>.json` of a lane whose
+    own run is T or whose pending marker for T it claimed (R57), the file a plain file reached
+    through no link: a role can write the lane's scratch directory, so a link there could hand
+    ppl another file to record."""
+    usage = ("ppl lessons record takes exactly --task <id> --file %s/<the lane's task>/"
+             "lessons-<id>.json" % facts["scratch"])
+    if not task_id:
+        return "ppl lessons record runs outside the sandbox only in a lane, for its run"
+    operands, flags = _parse(args, {"--task": "task", "--file": "file"}, ())
+    if operands is None:
+        return "%s: %s" % (usage, flags)
+    if operands or set(flags) != {"--task", "--file"}:
+        return usage
+    target, value = flags["--task"], flags["--file"]
+    if not paths.TASK_ID_RE.fullmatch(target):
+        return "ppl lessons record --task %s is not a task id" % _short(target)
+    if target != task_id and not os.path.isfile(str(paths.claimed_marker(target, task_id))):
+        return ("ppl lessons record --task %s is neither lane %s's own run nor a run whose "
+                "pending marker it claimed with ppl lessons pending" % (target, task_id))
+    expected = os.path.join(facts["scratch"], task_id, "lessons-%s.json" % target)
+    if not os.path.isabs(value) or os.path.realpath(value) != expected:
+        return ("ppl lessons record --file %s is not %s, reached through no link"
+                % (_short(value), expected))
+    try:
+        info = os.lstat(expected)
+    except OSError:
+        return "ppl lessons record --file %s does not exist" % _short(value)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return "ppl lessons record --file %s is not a plain file with a single link" % _short(value)
+    return None
+
+
+def _ppl_problem(args, state, facts):
     task_id = _task_id(state)
     if args[:2] == ["tracker", "fetch"]:
         if task_id and args[2:] in (["--task", task_id], ["--task=" + task_id]):
@@ -660,5 +693,15 @@ def _ppl_problem(args, state):
                                              ["--task=" + task_id])):
             return None
         return "ppl lane close takes nothing, or the active run's id as <id> or --task <id>"
+    if args[:2] == ["lessons", "pending"]:
+        # it claims the lane's markers under PPL_HOME/lessons, outside every write scope (R57),
+        # for the lane PPL_TASK names
+        if task_id and not args[2:]:
+            return None
+        return "ppl lessons pending takes nothing, and runs outside the sandbox only in a lane"
+    if args[:2] == ["lessons", "record"]:
+        # it writes PPL_HOME/lessons, outside every write scope (R57)
+        return _lessons_record_problem(args[2:], facts, task_id)
     return ("ppl %s is not one of tracker fetch --task <id>, review fetch --pr <n>, "
-            "doctor --forge or lane close" % " ".join(_short(a) for a in args[:2]))
+            "doctor --forge, lane close, lessons pending or lessons record"
+            % " ".join(_short(a) for a in args[:2]))

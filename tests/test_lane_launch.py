@@ -20,6 +20,9 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import fixtures
 from ppl import (cli, config, harness, lane_launch, lanes, lessons, os_sandbox, paths, run,
                  setup, store, tomlout)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
+import ppl_guard
 from ppl.errors import PplError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -482,6 +485,14 @@ class TestStart(LaneCase):
         self.assertEqual(self.staging_dirs(), [])
 
 
+def under(path, entries):
+    """True when `path` is one of `entries` or lies under one, compared by realpath."""
+    real = os.path.realpath(path)
+    return any(real == os.path.realpath(entry)
+               or real.startswith(os.path.realpath(entry).rstrip(os.sep) + os.sep)
+               for entry in entries)
+
+
 class TestTheLaneWriteScope(LaneCase):
     """R44: under the lane's OS sandbox profile, sandboxed Bash writes only its own run under
     PPL_HOME's runs/ and scratch/. Every path the in-lane ppl CLI writes on a normal flow lies
@@ -527,6 +538,87 @@ class TestTheLaneWriteScope(LaneCase):
     def generation(self):
         return str(json.loads(self.ppl("show", "--json"))["lease_generation"])
 
+    def filesystem(self):
+        """The rendered profile's sandbox.filesystem of the lane's settings.json."""
+        settings = json.loads((lanes.start_dir(TASK) / "settings.json").read_text(
+            encoding="utf-8"))
+        return settings["sandbox"]["filesystem"]
+
+    def guard(self, *args):
+        """The guard's decision on the orchestrator's `<pinned ppl> <args>` outside the OS
+        sandbox from the lane's start directory, as the lane's hook command line binds it."""
+        command = " ".join([fixtures.FAKE_PINS["ppl"]["path"]] + list(args))
+        return ppl_guard.decide({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                 "tool_input": {"command": command,
+                                                "dangerouslyDisableSandbox": True},
+                                 "cwd": str(lanes.start_dir(TASK))}, ["--task", TASK])
+
+    def escaped(self, *args):
+        """`ppl <args>` run as an escape shape: the guard lets it out of the sandbox, and it
+        runs as the lane's session runs it. Returns (stdout, the paths it wrote)."""
+        self.assertIsNone(self.guard(*args), args)
+        before = self.snapshot()
+        with mock.patch.dict(os.environ, {"PPL_TASK": TASK}):
+            code, out, err = call(*args)
+        self.assertEqual(code, 0, "ppl %s: %s" % (" ".join(args), err))
+        after = self.snapshot()
+        return out, {path for path in set(before) | set(after)
+                     if before.get(path) != after.get(path)}
+
+    def abandon(self, task, harness_name):
+        """A run of `harness_name` that the owner destroyed with reflection outside every lane:
+        its pending marker."""
+        run.init(task, "u", str(self.base / ("gone-" + task)),
+                 harness={"name": harness_name, "path": "x", "format": harness.FORMAT})
+        store.write_json(paths.run_dir(task) / "harness.json", {"name": harness_name})
+        lessons.destroy_with_reflection(task, "gave up")
+        return lessons.pending_path(task)
+
+    def test_an_in_lane_reflection_records_through_the_escape_shapes(self):
+        # R57: the lane's sandboxed Bash writes neither PPL_HOME/lessons nor another run's
+        # scratch, so the reflection builds its own bundle sandboxed and claims and records
+        # through the two pinned ppl shapes, its answers in its own scratch directory, and the
+        # lane closes the same way
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.ppl("init", TASK, "--tracker-url", LINK, "--skip-model-check", "--no-os-sandbox")
+        mine = self.abandon("KEY-3", HARNESS)
+        theirs = self.abandon("KEY-4", "other")
+        state = run.load(TASK)
+        state.update(stage="merge_watch", status="done")
+        state["mr"]["merged_sha"] = git(self.worktree, "rev-parse", "HEAD")
+        run.save(state)
+        self.ppl("lessons", "bundle")
+        filesystem = self.filesystem()
+        lessons_home = lessons.lessons_home()
+        recorded = []
+        for task in (TASK, "KEY-3"):
+            if task == "KEY-3":
+                out, wrote = self.escaped("lessons", "pending")
+                self.assertEqual(out.split(), ["KEY-3", str(lessons.find_bundle(
+                    "KEY-3", TASK))])
+                self.assertFalse(mine.exists())
+                self.assertTrue(theirs.is_file())
+                self.assertTrue(all(under(path, [lessons_home]) for path in wrote), wrote)
+            answer = self.document("lessons-%s.json" % task, {"task": task, "no_entry": True})
+            self.assertTrue(under(answer, filesystem["allowWrite"]))
+            out, wrote = self.escaped("lessons", "record", "--task", task, "--file", answer)
+            self.assertEqual(out.strip(), "recorded no entry for %s" % task)
+            self.assertTrue(all(under(path, [lessons_home]) for path in wrote), wrote)
+            recorded.append(lessons.proposals_path(HARNESS, task))
+        self.assertTrue(all(path.is_file() for path in recorded))
+        self.assertEqual([path for path in self.written
+                          if not under(path, filesystem["allowWrite"])], [])
+        self.assertFalse(any(under(lessons_home, [entry]) or under(entry, [lessons_home])
+                             for entry in filesystem["allowWrite"]))
+        # the other harness's run stays unclaimed, and this lane cannot record it
+        self.assertEqual([marker["task"] for marker in lessons.pending()], ["KEY-4"])
+        answer = self.document("lessons-KEY-4.json", {"task": "KEY-4", "no_entry": True})
+        reason = self.guard("lessons", "record", "--task", "KEY-4", "--file", answer)
+        self.assertIn("BOUNDARY_VIOLATION",
+                      reason["hookSpecificOutput"]["permissionDecisionReason"])
+        self.escaped("lane", "close")
+        self.assertIsNone(lanes.entry(TASK))
+
     def test_the_in_lane_cli_writes_only_inside_the_rendered_allow_write(self):
         # rule: R-LANE-CROSS-WRITE
         lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
@@ -570,16 +662,7 @@ class TestTheLaneWriteScope(LaneCase):
         self.ppl("review", "approved", "--sha", head)
         self.ppl("park", "--blocker", "OWNER_DECISION", "--safe-next", "ask the owner")
 
-        settings = json.loads((lanes.start_dir(TASK) / "settings.json").read_text(
-            encoding="utf-8"))
-        filesystem = settings["sandbox"]["filesystem"]
-
-        def under(path, entries):
-            real = os.path.realpath(path)
-            return any(real == os.path.realpath(entry)
-                       or real.startswith(os.path.realpath(entry).rstrip(os.sep) + os.sep)
-                       for entry in entries)
-
+        filesystem = self.filesystem()
         self.assertTrue(any(under(path, [paths.run_dir(TASK)]) for path in self.written))
         self.assertEqual(sorted(path for path in self.written
                                 if not under(path, filesystem["allowWrite"])), [])

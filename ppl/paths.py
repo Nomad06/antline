@@ -94,6 +94,21 @@ def run_dir(task_id):
     return runs_dir() / check_task_id(task_id)
 
 
+def pending_marker(task_id):
+    """The marker a run destroyed with reflection leaves while its reflection is not recorded:
+    PPL_HOME/lessons/pending/<task>.json."""
+    return home() / "lessons" / "pending" / ("%s.json" % task_id)
+
+
+CLAIMED = ".claimed-"
+
+
+def claimed_marker(task_id, by_task):
+    """That marker once the lane of `by_task` claimed it (D20): <task>.json.claimed-<by_task>."""
+    marker = pending_marker(task_id)
+    return marker.with_name(marker.name + CLAIMED + by_task)
+
+
 def legacy_active_file():
     """The single-run pointer ppl init wrote before lanes. Nothing writes it now: only
     `ppl lane` reads it, to refuse while it names a run from before lanes that is not finished

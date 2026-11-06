@@ -797,6 +797,97 @@ class TestOrchestratorShape(OsSandboxCase):
             self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(
                 self.decide(PPL + " lane close --task GH-7", cwd=real(start))))
 
+    @contextlib.contextmanager
+    def reflection(self):
+        """The lane's own answer file, the answer for GH-9, a run of the same harness whose
+        pending marker GH-7's lane claimed, and GH-10's unclaimed marker, as files of the
+        lane's scratch directory and of PPL_HOME/lessons/pending."""
+        pending = paths.home() / "lessons" / "pending"
+        pending.mkdir(parents=True, exist_ok=True)
+        made = [Path(scratch_file(name)) for name in ("lessons-GH-7.json", "lessons-GH-9.json",
+                                                      "lessons-GH-10.json")]
+        made += [paths.claimed_marker("GH-9", TASK), paths.pending_marker("GH-10"),
+                 paths.claimed_marker("GH-11", "GH-8")]
+        for path in made:
+            path.write_text("{}\n", encoding="utf-8")
+        try:
+            yield
+        finally:
+            for path in made:
+                path.unlink(missing_ok=True)
+
+    def test_ppl_lessons_pending_and_record_from_the_start_directory_are_allowed(self):
+        # R57: both write PPL_HOME/lessons, outside every write scope, so the orchestrator runs
+        # them outside the sandbox from the lane's start directory: pending bare, record for its
+        # own run or a marker it claimed, its answer pinned to its own scratch directory
+        with self.reflection():
+            for command in (PPL + " lessons pending",
+                            PPL + " lessons record --task GH-7 --file "
+                            + scratch_file("lessons-GH-7.json"),
+                            PPL + " lessons record --file=%s --task=GH-9"
+                            % scratch_file("lessons-GH-9.json")):
+                for cwd in (WS, real(WS)):
+                    with self.subTest(command=command, cwd=cwd):
+                        self.assertIsNone(self.decide(command, cwd=cwd))
+
+    def test_ppl_lessons_record_of_a_task_this_lane_has_not_claimed_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        with self.reflection():
+            # an unclaimed marker, another lane's claim, a task with no marker at all
+            for task in ("GH-10", "GH-11", "GH-12"):
+                command = "%s lessons record --task %s --file %s" % (
+                    PPL, task, scratch_file("lessons-%s.json" % task))
+                with self.subTest(task=task):
+                    reason = self.deny_reason(self.decide(command))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("ppl lessons pending", reason)
+            with self.no_lane():
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(
+                    PPL + " lessons record --task GH-7 --file "
+                    + scratch_file("lessons-GH-7.json"))))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(
+                    PPL + " lessons pending")))
+
+    def test_ppl_lessons_record_of_a_file_outside_the_lanes_scratch_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        with self.reflection():
+            mine = scratch_file("lessons-GH-7.json")
+            other = str(paths.home() / "scratch" / "GH-8")
+            os.makedirs(other, exist_ok=True)
+            Path(other, "lessons-GH-7.json").write_text("{}\n", encoding="utf-8")
+            link = scratch_file("lessons-GH-9.json")
+            os.unlink(link)
+            os.symlink(mine, link)
+            hard = scratch_file("lessons-GH-10.json")
+            os.unlink(hard)
+            os.link(mine, hard)
+            paths.claimed_marker("GH-10", TASK).write_text("{}\n", encoding="utf-8")
+            self.addCleanup(paths.claimed_marker("GH-10", TASK).unlink, missing_ok=True)
+            self.addCleanup(shutil.rmtree, other, True)
+            for task, path in (("GH-7", os.path.join(other, "lessons-GH-7.json")),
+                               ("GH-7", scratch_file("lessons.json")),
+                               ("GH-7", scratch_file("lessons-GH-9.json")),
+                               ("GH-7", "lessons-GH-7.json"),
+                               ("GH-7", scratch_file("lessons-GH-404.json")),
+                               ("GH-9", link), ("GH-10", hard)):
+                command = "%s lessons record --task %s --file %s" % (PPL, task, path)
+                with self.subTest(command=command):
+                    self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(self.decide(command)))
+
+    def test_ppl_lessons_pending_or_record_with_an_extra_argument_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        mine = scratch_file("lessons-GH-7.json")
+        with self.reflection():
+            for tail in ("pending GH-7", "pending --task GH-7", "pending --json",
+                         "record --task GH-7 --file %s --harness x" % mine,
+                         "record --task GH-7 --file %s GH-7" % mine,
+                         "record --task GH-7 --task GH-7 --file %s" % mine,
+                         "record --task GH-7", "record --file %s" % mine,
+                         "bundle --task GH-7", "list", "accept GH-7.1"):
+                with self.subTest(tail=tail):
+                    self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(
+                        self.decide("%s lessons %s" % (PPL, tail))))
+
     def test_ppl_init_unsandboxed_is_denied(self):
         # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
         for tail in ("init GH-8 https://github.com/o/r/issues/8 /tmp/ghrepo", "harness apply x",

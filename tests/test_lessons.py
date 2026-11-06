@@ -1304,6 +1304,93 @@ class TestAbandonedRun(LessonsTestCase):
         self.assertEqual(len(err.strip().splitlines()), 2)
         self.assertIn("DEMO-9331", err)
 
+    def abandon(self, task, harness_name="example-maven"):
+        """A run of `harness_name` destroyed with reflection: its pending marker's bundle."""
+        built = self.build_run(task)
+        if harness_name != "example-maven":
+            snapshot = json.loads((built["directory"] / "harness.json").read_text(
+                encoding="utf-8"))
+            store.write_json(built["directory"] / "harness.json", dict(snapshot,
+                                                                      name=harness_name))
+        return lessons.destroy_with_reflection(task, "gave up")["archive"] + "/lessons/bundle"
+
+    def in_lane(self, lane, *args):
+        """`ppl <args>` as the session of `lane` runs it."""
+        with mock.patch.dict(os.environ, {"PPL_TASK": lane}):
+            return call(*args)
+
+    def test_pending_lists_only_this_harness(self):
+        # D20: a lane reflects only on the runs of its own harness, and claims what it lists
+        mine = self.abandon("DEMO-9340")
+        self.abandon("DEMO-9341", harness_name="other-harness")
+        fixtures.bind_lane("DEMO-9350", "/tmp/repo-9350", harness="example-maven")
+        self.assertEqual([m["task"] for m in lessons.pending("example-maven")], ["DEMO-9340"])
+        self.assertEqual([m["task"] for m in lessons.pending("other-harness")], ["DEMO-9341"])
+        self.assertEqual(sorted(m["task"] for m in lessons.pending()), ["DEMO-9340", "DEMO-9341"])
+        code, out, err = self.in_lane("DEMO-9350", "lessons", "pending")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.splitlines(), ["DEMO-9340 %s" % mine])
+        self.assertFalse(lessons.pending_path("DEMO-9340").exists())
+        self.assertTrue(lessons.claimed_path("DEMO-9340", "DEMO-9350").is_file())
+        # the other harness's marker stays for a lane of its own harness
+        self.assertEqual([m["task"] for m in lessons.pending()], ["DEMO-9341"])
+
+    def test_a_claimed_marker_is_not_listed_twice(self):
+        # D20: the first lane's rename wins, and two lanes never reflect on the same run
+        bundle = self.abandon("DEMO-9342")
+        fixtures.bind_lane("DEMO-9351", "/tmp/repo-9351", lane=1)
+        fixtures.bind_lane("DEMO-9352", "/tmp/repo-9352", lane=2)
+        self.assertTrue(lessons.claim_pending("DEMO-9342", "DEMO-9351"))
+        self.assertFalse(lessons.claim_pending("DEMO-9342", "DEMO-9352"))
+        self.assertFalse(lessons.claim_pending("DEMO-9342", "DEMO-9351"))
+        self.assertEqual(lessons.pending(), [])
+        self.assertEqual(lessons.pending("example-maven"), [])
+        code, out, err = self.in_lane("DEMO-9352", "lessons", "pending")
+        self.assertEqual((code, out.strip()), (0, "no pending reflections"), err)
+        # the claiming lane lists its claim again, so a resumed session finishes it
+        code, out, err = self.in_lane("DEMO-9351", "lessons", "pending")
+        self.assertEqual((code, out.splitlines()), (0, ["DEMO-9342 %s" % bundle]), err)
+        self.assertEqual(lessons.find_bundle("DEMO-9342", "DEMO-9351"), Path(bundle))
+        # outside a lane the owner still sees nothing pending to claim
+        self.assertEqual(call("lessons", "pending")[1].strip(), "no pending reflections")
+
+    def test_a_lane_records_only_its_own_run_or_a_marker_it_claimed(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # R57: a lane's record names its own run or a marker it claimed with ppl lessons pending
+        self.build_run("DEMO-9343")
+        self.abandon("DEMO-9344")
+        fixtures.bind_lane("DEMO-9353", "/tmp/repo-9353", lane=1)
+        fixtures.bind_lane("DEMO-9354", "/tmp/repo-9354", lane=2)
+        fixtures.bind_lane("DEMO-9343", "/tmp/repo-9343", lane=3)
+        answer = Path(tmphome.mkdtemp(prefix="pplreflect-")) / "answer.json"
+
+        def record(lane, task):
+            answer.write_text(json.dumps({"task": task, "no_entry": True}), encoding="utf-8")
+            return self.in_lane(lane, "lessons", "record", "--task", task, "--file",
+                                str(answer))
+
+        # a pending marker no lane claimed, and another lane's run
+        for task in ("DEMO-9344", "DEMO-9343"):
+            code, out, err = record("DEMO-9353", task)
+            self.assertEqual(code, 2, out)
+            payload = json.loads(err)
+            self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+            self.assertIn("ppl lessons pending", payload["message"])
+        self.assertTrue(lessons.pending_path("DEMO-9344").is_file())
+        self.assertFalse(lessons.proposals_path("example-maven", "DEMO-9344").exists())
+        # claimed by the other lane: still not this one's
+        self.assertTrue(lessons.claim_pending("DEMO-9344", "DEMO-9354"))
+        code, _, err = record("DEMO-9353", "DEMO-9344")
+        self.assertEqual((code, json.loads(err)["error_code"]), (2, "SCHEMA_INVALID"))
+        code, out, err = record("DEMO-9354", "DEMO-9344")
+        self.assertEqual((code, out.strip()), (0, "recorded no entry for DEMO-9344"), err)
+        self.assertFalse(lessons.claimed_path("DEMO-9344", "DEMO-9354").exists())
+        self.assertTrue(lessons.proposals_path("example-maven", "DEMO-9344").is_file())
+        # a lane's own run is its own to record: this one only lacks its bundle
+        code, out, err = record("DEMO-9343", "DEMO-9343")
+        self.assertEqual(code, 2, out)
+        self.assertIn("run ppl lessons bundle first", json.loads(err)["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1237,18 +1237,21 @@ def cmd_label(args):
 
 
 def _lessons_record(args):
-    # --task is required: the run reflected on is archived, so no lane holds it, and a lane
-    # session's PPL_TASK names its own run. Not a role-output command of refusals.COMMANDS
-    # and no control.enforce: it reads the bundle and writes only under PPL_HOME/lessons.
+    # --task is required: a pending run reflected on is archived, so no lane holds it, and a
+    # lane session's PPL_TASK names its own run, so --task is not checked against it. In a lane
+    # the task is the lane's own run or a marker it claimed (R57). Not a role-output command of
+    # refusals.COMMANDS and no control.enforce: it reads the bundle and writes only under
+    # PPL_HOME/lessons.
     if not args.task or not args.file:
         raise PplError("SCHEMA_INVALID", "ppl lessons record needs --task <id> and --file <json>")
+    lane = lanes.task_for_call(None)
     try:
         doc = store.read_json(args.file, None, lessons.BUNDLE_READ_LIMIT)
     except (OSError, UnicodeDecodeError, RecursionError) as exc:
         raise PplError("SCHEMA_INVALID", "cannot read %s: %s" % (args.file, exc))
     if doc is None:
         raise PplError("SCHEMA_INVALID", "%s is not there" % args.file)
-    result = lessons.record(args.task, doc)
+    result = lessons.record(args.task, doc, by_task=lane)
     if result["no_entry"]:
         print("recorded no entry for %s" % args.task)
     else:
@@ -1310,7 +1313,21 @@ def _lessons_review(args):
 
 
 def _lessons_pending():
-    markers = lessons.pending()
+    """Every pending marker outside a lane. In a lane, the markers of runs of the lane's harness,
+    each claimed for this lane first (D20), and the ones it claimed before and has not recorded,
+    so a resumed session finishes them."""
+    lane = lanes.task_for_call(None)
+    if lane is None:
+        markers = lessons.pending()
+    else:
+        entry = lanes.entry(lane)
+        if entry is None:
+            raise PplError("SETUP_INCOMPLETE", "PPL_TASK names %s, which holds no lane, so no "
+                           "pending reflection is claimed for it: start one with ppl lane <link>"
+                           % lane)
+        for marker in lessons.pending(entry.get("harness")):
+            lessons.claim_pending(marker["task"], lane)
+        markers = lessons.claimed(lane)
     shown = 0
     for marker in markers:
         if "warning" in marker:
