@@ -80,6 +80,19 @@ class TestDemo(unittest.TestCase):
         state = json.loads((sandbox / "ppl" / "runs" / "GH-1" / "state.json").read_text())
         self.assertEqual((state["stage"], state["status"], state["budgets"]["retry_used"]),
                          ("merge_watch", "done", 1))
+        # the run is lane 1's, which ppl lane started: its worktree, on the run's own branch,
+        # holds the walk's commits
+        (entry,) = json.loads((sandbox / "ppl" / "lanes.json").read_text())["lanes"]
+        worktree = sandbox / "shop" / ".worktrees" / "shop-GH-1"
+        self.assertEqual((entry["task"], entry["lane"], entry["worktree"]),
+                         ("GH-1", 1, str(worktree)))
+        self.assertEqual((state["repo"], state["lane"]["session_id"]),
+                         (str(worktree), entry["session_id"]))
+        git_env = dict(env, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+        log = subprocess.run(["git", "-C", str(worktree), "log", "--format=%s", "main..GH-1-work"],
+                             env=git_env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(log.stdout.splitlines(), ["reject a discount outside 0-100",
+                                                   "test the discount", "apply the discount"])
         self.assertEqual(lines[-1], "kept: %s. Look at the run: PPL_HOME=%s ppl serve --open"
                          % (sandbox, sandbox / "ppl"))
         self.assertRegex(lines[-2], r"^done in [0-9.]+ s$")

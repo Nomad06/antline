@@ -17,6 +17,9 @@ FILES = {
     "README.md": "# shop\n\nA tiny cart, the demo's sample project.\n",
 }
 
+# The sample's GitHub repository: the harness's forge repo and the sample checkout's origin.
+REMOTE = "https://github.com/demo/shop.git"
+
 ISSUE = {
     "number": 1,
     "title": "Cart total ignores the discount",
@@ -36,7 +39,7 @@ def harness(repo):
     """(doc, fragments) of the demo's harness: the python preset with unittest gates."""
     draft = stacks.draft("python", {
         "path": repo, "name_hint": "demo", "default_branch": "main", "forge_hint": "github",
-        "remote_url": "https://github.com/demo/shop.git"})
+        "remote_url": REMOTE})
     doc, fragments = draft["doc"], draft["fragments"]
     python = sys.executable
     doc["gate"] = [

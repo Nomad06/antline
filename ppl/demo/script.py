@@ -1,5 +1,6 @@
 """The demo's walk: one issue from `ppl setup` to the recorded merge, as a table of steps."""
 import json
+import os
 import re
 import subprocess
 import sys
@@ -63,13 +64,14 @@ class Walk:
         return str(path)
 
     def commit_file(self, rel, text, message):
-        target = self.box.repo / rel
+        target = self.box.worktree / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
         self.head = self.box.commit([rel], message)
 
     def guard(self, tool, tool_input, role=None):
-        cwd = self.box.repo if role else self.box.workspace
+        # the session works in the lane's start directory, a role in the run's worktree
+        cwd = self.box.worktree if role else self.box.start
         decision = self.box.guard({"hook_event_name": "PreToolUse", "agent_type": role,
                                    "tool_name": tool, "tool_input": tool_input, "cwd": str(cwd)})
         if decision["decision"] == "allow":
@@ -94,7 +96,7 @@ class Walk:
             hit = SECRET.search(text)
             output, code = ("secret found: %s\n" % hit.group(0)) if hit else "no secrets\n", int(bool(hit))
         else:
-            done = subprocess.run(argv, cwd=str(self.box.repo), env=self.box.env,
+            done = subprocess.run(argv, cwd=str(self.box.worktree), env=self.box.env,
                                   capture_output=True, text=True, timeout=sandbox.TIMEOUT_SECONDS)
             output, code = done.stdout + done.stderr, done.returncode
         log.write_text(output, encoding="utf-8")
@@ -122,9 +124,11 @@ class Walk:
 
 
 def setup(walk):
-    settings = walk.box.lane_settings().read_text(encoding="utf-8")
-    if "ppl_guard" not in settings or "--task %s" % sandbox.TASK not in settings:
-        raise RuntimeError("the lane's settings register no guard bound to %s" % sandbox.TASK)
+    argv = walk.box.guard_argv()
+    if not (len(argv) >= 3 and os.path.basename(argv[-3]) == "ppl_guard.py"
+            and argv[-2:] == ["--task", sandbox.TASK]):
+        raise RuntimeError("the lane's settings register no ppl_guard.py --task %s but %s"
+                           % (sandbox.TASK, " ".join(argv)))
     return "ok"
 
 
@@ -181,25 +185,26 @@ def challenge(walk):
 
 
 def code_write(walk):
-    answer = walk.guard("Write", {"file_path": str(walk.box.repo / "shop" / "cart.py"),
+    answer = walk.guard("Write", {"file_path": str(walk.box.worktree / "shop" / "cart.py"),
                                   "content": IMPLEMENTATION}, AGENT)
     walk.commit_file("shop/cart.py", IMPLEMENTATION, "apply the discount")
     return answer
 
 
 def code_edit_test(walk):
-    return walk.guard("Edit", {"file_path": str(walk.box.repo / "tests" / "test_cart.py"),
+    return walk.guard("Edit", {"file_path": str(walk.box.worktree / "tests" / "test_cart.py"),
                                "old_string": "3", "new_string": "4"}, AGENT)
 
 
 def test_read_main(walk):
     walk.stage("tests")
-    return walk.guard("Read", {"file_path": str(walk.box.repo / "shop" / "cart.py")}, TEST_AGENT)
+    return walk.guard("Read", {"file_path": str(walk.box.worktree / "shop" / "cart.py")},
+                      TEST_AGENT)
 
 
 def test_write(walk):
-    answer = walk.guard("Write", {"file_path": str(walk.box.repo / "tests" / "test_discount.py"),
-                                  "content": TEST}, TEST_AGENT)
+    target = walk.box.worktree / "tests" / "test_discount.py"
+    answer = walk.guard("Write", {"file_path": str(target), "content": TEST}, TEST_AGENT)
     walk.commit_file("tests/test_discount.py", TEST, "test the discount")
     return answer
 
@@ -288,7 +293,7 @@ BRIEF = {"task_id": sandbox.TASK, "purpose": "apply a discount",
 
 # (actor, tried, expect, rule), and ACTIONS holds the function of each row, in the same order.
 STEPS = [
-    ("operator", "`ppl setup` applies harness demo, and its lane's settings carry the guard",
+    ("operator", "`ppl setup` applies harness demo, `ppl lane GH-1` binds the guard to its lane",
      "ok", "R-INIT-SETUP-COMPLETE"),
     ("operator", "`ppl init GH-1` freezes the harness into the run", "ok", ""),
     ("orchestrator", "`ppl stage enter baseline`, `ppl baseline record` at HEAD", "ok", ""),

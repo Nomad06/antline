@@ -15,7 +15,7 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 from ppl import paths
 from ppl.errors import PplError
-from ppl.demo import sandbox
+from ppl.demo import sample, sandbox
 
 
 class TestSandbox(unittest.TestCase):
@@ -29,9 +29,36 @@ class TestSandbox(unittest.TestCase):
         shown = json.loads(self.box.ppl("show", "--json").stdout)
         self.assertEqual(shown["task_id"], "GH-1")
         self.assertEqual(shown["stage"], "admission")
-        self.assertEqual(shown["repo"], str(self.box.repo))
+        self.assertEqual(shown["repo"], str(self.box.worktree))
         self.assertEqual(shown["model_check"], "skipped")
         self.assertEqual(len(self.box.git("log", "--oneline").splitlines()), 1)
+
+    def test_the_demo_runs_in_a_lane(self):
+        ppl_home = self.box.ppl_home
+        (entry,) = json.loads((ppl_home / "lanes.json").read_text())["lanes"]
+        start = ppl_home / "lanes" / "GH-1"
+        self.assertEqual((entry["task"], entry["lane"], entry["harness"], entry["start_dir"]),
+                         ("GH-1", 1, "demo", str(start)))
+        # ppl lane exported the installed harness at its commit and made the run's branch
+        installed = self.box.git("rev-parse", "HEAD", cwd=ppl_home / "harnesses" / "demo")
+        self.assertEqual(entry["harness_sha"], installed.strip())
+        record = json.loads((start / "lane.json").read_text())
+        self.assertEqual((record["worktree"], record["branch"]), (entry["worktree"], "GH-1-work"))
+        head = self.box.git("symbolic-ref", "HEAD", cwd=entry["worktree"])
+        self.assertEqual(head.strip(), "refs/heads/GH-1-work")
+        # origin, where ppl lane fetched the base from, is the GitHub repository the harness
+        # names (the sandbox's git reaches a local stand-in for it)
+        origin = self.box.git("config", "--get", "remote.origin.url", cwd=self.box.repo)
+        self.assertEqual(origin.strip(), sample.REMOTE)
+        settings = json.loads((start / "settings.json").read_text())
+        command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertTrue(command.endswith("ppl_guard.py --task GH-1"), command)
+        # the demo's ppl calls after the lane run as its session does, with the env ppl lane
+        # adds and in its start directory, and ppl init took the lane's worktree as the repo
+        self.assertEqual((self.box.env["PPL_TASK"], self.box.env["PPL_LANE"]), ("GH-1", "1"))
+        self.assertEqual(self.box.start, start)
+        shown = json.loads(self.box.ppl("show", "--json").stdout)
+        self.assertEqual(shown["repo"], entry["worktree"])
 
     def test_the_guard_command_is_the_one_the_lanes_settings_register(self):
         settings = json.loads(self.box.lane_settings().read_text())
@@ -42,7 +69,7 @@ class TestSandbox(unittest.TestCase):
         decision = self.box.guard({"hook_event_name": "PreToolUse", "agent_type": None,
                                    "tool_name": "Bash",
                                    "tool_input": {"command": "git push --force origin main"},
-                                   "cwd": str(self.box.workspace)})
+                                   "cwd": str(self.box.start)})
         self.assertEqual((decision["decision"], decision["code"]), ("deny", "BOUNDARY_VIOLATION"))
 
     def test_the_gh_stand_in_answers_the_issue_and_404s_the_links(self):
@@ -69,6 +96,8 @@ class TestSandbox(unittest.TestCase):
             else:
                 self.assertNotIn(name, other.env)
         self.assertEqual(Path(other.env["HOME"]).parent, other.root)
+        # the operator's shell: PPL_TASK comes with the lane, which build starts
+        self.assertIsNone(other.env.get("PPL_TASK"))
 
     def test_a_hostile_xdg_git_config_of_the_caller_is_never_read(self):
         xdg = Path(tmphome.mkdtemp(prefix="xdg-"))
@@ -81,7 +110,7 @@ class TestSandbox(unittest.TestCase):
         self.assertEqual(Path(other.env["XDG_CONFIG_HOME"]), other.home / ".config")
         self.assertEqual(other.env["GIT_CONFIG_GLOBAL"], "/dev/null")
         other.build()
-        other.repo.joinpath("extra.txt").write_text("x")
+        other.worktree.joinpath("extra.txt").write_text("x")
         self.assertEqual(len(other.commit(["extra.txt"], "extra")), 40)
         read = subprocess.run(["git", "-C", str(other.repo), "config", "--get", "init.defaultBranch"],
                               env=other.env, capture_output=True, text=True)
