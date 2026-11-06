@@ -475,6 +475,20 @@ class TestDestroyCleansUpTheLane(unittest.TestCase):
         self.assertEqual(self.branches(main), ["DEMO-470-work", "main"])
         self.assertFalse(tree.exists())
 
+    def test_local_destroy_after_lane_close_still_deletes_the_branch(self):
+        # D24: ppl lane close frees the slot and leaves the worktree, so the branch is reached
+        # through the git dir the worktree names
+        main = self.checkout()
+        entry, tree = self.lane("DEMO-477", main)
+        run.init("DEMO-477", "u", str(tree))
+        lanes.release("DEMO-477")
+        result = run.destroy("DEMO-477", "local")
+        self.assertEqual((result["worktree"], result["branch"], result["lane"]),
+                         ("removed", "deleted", "none"))
+        self.assertNotIn("DEMO-477-work", self.branches(main))
+        self.assertFalse(tree.exists())
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+
     def test_local_destroy_keeps_a_branch_not_named_for_the_run(self):
         # the worktree's HEAD is in a role's reach: a branch it checked out there that is not
         # <TASK-ID>-<slug> is not the run's to delete
@@ -521,6 +535,13 @@ class TestDestroyCleansUpTheLane(unittest.TestCase):
                          ("released", None, "released"))
         self.assertFalse(paths.run_dir("DEMO-475").exists())
         self.assertFalse(os.path.lexists(entry["start_dir"]))
+        # the empty run directory ppl lane makes is removed, not archived
+        fixtures.bind_lane("DEMO-478", "/tmp/definitely-not-a-repo-xyz")
+        paths.run_dir("DEMO-478").mkdir(parents=True)
+        result = run.destroy("DEMO-478", "local")
+        self.assertEqual((result["status"], result["archive"]), ("released", None))
+        self.assertFalse(paths.run_dir("DEMO-478").exists())
+        self.assertFalse(any(paths.runs_dir().glob("_archive/DEMO-478-*")))
 
     def test_local_destroy_with_no_run_and_no_lane_is_refused(self):
         with self.assertRaises(PplError) as caught:

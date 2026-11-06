@@ -138,7 +138,7 @@ def registered_guard_commands(cwd=None):
 
 def guard_probe_session_id():
     """The session_id that marks the probe below, read from the hook file so the two
-    cannot drift: the guard does not log a deny of it against the active run."""
+    cannot drift: the guard does not log a deny of it against any run."""
     _hooks_on_path()
     import ppl_guard
     return ppl_guard.DOCTOR_PROBE_SESSION_ID

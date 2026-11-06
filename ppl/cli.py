@@ -1213,8 +1213,8 @@ def cmd_label(args):
     # R-LABEL-NO-LEASE-FENCE). record_label's own existence check accepts a
     # live OR an archived task (R-METRIC-SCANS-ARCHIVE), since ground truth
     # normally arrives after ppl destroy has already archived the run -
-    # --task must be given explicitly then, since there is no active run left
-    # for resolve_task to fall back to.
+    # --task must be given explicitly then, since no lane holds that run any
+    # more for resolve_task to find.
     task_id = resolve_task(args)
     metrics.record_label(task_id, args.sha, args.actual, by=args.by)
     print("labeled %s on %s as %s" % (task_id, args.sha, args.actual))
@@ -1222,9 +1222,9 @@ def cmd_label(args):
 
 
 def _lessons_record(args):
-    # --task is required: the run may be archived by now, so there is no active run to fall
-    # back to. Not a role-output command of refusals.COMMANDS and no control.enforce: it reads
-    # the bundle and writes only under PPL_HOME/lessons.
+    # --task is required: the run reflected on is archived, so no lane holds it, and a lane
+    # session's PPL_TASK names its own run. Not a role-output command of refusals.COMMANDS
+    # and no control.enforce: it reads the bundle and writes only under PPL_HOME/lessons.
     if not args.task or not args.file:
         raise PplError("SCHEMA_INVALID", "ppl lessons record needs --task <id> and --file <json>")
     try:

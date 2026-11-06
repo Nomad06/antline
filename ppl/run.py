@@ -513,7 +513,11 @@ def destroy(task_id, scope):
     from . import os_sandbox
     shutil.rmtree(os_sandbox.scratch_dir(task_id), ignore_errors=True)
     result["status"], result["archive"] = "released", None
-    if paths.run_dir(task_id).is_dir():
+    directory = paths.run_dir(task_id)
+    if directory.is_dir() and not any(directory.iterdir()):
+        # the one ppl lane made for a run that never wrote into it
+        directory.rmdir()
+    elif directory.is_dir():
         # Logged before the move: append_log would otherwise recreate the run
         # directory it has just archived.
         store.append_log(task_id, {"event": "destroy", "scope": "local",
