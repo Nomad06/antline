@@ -480,15 +480,16 @@ def park(task_id, blocker, safe_next, unsafe_to_repeat, refusals=None):
 
 
 def destroy(task_id, scope):
-    """Local scope is file work and happens here: the worktree, the scratch directory, the run
-    (archived), the lane's registry slot and its start directory. Remote scope is an outward
-    mutation and is queued for the orchestrator, which is the only component holding GitLab
-    credentials.
+    """Local scope is file work and happens here: the worktree and the run's branch while
+    nothing of it was pushed (D23), the scratch directory, the run (archived), the lane's
+    registry slot and its start directory. A lane whose run never reached ppl init goes the same
+    way, its worktree read from the registry. Remote scope is an outward mutation and is queued
+    for the orchestrator, which is the only component holding GitLab credentials.
     """
     if scope not in ("local", "full"):
         raise PplError("SCHEMA_INVALID", "destroy scope must be local or full")
-    state = load(task_id)
     if scope == "full":
+        state = load(task_id)
         store.write_json(paths.run_dir(task_id) / "remote_cleanup.json", {
             "task_id": task_id, "scope": "full",
             "mr": state.get("mr"), "branch": state.get("branch"),
@@ -500,44 +501,114 @@ def destroy(task_id, scope):
                 "next": "orchestrator closes the MR and deletes the remote branch, then "
                         "runs ppl destroy --scope local"}
 
-    repo = state.get("repo")
-    worktree = "absent"
-    worktree_error = None
-    if repo and os.path.isdir(repo):
-        # -C <repo> matters: without it git runs against ppl's own cwd, which is
-        # not the target repository, so the removal silently did nothing and the
-        # discarded exit code made the archive below report success anyway,
-        # leaving an orphan worktree with nothing pointing at it.
-        removal = subprocess.run(
-            ["git", "-C", str(repo), "worktree", "remove", "--force", str(repo)],
-            capture_output=True, text=True)
-        if removal.returncode == 0:
-            worktree = "removed"
-        else:
-            worktree = "left_behind"
-            worktree_error = (removal.stderr.strip() or removal.stdout.strip()
-                              or "git worktree remove exited %d" % removal.returncode)
+    state = store.read_json(state_path(task_id))
+    entry = lanes.entry(task_id)
+    if state is None and entry is None:
+        raise PplError("SCHEMA_INVALID", "no run and no lane for %s, so there is nothing to "
+                       "destroy: ppl lane list shows the lanes" % task_id)
+    # the registry's worktree when the lane still holds one: ppl lane wrote it there, out of
+    # every sandbox's reach
+    worktree_dir = entry.get("worktree") if entry else state.get("repo")
+    result = _remove_worktree(task_id, worktree_dir, entry.get("repo") if entry else None)
     from . import os_sandbox
     shutil.rmtree(os_sandbox.scratch_dir(task_id), ignore_errors=True)
-    # Logged before the move: append_log would otherwise recreate the run
-    # directory it has just archived.
-    store.append_log(task_id, {"event": "destroy", "scope": "local",
-                               "worktree": worktree, "worktree_error": worktree_error})
-    # store.now() has second resolution, so appending a random suffix keeps two
-    # destroys of the same task id (even inside the same second) from colliding:
-    # a name collision would make shutil.move nest the second archive inside the
-    # first instead of placing it beside it.
-    archive = paths.runs_dir() / "_archive" / ("%s-%s-%s" % (
-        task_id, store.now().replace(":", ""), uuid.uuid4().hex[:8]))
-    archive.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(paths.run_dir(task_id)), str(archive))
-    result = {"status": "archived", "archive": str(archive), "worktree": worktree,
-              "lane": "released" if lanes.release(task_id) else "none"}
+    result["status"], result["archive"] = "released", None
+    if paths.run_dir(task_id).is_dir():
+        # Logged before the move: append_log would otherwise recreate the run
+        # directory it has just archived.
+        store.append_log(task_id, {"event": "destroy", "scope": "local",
+                                   "worktree": result["worktree"],
+                                   "worktree_error": result.get("worktree_error"),
+                                   "branch": result["branch"]})
+        # store.now() has second resolution, so appending a random suffix keeps two
+        # destroys of the same task id (even inside the same second) from colliding:
+        # a name collision would make shutil.move nest the second archive inside the
+        # first instead of placing it beside it.
+        archive = paths.runs_dir() / "_archive" / ("%s-%s-%s" % (
+            task_id, store.now().replace(":", ""), uuid.uuid4().hex[:8]))
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(paths.run_dir(task_id)), str(archive))
+        result["status"], result["archive"] = "archived", str(archive)
+    result["lane"] = "released" if lanes.release(task_id) else "none"
     result.update(_remove_start_dir(task_id))
-    if worktree_error:
+    return result
+
+
+def _git(directory, args):
+    """git in a project checkout or worktree outside any sandbox, through lane_harness.git: the
+    -c words of escape_git.OPERATOR_PINNED_CONFIG first and no replace refs, so no hook or other
+    program a role planted there runs. A git that cannot start or runs out of time comes back
+    as a failed run, so a cleanup reports it and goes on."""
+    from . import lane_harness
+    try:
+        return lane_harness.git(directory, args)
+    except PplError as err:
+        return subprocess.CompletedProcess(args, 1, "", err.message)
+
+
+def _failure(done, what):
+    """What a failed git said, or its exit code when it said nothing."""
+    return ((done.stderr or "").strip() or (done.stdout or "").strip()
+            or "git %s exited %d" % (what, done.returncode))
+
+
+def _run_branch(task_id, worktree):
+    """(the git dir the worktree shares, its branch) read before the worktree goes: the branch
+    only when it is named for the run, <TASK-ID>-<slug> (D5), since a role can check out any
+    branch in its worktree and its HEAD says which."""
+    found = _git(worktree, ["rev-parse", "--git-common-dir"])
+    common = found.stdout.strip() if found.returncode == 0 else ""
+    common = os.path.realpath(os.path.join(worktree, common)) if common else None
+    head = _git(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    branch = head.stdout.strip() if head.returncode == 0 else ""
+    return common, (branch if branch.startswith(task_id + "-") else None)
+
+
+def _remove_worktree(task_id, worktree, checkout):
+    """Remove the run's worktree, then its branch unless refs/remotes/origin/<branch> exists,
+    as {"worktree", "branch"} states plus "branch_name" and the errors. `checkout` is the lane's
+    project checkout from the registry, None when the lane is gone: the branch is then reached
+    through the git dir the worktree named before it was removed. No config check comes first:
+    a key planted in the checkout must not block a cleanup, and the pinned words run nothing."""
+    result = {"worktree": "absent", "branch": "none"}
+    if not worktree or not os.path.isdir(str(worktree)):
+        return result
+    worktree = str(worktree)
+    common, branch = _run_branch(task_id, worktree)
+    # -C <worktree> matters: without it git runs against ppl's own cwd, which is
+    # not the target repository, so the removal silently did nothing and the
+    # discarded exit code made the archive report success anyway, leaving an
+    # orphan worktree with nothing pointing at it.
+    removal = _git(worktree, ["worktree", "remove", "--force", worktree])
+    if removal.returncode != 0:
         # The run is archived either way, but a destroy that could not remove
         # the worktree has to say so rather than report a clean success.
-        result["worktree_error"] = worktree_error
+        result.update(worktree="left_behind", worktree_error=_failure(removal, "worktree remove"))
+        return result
+    result["worktree"] = "removed"
+    if branch is None:
+        return result
+    result["branch_name"] = branch
+    if checkout and os.path.isdir(str(checkout)):
+        where, words = str(checkout), []
+    elif common:
+        where, words = common, ["--git-dir=" + common]
+    else:
+        result["branch"] = "left_behind"
+        result["branch_error"] = "the git dir of %s could not be read" % worktree
+        return result
+    pushed = _git(where, words + ["rev-parse", "--verify", "--quiet",
+                                  "refs/remotes/origin/" + branch])
+    if pushed.returncode == 0:
+        # pushed: deleting it is the owner's call, after the remote one is dealt with
+        result["branch"] = "kept"
+        return result
+    deleted = _git(where, words + ["branch", "-D", branch])
+    if deleted.returncode == 0:
+        result["branch"] = "deleted"
+    else:
+        result["branch"] = "left_behind"
+        result["branch_error"] = _failure(deleted, "branch -D")
     return result
 
 

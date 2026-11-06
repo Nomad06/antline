@@ -425,5 +425,109 @@ class TestDestroyRemovesTheWorktree(unittest.TestCase):
         self.assertFalse(paths.run_dir("DEMO-462").exists())
 
 
+class TestDestroyCleansUpTheLane(unittest.TestCase):
+    """ppl destroy --scope local takes the lane with the run: its worktree, its branch while
+    nothing of it was pushed (D23), its registry slot and its start directory, before ppl init
+    too (R15). Its git in the project checkout carries the operator's pinned -c words (R19)."""
+
+    def git(self, directory, *args):
+        return subprocess.run(["git", "-C", str(directory), "-c", "user.email=t@t",
+                               "-c", "user.name=t", *args],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def checkout(self):
+        """A project checkout with a bare origin, its default branch pushed."""
+        base = Path(tmphome.mkdtemp(prefix="ppldestroy-"))
+        origin, main = base / "origin.git", base / "shop"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(main)], check=True)
+        (main / "a.txt").write_text("one\n", encoding="utf-8")
+        self.git(main, "add", "a.txt")
+        self.git(main, "commit", "-q", "-m", "base")
+        self.git(main, "remote", "add", "origin", str(origin))
+        self.git(main, "push", "-q", "origin", "main")
+        return main
+
+    def lane(self, task_id, main, branch=None, lane=1):
+        """A worktree on `branch` (<task>-work by default), as ppl lane adds it, and its lane."""
+        tree = main.parent / ("shop-" + task_id)
+        self.git(main, "worktree", "add", "-q", "-b", branch or task_id + "-work", str(tree))
+        return fixtures.bind_lane(task_id, main, tree, lane=lane), tree
+
+    def branches(self, main):
+        return self.git(main, "branch", "--list", "--format=%(refname:short)").split()
+
+    def test_local_destroy_deletes_an_unpushed_branch_and_keeps_a_pushed_one(self):
+        main = self.checkout()
+        _, pushed_tree = self.lane("DEMO-470", main)
+        self.git(pushed_tree, "push", "-q", "origin", "DEMO-470-work")
+        self.git(main, "fetch", "-q", "origin")
+        _, tree = self.lane("DEMO-471", main, lane=2)
+        for task_id in ("DEMO-470", "DEMO-471"):
+            run.init(task_id, "u", str(main.parent / ("shop-" + task_id)))
+        kept = run.destroy("DEMO-470", "local")
+        self.assertEqual((kept["worktree"], kept["branch"], kept["branch_name"]),
+                         ("removed", "kept", "DEMO-470-work"))
+        deleted = run.destroy("DEMO-471", "local")
+        self.assertEqual((deleted["worktree"], deleted["branch"], deleted["branch_name"]),
+                         ("removed", "deleted", "DEMO-471-work"))
+        self.assertNotIn("branch_error", deleted)
+        self.assertEqual(self.branches(main), ["DEMO-470-work", "main"])
+        self.assertFalse(tree.exists())
+
+    def test_local_destroy_keeps_a_branch_not_named_for_the_run(self):
+        # the worktree's HEAD is in a role's reach: a branch it checked out there that is not
+        # <TASK-ID>-<slug> is not the run's to delete
+        main = self.checkout()
+        self.lane("DEMO-472", main, branch="release-notes")
+        run.init("DEMO-472", "u", str(main.parent / "shop-DEMO-472"))
+        result = run.destroy("DEMO-472", "local")
+        self.assertEqual((result["worktree"], result["branch"]), ("removed", "none"))
+        self.assertIn("release-notes", self.branches(main))
+
+    def test_local_destroy_runs_no_hook_the_checkout_plants(self):
+        # rule: R-LANE-LAUNCH-GIT-CONFIG
+        main = self.checkout()
+        self.lane("DEMO-473", main)
+        run.init("DEMO-473", "u", str(main.parent / "shop-DEMO-473"))
+        marker = main.parent / "hook.ran"
+        hook = main / ".git" / "hooks" / "reference-transaction"
+        hook.write_text("#!/bin/sh\necho ran >> %s\n" % marker, encoding="utf-8")
+        hook.chmod(0o755)
+        result = run.destroy("DEMO-473", "local")
+        self.assertEqual(result["branch"], "deleted")
+        self.assertFalse(marker.exists())
+
+    def test_local_destroy_frees_a_lane_whose_run_never_started(self):
+        main = self.checkout()
+        entry, tree = self.lane("DEMO-474", main)
+        # a denial the guard logged before ppl init made the run directory
+        store.append_log("DEMO-474", {"event": "denial"})
+        result = run.destroy("DEMO-474", "local")
+        self.assertEqual((result["status"], result["lane"], result["start_dir"]),
+                         ("archived", "released", "removed"))
+        self.assertEqual((result["worktree"], result["branch"]), ("removed", "deleted"))
+        self.assertIsNone(lanes.entry("DEMO-474"))
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+        self.assertFalse(tree.exists())
+        self.assertNotIn("DEMO-474-work", self.branches(main))
+        self.assertFalse(paths.run_dir("DEMO-474").exists())
+        self.assertTrue((Path(result["archive"]) / "log.jsonl").is_file())
+
+    def test_local_destroy_of_a_lane_with_no_run_directory_releases_it(self):
+        entry = fixtures.bind_lane("DEMO-475", "/tmp/definitely-not-a-repo-xyz")
+        result = run.destroy("DEMO-475", "local")
+        self.assertEqual((result["status"], result["archive"], result["lane"]),
+                         ("released", None, "released"))
+        self.assertFalse(paths.run_dir("DEMO-475").exists())
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+
+    def test_local_destroy_with_no_run_and_no_lane_is_refused(self):
+        with self.assertRaises(PplError) as caught:
+            run.destroy("DEMO-476", "local")
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("DEMO-476", caught.exception.message)
+
+
 if __name__ == "__main__":
     unittest.main()
