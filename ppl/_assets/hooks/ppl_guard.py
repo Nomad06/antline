@@ -1,4 +1,5 @@
 """PreToolUse cage. Runs on every tool call, so it stays cheap and never raises."""
+import functools
 import json
 import os
 import re
@@ -2014,15 +2015,11 @@ def _bash_write_targets(command, base_cwd, commands=None):
     opaque word: nothing inside it is read. With `commands`, every segment the
     walk reads is appended to it (see _segment_write_targets), one it cannot
     split into words as (None, its raw text, its cwd), and a command holding a
-    `$(` or a backtick appends nothing.
+    `$(` or a backtick appends nothing: it is one unplaceable write when its
+    raw text or any of its views holds a write shape (_blinded_write_shape).
     """
     if "$(" in command or "`" in command:
-        # each here-document body is read as its own view, line by line (_command_views)
-        found = _command_views(command)
-        if BASH_WRITE_SHAPES.search("\n".join(found[0] + found[1] + found[3]) if found
-                                    else command):
-            return [(None, base_cwd, False)]
-        return []
+        return [(None, base_cwd, False)] if _blinded_write_shape(command) else []
     targets = []
     cwd = list_cwd = base_cwd
     groups = []
@@ -2850,20 +2847,30 @@ _HEREDOC_INTERPRETERS = frozenset({"perl", "ruby", "node", "nodejs", "php", "osa
                                    "irb", "julia", "jshell", "groovy"})
 
 
-def _heredoc_feeds_interpreter(prefix):
-    """True when the here-document that follows `prefix` is fed to python or another
-    interpreter, read off the last simple command of `prefix` past assignments, options,
-    redirect words and the usual wrappers. Its body is judged as commands like every other
-    here-document's, and spelled out besides."""
-    part = re.split(r"\|\||&&|[;|\n(){}]", prefix)[-1]
-    for token in _shlex_tokens(part) or []:
+def _heredoc_feeds_interpreter(part):
+    """Whether a here-document of the simple command whose text before the operator is `part`
+    is fed to python or another interpreter, read off its first word past assignments,
+    options, numbers, redirect words and the usual wrappers: True or False once `part` holds
+    such a word, None while it holds none yet. An operator's own word (<<EOF) is one, so a
+    simple command is read at most twice, whatever number of operators it holds
+    (_mask_text). Such a body is judged as commands like every other here-document's, and
+    spelled out besides."""
+    tokens = _shlex_tokens(part)
+    if tokens is None:
+        return False
+    for token in tokens:
         if (_ASSIGNMENT_WORD_RE.match(token) or token.startswith("-") or token.isdigit()
                 or token in (">", ">>", "<") or _verb_name(token) in _HEREDOC_WRAPPERS):
             continue
         name = _verb_name(token)
         return (name.startswith("python") or name.startswith("pypy")
                 or name in _HEREDOC_INTERPRETERS)
-    return False
+    return None
+
+
+# What ends a simple command for _heredoc_feeds_interpreter, outside quotes: a separator, a
+# pipe, a newline, a subshell's or a group's parenthesis or brace, and the second & of &&.
+_COMMAND_ENDS = frozenset(";|\n(){}")
 
 
 def _heredoc_delimiter(written):
@@ -2907,16 +2914,24 @@ def _mask_text(text, i, closer, inner, fed, unsure, spelled):
     word $SUBST and the text inside each appended to `inner`, the index after `closer`). Every
     here-document body is taken out of the text and appended to `inner` as commands, masked the
     same way, whatever its consumer or its pipeline; one fed to an interpreter is appended to
-    `fed` as well. The guard does not model bash's here-document expansion, so the body is
-    read by its delimiter's spelling [R-LANE-CROSS-WRITE]:
+    `fed` as well. `inner` takes (masked, raw) pairs, raw being the text the view was masked
+    from: the text inside the substitution, or the body as judged. The guard does not model
+    bash's here-document expansion, so the body is read by its delimiter's spelling
+    [R-LANE-CROSS-WRITE]:
     - under exactly <<'WORD' or <<-'WORD' bash expands nothing: the lines that parse are the
       commands, and each line that leaves a quote open goes to `spelled` (_quoted_body_commands);
     - under any other spelling, bare, double-quoted, backslashed or mixed, a body that holds
       a backslash or a line that leaves a quote open, which bash may read otherwise than this,
       is appended to `unsure` too (lane_heredoc_denial).
-    Raises _Unreadable on a substitution or a here-document left open."""
+    One pass: whether a here-document feeds an interpreter is read once per simple command,
+    from where it starts in `out`, not from the whole text before each operator.
+    Raises _Unreadable on a substitution or a here-document left open, and RecursionError on
+    substitutions nested past the interpreter's recursion limit."""
     out, pending = [], []
     quote, depth, n = None, 0, len(text)
+    # where the simple command being read starts in `out`, and whether its here-documents
+    # feed an interpreter, None until a word of it tells (_heredoc_feeds_interpreter)
+    command_at, feeds = 0, None
     while i < n:
         char = text[i]
         if quote == "'":
@@ -2931,14 +2946,11 @@ def _mask_text(text, i, closer, inner, fed, unsure, spelled):
         if quote is None and closer is not None and char == closer and (
                 closer == "`" or depth == 0):
             return "".join(out), i + 1
-        if text.startswith("$(", i):
-            body, i = _mask_text(text, i + 2, ")", inner, fed, unsure, spelled)
-            inner.append(body)
-            out.append("$SUBST")
-            continue
-        if char == "`":
-            body, i = _mask_text(text, i + 1, "`", inner, fed, unsure, spelled)
-            inner.append(body)
+        if text.startswith("$(", i) or char == "`":
+            start = i + (1 if char == "`" else 2)
+            body, i = _mask_text(text, start, "`" if char == "`" else ")", inner, fed, unsure,
+                                 spelled)
+            inner.append((body, text[start:i - 1]))
             out.append("$SUBST")
             continue
         if char == '"':
@@ -2948,15 +2960,18 @@ def _mask_text(text, i, closer, inner, fed, unsure, spelled):
         elif quote is None and text.startswith("<<", i) and not text.startswith("<<<", i):
             match = _HEREDOC_OP_RE.match(text, i)
             if match:
+                if feeds is None:
+                    feeds = _heredoc_feeds_interpreter("".join(out[command_at:]))
                 quoted = bool(_HEREDOC_QUOTED_WORD_RE.fullmatch(match.group(2)))
                 pending.append((match.group(1) == "-", _heredoc_delimiter(match.group(2)),
-                                _heredoc_feeds_interpreter("".join(out)), quoted))
+                                bool(feeds), quoted))
                 out.append(match.group())
                 i = match.end()
                 continue
         elif quote is None and char == "\n" and pending:
             out.append(char)
             i += 1
+            command_at, feeds = len(out), None
             for strip_tabs, word, interpreted, quoted in pending:
                 body = []
                 while True:
@@ -2980,10 +2995,11 @@ def _mask_text(text, i, closer, inner, fed, unsure, spelled):
                             or any(_outside_quotes(line) is None for line in body)):
                         unsure.append(text_of_body)
                 try:
-                    inner.append(_mask_text(judged, 0, None, inner, fed, unsure, spelled)[0])
+                    inner.append((_mask_text(judged, 0, None, inner, fed, unsure, spelled)[0],
+                                  judged))
                 except _Unreadable:
                     # a $( or a backtick left open in the body: kept raw, read by its spelling
-                    inner.append(judged)
+                    inner.append((judged, judged))
             pending = []
             continue
         elif quote is None and char == "(":
@@ -2992,50 +3008,97 @@ def _mask_text(text, i, closer, inner, fed, unsure, spelled):
             depth -= 1
         out.append(char)
         i += 1
+        if quote is None and (char in _COMMAND_ENDS or text[i - 2:i] == "&&"):
+            command_at, feeds = len(out), None
     if closer is not None:
         raise _Unreadable("%s left open" % closer)
     return "".join(out), n
 
 
 def _command_views(command):
-    """([the command with every $(...) and backtick masked to the word $SUBST and every
+    """((the command with every $(...) and backtick masked to the word $SUBST and every
     here-document body taken out, then the same of the text inside each substitution and of
-    each here-document body, judged as commands line by line], [each here-document body fed
-    to an interpreter], [each body bash may read otherwise than the masking], [each line of a
-    body under <<'WORD' that leaves a quote open, to be read by its spelling only]), or None
-    when one is left open (_mask_text)."""
+    each here-document body, judged as commands line by line), (each here-document body fed
+    to an interpreter), (each body bash may read otherwise than the masking), (each line of a
+    body under <<'WORD' that leaves a quote open, to be read by its spelling only), (the raw
+    text each view was masked from, the first the command itself)), or None when a
+    substitution or a here-document is left open, or substitutions are nested past what the
+    masking reads (_mask_text), and the command is read by its spelling. Read once per
+    command: every check of a decision asks for the same views, and they are shared, so the
+    lists are tuples."""
+    return _read_views(command) if isinstance(command, str) else None
+
+
+@functools.lru_cache(maxsize=8)
+def _read_views(command):
     inner, fed, unsure, spelled = [], [], [], []
     try:
         outer, _ = _mask_text(command, 0, None, inner, fed, unsure, spelled)
-    except _Unreadable:
+    except (_Unreadable, RecursionError):
         return None
-    return [outer] + inner, fed, unsure, spelled
+    return ((outer,) + tuple(view for view, _ in inner), tuple(fed), tuple(unsure),
+            tuple(spelled), (command,) + tuple(raw for _, raw in inner))
+
+
+@functools.lru_cache(maxsize=8)
+def _blinded_write_shape(command):
+    """True when `command`, which holds a $(...) or a backtick the write walk does not read,
+    holds a write shape in its raw text or in any of its views, here-document bodies line by
+    line and the lines of a body under <<'WORD' that do not parse among them (_command_views)
+    [R-GUARD-BASH-WRITE-BOUNDARY]. The raw text keeps a shape a substitution splits (a verb,
+    a -i or an of= it builds), the views one a here-document's backslash-newline joins. Read
+    once per command, as every check of a decision asks."""
+    if BASH_WRITE_SHAPES.search(command):
+        return True
+    found = _command_views(command)
+    return bool(found and BASH_WRITE_SHAPES.search("\n".join(found[0] + found[1] + found[3])))
+
+
+def _built_command_word(segments):
+    """The command word the shell builds ($ or a backtick in it) that one of `segments`, as the
+    write walk reads them, runs, else None."""
+    for tokens, start, _ in segments:
+        word = tokens[start] if tokens and start < len(tokens) else ""
+        if "$" in word or "`" in word:
+            return word
+    return None
 
 
 def _lane_git_segments(command, cwd):
     """(every segment the write walk reads over each view of `command` (_command_views), the
-    texts it could not read as words, the here-document bodies fed to an interpreter): the
-    whole command is unread when a substitution or a here-document is left open, else each
-    segment the walk cannot split and each line of a body under <<'WORD' that does not parse."""
+    texts it could not read as words, the here-document bodies fed to an interpreter, the raw
+    texts of the views whose command word the shell builds): the whole command is unread when
+    the masking cannot read it, else each segment the walk cannot split, each line of a body
+    under <<'WORD' that does not parse, and the raw text of each view, the command, the text
+    inside a substitution or a here-document body, where a segment's command word is one the
+    shell builds, which may be git or ppl with its subcommand built too [R-LANE-CROSS-WRITE]."""
     found = _command_views(command)
     if found is None:
-        return [], [command], []
-    views, fed, _, spelled = found
-    segments, unread = [], list(spelled)
-    for view in views:
+        return [], [command], (), ()
+    views, fed, _, spelled, raws = found
+    segments, unread, built = [], list(spelled), []
+    for view, raw in zip(views, raws):
         if "$(" in view or "`" in view:
             # a substitution the masking could not see, as in a here-document body after an
             # apostrophe: the view is read by its spelling
             unread.append(view)
             continue
+        walked = len(segments)
         _bash_write_targets(view, cwd if isinstance(cwd, str) else None, segments)
-    return segments, unread + [text for tokens, text, _ in segments if tokens is None], fed
+        if _built_command_word(segments[walked:]):
+            built.append(raw)
+    return (segments, unread + built + [text for tokens, text, _ in segments if tokens is None],
+            fed, built)
 
 
 # What an interpreter's here-document may not spell in a lane: ppl, or a git worktree or
 # config call, which the walk cannot read inside code.
 _INTERPRETED_SPELLING_RE = re.compile(
     r"(?<![\w.-])ppl\b|\bgit\b[\s\S]*?\b(?:worktree|config)\b")
+# ppl spelled as a command in the raw text of a view whose command word the shell builds
+# ($(echo ppl), `which ppl`, /usr/local/bin/ppl, -m ppl.cli), and not ~/.ppl, a ppl/ directory
+# or a test_ppl.py file [R-LANE-CROSS-WRITE].
+_PPL_SPELLED_RE = re.compile(r"(?<![\w.-])ppl(?:\.\w+)*(?![\w./-])")
 
 
 def lane_heredoc_denial(command, binding):
@@ -3074,13 +3137,17 @@ def lane_git_denial(command, agent, binding, cwd=None):
     - a git whose subcommand cannot be trusted, for every session [R-LANE-CROSS-WRITE]: an
       alias or include set on its command line (-c, --config-env, keys in any case), config
       handed in from elsewhere by GIT_CONFIG_*, HOME or XDG_CONFIG_HOME, or a global option
-      the guard does not read, which may take a value and shift the words (_git_subcommand).
+      the guard does not read, which may take a value and shift the words (_git_subcommand);
+    - a command word the shell builds, for every session [R-LANE-CROSS-WRITE]: before a
+      worktree, config or ppl word, and with the raw text of the command, substitution or
+      here-document body that holds it read by its spelling as well (_lane_git_segments), so
+      a git or a ppl whose subcommand is built too is judged by its spelling.
     Aliases in the operator's own global config are the operator's, and the checkout's
     .git/config is kept from the lanes (R-LANE-SHARED-GIT-DIR)."""
     if not (isinstance(command, str) and binding.task and not binding.problem):
         return None
     role = escape.is_role(agent)
-    segments, unread, fed = _lane_git_segments(command, cwd)
+    segments, unread, fed, built = _lane_git_segments(command, cwd)
     for body in fed:
         spelled = _INTERPRETED_SPELLING_RE.search(body)
         if spelled:
@@ -3095,6 +3162,9 @@ def lane_git_denial(command, agent, binding, cwd=None):
     config = role and any(_GIT_CONFIG_SPELLED_RE.search(text) for text in unread)
     untrusted = (any(_GIT_ALIAS_SPELLED_RE.search(text) for text in unread)
                  and "an alias or include set on the command line")
+    if not untrusted and any(_PPL_SPELLED_RE.search(text) for text in built):
+        untrusted = ("the command word %s, which the shell builds, where ppl is spelled"
+                     % _built_command_word(segments))
     runs_git = any(re.search(r"\bgit\b", text) for text in unread)
     for tokens, start, _ in segments:
         if tokens is None:

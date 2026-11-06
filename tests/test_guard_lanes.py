@@ -927,6 +927,125 @@ class TestLaneProtection(LaneCase):
                 self.assertIsNone(self.bash(command, agent="ppl-code-worker",
                                             cwd=self.worktree[LANE_A]))
 
+    def test_a_write_shape_a_substitution_splits_is_still_a_write_shape(self):
+        # rule: R-GUARD-BASH-WRITE-BOUNDARY
+        # rule: R-LANE-CROSS-WRITE
+        # R47: a command holding a $(...) or a backtick is a write shape when its raw text or
+        # any of its masked views is one, so a verb, a -i or an of= the substitution builds
+        # still leaves a write whose target cannot be placed: denied for the orchestrator and
+        # a role writing into another lane, and for the read-only ppl-verifier in its own
+        # worktree, which the OS profile does not tell apart from a writing role
+        own, theirs = self.worktree[LANE_A], self.worktree[LANE_B]
+        for command in ("$(which sed) -i 's/a/b/' %s/src/App.java" % theirs,
+                        "$(echo sed) -i 's/a/b/' %s/src/App.java" % theirs,
+                        "`which sed` -i 's/a/b/' %s/src/App.java" % theirs,
+                        "sed $(echo -i) 's/a/b/' %s/src/App.java" % theirs,
+                        "dd if=/tmp/x $(echo of=%s/src/App.java)" % theirs,
+                        "$(command -v git) -C %s checkout -- src/App.java" % theirs):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("$(which sed) -i 's/a/b/' src/App.java",
+                        "$(echo sed) -i 's/a/b/' src/App.java",
+                        "dd if=/tmp/x $(echo of=src/App.java)",
+                        "$(command -v git) checkout HEAD -- src/App.java"):
+            with self.subTest(verifier=command):
+                reason = self.deny_reason(self.bash(command, agent="ppl-verifier", cwd=own))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn("could not be resolved", reason)
+        # R40's reads hold no write shape in their raw text either
+        for command in ("git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "git log -1 $(git rev-parse HEAD)",
+                        "git log --oneline `git merge-base HEAD main`..HEAD -- config"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker", cwd=own))
+
+    def test_a_command_word_the_shell_builds_is_read_by_its_raw_spelling(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R47: a command word a substitution builds may be git or ppl with its subcommand built
+        # too, so the raw text of the command, substitution or here-document body that holds
+        # it is read by its spelling: git worktree for every session, git config for a role,
+        # an alias set on git's command line, and ppl
+        own = self.worktree[LANE_A]
+        for command in ("$(echo git) $(echo worktree) remove ../shop-%s" % LANE_B,
+                        "$(command -v git) $(echo worktree) prune",
+                        "`which git` `echo worktree` prune",
+                        "$(echo git) -c $(echo alias.x=worktree) x prune",
+                        "echo $($(echo git) $(echo worktree) prune)",
+                        "bash <<'EOF'\n$(echo git) $(echo worktree) prune\nEOF",
+                        "$(echo ppl) show --task %s" % LANE_B,
+                        "`which ppl` show --task %s" % LANE_B,
+                        "$(command -v ppl) verdict --text done"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("$(echo git) $(echo config) core.hooksPath /tmp/h",
+                        "`which git` `echo config` core.hooksPath /tmp/h"):
+            with self.subTest(config=command):
+                reason = self.deny_reason(self.bash(command, agent="ppl-code-worker", cwd=own))
+                self.assertIn("may not write git config", reason)
+        # a commit message line that opens with a backtick is read as a command, and only
+        # its own body by its spelling, so the config and worktree words elsewhere in the
+        # command are no git config or git worktree
+        commit = ("git commit -m \"$(cat <<'EOF'\nRead the worktree config once\n\n"
+                  "`load_config` keeps the result\nEOF\n)\"")
+        for agent in (None, "ppl-code-worker"):
+            with self.subTest(allowed=commit, agent=agent):
+                self.assertIsNone(self.bash(commit, agent=agent, cwd=own))
+
+    def test_a_substitution_nested_past_the_recursion_limit_is_read_by_its_spelling(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R47: substitutions nested deeper than the masking reads are a command it cannot
+        # read, so the whole command is read by its spelling, and no internal error lets the
+        # call through (main() allows an unroled session's call on one)
+        tail = "; git worktree remove ../shop-%s" % LANE_B
+        depth = sys.getrecursionlimit() + 200
+        command = "echo " + "$(" * depth + "true" + ")" * depth + tail
+        reason = self.deny_reason(self.bash(command, cwd=self.worktree[LANE_A]))
+        self.assertIn("git worktree", reason)
+        depth = (ppl_guard.ROLE_COMMAND_LENGTH_LIMIT - len("echo true" + tail)) // 3
+        command = "echo " + "$(" * depth + "true" + ")" * depth + tail
+        reason = self.deny_reason(self.bash(command, agent="ppl-code-worker",
+                                            cwd=self.worktree[LANE_A]))
+        self.assertIn("git worktree", reason)
+
+    def test_a_command_built_for_here_document_and_substitution_work_is_decided_in_time(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R47: here-documents and substitutions are read in one pass and the views once per
+        # decision, so a role command at the 4096 cap and an orchestrator command of 32 KiB,
+        # each built of here-document operators, substitutions or both, decide well inside
+        # the hook's 5 s timeout (a timeout lets the call through), and still deny the git
+        # worktree they end with
+        own = self.worktree[LANE_A]
+        tail = "\ngit worktree remove ../shop-%s" % LANE_B
+        # (head, repeated unit, the line that ends each unit's here-document or "", close)
+        shapes = (("cat ", "<<A ", "A", ""), ("cat ", "<<'A' ", "A", ""),
+                  ("cat $(true) ", "<<A ", "A", ""), ("x=$(cat ", "<<'A' ", "A", ")"),
+                  ("cat ", "<<'A'\"\" ", "A", ""), ("python3 ", "<<A ", "A", ""),
+                  ("", "A=1 <<A ", "A", ""), ("", "cat <<A; ", "A", ""),
+                  ("", "cat <<'A'\nit's\nA\n", "", ""), ("echo ", "$(true)", "", ""),
+                  ("echo ", "`true`", "", ""), ("echo ", "$(cat <<'A'\nA\n)", "", ""),
+                  ("echo ", "$(", "", "true"))
+        for size, agent in ((ppl_guard.ROLE_COMMAND_LENGTH_LIMIT, "ppl-code-worker"),
+                            (32 * 1024, None)):
+            for head, unit, term, close in shapes:
+                per = len(unit) + (len(term) + 1 if term else 0) + (1 if unit == "$(" else 0)
+                count = (size - len(head) - (1 if term else 0) - len(close) - len(tail)) // per
+                if unit == "$(":
+                    command = head + unit * count + close + ")" * count + tail
+                else:
+                    command = (head + unit * count
+                               + ("\n" + (term + "\n") * count if term else "") + close + tail)
+                with self.subTest(size=size, unit=unit):
+                    self.assertLessEqual(len(command), size)
+                    start = time.perf_counter()
+                    result = self.bash(command, agent=agent, cwd=own)
+                    self.assertLess(time.perf_counter() - start, 0.5)
+                    self.assertIn("git worktree", self.deny_reason(result))
+
     def test_git_worktree_in_any_form_but_list_is_denied(self):
         # rule: R-LANE-CROSS-WRITE
         # R34: git takes a worktree by a unique tail of its path from anywhere in the
