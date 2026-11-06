@@ -84,20 +84,54 @@ def _repo(doc):
     return checkout, worktrees
 
 
+# What git in a worktree writes in the checkout's common .git besides its own worktrees/<id>:
+# objects, branch and stash refs, and their reflogs (commit, add, branch, stash, checkout,
+# rebase, reset and switch, as test_git_in_a_worktree_writes_only_objects_refs_logs_and_its_git_dir
+# runs them).
+_COMMON_GIT_WRITES = ("objects", "refs", "logs")
+
+
+def worktree_git_dir(doc, worktree):
+    """The lane's own git dir in the checkout, `<checkout>/.git/worktrees/<id>`, `realpath`-ed:
+    the gitdir line of `<worktree>/.git`, which git worktree add wrote. SETUP_INCOMPLETE when
+    that file does not name one there, since the lane's sandbox could not then be scoped to
+    its own worktree's git."""
+    marker = os.path.join(str(worktree), ".git")
+    try:
+        with open(marker, encoding="utf-8") as handle:
+            line = handle.readline().strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PplError("SETUP_INCOMPLETE", "%s cannot be read (%s), so the lane's sandbox "
+                       "cannot be scoped to its worktree's git dir" % (marker, exc))
+    if not line.startswith("gitdir:"):
+        raise PplError("SETUP_INCOMPLETE", "%s has no gitdir line, so %s is not a worktree "
+                       "git worktree add made" % (marker, worktree))
+    git_dir = os.path.realpath(os.path.join(str(worktree), line[len("gitdir:"):].strip()))
+    worktrees = os.path.join(checkout(doc), ".git", "worktrees")
+    if os.path.dirname(git_dir) != worktrees:
+        raise PplError("SETUP_INCOMPLETE", "%s names the git dir %s, which is not in %s, the "
+                       "worktrees of the checkout %s" % (marker, git_dir, worktrees,
+                                                         checkout(doc)))
+    return git_dir
+
+
 def write_scope(doc, worktree=None):
     """Where a sandboxed command may write, each entry resolved. For a lane, given its
-    `worktree`: runs, labels and scratch, the checkout's .git, where git in a worktree writes
-    its objects, refs and worktrees/<name>, and the lane's own worktree, so no lane's Bash
-    writes the checkout's working tree or another lane's worktree. runs/ stays whole: ppl init
-    makes runs/<task> and still writes runs/ACTIVE there, and a local destroy moves the run
-    into runs/_archive. With no worktree, outside a lane: the whole checkout and the whole
-    worktrees root. [os_sandbox] allow_write is added to either."""
-    checkout, worktrees = _repo(doc)
+    `worktree`: runs, labels and scratch, the parts of the checkout's common .git that git in
+    a worktree writes (objects, refs, logs) and its own git dir there (worktree_git_dir), and
+    the lane's own worktree, so no lane's Bash writes the checkout's working tree, another
+    lane's worktree or git dir, or the shared config, hooks, info and packed-refs. runs/ stays
+    whole: ppl init makes runs/<task> and still writes runs/ACTIVE there, and a local destroy
+    moves the run into runs/_archive. With no worktree, outside a lane: the whole checkout
+    and the whole worktrees root. [os_sandbox] allow_write is added to either."""
+    checkout_dir, worktrees = _repo(doc)
     scope = [paths.home() / "runs", paths.home() / "labels", scratch_root()]
     if worktree is None:
-        scope.extend([checkout, worktrees])
+        scope.extend([checkout_dir, worktrees])
     else:
-        scope.extend([os.path.join(_real(checkout), ".git"), worktree])
+        git_dir = os.path.join(checkout(doc), ".git")
+        scope.extend(os.path.join(git_dir, name) for name in _COMMON_GIT_WRITES)
+        scope.extend([worktree_git_dir(doc, worktree), worktree])
     scope.extend(_table(doc).get("allow_write") or [])
     return [_real(entry) for entry in scope]
 
@@ -293,18 +327,25 @@ def shared_git(doc):
 
 
 def _lane_deny_write(doc, workspace, pin_map, worktree):
-    """deny_write, with the checkout's shared .git parts for a lane (`worktree` given)."""
+    """deny_write, and for a lane (`worktree` given) the checkout's shared .git parts and the
+    gitdir and commondir files of its own git dir, which tell git where the worktree and the
+    common dir are, so no lane points its own, or another's, git elsewhere."""
     denied = deny_write(workspace, pin_map)
     if worktree is not None:
-        denied.extend(entry for entry in shared_git(doc) if entry not in denied)
+        own = worktree_git_dir(doc, worktree)
+        for entry in shared_git(doc) + [os.path.join(own, "gitdir"),
+                                         os.path.join(own, "commondir")]:
+            if entry not in denied:
+                denied.append(entry)
     return denied
 
 
 def profile(doc, workspace, pin_map, worktree=None):
     """The sandbox settings block and the permissions.allow entries ppl owns, for a lane
     whose own `worktree` is given or for the workspace (write_scope). A lane's denyWrite also
-    holds the checkout's shared .git parts (shared_git), which its allowWrite's .git would
-    otherwise take in: a denyWrite entry wins over an allowWrite one."""
+    holds the checkout's shared .git parts (shared_git) and its own git dir's gitdir and
+    commondir, which its allowWrite would otherwise take in: a denyWrite entry wins over an
+    allowWrite one."""
     denied = _lane_deny_write(doc, workspace, pin_map, worktree)
     sandbox = {"enabled": True,
                "failIfUnavailable": True,

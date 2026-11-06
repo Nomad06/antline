@@ -441,6 +441,12 @@ class TestLaneProtection(LaneCase):
         for number, task in ((1, LANE_A), (2, LANE_B)):
             worktree = os.path.join(self.checkout, ".worktrees", "shop-" + task)
             os.makedirs(os.path.join(worktree, "src"))
+            # as git worktree add leaves it: a .git file naming its git dir in the checkout
+            git_dir = os.path.join(self.checkout, ".git", "worktrees", "shop-" + task)
+            os.makedirs(git_dir)
+            for name, text in (("gitdir", worktree + "/.git"), ("commondir", "../..")):
+                Path(git_dir, name).write_text(text + "\n", encoding="utf-8")
+            Path(worktree, ".git").write_text("gitdir: %s\n" % git_dir, encoding="utf-8")
             run.init(task, "u", worktree)
             fixtures.bind_lane(task, self.checkout, worktree=worktree, lane=number)
             self.worktree[task] = worktree
@@ -661,6 +667,8 @@ class TestLaneProtection(LaneCase):
                     "python3 -m ppl.__main__ show --task %s" % theirs,
                     "python3 -mppl show --task %s" % theirs,
                     "python3.11 -I -m ppl.cli show --task %s" % theirs,
+                    "python3 -Im ppl.__main__ show --task %s" % theirs,
+                    "python3 -bBm ppl show --task %s" % theirs,
                     "ppl show --task $(echo %s)" % theirs,
                     # bare ppl takes its run from a cwd inside a lane once PPL_TASK is gone
                     "cd %s && PPL_TASK= ppl show" % worktree,
@@ -704,32 +712,47 @@ class TestLaneProtection(LaneCase):
             with self.subTest(placed=command):
                 self.assertIsNone(self.bash(command))
 
-    def test_git_worktree_remove_or_move_of_another_lanes_worktree_is_denied(self):
+    def test_git_worktree_in_any_form_but_list_is_denied(self):
         # rule: R-LANE-CROSS-WRITE
-        # git removes the worktree it names, and takes a unique tail of its path from anywhere
-        # in the repository, which the guard cannot place
+        # R34: git takes a worktree by a unique tail of its path from anywhere in the
+        # repository, so no path the guard reads places remove, move, prune, lock or repair
         theirs = self.worktree[LANE_B]
+        planted = real(tmphome.mkdtemp(prefix="pplplanted-"))
+        os.makedirs(os.path.join(planted, "shop-" + LANE_B))
         for command in ("git worktree remove --force %s" % theirs,
                         "git -C %s worktree remove %s" % (self.checkout, theirs),
+                        "git worktree remove shop-%s" % LANE_B,
+                        "cd %s && git worktree remove --force shop-%s" % (planted, LANE_B),
                         "cd %s/.worktrees && git worktree remove -f shop-%s"
                         % (self.checkout, LANE_B),
-                        "git worktree move %s /tmp/moved" % theirs,
-                        "git worktree move %s %s/moved" % (self.worktree[LANE_A], theirs),
-                        "git worktree remove shop-%s" % LANE_B):
-            for agent in (None, "ppl-code-worker"):
+                        "git worktree move %s /tmp/moved" % theirs, "git worktree prune",
+                        "git worktree add /tmp/extra", "git worktree lock shop-%s" % LANE_B,
+                        "git worktree repair", "timeout 5 git worktree prune",
+                        "git worktree remove $(echo shop-%s)" % LANE_B,
+                        "git worktree remove %s" % self.worktree[LANE_A]):
+            for agent in (None, "ppl-code-worker", "general-purpose"):
                 with self.subTest(command=command, agent=agent):
                     reason = self.deny_reason(self.bash(command, agent=agent))
                     self.assertIn("BOUNDARY_VIOLATION", reason)
-        reason = self.deny_reason(self.bash("git worktree remove --force %s" % theirs))
-        self.assertIn("lane %s's worktree" % LANE_B, reason)
-        self.assertIsNone(self.bash("git worktree list"))
+                    self.assertIn("git worktree", reason)
+        for command in ("git worktree list", "git worktree list --porcelain"):
+            with self.subTest(read=command):
+                self.assertIsNone(self.bash(command))
+                self.assertIsNone(self.bash(command, agent="ppl-verifier"))
 
-    def test_the_shared_git_config_hooks_and_info_are_denied(self):
+    def test_writes_under_the_checkouts_git_dir_are_denied(self):
         # rule: R-LANE-SHARED-GIT-DIR
-        # R33: every lane on the checkout and the operator's own git read and run them
+        # R33, R35: the shared config, hooks and info, which every lane on the checkout and
+        # the operator's own git read and run, and every git dir in it, another lane's
+        # commondir and gitdir that tell its git where to look among them, are no session's
+        # to write, and git's own writes there are no write shape
         git_dir = self.checkout + "/.git"
         targets = (git_dir + "/config", git_dir + "/hooks/pre-commit",
-                   git_dir + "/info/attributes")
+                   git_dir + "/info/attributes", git_dir + "/packed-refs",
+                   git_dir + "/worktrees/shop-%s/commondir" % LANE_B,
+                   git_dir + "/worktrees/shop-%s/gitdir" % LANE_B,
+                   git_dir + "/worktrees/shop-%s/gitdir" % LANE_A,
+                   git_dir + "/objects/info/alternates")
         for agent in (None, "ppl-code-worker", "general-purpose"):
             for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
                 for target in targets:
@@ -741,6 +764,7 @@ class TestLaneProtection(LaneCase):
             for command in ("echo x >> %s/config" % git_dir,
                             "cp /tmp/h %s/hooks/post-checkout" % git_dir,
                             "tee %s/info/exclude" % git_dir,
+                            "echo /tmp/evil > %s/worktrees/shop-%s/commondir" % (git_dir, LANE_B),
                             "cd %s && echo x > ../../.git/hooks/pre-push" % self.worktree[LANE_A]):
                 with self.subTest(agent=agent, command=command):
                     reason = self.deny_reason(self.bash(command, agent=agent,
@@ -758,7 +782,13 @@ class TestLaneProtection(LaneCase):
                         "git config --add include.path /tmp/x", "git config --unset user.name",
                         "timeout 5 git config core.fsmonitor /tmp/x",
                         "/usr/bin/git -c a.b=c config filter.x.smudge /tmp/x",
-                        "git config core.hooksPath $(echo /tmp/h)", "git config core.hooksPath"):
+                        "git config core.hooksPath $(echo /tmp/h)", "git config core.hooksPath",
+                        # R36: the first word decides, and no action may follow a read
+                        "git config core.hooksPath /tmp/h --list",
+                        "git config --get user.name --add core.hooksPath /tmp/h",
+                        "git config --list --unset-all user.name",
+                        "git config --show-origin core.hooksPath /tmp/h",
+                        "git config --global --get user.name"):
             for agent in ("ppl-code-worker", "ppl-verifier"):
                 with self.subTest(command=command, agent=agent):
                     reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))

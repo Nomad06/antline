@@ -52,8 +52,16 @@ class LaneRenderCase(unittest.TestCase):
         start = lanes.start_dir(TASK)
         return harness.load(start / "harness" / name), start
 
+    def worktree(self, doc):
+        """A worktree as git worktree add leaves it: a .git file naming its git dir in the
+        harness checkout's .git/worktrees."""
+        worktree = Path(tmphome.mkdtemp(prefix="pplworktree-"))
+        git_dir = os.path.join(os_sandbox.checkout(doc), ".git", "worktrees", worktree.name)
+        (worktree / ".git").write_text("gitdir: %s\n" % git_dir, encoding="utf-8")
+        return worktree
+
     def render(self, doc, start, source=SOURCE, routing_config=None, worktree=None):
-        worktree = worktree or Path(tmphome.mkdtemp(prefix="pplworktree-"))
+        worktree = worktree or self.worktree(doc)
         return lane_render.render(doc, TASK, 2, start, worktree, routing_config
                                   or routing.load(), source)
 
@@ -85,16 +93,22 @@ class TestSettings(LaneRenderCase):
 
     def test_the_profile_lets_bash_write_only_its_own_worktree_and_the_checkouts_git(self):
         # rule: R-LANE-CROSS-WRITE
-        # R25: a lane's sandboxed Bash writes neither the project checkout's working tree nor
-        # another lane's worktree, and git in its own worktree writes under the checkout's .git
+        # R25, R35: a lane's sandboxed Bash writes neither the project checkout's working tree
+        # nor another lane's worktree, and of the checkout's .git only what git in its own
+        # worktree writes: objects, refs, logs and its own worktrees/<id>
         doc, start = self.sandboxed()
-        worktree = Path(tmphome.mkdtemp(prefix="pplworktree-"))
+        worktree = self.worktree(doc)
         result = self.render(doc, start, worktree=worktree)
         settings = json.loads(result["settings"].read_text(encoding="utf-8"))
         allow = settings["sandbox"]["filesystem"]["allowWrite"]
         checkout = os_sandbox.checkout(doc)
+        git_dir = os.path.join(checkout, ".git")
         self.assertIn(os.path.realpath(worktree), allow)
-        self.assertIn(os.path.join(checkout, ".git"), allow)
+        for name in ("objects", "refs", "logs", "worktrees/" + worktree.name):
+            self.assertIn(os.path.join(git_dir, name), allow)
+        for entry in (git_dir, os.path.join(git_dir, "worktrees"),
+                      os.path.join(git_dir, "packed-refs")):
+            self.assertNotIn(entry, allow)
         self.assertNotIn(checkout, allow)
         self.assertNotIn(os.path.realpath(doc["repo"]["worktrees"]), allow)
         for name in ("runs", "labels", "scratch"):
@@ -104,14 +118,18 @@ class TestSettings(LaneRenderCase):
 
     def test_the_profile_write_denies_the_checkouts_shared_git_parts(self):
         # rule: R-LANE-SHARED-GIT-DIR
+        # R33, R35: the shared config, hooks and info, and the own git dir's gitdir and
+        # commondir, which its allowance would otherwise take in
         doc, start = self.sandboxed()
-        result = self.render(doc, start)
+        worktree = self.worktree(doc)
+        result = self.render(doc, start, worktree=worktree)
         filesystem = json.loads(result["settings"].read_text(encoding="utf-8"))[
             "sandbox"]["filesystem"]
         facts = json.loads(result["facts"].read_text(encoding="utf-8"))
         git_dir = os.path.join(os_sandbox.checkout(doc), ".git")
-        self.assertIn(git_dir, filesystem["allowWrite"])
-        for name in ("config", "hooks", "info"):
+        own = os.path.join("worktrees", worktree.name)
+        self.assertIn(os.path.join(git_dir, own), filesystem["allowWrite"])
+        for name in ("config", "hooks", "info", own + "/gitdir", own + "/commondir"):
             self.assertIn(os.path.join(git_dir, name), filesystem["denyWrite"])
             self.assertIn(os.path.join(git_dir, name), facts["deny_write"])
             self.assertNotIn(os.path.join(git_dir, name), filesystem["allowWrite"])

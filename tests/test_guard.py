@@ -1895,7 +1895,10 @@ class TestGuard(unittest.TestCase):
         # ppl/__main__.py calls cli.main too, and python takes -m glued or behind its flags
         for command in ("python3 -m ppl.__main__ transition done", "python3 -mppl transition done",
                         "python3.11 -I -m ppl.cli findings status --finding-id F1 --status fixed",
-                        "python -m ppl.__main__ stage enter verification"):
+                        "python -m ppl.__main__ stage enter verification",
+                        # -m inside a cluster of short flags
+                        "python3 -Im ppl.__main__ transition done", "python3 -bm ppl transition done",
+                        "python3 -IBm ppl.cli transition done", "python3 -Imppl transition done"):
             with self.subTest(command=command):
                 result = decide(payload("ppl-code-worker", "Bash", {"command": command}))
                 self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
@@ -2918,16 +2921,19 @@ class TestGuard(unittest.TestCase):
                 self.assertIsNone(decide(payload(
                     "ppl-code-worker", "Bash", {"command": command})))
 
-    def test_orchestrator_stage_one_worktree_setup_is_still_allowed(self):
+    def test_orchestrator_stage_one_worktree_setup_is_left_to_the_lane(self):
         # SKILL.md Stage 1, verbatim shape: run from the MAIN checkout, beside
-        # the run's repo. `git worktree add` is not a shape this parses at all,
-        # and nothing here may start denying the documented setup.
-        self.assertIsNone(decide(payload(
-            None, "Bash",
-            {"command": "cd /home/dev/src/project && git fetch origin master "
-                        "&& git worktree add ../project-DEMO-700 -b DEMO-700-slug "
-                        "origin/master"},
-            cwd="/home/dev/ppl-workspace")))
+        # the run's repo. `git worktree add` is not a shape the write boundary
+        # parses at all, so a session in no lane may still run it. In a lane
+        # ppl lane made the worktree (D6) and every git worktree but list is
+        # denied (R-LANE-CROSS-WRITE), until Task 10 drops the step.
+        call = payload(None, "Bash",
+                       {"command": "cd /home/dev/src/project && git fetch origin master "
+                                   "&& git worktree add ../project-DEMO-700 -b DEMO-700-slug "
+                                   "origin/master"},
+                       cwd="/home/dev/ppl-workspace")
+        self.assertIsNone(decide(call, ()))
+        self.assertIn("git worktree", self.deny_reason(decide(call)))
 
     # --- Round 3 (post-branch review, finding 3): references/gates.md's
     # recipe redirected every log to "$RUN/...", and the write-boundary check

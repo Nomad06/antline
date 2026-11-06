@@ -26,6 +26,18 @@ def doc(forge="github", tracker="jira", checkout="/srv/repo", **extra):
     return out
 
 
+def fake_worktree(checkout, worktree):
+    """`worktree` laid out as git worktree add leaves it: a .git file naming its git dir in
+    the checkout's .git/worktrees, which holds gitdir and commondir. Returns the git dir."""
+    git_dir = Path(checkout) / ".git" / "worktrees" / Path(worktree).name
+    git_dir.mkdir(parents=True, exist_ok=True)
+    (git_dir / "gitdir").write_text(str(Path(worktree) / ".git") + "\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    Path(worktree).mkdir(parents=True, exist_ok=True)
+    (Path(worktree) / ".git").write_text("gitdir: %s\n" % git_dir, encoding="utf-8")
+    return git_dir
+
+
 class Home(unittest.TestCase):
     def setUp(self):
         self._home = os.environ["PPL_HOME"]
@@ -58,68 +70,86 @@ class TestScope(Home):
         self.assertEqual(scope, [home + "/runs", home + "/labels", home + "/scratch",
                                  str(base / "real"), str(base / "real" / ".worktrees")])
 
-    def test_a_lanes_write_scope_is_its_own_worktree_and_the_checkouts_git(self):
+    def test_a_lanes_write_scope_is_its_own_worktree_and_its_git_dir(self):
         # rule: R-LANE-CROSS-WRITE
-        # R25: git in a worktree writes objects, refs and worktrees/<name> under the checkout's
-        # .git, and the lane writes nothing else of the checkout or of another lane's worktree
+        # R25, R35: git in a worktree writes the checkout's .git objects, refs and logs and its
+        # own worktrees/<id>, and the lane writes nothing else of the checkout's .git, of the
+        # checkout or of another lane's worktree
         base = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplrepo-")))
         (base / "real").mkdir()
         (base / "link").symlink_to(base / "real")
         worktree = base / "link" / ".worktrees" / "real-KEY-7"
+        fake_worktree(base / "link", worktree)
+        fake_worktree(base / "link", base / "link" / ".worktrees" / "real-KEY-8")
         scope = os_sandbox.write_scope(doc(checkout=str(base / "link"),
                                            os_sandbox={"allow_write": ["~/.npm"]}),
                                        worktree=worktree)
         home = os.environ["PPL_HOME"]
+        git_dir = base / "real" / ".git"
         self.assertEqual(scope, [home + "/runs", home + "/labels", home + "/scratch",
-                                 str(base / "real" / ".git"),
+                                 str(git_dir / "objects"), str(git_dir / "refs"),
+                                 str(git_dir / "logs"), str(git_dir / "worktrees" / "real-KEY-7"),
                                  str(base / "real" / ".worktrees" / "real-KEY-7"),
                                  os.path.realpath(os.path.expanduser("~/.npm"))])
-        self.assertNotIn(str(base / "real"), scope)
-        self.assertNotIn(str(base / "real" / ".worktrees"), scope)
+        for entry in (base / "real", base / "real" / ".worktrees", git_dir,
+                      git_dir / "worktrees", git_dir / "worktrees" / "real-KEY-8",
+                      git_dir / "packed-refs"):
+            self.assertNotIn(str(entry), scope)
+
+    def test_a_worktree_with_no_git_dir_of_the_checkout_is_refused(self):
+        # rule: R-LANE-CROSS-WRITE
+        base = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplrepo-")))
+        elsewhere = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplother-")))
+        worktree = base / ".worktrees" / "repo-KEY-7"
+        worktree.mkdir(parents=True)
+        for text in (None, "not a gitdir\n", "gitdir: %s/.git/worktrees/x\n" % elsewhere):
+            if text is not None:
+                (worktree / ".git").write_text(text, encoding="utf-8")
+            with self.subTest(text=text), self.assertRaises(PplError) as caught:
+                os_sandbox.write_scope(doc(checkout=str(base)), worktree=worktree)
+            self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
 
     def test_a_lanes_profile_write_denies_the_shared_git_config_hooks_and_info(self):
         # rule: R-LANE-SHARED-GIT-DIR
-        # R33: the lane's allowWrite takes in the checkout's .git, and its denyWrite, which
-        # wins, keeps out what every lane and the operator's own git read and run there
+        # R33, R35: what every lane and the operator's own git read and run in the checkout's
+        # .git, and the gitdir and commondir of the lane's own git dir, are write-denied, and
+        # a denyWrite entry wins over an allowWrite one
         base = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplrepo-")))
         worktree = base / ".worktrees" / "repo-KEY-7"
+        own = fake_worktree(base, worktree)
         lane_doc = doc(forge="gitlab", checkout=str(base))
-        shared = [str(base / ".git" / name) for name in ("config", "hooks", "info")]
+        denied = [str(base / ".git" / name) for name in ("config", "hooks", "info")]
+        denied += [str(own / "gitdir"), str(own / "commondir")]
         lane = os_sandbox.profile(lane_doc, "/srv/ws", PINS, worktree=worktree)
         filesystem = lane["sandbox"]["filesystem"]
-        self.assertIn(str(base / ".git"), filesystem["allowWrite"])
-        for entry in shared:
+        self.assertIn(str(own), filesystem["allowWrite"])
+        self.assertNotIn(str(base / ".git"), filesystem["allowWrite"])
+        for entry in denied:
             self.assertIn(entry, filesystem["denyWrite"])
             self.assertNotIn(entry, filesystem["allowWrite"])
         facts = os_sandbox.facts(lane_doc, "/srv/ws", PINS, worktree=worktree)
-        for entry in shared:
+        self.assertEqual(facts["write_scope"], filesystem["allowWrite"])
+        for entry in denied:
             self.assertIn(entry, facts["deny_write"])
         # outside a lane the whole checkout is in scope, as before
         plain = os_sandbox.profile(lane_doc, "/srv/ws", PINS)["sandbox"]["filesystem"]
-        for entry in shared:
+        for entry in denied:
             self.assertNotIn(entry, plain["denyWrite"])
 
-    def test_git_in_a_worktree_never_writes_the_shared_config_hooks_or_info(self):
-        # R33: what a lane runs in its worktree (commit, add, branch, stash, rebase, reset,
-        # checkout) leaves the checkout's .git/config, hooks and info as they were, so the
-        # lane's profile can write-deny them
+    def test_git_in_a_worktree_writes_only_objects_refs_logs_and_its_git_dir(self):
+        # R33, R35: what a lane runs in its worktree (add, commit, branch, stash, checkout,
+        # rebase, reset, switch) writes in the checkout's .git only objects, refs, logs and
+        # its own worktrees/<id>, so the profile leaves the rest out of the lane's reach: the
+        # shared config, hooks, info and packed-refs, and another lane's git dir
         root = Path(os.path.realpath(tmphome.mkdtemp(prefix="pplgit-")))
         checkout, worktree = root / "checkout", root / "worktree"
         env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
 
         def git(directory, *args):
             subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
-                            "-c", "commit.gpgsign=false", "-C", str(directory)] + list(args),
+                            "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
+                            "-c", "maintenance.auto=false", "-C", str(directory)] + list(args),
                            check=True, capture_output=True, env=env, timeout=60)
-
-        def shared():
-            found = {}
-            for name in ("config", "hooks", "info"):
-                top = checkout / ".git" / name
-                for path in [top] + sorted(top.rglob("*")):
-                    if path.is_file():
-                        found[str(path)] = (path.read_bytes(), path.stat().st_mtime_ns)
-            return found
 
         checkout.mkdir()
         git(checkout, "init", "-q", "-b", "main")
@@ -127,7 +157,20 @@ class TestScope(Home):
         git(checkout, "add", "a.txt")
         git(checkout, "commit", "-q", "-m", "base")
         git(checkout, "worktree", "add", "-q", "-b", "lane", str(worktree))
-        before = shared()
+        git(checkout, "worktree", "add", "-q", "-b", "other", str(root / "other"))
+        common = checkout / ".git"
+        own = Path(os_sandbox.worktree_git_dir(doc(checkout=str(checkout)), worktree))
+        allowed = [common / name for name in ("objects", "refs", "logs")] + [own]
+
+        def outside():
+            found = {}
+            for path in sorted(common.rglob("*")):
+                if path.is_file() and not any(path == top or top in path.parents
+                                              for top in allowed):
+                    found[str(path)] = (path.read_bytes(), path.stat().st_mtime_ns)
+            return found
+
+        before = outside()
         (worktree / "b.txt").write_text("b\n", encoding="utf-8")
         git(worktree, "add", "b.txt")
         git(worktree, "commit", "-q", "-m", "lane work")
@@ -145,7 +188,7 @@ class TestScope(Home):
         git(worktree, "reset", "-q", "--soft", "HEAD~1")
         git(worktree, "reset", "-q", "--hard", "HEAD")
         git(worktree, "switch", "-q", "-c", "lane-2")
-        self.assertEqual(shared(), before)
+        self.assertEqual(outside(), before)
 
     def test_allow_write_follows_the_scope_and_expands_home(self):
         scope = os_sandbox.write_scope(doc(os_sandbox={"allow_write": ["~/.npm"]}))

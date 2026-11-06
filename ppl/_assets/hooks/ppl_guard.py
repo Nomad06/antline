@@ -466,7 +466,8 @@ BASH_WRITE_SHAPES = re.compile(
 # PPL_INVOCATION_RE below matches those shapes too, feeding the exact same
 # read-only allowlist and the exact same fail-closed default. Any module of the
 # package counts, `python3 -m ppl.__main__` (which runs cli.main) among them,
-# by any python, with -m glued or behind other interpreter flags. `p''pl` (or
+# by any python, with -m glued, inside a cluster of short flags (-Im) or behind other
+# interpreter flags. `p''pl` (or
 # base64, or any other quote/encoding trick) is not: a lexical matcher
 # cannot win an arms race against arbitrary shell quoting, and chasing this
 # one instance would buy a longer regex and a false sense of completeness,
@@ -486,7 +487,7 @@ BASH_WRITE_SHAPES = re.compile(
 # enter` among them, takes no generation, so for those this lexical check is
 # the only fence a role meets, and it is a speed bump, not a proof.
 PPL_INVOCATION_RE = re.compile(
-    r"\bpython[0-9.]*\s+(?:-[A-Za-z]+\s+)*-m\s*ppl(?:\.\w+)*(?=[\s;&|]|$)"
+    r"\bpython[0-9.]*\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*m\s*ppl(?:\.\w+)*(?=[\s;&|]|$)"
     r"|\bppl\.cli(?=[\s;&|]|$)"
     # Not after a dot: `~/.ppl`, the default data root, is a directory, while
     # `bin/ppl` and `./ppl` are the launcher.
@@ -1481,9 +1482,8 @@ def _git_write_targets(args, cwd):
     any other target this cannot pin down, which for a role is a deny and for
     an unroled session is a deny only when its cwd sits inside the run's repo
     (the orchestrator's Stage 1 `git worktree add`, run from the main checkout
-    beside the repo, is not a shape this parses at all). `git worktree remove`
-    and `git worktree move` remove the worktree they name, which must name a
-    directory from the cwd, or the target is one this cannot place. Read-only
+    beside the repo, is not a shape this parses at all; in a lane every git
+    worktree subcommand but list is denied outright, see lane_git_denial). Read-only
     subcommands, `add`, `commit`, and `stash push`/`stash apply` (the shapes
     references/gates.md sends a role to) write no tree path and pass.
     """
@@ -1524,17 +1524,6 @@ def _git_write_targets(args, cwd):
         if any(t in _GIT_APPLY_DRY_RUN_FLAGS for t in rest):
             return []
         return [(None, cwd, False)]
-    if sub == "worktree" and rest[:1] in (["remove"], ["move"]):
-        # git takes a worktree by its path or by a unique tail of it from anywhere in the
-        # repository, so a spelling that names no directory from the cwd cannot be placed
-        files = _positionals(rest[1:])
-        wanted = 1 if rest[0] == "remove" else 2
-        if len(files) != wanted:
-            return [(None, cwd, False)]
-        resolved = _resolve_path_against_cwd(files[0], cwd)
-        if not (resolved and os.path.isdir(resolved)):
-            return [(None, cwd, False)]
-        return [(files[0], cwd, True)] + [(f, cwd, False) for f in files[1:]]
     if sub in _GIT_TREE_REWRITERS:
         return [(None, cwd, False)]
     if sub == "reset" and any(t in ("--merge", "--keep") for t in rest):
@@ -2509,13 +2498,20 @@ _PPL_MODULE_RE = re.compile(r"ppl(?:\.\w+)*")
 
 
 def _runs_ppl_module(words):
-    """True when an interpreter's `words` name a ppl module for -m: `-m ppl[.<module>]`, or
-    the module glued to the flag, `-mppl[.<module>]`."""
+    """True when an interpreter's `words` name a ppl module for -m: a short-flag word with an
+    m in it (-m, -Im, -bBm) whose rest is the module (-mppl, -Imppl.cli), or, with no rest,
+    whose next word is. Every m of the cluster is tried, so a cluster python reads otherwise
+    is taken as running ppl rather than not."""
     for index, word in enumerate(words):
-        if word == "-m" and index + 1 < len(words) and _PPL_MODULE_RE.fullmatch(words[index + 1]):
-            return True
-        if word.startswith("-m") and _PPL_MODULE_RE.fullmatch(word[2:]):
-            return True
+        if not (word.startswith("-") and not word.startswith("--")):
+            continue
+        for at in range(1, len(word)):
+            # the flags before the m are letters, as python's own short flags are
+            if word[at] != "m" or not (at == 1 or word[1:at].isalpha()):
+                continue
+            module = word[at + 1:] or (words[index + 1] if index + 1 < len(words) else "")
+            if _PPL_MODULE_RE.fullmatch(module):
+                return True
     return False
 
 
@@ -2680,55 +2676,80 @@ def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
 
 
 # The read forms of git config, the only ones a role runs in a lane [R-LANE-SHARED-GIT-DIR]:
-# the options of the old syntax and the verbs of the new one.
-_GIT_CONFIG_READ_OPTIONS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch",
-                                      "--list", "-l", "--show-origin", "--show-scope"})
-_GIT_CONFIG_READ_VERBS = frozenset({"get", "list"})
+# the first word after config must be one of these, an option of the old syntax or a verb of
+# the new one, and no action option may follow anywhere.
+_GIT_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch",
+                               "--list", "-l", "get", "list"})
+_GIT_CONFIG_ACTIONS = frozenset({"--add", "--replace-all", "--unset", "--unset-all",
+                                 "--rename-section", "--remove-section", "--edit", "-e"})
 
 
-def _git_config_write(words):
-    """True when `words`, what follows a git, run git config in any form but a read: past
-    git's own options (-C, -c, --git-dir, ...), the subcommand is config, and neither a read
-    verb (get, list) follows it nor a read option (--get, --list, ...) is among its words."""
+def _git_subcommand(words):
+    """(subcommand, the words after it) of what follows a git, past git's own options (-C, -c,
+    --git-dir, ...), or (None, [])."""
     i = 0
     while i < len(words) and words[i].startswith("-"):
         i += 2 if words[i] in _GIT_GLOBAL_VALUE_FLAGS else 1
-    if words[i:i + 1] != ["config"]:
-        return False
-    rest = words[i + 1:]
-    if rest[:1] and rest[0] in _GIT_CONFIG_READ_VERBS:
-        return False
-    return not any(word in _GIT_CONFIG_READ_OPTIONS for word in rest)
+    if i >= len(words):
+        return None, []
+    return words[i], words[i + 1:]
+
+
+def _git_config_write(rest):
+    """True unless the words after git config are a read: the first a read option or verb,
+    and no action option among them. Anything else, an implicit get or set included, is a
+    write form."""
+    if not rest or rest[0] not in _GIT_CONFIG_READS:
+        return True
+    return any(word in _GIT_CONFIG_ACTIONS or word.split("=", 1)[0] in _GIT_CONFIG_ACTIONS
+               for word in rest)
 
 
 _GIT_CONFIG_SPELLED_RE = re.compile(r"\bgit\b[\s\S]*\bconfig\b")
+_GIT_WORKTREE_SPELLED_RE = re.compile(r"\bgit\b[\s\S]*\bworktree\b")
 
 
-def role_git_config_denial(command, agent, binding, cwd=None):
-    """("BOUNDARY_VIOLATION", reason) when a ppl-* role in a lane runs git config in a write
-    form, else None [R-LANE-SHARED-GIT-DIR]. Git in a worktree writes its config into the
-    project checkout's shared .git/config, which every lane on that checkout and the
-    operator's own git read, so a hook or a core.hooksPath set there runs in their git. Any
-    word read as git counts, by any path and behind any wrapper, and a command the write walk
-    cannot split, with git and config spelled in it, fails closed."""
-    if not (isinstance(command, str) and binding.task and not binding.problem
-            and escape.is_role(agent)):
+def lane_git_denial(command, agent, binding, cwd=None):
+    """("BOUNDARY_VIOLATION", reason) for a git command a session bound to a lane may not run,
+    else None. Any word read as git counts, by any path and behind any wrapper, and a command
+    the write walk cannot split fails closed on the spelling:
+    - git worktree in any form but list, for every session [R-LANE-CROSS-WRITE]: git takes a
+      worktree by a unique tail of its path from anywhere in the repository, so remove,
+      move, prune, lock, unlock and repair can reach another lane's worktree whatever path
+      the guard reads, and ppl lane makes and ppl destroy removes a lane's own;
+    - git config in any form but a read, for a ppl-* role [R-LANE-SHARED-GIT-DIR]: git in a
+      worktree writes its config into the project checkout's shared .git/config, which every
+      lane on that checkout and the operator's own git read."""
+    if not (isinstance(command, str) and binding.task and not binding.problem):
         return None
+    role = escape.is_role(agent)
     segments = []
     _bash_write_targets(command, cwd if isinstance(cwd, str) else None, segments)
     blinded = not segments or any(tokens is None for tokens, _, _ in segments)
-    found = blinded and _GIT_CONFIG_SPELLED_RE.search(command)
+    worktree = blinded and _GIT_WORKTREE_SPELLED_RE.search(command)
+    config = blinded and role and _GIT_CONFIG_SPELLED_RE.search(command)
     for tokens, _, _ in segments:
         for index, word in enumerate(tokens or ()):
-            if _verb_name(word) == "git" and _git_config_write(tokens[index + 1:]):
-                found = True
-    if not found:
-        return None
-    return ("BOUNDARY_VIOLATION",
-            "%s may not write git config in lane %s: the project checkout's .git/config is "
-            "shared by every lane on it and by the operator's own git, so only its reads "
-            "(--get, --get-all, --get-regexp, --list, get, list) are a role's" % (agent,
-                                                                                   binding.task))
+            if _verb_name(word) != "git":
+                continue
+            sub, rest = _git_subcommand(tokens[index + 1:])
+            if sub == "worktree" and rest[:1] != ["list"]:
+                worktree = True
+            if sub == "config" and role and _git_config_write(rest):
+                config = True
+    if worktree:
+        return ("BOUNDARY_VIOLATION",
+                "lane %s may not run git worktree but git worktree list: git takes a worktree "
+                "by a tail of its path, which can name another lane's, and ppl lane and ppl "
+                "destroy make and remove a lane's own" % binding.task)
+    if config:
+        return ("BOUNDARY_VIOLATION",
+                "%s may not write git config in lane %s: the project checkout's .git/config is "
+                "shared by every lane on it and by the operator's own git, so only a read is a "
+                "role's, its first word one of %s and no %s after it"
+                % (agent, binding.task, ", ".join(sorted(_GIT_CONFIG_READS)),
+                   ", ".join(sorted(_GIT_CONFIG_ACTIONS))))
+    return None
 
 
 def _decide(payload, argv=()):
@@ -2871,8 +2892,8 @@ def _decide(payload, argv=()):
         if refusal is None and tool == "Bash":
             refusal = (ppl_task_mismatch(tool_input.get("command"), binding(), listed,
                                          payload.get("cwd"))
-                       or role_git_config_denial(tool_input.get("command"), agent, binding(),
-                                                 payload.get("cwd")))
+                       or lane_git_denial(tool_input.get("command"), agent, binding(),
+                                          payload.get("cwd")))
         if refusal:
             return deny(*refusal)
 
