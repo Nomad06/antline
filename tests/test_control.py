@@ -553,8 +553,16 @@ class TestDestroyCleansUpTheLane(unittest.TestCase):
         _, closed = self.lane("DEMO-487", main, lane=2)
         lanes.release("DEMO-487")
         variant = str(live.parent / live.name.upper())
-        for task_id, repo, holder in (("DEMO-488", variant, "DEMO-486"),
-                                      ("DEMO-489", str(closed), "DEMO-487")):
+        cases = [("DEMO-489", str(closed), "DEMO-487")]
+        if os.path.isdir(variant):
+            # a case-insensitive file system, where the variant is the live lane's worktree
+            cases.insert(0, ("DEMO-488", variant, "DEMO-486"))
+        else:
+            # a case-sensitive one, where it names no directory: there is nothing to remove
+            run.init("DEMO-488", "u", variant)
+            name_as_the_legacy_run(self, "DEMO-488")
+            self.assertEqual(run.destroy("DEMO-488", "local")["worktree"], "absent")
+        for task_id, repo, holder in cases:
             run.init(task_id, "u", repo)
             name_as_the_legacy_run(self, task_id)
             result = run.destroy(task_id, "local")
