@@ -88,6 +88,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     setup.py                     `ppl setup`, the six-step onboarding wizard
     models.py                    tier models: `ppl models verify` probes and their record
     harness.py                   harness load, validate, add, apply, and the run snapshot (5.6)
+    lessons.py                   a finished run's evidence bundle for ppl-reflector, and the owner's review of its lessons (6.13)
     tomlout.py                   the TOML writer for the files setup rewrites
     schema.py                    brief and verdict field/shape checks (Python, not JSON Schema files)
     refusals.py                  refused role output: the refusal count and its park (6.6)
@@ -132,6 +133,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     verdicts/<sha>/<n>.json      every verdict recorded on it, n = 1, 2, ... (6.6)
     findings/<finding_id>.json   the findings registry (6.6a)
     parking.json                 (only when parked)
+    lessons/bundle/              the evidence bundle ppl-reflector reads after the merge (6.13)
     log.jsonl                    append-only transition log
 <workspace>/.claude/             the isolated launch directory (default ~/ppl-workspace)
   settings.local.json            the three hook registrations ppl setup writes
@@ -201,6 +203,7 @@ issue write tools match its `mcp_write_regex`).
 | ppl-test-worker | average | high | test paths only [R-ROLE-TEST-WORKER-MAIN] | main sources for writes [R-ROLE-TEST-WORKER-MAIN]; its own Read/Grep/Glob and Bash reads of them are denied by the guard hook [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS] |
 | ppl-verifier | good | xhigh | nothing | Edit, Write, MultiEdit, Bash, all git mutations |
 | ppl-review-responder | average | high | nothing | posting directly; it drafts, orchestrator posts |
+| ppl-reflector | the briefer's | the briefer's | nothing - it returns lesson proposals as JSON | every path, it has no write tool [R-ROLE-READONLY-NO-WRITE]; a `routing.toml` without `[roles.ppl-reflector]` routes it as a copy of the briefer's entry without `by_risk` |
 
 Rationale for routing: chapter 8. The stronger tier is used where the solution space is wide
 (briefing, verification). The `average` tier executes on rails. The subscription window is
@@ -828,8 +831,8 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 188 rows: 141 `blocking`, 20 `soft` and 27 `n/a`. Of the
-`n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 8 are
+As of this commit the table carries 196 rows: 146 `blocking`, 21 `soft` and 29 `n/a`. Of the
+`n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 10 are
 `PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
 registered at all (README.md "Hooks"), the
 stage 6 preconditions being unchecked before the push, the four isolation-check blind spots of
@@ -896,6 +899,24 @@ the harness snapshot, and `ppl apply-patch` refuses `OWNER_DECISION`, all in one
 `ppl` command rewrites a snapshot, so the owner restores it or re-inits the run. The split is by
 path, so tests inside product files (Rust `#[cfg(test)]`, doctests) are not split.
 
+`memory.toml` holds the harness's lessons: entries of a role, a cue, a lesson of at most 300
+characters each, the evidence they came from, how often reflection proposed them and a status
+(`format = 1`, one `[[entry]]` table per lesson). The file belongs to one harness, and a lesson
+reaches another harness only when the owner copies it by hand. A harness holds 12 active entries per role at most, and
+`harness.load` reads the file, so a harness whose `memory.toml` is invalid is invalid
+[R-MEMORY-CAP]. Cue and lesson are stored as the clean one-line text `memory.clean` returns, not
+as markdown, because lesson text is data and not instructions.
+
+`ppl harness apply` renders the active entries of a role as a "Lessons from earlier runs" section
+after that role's project notes, and the orchestrator's as the same section at the end of the
+skill. Cue and lesson are cleaned again at render, so a hand-edited file puts no heading, comment
+or include marker into a prompt [R-MEMORY-TEXT-CLEANED]. `ppl init` freezes the entries active at
+that moment into `harness.json` as `memory`, so an entry accepted later is not in that run's
+snapshot [R-LESSONS-PAST-ONLY n/a]. The apply records the sha256 of the `memory.toml` bytes in
+`config.toml` `[harness] memory_sha256`, and `ppl init` refuses `SETUP_INCOMPLETE` while the file
+on disk has another digest [R-MEMORY-APPLIED]. A lesson is prompt text and grants nothing, the
+guard never reads it [R-MEMORY-NEVER-GRANTS n/a].
+
 `ppl harness validate [--json]` runs `harness.verify`, the check the studio runs on a draft or a
 saved harness file, and prints its `{errors, warnings}` [R-STUDIO-SAME-VALIDATION]. Every load of
 a harness refuses `HARNESS_INVALID` one with no `[[gate]]` named `focused-tests`, or whose
@@ -905,7 +926,7 @@ receipt under that name [R-HARNESS-FOCUSED-TESTS-REQUIRED]. It also refuses a ta
 placeholder other than `<test_class>`, `<worktree>`, `<TASK-ID>`, `<SHA>` and `<GENERATION>`
 that neither `skill/gates.md` nor `skill/extra-gates.md` names outside a verbatim copy of a gate
 command (example-maven's `<module>` is named in its `gates.md`, an echo of the command such as the
-studio's generated `gates.md` vouches for nothing), and a `templates/*.part` for a role that is not one of the six
+studio's generated `gates.md` vouches for nothing), and a `templates/*.part` for a role that is not one of the seven
 [R-HARNESS-UNKNOWN-KEY]. Any other file under `skill/` or `templates/` is a warning, as is a
 `knowledge.skills` name found neither under the configured skills directory nor under
 `~/.claude/skills`, and a focused-tests command no `[[guard.shape]]` lets the test worker run.
@@ -986,7 +1007,7 @@ forge, as an allowlist of the adapter's read shapes, and under GitLab every Bash
 is denied [R-REVIEW-RESPONDER-BASH-SHAPES].
 
 The hook's own failure modes are decided the same way. When `decide()` raises, the call is
-denied for any role in `boundary.ROLE_RULES` (all six generated roles) and allowed for an
+denied for any role in `boundary.ROLE_RULES` (all seven generated roles) and allowed for an
 unroled session, so a hook defect cannot lock
 the operator out of unrelated work [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A call that asks to
 run outside the OS sandbox is the exception: it is denied whoever makes it
@@ -1195,13 +1216,26 @@ ppl review approved --sha <sha>  # records approval on a SHA
 ppl merge observed --sha <sha> [--url <url>]
                                   # records the merge seen on the forge, in merge_watch
                                   # only and once; the tracker gate waits for it
+ppl lessons bundle [--task <id>] # writes runs/<task>/lessons/bundle/ for ppl-reflector,
+                                  # in merge_watch after merge observed (6.13)
+ppl lessons record --task <id> --file <json>
+                                  # checks the reflector's answer against the run's bundle
+                                  # and stores its proposals for the owner (6.13)
+ppl lessons pending              # one `<task> <bundle>` line per run destroyed with
+                                  # --reflect whose reflection is not recorded yet (6.13)
+ppl lessons list|accept|reject|retire|edit [<id>] [--harness <name>] [--json]
+                                  [--cue <text>] [--lesson <text>] [--reason <text>]
+                                  # the owner's review of proposed lessons (6.13)
 
 ppl serve [--port 8787]          # admin panel, loopback only
 ppl control set <pause|resume|stop|destroy> [--scope local|full]
 ppl control get                  # what the panel has queued, if anything
-ppl destroy --scope <local|full> # local: worktree removed and run archived immediately.
+ppl destroy --scope <local|full> [--reflect --why "<line>"]
+                                  # local: worktree removed and run archived immediately.
                                   # full: remote_cleanup.json queued for the orchestrator,
-                                  # local archive happens only after that half completes (9.3)
+                                  # local archive happens only after that half completes.
+                                  # --reflect --why, local only: the run's lessons bundle
+                                  # and a pending marker for its reflection (9.3)
 
 ppl routing apply [--harness <name>]
                                  # regenerate the agent files from routing.toml and the harness,
@@ -1247,7 +1281,7 @@ ppl doctor [--task <TASK-ID>]    # reports where the guard hook is registered - 
    structured edit tool or a write-shaped Bash construct [R-ROLE-CODE-WORKER-TESTS], an
    unroled session may not write inside the repo at all [R-UNROLED-REPO-WRITE], and every
    other role either may not write anywhere (`ppl-briefer`, `ppl-verifier`,
-   `ppl-review-responder` [R-ROLE-READONLY-NO-WRITE]) or may write test paths only
+   `ppl-review-responder`, `ppl-reflector` [R-ROLE-READONLY-NO-WRITE]) or may write test paths only
    (`ppl-test-worker` [R-ROLE-TEST-WORKER-MAIN]) - modulo the interpreter-invocation
    residual both R-ROLE-CODE-WORKER-TESTS and R-GUARD-BASH-WRITE-BOUNDARY already disclose:
    a `python3 -c` (or perl/ruby/node) write reaches the same path uncaught, so "only that
@@ -1911,6 +1945,146 @@ applied, the skipped files, every other file with its sha256, and the run's meas
 (`ppl budget spend usd`), which the dollars spent on the status card include, is left out.
 A measure with no data is null, not 0, and `reasons` says why. The skipped names and the measures go through the same redaction as the documents.
 
+### 6.13 Lessons
+
+A finished run can propose lessons for its harness's `memory.toml` (5.6). This section covers the
+evidence they are drawn from. `ppl lessons bundle [--task <id>]` writes
+`runs/<task>/lessons/bundle/`, and the orchestrator dispatches the read-only `ppl-reflector` with
+a short prompt that points at that directory. The bundle reaches the reflector as files it reads
+with Read, Grep and Glob, not as text pasted into its prompt, and a reviewer's remark in it is
+data, not an instruction.
+
+**When.** In `merge_watch`, right after `ppl merge observed` has recorded the merge and the
+post-merge tracker note is written. `ppl label` is not waited for: the outcome it records can
+arrive days later, and the reflector does not read labels. `ppl lessons bundle` is refused
+`ILLEGAL_TRANSITION` with nothing written in any stage other than `merge_watch`, a merged sha
+written into the state by hand included, and in `merge_watch` before the merge is recorded
+[R-LESSONS-BUNDLE-AFTER-MERGE]. It is refused `SETUP_INCOMPLETE`, naming the file and
+`ppl harness apply <name>`, while `ppl-reflector.md` is missing from the agents directory, as on
+an install that has not applied its harness since the role was added
+[R-LESSONS-BUNDLE-AFTER-MERGE]. The command changes no run state: it takes no `--generation`,
+does not call `control.enforce` and does not refresh the deadline, so a run the operator paused
+in `merge_watch` still gets its bundle. A stop parks the run, which leaves `merge_watch`.
+
+Reflection is on by default. `config.toml` `[lessons] reflect = false` turns it off:
+`ppl lessons bundle` then prints `reflection is off ([lessons] reflect = false)`, writes nothing
+and exits 0. An unknown key in `[lessons]`, or a `reflect` that is not a boolean, is
+`SCHEMA_INVALID` naming the known key, as in `[budgets]`.
+
+**Files.** Each is JSON. A brief or a challenge the run did not write is `null`, and an empty
+list or ledger is written as one:
+
+- `outcome.json`: how the run ended, here `{"ended": "merged", "merged_sha": <sha>}`.
+- `brief.json`, `challenge.json`: as the run holds them.
+- `findings.json`: every finding document, any status, oldest first.
+- `verdicts.json`: every `verdict` event of the log in order, each with `n`, its index in the
+  log, and `document`, the verdict document recorded for it (`verdicts/<sha>/<n>.json`), `null`
+  when that document is gone.
+- `gates.json`: one `{check, result, sha, producer, at}` per receipt, by SHA and then check. The
+  build log path stays out.
+- `timeline.json`: the log's `init`, `stage_enter`, `lifecycle`, `park`, `budget`, `refusal`,
+  `deny`, `usage`, `verdict`, `evidence`, `finding_add`, `finding_status`, `review_reply`,
+  `merge_observed`, `recover` and `lease_bump` events, each with `n`, a `usage` event without
+  its per-model token counts.
+- `threads.json`: the review ledger (6.6).
+- `memory-in-effect.json`: `{harness, entries}`, the lessons the run's snapshot froze at
+  `ppl init` [R-LESSONS-PAST-ONLY n/a].
+- `remarks/<thread id>.json`: `{id, notes}` for each thread of the `review-threads.json` that
+  `ppl review fetch` wrote on GitHub. On GitLab no remark text is kept, and the ledger is the
+  remark evidence.
+
+**Writing.** The bundle is built in a temporary directory under `runs/<task>/lessons/`, then
+swapped in by two renames: the earlier bundle is renamed aside within `lessons/`, the new one is
+renamed onto `lessons/bundle/`, and only then is the earlier one removed. A build that fails
+leaves the earlier bundle as it was, and when the second rename fails the earlier one is renamed
+back, so `lessons/bundle/` holds a whole bundle, the earlier or the new one, except for the
+moment between the two renames. As in `ppl review fetch`, every path under the run is checked
+right before it is written or renamed: the temporary directory, each file's directory and the
+file, and `lessons/` and `lessons/bundle/` before each rename. `remarks/` is made by the build
+itself, not reused. A path a role linked elsewhere is `EXTERNAL_BLOCKED` with nothing written
+through it, and a link made between a check and its write is not caught. A thread id names its
+file under `remarks/`, so a `review-threads.json` thread whose id is not a plain name (letters,
+digits, `_` and `-`) is `SCHEMA_INVALID` with nothing written. Build and set-aside directories
+an interrupted build left in `lessons/` are removed when the next build starts, a link among
+them is left alone.
+
+**Runs that end without a merge.** A destroy at the owner's say-so builds the bundle too, or keeps the one
+already reflected on (9.3).
+
+**Recording.** The reflector answers with JSON, `{task, no_entry, proposals, assessments}`: at
+most 5 proposals of `{role, cue, lesson, evidence}`, and for each lesson that was in effect an
+assessment `{memory_id, verdict, evidence}` with a verdict of `helped`, `hurt`,
+`no observed effect` or `confounded`. Evidence is a list of `{kind, ref}`, `kind` one of
+`finding`, `remark`, `verdict`, `gate`, `park`, `deny` and `timeline`. The orchestrator writes the
+answer to a file and runs `ppl lessons record --task <id> --file <path>`. `--task` is required,
+since the run may already be archived. The command checks the answer against the bundle, not
+against the live run: a finding id of `findings.json`, a thread id with a `remarks/` file or a
+key of `threads.json`, a sha prefix of 7 hex digits or more that matches exactly one sha of
+`verdicts.json`, `<sha prefix>/<check>` of one entry of `gates.json`, and for `park`, `deny` and
+`timeline` the `n` the bundle recorded, not an index of the log read now. An `n` resolves only
+under the kind that names its event, so a `park` reference to a denial is refused [R-LESSONS-EVIDENCE-RESOLVES]. An unresolved
+reference, a role outside the lesson roles, a cue or lesson that is empty or over 300
+characters once cleaned, an assessment of a memory id that `memory-in-effect.json` does not hold,
+`no_entry` with proposals and more than 5 proposals each refuse the whole record `SCHEMA_INVALID`
+naming the first problem, with nothing written [R-LESSONS-EVIDENCE-RESOLVES]. A link among the
+bundle files, or a harness name in `memory-in-effect.json` that is not a plain directory name, is
+refused too, so a planted bundle cannot steer where the proposals are written
+[R-LESSONS-EVIDENCE-RESOLVES].
+
+A record that passes writes `PPL_HOME/lessons/<harness>/proposals/<task>.json`, outside `runs/`:
+`{task, harness, recorded_at, no_entry, proposals, assessments}`, each proposal with its id
+`<task>.<n>` from 1, the cleaned cue and lesson, its evidence and `status: "pending"`. It leaves
+`memory.toml` as it was: only the owner's accept writes it. A
+second record for the same task is refused `ILLEGAL_TRANSITION` [R-LESSONS-EVIDENCE-RESOLVES]. A
+pending marker `PPL_HOME/lessons/pending/<task>.json`, `{task, bundle}`, names the bundle of a
+run that was destroyed before it was reflected on and wins over the run's own path. It must name
+a real directory under `runs/`, live or archived, else the record is refused [R-LESSONS-EVIDENCE-RESOLVES]. A successful record
+removes the marker, a `no_entry` one too. A refused one leaves it, except the `ILLEGAL_TRANSITION` of a task already
+recorded, which removes it, so a marker left for a recorded task does not outlive the next record [R-LESSONS-EVIDENCE-RESOLVES]. `record` is not one of the
+role-output commands of `refusals.COMMANDS` and does not call `control.enforce`: a refused answer
+goes back to the reflector once, and then the orchestrator reports it, since parking a merged run
+over a missing lesson would cost more than the lesson [R-LESSONS-EVIDENCE-RESOLVES].
+
+**Review.** The owner decides each proposal with `ppl lessons list|accept|reject|retire|edit` on
+the active harness, or on `--harness <name>`, which must be an installed harness [R-LESSONS-OWNER-ACCEPTS].
+`list` prints the pending proposals and the active entries, or JSON with `--json`. A proposals file
+that does not read as one is left out and named, by `list` in a warning line on stderr and under
+`skipped` in its JSON, and by the studio's Lessons section in a notice, so the others still show. `accept <task>.<n>`
+merges the proposal into an active entry of the same role whose cue is the same after
+`memory.normalize_cue`, which adds 1 to its `seen` and appends the proposal's sources that the
+entry lacks, and otherwise appends `M-<max + 1>` with `sources` of `<task>:<kind>:<ref>` and
+`accepted_at` now. A new entry for a role that already has 12 active ones is refused `SCHEMA_INVALID`
+("retire one first: ppl lessons retire <id>"), and a merge is accepted at 12, since it adds no
+entry [R-LESSONS-OWNER-ACCEPTS]. `--cue` and `--lesson` on `accept` and `edit` replace the text, cleaned
+by `memory.clean_cue` and `memory.clean`, and an empty or over-long result is refused
+`SCHEMA_INVALID` [R-LESSONS-OWNER-ACCEPTS]. `reject <task>.<n> --reason <text>` needs a reason, and a proposal that is accepted
+or rejected is refused `ILLEGAL_TRANSITION` if decided again [R-LESSONS-OWNER-ACCEPTS]. `retire <id>`
+keeps the entry in the file and out of the render, and `edit <id>` is refused for an unknown or
+retired id [R-LESSONS-OWNER-ACCEPTS]. Each writer reads `memory.toml` once, builds the new entries from that text and saves them
+through the studio's `files.validate` and `files.save` with that read's hash: the old file stays in
+the studio history, and a change made in between is refused `CHANGED_ON_DISK` with nothing written
+[R-LESSONS-OWNER-ACCEPTS]. The proposal is marked after the memory save. A mark that fails then leaves the
+lesson saved and the proposal pending, and accepting it again marks it without adding the lesson
+twice. No command applies the harness: each write prints `run ppl harness apply <name> to render it`.
+A pipeline role's Bash call of any of these commands is denied like every `ppl` call that is not
+read-only [R-GUARD-PPL-CLI-DENIED].
+
+**The flow end to end.** The skill's `references/reflection.md` runs it. After the post-merge
+tracker note, the orchestrator runs `ppl lessons bundle --task <id>` and dispatches
+`ppl-reflector` with a prompt that names the bundle directory and the task id, and nothing from
+inside the bundle. It writes the answer to `<scratch>/<id>/lessons.json` and runs
+`ppl lessons record --task <id> --file <that file>`. An answer `record` turns down goes back to the reflector
+once with the message quoted, and a second one is reported to the operator: the run's work
+is done, so it is not parked. At the start of a session the orchestrator runs
+`ppl lessons pending` and reflects on each task it lists, from the bundle path on that line:
+the runs destroyed with `--reflect` whose reflection is not recorded yet. Such a reflection runs
+outside the run it reflects on, so the dispatch hook counts its `ppl-reflector` dispatch against
+whichever run is active at that moment, and the usage hook logs its tokens into that run's log,
+or neither is recorded when no run is active. Proposals then wait for the owner, who accepts, rejects, retires or edits them and
+runs `ppl harness apply <name>`. The orchestrator does not run those commands. Its session is
+not a role, so that is discipline there, as the residual of [R-LESSONS-OWNER-ACCEPTS] says.
+A run reads the lessons its snapshot froze at `ppl init` [R-MEMORY-APPLIED].
+
 ## 7. Stage flow: task link to MR
 
 Entry: `/pipeline https://tracker.example/browse/DEMO-12345`
@@ -2080,8 +2254,11 @@ Per tick:
 3. `ppl review pending --threads <fetched threads> --sha <head>` is the dispatch filter: it
    drops resolved threads, threads authored by the pipeline's own recorded MR author
    (`ppl mr set --author`, sticky across MR updates), and threads the review ledger
-   (`threads.json`, section 6.6) already answered on this exact `last_note_id`. Only what it
-   returns is classified by `ppl-review-responder` (tier `average`), into exactly one class:
+   (`threads.json`, section 6.6) already answered on this exact `last_note_id`. On GitHub the
+   fetched document also keeps each thread's `notes` (`id`, `author`, `path`, `body`), the
+   oldest 20 by id with each body cut to 4000 characters, while `note_count` still counts all
+   of them. Only what it returns is classified by `ppl-review-responder` (tier `average`),
+   into exactly one class:
    - `NEEDS_CODE_CHANGE` - re-enter stage 3 with the remark as an additional constraint.
      Full loop: worker -> test-worker -> gates -> verifier. New SHA invalidates approvals.
    - `NEEDS_REPLY_ONLY` - a factual answer exists in the code or the evidence. Drafts a
@@ -2193,6 +2370,27 @@ Destroy always prompts and the owner picks the scope per run:
 
 Destroy does not silently touch remote state. If the dialog is dismissed, nothing happens.
 
+**Reflecting on an abandoned run.** `ppl destroy --scope local --reflect --why "<line>"` and the
+panel's destroy dialog, which asks for the line after the scope `local`, write the run's lessons
+bundle (6.13) before the archive step, with `outcome.json` `{ended: "destroyed", last_stage,
+blocker, why}`: the stage the run was in, or the stage it resumes to when it is parked or
+escalated, the blocker of `parking.json` while it is parked or escalated and `null` otherwise
+(a resume leaves `parking.json` on disk), and the owner's line. A run whose merge
+`ppl merge observed` recorded gets `{ended: "merged", merged_sha}` instead, as
+`ppl lessons bundle` writes it, and the owner's line goes in the command's result. The archive
+keeps the bundle, and a pending marker `PPL_HOME/lessons/pending/<task>.json` names it. The next
+orchestrator session lists the markers with `ppl lessons pending` and reflects on each. A run
+whose proposals are already recorded is archived with no new bundle and no marker, and the
+result says `"reflection": "recorded"`: the bundle those proposals came from stays in the
+archive as it was. An empty line in the dialog skips reflection, and Cancel aborts the destroy,
+as the prompt says. `--reflect` takes `--why`, and the two are only valid for scope `local`:
+`--reflect` with scope `full` exits `SCHEMA_INVALID` ("reflect at the local destroy that
+archives the run"), as does `--why` without `--reflect` and an empty line. A failed bundle build
+ends the command before anything is archived. From the panel the destroy command is already recorded by then, so the run stays
+halted under it, and the owner archives it with a destroy that gives no reason. With `[lessons] reflect = false` the run
+is destroyed without a bundle. When the marker write fails after the archive, the report says
+the run is archived and gives the bundle path, for reflecting by hand.
+
 `pause`, `stop` and `destroy` all halt the run at the next `ppl` call or tool call. `stop`
 additionally writes a real parking record with blocker `OWNER_DECISION`, so a stopped run
 is an escalation with a resume path rather than a silent halt.
@@ -2245,6 +2443,14 @@ same errors and warnings for the same harness [R-STUDIO-SAME-VALIDATION]. A file
 writes it, and only after the check ppl makes of it, `routing.validate_config` for `routing.toml`
 and, for a harness file or a role's notes, `harness.verify` of the harness with that content
 laid in, any other file of the harness's `skill/` and `templates/` laid in by name.
+
+**Lessons.** The Agents page ends with a Lessons section for the active harness: the pending
+proposals of finished runs, each with its role, cue, lesson and evidence refs, and the entries of
+`memory.toml` grouped by role. Accept (the cue and the lesson editable first), reject (with a
+reason), retire and edit call the functions `ppl lessons` calls, so the studio writes memory only
+when the owner clicks [R-LESSONS-OWNER-ACCEPTS]. Each write answers with the line
+`run ppl harness apply <name> to render it`, which the page shows, and the page shows a short
+notice instead when no harness is active.
 
 **Slow actions are jobs.** A model probe, the extraction or an apply runs in a worker
 thread: the route returns a job id and the page polls `/api/jobs/<id>`. One job of a kind runs
@@ -2305,7 +2511,7 @@ third-party file is `vendor/htm-preact.mjs`, the htm 3.1.1 standalone bundle wit
 beside it and run the suite.
 
 **Saves.** The studio names a file by a key, `routing` or `harness:<installed
-name>:<file>` with the file one of `harness.toml`, the four `skill/` fragments and the six
+name>:<file>` with the file one of `harness.toml`, the four `skill/` fragments and the seven
 `templates/<role>.part` overlays, and a history version by its timestamp. No studio file route
 reaches any other path [R-STUDIO-NO-RAW-PATHS]. The project path, the harness source and the
 playground's value and repo path that a request sends are read, never written

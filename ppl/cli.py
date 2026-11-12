@@ -6,8 +6,8 @@ import stat
 import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
-               harness, metrics, models, os_sandbox, paths, recover, refusals, review, routing, run, schema,
-               setup, status, store, trackers, trail, usage, verdict, watchdog)
+               harness, lessons, metrics, models, os_sandbox, paths, recover, refusals, review, routing,
+               run, schema, setup, status, store, trackers, trail, usage, verdict, watchdog)
 from .errors import PplError, role_output
 from .forges import github_fetch
 
@@ -186,6 +186,9 @@ def cmd_init(args):
         model_check = "verified"
     doc = harness.load(args.harness)
     harness.require_applied(doc)
+    problem = harness.memory_problem(doc)
+    if problem:
+        raise PplError("SETUP_INCOMPLETE", problem)
     os_sandboxed = False
     if os_sandbox.needed(doc) and args.os_sandbox:
         problem = os_sandbox_problem(inspected)
@@ -1135,8 +1138,18 @@ def cmd_dispatch(args):
 
 
 def cmd_destroy(args):
+    if args.why is not None and not args.reflect:
+        raise PplError("SCHEMA_INVALID", "--why goes with --reflect")
+    if args.reflect and args.scope != "local":
+        raise PplError("SCHEMA_INVALID", "reflect at the local destroy that archives the run")
+    if args.reflect and (args.why is None or not args.why.strip()):
+        raise PplError("SCHEMA_INVALID", "--reflect needs --why \"<one line on why the run "
+                                         "ended>\"")
     task_id = resolve_task(args)
-    result = run.destroy(task_id, args.scope)
+    if args.reflect:
+        result = lessons.destroy_with_reflection(task_id, args.why)
+    else:
+        result = run.destroy(task_id, args.scope)
     print(json.dumps(result, sort_keys=True))
     return 0
 
@@ -1173,6 +1186,115 @@ def cmd_label(args):
     return 0
 
 
+def _lessons_record(args):
+    # --task is required: the run may be archived by now, so there is no active run to fall
+    # back to. Not a role-output command of refusals.COMMANDS and no control.enforce: it reads
+    # the bundle and writes only under PPL_HOME/lessons.
+    if not args.task or not args.file:
+        raise PplError("SCHEMA_INVALID", "ppl lessons record needs --task <id> and --file <json>")
+    try:
+        doc = store.read_json(args.file, None, lessons.BUNDLE_READ_LIMIT)
+    except (OSError, UnicodeDecodeError, RecursionError) as exc:
+        raise PplError("SCHEMA_INVALID", "cannot read %s: %s" % (args.file, exc))
+    if doc is None:
+        raise PplError("SCHEMA_INVALID", "%s is not there" % args.file)
+    result = lessons.record(args.task, doc)
+    if result["no_entry"]:
+        print("recorded no entry for %s" % args.task)
+    else:
+        print("recorded %d proposals for %s" % (len(result["proposals"]), args.task))
+    return 0
+
+
+OWNER_ACTIONS = ("list", "accept", "reject", "retire", "edit")
+
+
+def _lessons_table(data):
+    lines = ["harness %s" % data["harness"], "", "pending proposals:"]
+    for item in data["proposals"]:
+        lines.append("  %s  %s  when %s: %s" % (item["id"], item["role"], item["cue"],
+                                                  item["lesson"]))
+    if not data["proposals"]:
+        lines.append("  none")
+    lines += ["", "active lessons:"]
+    active = [e for e in data["memory"] if e["status"] == "active"]
+    for entry in active:
+        lines.append("  %s  %s  seen %d  when %s: %s" % (entry["id"], entry["role"],
+                                                           entry["seen"], entry["cue"],
+                                                           entry["lesson"]))
+    if not active:
+        lines.append("  none")
+    return "\n".join(lines)
+
+
+def _lessons_review(args):
+    # The owner's review: the only writer of memory.toml, through the studio's versioned save.
+    # Not a role-output command, and a role's Bash call of it is denied by the guard
+    # [R-LESSONS-OWNER-ACCEPTS]. No control.enforce: it touches no run.
+    name = lessons.harness_name(args.harness)
+    if args.action == "list":
+        data = lessons.listing(name)
+        for item in data["skipped"]:
+            print("warning: the proposals file %s was skipped: %s" % (item["path"],
+                                                                     item["reason"]),
+                  file=sys.stderr)
+        print(json.dumps(data, indent=2, sort_keys=True) if args.json else _lessons_table(data))
+        return 0
+    if not args.target:
+        raise PplError("SCHEMA_INVALID", "ppl lessons %s needs a %s" % (
+            args.action, "proposal id" if args.action in ("accept", "reject") else "lesson id"))
+    if args.action == "accept":
+        entry = lessons.accept(name, args.target, args.cue, args.lesson)
+        print("accepted %s as %s (seen %d)" % (args.target, entry["id"], entry["seen"]))
+    elif args.action == "reject":
+        lessons.reject(name, args.target, args.reason)
+        print("rejected %s" % args.target)
+    elif args.action == "retire":
+        lessons.retire(name, args.target)
+        print("retired %s" % args.target)
+    else:
+        lessons.edit(name, args.target, args.cue, args.lesson)
+        print("edited %s" % args.target)
+    print("run ppl harness apply %s to render it" % name)
+    return 0
+
+
+def _lessons_pending():
+    markers = lessons.pending()
+    shown = 0
+    for marker in markers:
+        if "warning" in marker:
+            print("warning: the pending marker for %s %s, skipped" % (marker["task"],
+                                                                    marker["warning"]),
+                  file=sys.stderr)
+        else:
+            print("%s %s" % (marker["task"], marker["bundle"]))
+            shown += 1
+    if not shown:
+        print("no pending reflections")
+    return 0
+
+
+def cmd_lessons(args):
+    # No control.enforce, by design: the bundle changes no run state, and a destroy with
+    # reflection builds it after control.set_command recorded that destroy, so an enforce
+    # would refuse its own caller. lessons.bundle holds the stage gate
+    # [R-LESSONS-BUNDLE-AFTER-MERGE].
+    if args.action == "record":
+        return _lessons_record(args)
+    if args.action in OWNER_ACTIONS:
+        return _lessons_review(args)
+    if args.action == "pending":
+        return _lessons_pending()
+    task_id = resolve_task(args)
+    target = lessons.bundle(task_id)
+    if target is None:
+        print("reflection is off ([lessons] reflect = false)")
+    else:
+        print("bundle: %s" % target)
+    return 0
+
+
 def cmd_apply_patch(args):
     task_id = resolve_task(args)
     require_current_generation(task_id, args.generation)
@@ -1203,7 +1325,7 @@ COMMANDS = {
     "apply-patch": cmd_apply_patch, "destroy": cmd_destroy,
     "mr": cmd_mr, "merge": cmd_merge, "review": cmd_review, "doctor": cmd_doctor,
     "watchdog": cmd_watchdog, "metrics": cmd_metrics, "label": cmd_label,
-    "setup": cmd_setup, "tracker": cmd_tracker, "trail": cmd_trail,
+    "setup": cmd_setup, "tracker": cmd_tracker, "trail": cmd_trail, "lessons": cmd_lessons,
 }
 
 
@@ -1474,6 +1596,8 @@ def build_parser():
     p = sub.add_parser("destroy")
     p.add_argument("--scope", choices=["local", "full"], required=True)
     p.add_argument("--task")
+    p.add_argument("--reflect", action="store_true")
+    p.add_argument("--why")
 
     p = sub.add_parser("apply-patch")
     p.add_argument("--role", required=True)
@@ -1502,6 +1626,18 @@ def build_parser():
     p.add_argument("--actual", required=True, choices=list(metrics.LABEL_VALUES))
     p.add_argument("--by")
     p.add_argument("--task")
+
+    p = sub.add_parser("lessons")
+    p.add_argument("action", choices=["bundle", "record", "list", "accept", "reject", "retire",
+                                      "edit", "pending"])
+    p.add_argument("target", nargs="?")
+    p.add_argument("--task")
+    p.add_argument("--file")
+    p.add_argument("--harness")
+    p.add_argument("--reason")
+    p.add_argument("--cue")
+    p.add_argument("--lesson")
+    p.add_argument("--json", action="store_true")
     return parser
 
 

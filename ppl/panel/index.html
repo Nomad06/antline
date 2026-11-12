@@ -306,8 +306,13 @@ document.addEventListener("click", async (event) => {
       "Type local or full:", "local");
     if (scope !== "local" && scope !== "full") return;
     if (scope === "full" && prompt("Type the task id to confirm irreversible cleanup:") !== task) return;
-    const record = await post("/api/runs/" + encodePath(task) + "/control",
-                              { command: "destroy", scope: scope });
+    const body = { command: "destroy", scope: scope };
+    if (scope === "local") {
+      const why = prompt("Reflect on this run before it is archived? One line on why it ended, or leave empty to skip. Cancel aborts the destroy:");
+      if (why === null) return;
+      body.why = why;
+    }
+    const record = await post("/api/runs/" + encodePath(task) + "/control", body);
     // A local destroy archives the run even when git could not remove the
     // worktree. Saying nothing here is how an orphaned worktree used to look
     // exactly like a clean destroy.

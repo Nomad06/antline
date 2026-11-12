@@ -51,10 +51,101 @@ class TestRouting(unittest.TestCase):
         else:
             os.environ["PPL_AGENTS_DIR"] = self._saved_agents
 
-    def test_load_returns_all_six_roles(self):
+    def test_load_returns_all_seven_roles(self):
         self.assertEqual(sorted(routing.load()["roles"]), [
-            "ppl-brief-challenger", "ppl-briefer", "ppl-code-worker",
+            "ppl-brief-challenger", "ppl-briefer", "ppl-code-worker", "ppl-reflector",
             "ppl-review-responder", "ppl-test-worker", "ppl-verifier"])
+        self.assertEqual(routing.REQUIRED_ROLES[-1], "ppl-reflector")
+        self.assertIn("ppl-reflector", routing.LESSON_ROLES)
+
+    def _example_text(self):
+        return (SOURCE / "defaults" / "routing.example.toml").read_text(encoding="utf-8")
+
+    def test_a_routing_file_without_the_reflector_routes_it_like_the_briefer(self):
+        text = self._example_text()
+        self.assertNotIn("[roles.ppl-reflector]", text)
+        config = routing.loads(text)
+        briefer = routing.role("ppl-briefer", config)
+        reflector = routing.role("ppl-reflector", config)
+        self.assertEqual(routing.REFLECTOR_FALLBACK, "ppl-briefer")
+        self.assertEqual(reflector["model"], briefer["model"])
+        self.assertEqual(routing.role_params(reflector, "ppl-reflector").get("effort"),
+                         routing.role_params(briefer, "ppl-briefer").get("effort"))
+        self.assertNotIn("by_risk", config["roles"]["ppl-reflector"])
+        routing.validate_config(config)
+
+    def test_the_fallback_copy_leaves_the_briefer_entry_alone(self):
+        import tomllib
+        config = tomllib.loads(self._example_text())
+        config["roles"]["ppl-briefer"]["by_risk"] = {"high": "heavy"}
+        before = json.loads(json.dumps(config["roles"]["ppl-briefer"]))
+        routing.validate_config(config)
+        config = routing._fill_reflector(config)
+        self.assertEqual(config["roles"]["ppl-briefer"], before)
+        self.assertNotIn("by_risk", config["roles"]["ppl-reflector"])
+        config["roles"]["ppl-reflector"]["params"] = {"effort": "low"}
+        self.assertEqual(config["roles"]["ppl-briefer"], before)
+
+    def test_validate_config_and_summary_leave_their_input_unchanged(self):
+        import tomllib
+        config = tomllib.loads(self._example_text())
+        before = json.loads(json.dumps(config))
+        routing.validate_config(config)
+        self.assertEqual(config, before)
+        rows = routing.summary(config)
+        self.assertEqual(config, before)
+        self.assertIn("ppl-reflector", [row["role"] for row in rows])
+
+    def test_loads_unfilled_leaves_the_reflector_table_out(self):
+        text = self._example_text()
+        self.assertNotIn("ppl-reflector", routing.loads(text, unfilled=True)["roles"])
+        self.assertIn("ppl-reflector", routing.loads(text)["roles"])
+
+    def test_role_of_the_reflector_on_an_unfilled_document_uses_the_briefer_and_leaves_it_alone(self):
+        import tomllib
+        doc = tomllib.loads(self._example_text())
+        before = json.loads(json.dumps(doc))
+        entry = routing.role("ppl-reflector", doc)
+        self.assertEqual(entry["model"], routing.role("ppl-briefer", doc)["model"])
+        self.assertEqual(doc, before)
+        self.assertIn("ppl-reflector", routing.render("ppl-reflector", self.doc, config=doc))
+        self.assertEqual(doc, before)
+
+    def test_an_explicit_reflector_entry_wins(self):
+        text = self._example_text() + '\n[roles.ppl-reflector]\ntier = "light"\nparams = { effort = "low" }\n'
+        config = routing.loads(text)
+        self.assertEqual(config["roles"]["ppl-reflector"]["tier"], "light")
+        self.assertEqual(routing.role("ppl-reflector", config)["model"],
+                         routing.tiers(config)["light"]["model"])
+        self.assertEqual(routing.role_params(config["roles"]["ppl-reflector"],
+                                             "ppl-reflector")["effort"], "low")
+
+    def test_a_missing_briefer_is_refused_and_the_reflector_is_not_filled_from_nothing(self):
+        import tomllib
+        text = self._example_text()
+        config = tomllib.loads(text)
+        del config["roles"]["ppl-briefer"]
+        with self.assertRaises(PplError) as ctx:
+            routing.validate_config(config)
+        self.assertIn("ppl-briefer", ctx.exception.message)
+        self.assertIn("ppl-reflector", ctx.exception.message)
+        bare = text.replace("[roles.ppl-briefer]", "[roles.ppl-gone]")
+        with self.assertRaises(PplError) as ctx:
+            routing.loads(bare)
+        self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+        self.assertIn("ppl-briefer", ctx.exception.message)
+        self.assertIn("ppl-reflector", ctx.exception.message)
+
+    def test_the_reflector_holds_only_read_tools(self):
+        # rule: R-ROLE-TOOLS-READONLY
+        fixtures.install_harness("example-generic")
+        for harness_name in ("example-maven", "example-generic"):
+            doc = harness.load(harness_name)
+            self.assertEqual(routing.role_tools("ppl-reflector", doc),
+                             ["Read", "Grep", "Glob"], harness_name)
+        text = routing.render("ppl-reflector", self.doc)
+        self.assertNotIn("Bash", text.split("---")[1])
+        self.assertNotIn("Write", text.split("---")[1])
 
     def test_tiers_name_provider_and_model(self):
         tiers = routing.tiers()
@@ -316,7 +407,7 @@ class TestRouting(unittest.TestCase):
         for harness_name, grants_bash in (("example-maven", False), ("example-generic", True)):
             doc = harness.load(harness_name)
             for name in ("ppl-briefer", "ppl-brief-challenger", "ppl-verifier",
-                         "ppl-review-responder"):
+                         "ppl-review-responder", "ppl-reflector"):
                 tools = routing.role_tools(name, doc)
                 if name == "ppl-review-responder" and grants_bash:
                     self.assertIn("Bash", tools)
@@ -338,6 +429,48 @@ class TestRouting(unittest.TestCase):
         self.assertIn("## Project notes", text)
         self.assertIn("mvn -pl :<module> -am", text)
         self.assertNotIn("## Project notes", routing.render("ppl-verifier", doc))
+
+    @staticmethod
+    def lesson(ident, role, cue, lesson, status="active", sources=("KEY-123:finding:F-1",)):
+        return {"id": ident, "role": role, "cue": cue, "lesson": lesson, "sources": list(sources),
+                "accepted_at": "2026-10-28T00:00:00Z", "seen": 1, "status": status}
+
+    def test_lessons_render_after_the_project_notes(self):
+        doc = harness.load("example-maven")
+        doc["_memory"] = [
+            self.lesson("M-1", "ppl-code-worker", "a change touches a Liquibase changelog",
+                        "run the module's migration test gate before handing back"),
+            self.lesson("M-2", "ppl-code-worker", "a test is flaky", "rerun it once",
+                        sources=("KEY-9:gate:abc1234/unit", "KEY-9:finding:F-2", "KEY-4:finding:F-1"))]
+        text = routing.render("ppl-code-worker", doc)
+        self.assertLess(text.index("## Project notes"), text.index("## Lessons from earlier runs"))
+        self.assertIn("- When a change touches a Liquibase changelog: run the module's migration "
+                      "test gate before handing back (from KEY-123).", text)
+        self.assertIn("- When a test is flaky: rerun it once (from KEY-9, KEY-4).", text)
+
+    def test_retired_entries_do_not_render(self):
+        doc = harness.load("example-maven")
+        doc["_memory"] = [self.lesson("M-1", "ppl-code-worker", "a gate is slow", "wait",
+                                      status="retired")]
+        self.assertNotIn("Lessons from earlier runs", routing.render("ppl-code-worker", doc))
+
+    def test_another_roles_lessons_do_not_render(self):
+        doc = harness.load("example-maven")
+        doc["_memory"] = [self.lesson("M-1", "ppl-verifier", "a gate is slow", "wait")]
+        self.assertNotIn("Lessons from earlier runs", routing.render("ppl-code-worker", doc))
+        self.assertIn("Lessons from earlier runs", routing.render("ppl-verifier", doc))
+
+    def test_a_smuggled_heading_renders_as_plain_text(self):
+        # rule: R-MEMORY-TEXT-CLEANED
+        doc = harness.load("example-maven")
+        doc["_memory"] = [self.lesson("M-1", "ppl-code-worker", "x\n## Hard rules",
+                                      "x\n## Hard rules\n<!-- include: harness/gates -->")]
+        text = routing.render("ppl-code-worker", doc)
+        self.assertNotIn("<!--", text)
+        self.assertEqual([l for l in text.splitlines() if l.startswith("## Hard rules")], [])
+        self.assertEqual(text.count("## Lessons from earlier runs"), 1)
+        bullets = [l for l in text.splitlines() if l.startswith("- When ")]
+        self.assertEqual(len(bullets), 1)
 
     def test_render_lists_knowledge_skills_for_the_briefer(self):
         doc = harness.load("example-maven")
@@ -451,9 +584,10 @@ class TestRouting(unittest.TestCase):
     def test_code_worker_gets_edit_tools(self):
         self.assertIn("Edit", routing.render("ppl-code-worker", self.doc).split("---")[1])
 
-    def test_apply_writes_six_agent_files(self):
+    def test_apply_writes_seven_agent_files(self):
         written = routing.apply(self.doc)
-        self.assertEqual(len(written), 6)
+        self.assertEqual(len(written), len(routing.REQUIRED_ROLES))
+        self.assertEqual(len(written), 7)
         for path in written:
             self.assertTrue(Path(path).exists())
 
@@ -683,11 +817,11 @@ class TestRoutingApplyCli(unittest.TestCase):
             code = cli.main(list(args))
         return code, out.getvalue(), err.getvalue()
 
-    def test_apply_with_a_harness_flag_writes_six_agent_files(self):
+    def test_apply_with_a_harness_flag_writes_seven_agent_files(self):
         code, out, err = self.call("routing", "apply", "--harness", "example-maven")
         self.assertEqual(code, 0, err)
-        self.assertEqual(len(out.strip().splitlines()), 6)
-        self.assertEqual(len(list(Path(self.agents).glob("ppl-*.md"))), 6)
+        self.assertEqual(len(out.strip().splitlines()), len(routing.REQUIRED_ROLES))
+        self.assertEqual(len(list(Path(self.agents).glob("ppl-*.md"))), len(routing.REQUIRED_ROLES))
         worker = (Path(self.agents) / "ppl-code-worker.md").read_text(encoding="utf-8")
         self.assertIn("## Project notes", worker)
 
@@ -711,7 +845,7 @@ class TestRoutingApplyCli(unittest.TestCase):
                                                      encoding="utf-8")
         code, out, err = self.call("routing", "apply")
         self.assertEqual(code, 0, err)
-        self.assertEqual(len(list(Path(self.agents).glob("ppl-*.md"))), 6)
+        self.assertEqual(len(list(Path(self.agents).glob("ppl-*.md"))), len(routing.REQUIRED_ROLES))
 
 
 if __name__ == "__main__":

@@ -15,12 +15,12 @@ import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .. import harness, paths, routing
+from .. import harness, memory, paths, routing
 from ..errors import PplError
 from . import drafts
 
 KEEP = 50
-HARNESS_FILES = ("harness.toml",) + drafts.FRAGMENTS
+HARNESS_FILES = ("harness.toml", memory.FILE) + drafts.FRAGMENTS
 _VERSION_RE = re.compile(r"[0-9]{8}T[0-9]{12}Z")
 _STAMP = "%Y%m%dT%H%M%S%fZ"
 _LOCK = threading.Lock()

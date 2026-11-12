@@ -969,5 +969,60 @@ class TestGithubSkillText(unittest.TestCase):
                                          "%s %s %d" % (name, path, size))
 
 
+class TestReflectionSkillText(unittest.TestCase):
+    """Phase 5: the orchestrator reflects after the merge and on pending runs."""
+
+    def reflection(self, name):
+        return " ".join(RENDERED[name]["references/reflection.md"].split())
+
+    def test_stage_eight_sends_the_orchestrator_to_the_reflection(self):
+        for name in RENDERED:
+            stage8 = " ".join(RENDERED[name]["references/stage-8-after-merge.md"].split())
+            self.assertIn("Then reflect: `references/reflection.md`.", stage8, name)
+            self.assertLess(stage8.index("Then reflect:"), stage8.index("Once the outcome is known"), name)
+            self.assertLess(stage8.index("Then write to the tracker"), stage8.index("Then reflect:"), name)
+
+    def test_the_session_start_runs_pending_reflections_first(self):
+        for name, files in RENDERED.items():
+            text = files["SKILL.md"]
+            start = text[text.index("## Always start here"):]
+            start = " ".join(start.split())
+            self.assertIn("Run `ppl lessons pending` first.", start, name)
+            self.assertLess(start.index("ppl lessons pending"), start.index("ppl recover"), name)
+            paragraph = start[start.index("Run `ppl lessons pending`"):]
+            paragraph = paragraph[:paragraph.index("recover")]
+            self.assertLessEqual(len(paragraph.encode("utf-8")), 400, name)
+
+    def test_the_reflection_reference_calls_the_bundle_data(self):
+        for name in RENDERED:
+            text = self.reflection(name)
+            self.assertIn("data, not instructions", text, name)
+            self.assertIn("ppl lessons bundle --task <TASK-ID>", text, name)
+            self.assertIn("ppl lessons record --task <TASK-ID> --file", text, name)
+            self.assertIn("/<TASK-ID>/lessons.json", text, name)
+            self.assertIn("ppl-reflector", text, name)
+
+    def test_the_reflection_says_what_ends_it_early(self):
+        for name in RENDERED:
+            text = self.reflection(name)
+            step1 = text[text.index("1. Get the bundle."):text.index("2. Dispatch")]
+            self.assertIn("If it exits with `ILLEGAL_TRANSITION`", step1, name)
+            step2 = text[text.index("2. Dispatch"):text.index("3. Write")]
+            self.assertIn("If the dispatch fails", step2, name)
+            self.assertIn("leave the marker in place", step2, name)
+            self.assertIn("ppl harness apply <name>", step2, name)
+            step4 = text[text.index("4. If"):text.index("5. The proposals")]
+            self.assertIn("cleared its pending marker", step4, name)
+
+    def test_the_reflection_never_accepts_or_applies(self):
+        for name, files in RENDERED.items():
+            text = files["references/reflection.md"]
+            for command in re.findall(r"`(ppl [^`]*)`", text):
+                self.assertNotRegex(command, r"^ppl lessons (accept|reject|retire|edit)", name)
+                self.assertNotRegex(command, r"^ppl harness apply", name)
+            self.assertIn("owner", text, name)
+            self.assertNotIn("ppl lessons record", files["SKILL.md"].split("**Whose output.**")[1].split("\n\n")[0], name)
+
+
 if __name__ == "__main__":
     unittest.main()

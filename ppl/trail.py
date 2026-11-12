@@ -485,29 +485,35 @@ def _serialize(rel, value):
     return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
+def verdict_events(docs):
+    """(paired, unclaimed) over `collect`'s documents. `paired` holds every `verdict` event
+    of the log in order as (index in the log, event, its document or None): the n-th event
+    on a SHA is `verdicts/<sha>/<n>.json`. `unclaimed` holds the history documents no event
+    claims, by SHA and then n."""
+    by_sha = {}
+    for rel, doc in docs.items():
+        match = re.fullmatch(r"verdicts/([^/]+)/(\d+)\.json", rel)
+        if match and isinstance(doc, dict):
+            by_sha.setdefault(match.group(1), {})[int(match.group(2))] = doc
+    paired = []
+    seen = Counter()
+    for index, event in enumerate(docs.get("log.jsonl") or []):
+        if event.get("event") == "verdict":
+            sha = event.get("sha")
+            seen[sha] += 1
+            paired.append((index, event, by_sha.get(sha, {}).pop(seen[sha], None)))
+    unclaimed = [by_sha[sha][n] for sha in sorted(by_sha) for n in sorted(by_sha[sha])]
+    return paired, unclaimed
+
+
 def _verdict_history(redacted):
     """The redacted verdict documents `docs/verdicts/<sha>/<n>.json`, oldest first.
     Each carries the findings the run recorded against its SHA, as the registry
     holds them, since the verdict document itself lists none."""
-    by_sha = {}
-    for rel, doc in redacted.items():
-        match = re.fullmatch(r"verdicts/([^/]+)/(\d+)\.json", rel)
-        if match and isinstance(doc, dict):
-            by_sha.setdefault(match.group(1), {})[int(match.group(2))] = doc
     found = [d for rel, d in sorted(redacted.items())
              if rel.startswith("findings/") and isinstance(d, dict)]
-    history = []
-    seen = Counter()
-    events = redacted.get("log.jsonl") or []
-    for event in events:
-        if event.get("event") == "verdict":
-            sha = event.get("sha")
-            seen[sha] += 1
-            doc = by_sha.get(sha, {}).pop(seen[sha], None)
-            if doc is not None:
-                history.append(doc)
-    for sha in sorted(by_sha):
-        history.extend(by_sha[sha][n] for n in sorted(by_sha[sha]))
+    paired, unclaimed = verdict_events(redacted)
+    history = [doc for _, _, doc in paired if doc is not None] + unclaimed
     return [dict(doc, findings=[f for f in found if f.get("affected_sha") == doc.get("candidate_sha")])
             for doc in history]
 

@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import control, findings, paths, run, status, store
+from .. import control, findings, lessons, paths, run, status, store
 from ..errors import PplError
 from . import api_static, routes, session
 from .router import Raw
@@ -156,9 +156,22 @@ def handle_control(task_id, body):
     run.load(task_id)
     command = body.get("command")
     scope = body.get("scope")
+    why = body.get("why")
+    if why is not None and not isinstance(why, str):
+        raise PplError("SCHEMA_INVALID", "why must be text")
     record = control.set_command(task_id, command, scope, by="panel")
     if command == "destroy":
-        record["result"] = run.destroy(task_id, scope)
+        if scope == "local" and why and why.strip():
+            try:
+                record["result"] = lessons.destroy_with_reflection(task_id, why)
+            except PplError as err:
+                if not paths.run_dir(task_id).is_dir():
+                    raise  # already archived: the error says where the bundle is
+                raise PplError(err.code, "%s. Nothing was archived: the run stays halted under "
+                               "the recorded destroy, and a destroy without a reason archives "
+                               "it" % err.message.rstrip("."))
+        else:
+            record["result"] = run.destroy(task_id, scope)
     return record
 
 

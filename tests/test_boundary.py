@@ -258,10 +258,17 @@ class TestReadOnlyRoles(unittest.TestCase):
             with self.assertRaises(PplError):
                 boundary.check_path("ppl-verifier", path, BOUND, JAVA)
 
+    def test_reflector_may_write_nothing(self):
+        # rule: R-ROLE-READONLY-NO-WRITE
+        self.assertEqual(boundary.ROLE_RULES["ppl-reflector"], {"may_write": False, "tests": "deny"})
+        for path in ["source/core/orders/Foo.java", "anything.txt"]:
+            with self.assertRaises(PplError):
+                boundary.check_path("ppl-reflector", path, BOUND, JAVA)
+
     def test_every_read_only_role_may_write_nothing(self):
         # rule: R-ROLE-READONLY-NO-WRITE
         for role in ("ppl-briefer", "ppl-brief-challenger", "ppl-verifier",
-                     "ppl-review-responder"):
+                     "ppl-review-responder", "ppl-reflector"):
             for path in ["source/core/orders/Foo.java", "anything.txt"]:
                 with self.subTest(role=role, path=path), self.assertRaises(PplError):
                     boundary.check_path(role, path, BOUND, JAVA)

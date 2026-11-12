@@ -17,6 +17,10 @@ light   = { provider = "claude-code-subagent", model = "haiku" }
 tier = "good"
 params = { effort = "high" }
 
+# ppl-reflector (the read-only role that proposes lessons after a merge) has no table here:
+# a routing.toml that has none routes it as a copy of the ppl-briefer table
+# without by_risk. Add the table to give it its own tier or effort.
+
 [roles.ppl-brief-challenger]
 tier = "good"
 params = { effort = "xhigh" }

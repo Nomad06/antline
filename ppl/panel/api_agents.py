@@ -38,7 +38,7 @@ def _verified():
 
 def overview(params, body, query):
     current = files.read("routing")
-    doc = routing.loads(current["text"])
+    doc = routing.loads(current["text"], unfilled=True)
     try:
         name, harness_doc = _active()
         harness_error = None
@@ -90,7 +90,10 @@ def preview(params, body, query):
     scratch = tempfile.mkdtemp(dir=drafts.drafts_dir(), prefix=".preview-")
     try:
         draft = drafts.write(name, harness_doc, fragments, root=scratch)
-        return {"rendered": routing.render(role, harness.load(str(draft)), config=routing_doc)}
+        draft_doc = harness.load(str(draft))
+        # the draft holds no memory.toml, the lessons shown are the installed harness's
+        draft_doc["_memory"] = harness_doc.get("_memory") or []
+        return {"rendered": routing.render(role, draft_doc, config=routing_doc)}
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

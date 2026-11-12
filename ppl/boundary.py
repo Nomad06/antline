@@ -16,6 +16,7 @@ ROLE_RULES = {
     "ppl-brief-challenger": {"may_write": False, "tests": "deny"},
     "ppl-verifier": {"may_write": False, "tests": "deny"},
     "ppl-review-responder": {"may_write": False, "tests": "deny"},
+    "ppl-reflector": {"may_write": False, "tests": "deny"},
 }
 
 

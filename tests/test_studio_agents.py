@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 import panel_client
-from ppl import boundary, config, harness, models, paths, routing, rules, tomlout
+from ppl import boundary, config, harness, memory, models, paths, routing, rules, tomlout
 from ppl.errors import PplError
 from ppl.studio import drafts, enforced, files
 
@@ -247,6 +247,26 @@ class TestAgentsApi(AgentsTestCase):
         self.assertEqual(files.read("harness:demo:templates/ppl-code-worker.part"), before)
         self.assertNotIn('effort = "max"', paths.routing_file().read_text(encoding="utf-8"))
 
+    def test_the_reflector_preview_works_without_the_reflector_table(self):
+        status, data, _ = panel_client.call("GET", "/api/agents")
+        self.assertNotIn("ppl-reflector", data["routing"]["roles"])
+        status, preview, _ = panel_client.call("POST", "/api/agents/ppl-reflector/preview",
+                                               body={"routing": data["routing"]})
+        self.assertEqual(status, 200, preview)
+        model = routing.role("ppl-briefer")["model"]
+        self.assertIn("model: %s" % model, preview["rendered"])
+
+    def test_the_preview_shows_the_roles_lessons(self):
+        (paths.harness_dir("demo") / "memory.toml").write_text(memory.dumps([{
+            "id": "M-1", "role": "ppl-code-worker", "cue": "a changelog changes",
+            "lesson": "run the migration gate", "sources": ["KEY-1:finding:F-1"],
+            "accepted_at": "2026-10-28T00:00:00Z", "seen": 1, "status": "active"}]), encoding="utf-8")
+        status, data, _ = panel_client.call("POST", "/api/agents/ppl-code-worker/preview",
+                                            body={"overlay": "- Use pnpm.\n"})
+        self.assertEqual(status, 200)
+        self.assertIn("- When a changelog changes: run the migration gate (from KEY-1).",
+                      data["rendered"])
+
     def test_preview_of_the_routing_alone_keeps_the_notes_on_disk(self):
         doc = routing.load()
         doc["roles"]["ppl-test-worker"]["params"]["effort"] = "max"
@@ -321,6 +341,20 @@ class TestAgentsApi(AgentsTestCase):
                                                    body={"routing": bad})
             self.assertEqual(status, 400, bad)
             self.assertEqual(payload["error_code"], "SCHEMA_INVALID", bad)
+
+    def test_an_agents_page_save_does_not_add_the_reflector_table(self):
+        self.assertNotIn("ppl-reflector", tomllib.loads(files.read("routing")["text"])["roles"])
+        status, data, _ = panel_client.call("GET", "/api/agents")
+        self.assertEqual(status, 200)
+        self.assertNotIn("ppl-reflector", data["routing"]["roles"])
+        row = next(r for r in data["roles"] if r["role"] == "ppl-reflector")
+        briefer = next(r for r in data["roles"] if r["role"] == "ppl-briefer")
+        self.assertEqual((row["tier"], row["effort"], row["model"]),
+                         (briefer["tier"], briefer["effort"], briefer["model"]))
+        status, _, _ = panel_client.call("PUT", "/api/routing",
+                                         body={"config": data["routing"], "hash": data["routing_hash"]})
+        self.assertEqual(status, 200)
+        self.assertNotIn("ppl-reflector", tomllib.loads(files.read("routing")["text"])["roles"])
 
     def test_saving_routing_validates_and_writes(self):
         doc = routing.load()

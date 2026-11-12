@@ -237,6 +237,19 @@ console.log(JSON.stringify({
         self.assertIn("exampleTestPath(", source)
         self.assertNotIn('value: "src/test/FooTest.java"', source)
 
+    def test_the_playground_offers_every_role_the_guard_knows(self):
+        from ppl import routing
+        source = (STATIC / "pages" / "playground.js").read_text()
+        listed = source[source.index("const ROLES = ["):]
+        listed = re.findall(r'"([^"]+)"', listed[:listed.index("];")])
+        self.assertEqual(sorted(listed), sorted(routing.REQUIRED_ROLES + ("operator",)))
+
+    def test_the_lessons_section_names_each_skipped_proposals_file(self):
+        source = (STATIC / "pages" / "agents.js").read_text()
+        body = source[source.index("function LessonsSection"):source.index("export function AgentsPage")]
+        self.assertIn("(data.skipped || []).map(", body)
+        self.assertIn('kind="warn">Skipped proposals file ${item.path}: ${item.reason}<//>', body)
+
     def test_the_harness_form_routes_list_inputs_through_the_list_field_rules(self):
         source = (STATIC / "ui" / "harness-form.js").read_text()
         self.assertIn('from "./listfield.js"', source)

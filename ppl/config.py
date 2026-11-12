@@ -80,6 +80,27 @@ def budgets_usd_max():
     return float(value)
 
 
+LESSON_KEYS = ("reflect",)
+
+
+def lessons_reflect():
+    """[lessons] reflect, whether a merged run's evidence is bundled for the reflector. True
+    when absent. An unknown key or a reflect that is not a boolean is refused, the [budgets]
+    pattern: a misspelt switch must not leave reflection on while the owner believes it off."""
+    table = _section(load(), "lessons")
+    unknown = sorted(key for key in table if key not in LESSON_KEYS)
+    if unknown:
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: [lessons] has the unknown key %s, the known key is %s"
+                       % (paths.config_file(), ", ".join(unknown), ", ".join(LESSON_KEYS)))
+    value = table.get("reflect", True)
+    if not isinstance(value, bool):
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: lessons.reflect must be true or false"
+                       % paths.config_file())
+    return value
+
+
 def _dir_setting(key, env_var, fallback):
     """The environment wins over config, so a test or a one-off render
     (PPL_AGENTS_DIR=... ppl harness apply) never writes into the real dir."""
@@ -102,10 +123,14 @@ def agents_dir():
     return _dir_setting("agents_dir", "PPL_AGENTS_DIR", Path.home() / ".claude" / "agents")
 
 
-def set_active_harness(name):
+def set_active_harness(name, memory_sha256=None):
     doc = load()
     _section(doc, "harness")
     doc.setdefault("harness", {})["active"] = name
+    if memory_sha256 is None:
+        doc["harness"].pop("memory_sha256", None)
+    else:
+        doc["harness"]["memory_sha256"] = memory_sha256
     save(doc)
 
 

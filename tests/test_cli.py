@@ -226,7 +226,7 @@ class TestCli(unittest.TestCase):
         for name in ["init", "show", "status", "stage", "brief", "boundary", "baseline",
                      "evidence", "verdict", "transition", "park", "escalate", "budget",
                      "approval", "recover", "serve", "control", "routing", "dispatch",
-                     "apply-patch", "mr", "merge", "review", "demo"]:
+                     "apply-patch", "mr", "merge", "review", "demo", "lessons"]:
             self.assertIn(name, cli.COMMANDS)
 
     # --- carried-forward requirement 1: recover is gated by control.enforce ---
@@ -2369,6 +2369,62 @@ class TestInitIsolatedFlag(unittest.TestCase):
              "--harness", "example-maven")
         code, out, _ = call("show", "--task", "DEMO-909", "--json")
         self.assertIs(json.loads(out)["isolated"], False)
+
+
+class TestInitChecksTheMemoryWasApplied(unittest.TestCase):
+    def setUp(self):
+        from ppl import harness, os_sandbox
+        self.harness = harness
+        self.agents = tmphome.mkdtemp(prefix="pplagents-")
+        self.skills = tmphome.mkdtemp(prefix="pplskills-")
+        self.addCleanup(seed_setup)
+        fixtures.install_harness("example-maven")
+        self.memory = paths.harness_dir("example-maven") / "memory.toml"
+
+    def apply(self):
+        self.harness.apply("example-maven", agents_dir=self.agents, skills_dir=self.skills)
+
+    def write_memory(self):
+        from ppl import memory
+        self.memory.write_text(memory.dumps([{
+            "id": "M-1", "role": "ppl-verifier", "cue": "a gate is flaky", "lesson": "rerun it once",
+            "sources": ["KEY-1:finding:F-1"], "accepted_at": "2026-10-28T00:00:00Z", "seen": 1,
+            "status": "active"}]), encoding="utf-8")
+
+    def init(self, task):
+        return call("init", task, "--tracker-url", "u", "--repo", "/tmp/repo",
+                    "--harness", "example-maven")
+
+    def test_init_refuses_when_memory_changed_since_apply(self):
+        # rule: R-MEMORY-APPLIED
+        self.apply()
+        self.write_memory()
+        code, _, err = self.init("DEMO-9930")
+        self.assertEqual(code, 2)
+        payload = json.loads(err)
+        self.assertEqual(payload["error_code"], "SETUP_INCOMPLETE")
+        self.assertIn("ppl harness apply example-maven", payload["message"])
+
+    def test_init_passes_after_apply_records_the_memory(self):
+        self.write_memory()
+        self.apply()
+        self.assertEqual(self.init("DEMO-9931")[0], 0)
+
+    def test_init_passes_for_a_harness_that_never_had_memory(self):
+        self.assertNotIn("memory_sha256", config.section("harness"))
+        self.assertFalse(self.memory.exists())
+        self.assertEqual(self.init("DEMO-9932")[0], 0)
+
+    def test_init_passes_for_an_empty_memory_file_nothing_recorded(self):
+        self.memory.write_text("", encoding="utf-8")
+        self.assertEqual(self.init("DEMO-9933")[0], 0)
+
+    def test_init_refuses_when_memory_was_removed_after_apply(self):
+        self.write_memory()
+        self.apply()
+        self.memory.unlink()
+        code, _, err = self.init("DEMO-9934")
+        self.assertEqual((code, json.loads(err)["error_code"]), (2, "SETUP_INCOMPLETE"))
 
 
 # The entry ppl setup claude writes: this interpreter, then the real guard script.

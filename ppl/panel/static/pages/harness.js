@@ -133,7 +133,7 @@ export function HarnessPage({ mode }) {
     ${current && !creating ? html`<div>
       <h2>${name} ${active ? html`<${Badge} kind="done">active<//>` : null}</h2>
       <${Button} primary=${!active} busy=${busy === "apply"} disabled=${Boolean(busy)} onClick=${apply}>${active ? "Apply again" : "Apply and make it active"}<//>
-      <p class="help">Apply writes the six agent files and the skill from the saved harness and makes it the active one, as <code>ppl harness apply</code> does.</p>
+      <p class="help">Apply writes the agent files and the skill from the saved harness and makes it the active one, as <code>ppl harness apply</code> does.</p>
       ${asForm ? html`<${HarnessForm} key=${name + ":" + Object.values(current.hashes).join("")}
         draft=${{ doc: named, fragments: current.fragments, sources: {} }} extras=${{}}
         mode=${mode} saveLabel="Save" nameLocked=${true} onSave=${save} />

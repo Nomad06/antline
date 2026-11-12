@@ -55,24 +55,24 @@ residual = "inert until the hook is registered, see R-GUARD-NOT-ARMED. The Bash 
 
 [[rule]]
 id = "R-ROLE-READONLY-NO-WRITE"
-statement = "ppl-briefer, ppl-brief-challenger, ppl-verifier and ppl-review-responder may write no path at all."
+statement = "ppl-briefer, ppl-brief-challenger, ppl-verifier, ppl-review-responder and ppl-reflector may write no path at all."
 scope = "active run, read-only roles"
 event = "PreToolUse on Edit/Write/MultiEdit/NotebookEdit"
 enforcement = "blocking"
 hook_or_check = "ppl/boundary.py:ROLE_RULES, ppl/boundary.py:check_path"
-deny_test = "tests/test_guard.py::TestGuard::test_verifier_may_not_write_anything, tests/test_guard.py::TestGuard::test_brief_challenger_may_not_write_anything, tests/test_boundary.py::TestReadOnlyRoles::test_verifier_may_write_nothing, tests/test_boundary.py::TestReadOnlyRoles::test_every_read_only_role_may_write_nothing"
+deny_test = "tests/test_guard.py::TestGuard::test_verifier_may_not_write_anything, tests/test_guard.py::TestGuard::test_brief_challenger_may_not_write_anything, tests/test_boundary.py::TestReadOnlyRoles::test_verifier_may_write_nothing, tests/test_boundary.py::TestReadOnlyRoles::test_every_read_only_role_may_write_nothing, tests/test_guard.py::TestGuard::test_the_reflector_may_not_write_anything, tests/test_boundary.py::TestReadOnlyRoles::test_reflector_may_write_nothing"
 allow_test = ""
 owner = "guard-hook"
 residual = "inert until the hook is registered, see R-GUARD-NOT-ARMED"
 
 [[rule]]
 id = "R-ROLE-TOOLS-READONLY"
-statement = "The generated agent file for a read-only role grants no Edit, Write or Bash tool. The one exception is Bash for ppl-review-responder under a forge whose adapter grants it (github), where the hook caps it to the forge's read shapes, see R-REVIEW-RESPONDER-BASH-SHAPES."
+statement = "The generated agent file for a read-only role (ppl-reflector among them) grants no Edit, Write or Bash tool. The one exception is Bash for ppl-review-responder under a forge whose adapter grants it (github), where the hook caps it to the forge's read shapes, see R-REVIEW-RESPONDER-BASH-SHAPES."
 scope = "global, every dispatch of that role"
 event = "ppl routing apply"
 enforcement = "blocking"
 hook_or_check = "ppl/routing.py:BASE_TOOLS, ppl/routing.py:role_tools, ppl/routing.py:render"
-deny_test = "tests/test_routing.py::TestRouting::test_read_only_roles_get_no_write_tools, tests/test_routing.py::TestRouting::test_verifier_gets_no_bash, tests/test_routing.py::TestRouting::test_only_the_review_responder_may_hold_bash_and_only_under_a_granting_forge, tests/test_harness.py::TestMalformedInputIsRefusedNotATraceback::test_a_built_in_tool_cannot_be_granted_through_extra_tools"
+deny_test = "tests/test_routing.py::TestRouting::test_read_only_roles_get_no_write_tools, tests/test_routing.py::TestRouting::test_verifier_gets_no_bash, tests/test_routing.py::TestRouting::test_only_the_review_responder_may_hold_bash_and_only_under_a_granting_forge, tests/test_routing.py::TestRouting::test_the_reflector_holds_only_read_tools, tests/test_harness.py::TestMalformedInputIsRefusedNotATraceback::test_a_built_in_tool_cannot_be_granted_through_extra_tools"
 allow_test = "tests/test_routing.py::TestRouting::test_code_worker_gets_edit_tools"
 owner = "ppl"
 residual = "the allow-list is real only after ppl routing apply has been run against the live agents directory"
@@ -275,7 +275,7 @@ residual = "the shapes are git reads in a run repo the responder can reach, and 
 
 [[rule]]
 id = "R-GUARD-INTERNAL-ERROR-DENIES-ROLES"
-statement = "When decide() raises, the hook denies the call for any role in boundary.ROLE_RULES (all six generated roles) instead of allowing it, and keeps allowing an unroled session so a hook defect cannot lock the operator out of unrelated sessions, except for a call that asks to run outside the OS sandbox."
+statement = "When decide() raises, the hook denies the call for any role in boundary.ROLE_RULES (all seven generated roles) instead of allowing it, and keeps allowing an unroled session so a hook defect cannot lock the operator out of unrelated sessions, except for a call that asks to run outside the OS sandbox."
 scope = "every PreToolUse call carrying a role"
 event = "exception inside decide"
 enforcement = "blocking"
@@ -2135,7 +2135,7 @@ residual = "the check reads the gate's name and the placeholder only: a focused-
 
 [[rule]]
 id = "R-HARNESS-UNKNOWN-KEY"
-statement = "harness.validate refuses HARNESS_INVALID a harness that names something ppl never reads: a table or key outside harness.KNOWN_KEYS ([env] keys stay free), with the nearest known key in the message, a gate placeholder outside <test_class>, <worktree>, <TASK-ID>, <SHA> and <GENERATION> that neither skill/gates.md nor skill/extra-gates.md names outside a verbatim copy of a gate command, and a templates/*.part whose role is not one of the six. A file under skill/ or templates/ that is no fragment is a warning."
+statement = "harness.validate refuses HARNESS_INVALID a harness that names something ppl never reads: a table or key outside harness.KNOWN_KEYS ([env] keys stay free), with the nearest known key in the message, a gate placeholder outside <test_class>, <worktree>, <TASK-ID>, <SHA> and <GENERATION> that neither skill/gates.md nor skill/extra-gates.md names outside a verbatim copy of a gate command, and a templates/*.part whose role is not one of the seven. A file under skill/ or templates/ that is no fragment is a warning."
 scope = "ppl CLI and panel"
 event = "harness.load, ppl harness validate, ppl harness apply, ppl init, studio draft check"
 enforcement = "blocking"
@@ -2168,6 +2168,102 @@ deny_test = "tests/test_harness.py::TestVerify::test_apply_refuses_an_agent_file
 allow_test = "tests/test_harness.py::TestVerify::test_both_examples_verify_clean, tests/test_harness.py::TestVerify::test_an_agent_file_over_the_soft_cap_is_warned_about, tests/test_harness.py::TestVerify::test_a_reference_over_the_soft_cap_is_warned_about"
 owner = "harness"
 residual = "a cap bounds one rendered file, not the skill as a whole: a harness may spread its growth over several references, each under the cap. A harness applied before the caps existed stays applied until its next apply. SKILL_MEASURED_BYTES was measured before each stage's procedure moved to its own references/stage-*.md, so the SKILL.md cap sits far above what the examples render now and no harness fragment renders into SKILL.md any more: what holds the shipped skill small is tests/test_skill_contract.py, at most 14,000 bytes of SKILL.md and 10,000 per stage reference on both examples"
+
+[[rule]]
+id = "R-MEMORY-CAP"
+statement = "memory.parse refuses HARNESS_INVALID a harness memory.toml with more than memory.MAX_ACTIVE (12) active entries for one role, a cue or lesson over memory.MAX_TEXT (300) characters, text that is not its own memory.clean form, a role outside routing.LESSON_ROLES, a repeated id or an unknown key. harness.load reads the file, so ppl harness validate, ppl harness apply and the studio's save refuse a harness whose memory.toml is invalid."
+scope = "ppl CLI and panel"
+event = "ppl harness validate, ppl harness apply, studio save of memory.toml"
+enforcement = "blocking"
+hook_or_check = "ppl/memory.py:parse, ppl/harness.py:load"
+deny_test = "tests/test_memory.py::TestParse::test_a_thirteenth_active_entry_for_one_role_is_refused, tests/test_memory.py::TestParse::test_a_cue_over_300_characters_is_refused, tests/test_memory.py::TestParse::test_unknown_role_is_refused"
+allow_test = "tests/test_memory.py::TestParse::test_a_valid_file_parses_into_entries"
+owner = "ppl"
+residual = "the cap bounds the entries of one role, not the bytes they render to: the existing agent-file caps (R-HARNESS-SIZE-CAP) measure the rendered file, lessons included. A hand edit of memory.toml in the harness directory is read at the next load, so an invalid file is refused there and not when it is written"
+
+[[rule]]
+id = "R-MEMORY-TEXT-CLEANED"
+statement = "A lesson reaches an agent file or the skill only as plain one-line text: memory.section passes each cue and lesson through memory.clean again at render, so a hand-edited memory.toml cannot put a heading, an HTML comment, an include marker or a fence into a prompt."
+scope = "ppl harness apply, studio preview"
+event = "rendering a role agent file or the orchestrator skill"
+enforcement = "soft"
+hook_or_check = "ppl/memory.py:clean, ppl/memory.py:section"
+deny_test = ""
+allow_test = "tests/test_routing.py::TestRouting::test_a_smuggled_heading_renders_as_plain_text, tests/test_memory.py::TestClean::test_clean_strips_headings_comments_markers_and_fences"
+owner = "ppl"
+residual = "the text is cleaned, not judged: a clean sentence that gives a bad instruction renders as written, and a lesson is capped (R-MEMORY-CAP), not reviewed by any check"
+
+[[rule]]
+id = "R-MEMORY-APPLIED"
+statement = "ppl init refuses SETUP_INCOMPLETE when the harness memory.toml differs, by sha256 of its bytes, from the one the last ppl harness apply recorded in config.toml [harness] memory_sha256, so a run never starts on lessons its agent files were not rendered from. A harness with no recorded digest and no memory.toml, or an empty one, passes."
+scope = "ppl CLI"
+event = "ppl init"
+enforcement = "blocking"
+hook_or_check = "ppl/harness.py:memory_problem, ppl/cli.py:cmd_init"
+deny_test = "tests/test_cli.py::TestInitChecksTheMemoryWasApplied::test_init_refuses_when_memory_changed_since_apply"
+allow_test = "tests/test_cli.py::TestInitChecksTheMemoryWasApplied::test_init_passes_after_apply_records_the_memory, tests/test_cli.py::TestInitChecksTheMemoryWasApplied::test_init_passes_for_a_harness_that_never_had_memory"
+owner = "ppl"
+residual = "judged at ppl init only: a ppl harness apply during a run re-renders the agent files that run's later dispatches read, as for .part notes. The digest says the file was applied, not that the agent files on disk are still the rendered ones"
+
+[[rule]]
+id = "R-LESSONS-PAST-ONLY"
+statement = "A run sees the lessons that were active when it started: harness.snapshot freezes the active entries into harness.json at ppl init, and an entry accepted afterwards is not in that snapshot."
+scope = "run snapshot"
+event = "ppl init, a later memory.toml change"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = "tests/test_harness.py::TestSnapshotAndApplied::test_an_entry_accepted_after_the_snapshot_is_not_in_it"
+owner = "ppl"
+residual = "PROPERTY: harness.json is written once at ppl init and holds the entries active then. What the run's agents read is tied to it by R-MEMORY-APPLIED, and an owner's ppl harness apply during the run re-renders the agent files its later dispatches read, as for .part notes"
+
+[[rule]]
+id = "R-MEMORY-NEVER-GRANTS"
+statement = "A lesson grants nothing: it is prompt text, and no check reads it."
+scope = "guard hook, ppl CLI"
+event = "any tool call under a run"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "ppl"
+residual = "PROPERTY: memory is prompt text, the guard reads boundary.json and the harness.json shapes, tracker, forge, os_sandbox and tests keys only, never memory"
+
+[[rule]]
+id = "R-LESSONS-BUNDLE-AFTER-MERGE"
+statement = "ppl lessons bundle writes the run's evidence bundle, runs/<task>/lessons/bundle/, only while the run is in stage merge_watch and ppl merge observed has recorded the merge (state.mr.merged_sha): in any other stage, a merged sha included, or before the merge is recorded, it is refused with ILLEGAL_TRANSITION and writes nothing. It is refused SETUP_INCOMPLETE, naming the file, while the reflector's agent file ppl-reflector.md is missing from the agents directory, and with config.toml [lessons] reflect = false it writes nothing and exits 0."
+scope = "ppl CLI"
+event = "ppl lessons bundle"
+enforcement = "blocking"
+hook_or_check = "ppl/lessons.py:bundle, ppl/cli.py:cmd_lessons"
+deny_test = "tests/test_lessons.py::TestBundle::test_bundle_before_the_merge_is_recorded_is_refused, tests/test_lessons.py::TestBundle::test_bundle_outside_merge_watch_is_refused"
+allow_test = "tests/test_lessons.py::TestBundle::test_bundle_holds_every_file_with_the_runs_evidence, tests/test_lessons.py::TestBundle::test_a_second_bundle_replaces_the_first, tests/test_lessons.py::TestBundle::test_bundle_is_skipped_when_reflection_is_off"
+owner = "ppl"
+residual = "the merge is the sha the orchestrator recorded off the forge (R-MERGE-OBSERVED-ONCE), not checked here. Neither the command nor lessons.build_bundle, the builder behind it, calls control.enforce, so a run the operator paused in merge_watch still gets its bundle (a stop parks the run, which leaves merge_watch), and build_bundle checks no stage, so any other caller of it holds its own gate. The bundle copies what the run's documents hold, unjudged, and a review-threads.json thread whose id is not a plain name is refused SCHEMA_INVALID with nothing written. Every path under the run is checked right before it is written or renamed, so a link a role makes between a check and its write is not caught, and between the two renames that swap a bundle in there is no bundle at lessons/bundle. A pipeline role is denied the command by R-GUARD-PPL-CLI-DENIED like every ppl call that is not read-only"
+
+[[rule]]
+id = "R-LESSONS-EVIDENCE-RESOLVES"
+statement = "ppl lessons record stores the reflector's proposals only when every evidence reference resolves in the run's own bundle, and refuses the whole record SCHEMA_INVALID, naming the first problem and writing nothing, otherwise: a finding id, a thread id, a sha prefix of at least 7 hex digits that matches exactly one verdict sha, a sha prefix and check of one gate, and for park, deny and timeline the bundle's own event index n of an event of that name. It also refuses a task that differs from --task, a key outside the schema, no_entry with proposals, more than 5 proposals, a role outside the lesson roles, a cue or lesson empty or over 300 characters once cleaned, an assessment of a memory id that was not in effect or with a verdict outside helped, hurt, no observed effect and confounded, a bundle file that is a link, a pending marker naming anything but a real directory under runs/, and a harness name in the bundle that is not a plain directory name. A second record for the task is refused ILLEGAL_TRANSITION."
+scope = "ppl CLI"
+event = "ppl lessons record"
+enforcement = "blocking"
+hook_or_check = "ppl/lessons.py:record"
+deny_test = "tests/test_lessons.py::TestRecord::test_an_unresolved_reference_refuses_the_whole_record, tests/test_lessons.py::TestRecord::test_each_evidence_kind_resolves_only_against_its_own_file, tests/test_lessons.py::TestRecord::test_an_ambiguous_verdict_prefix_is_refused, tests/test_lessons.py::TestRecord::test_an_unknown_role_is_refused, tests/test_lessons.py::TestRecord::test_a_stale_memory_id_is_refused, tests/test_lessons.py::TestRecord::test_no_entry_with_proposals_is_refused, tests/test_lessons.py::TestRecord::test_more_than_five_proposals_are_refused, tests/test_lessons.py::TestRecord::test_a_second_record_is_refused, tests/test_lessons.py::TestRecord::test_a_bundle_file_that_is_a_link_is_refused, tests/test_lessons.py::TestRecord::test_a_marker_naming_a_path_outside_the_runs_is_refused"
+allow_test = "tests/test_lessons.py::TestRecord::test_record_stores_cleaned_proposals_as_pending, tests/test_lessons.py::TestRecord::test_no_entry_records_nothing_to_review, tests/test_lessons.py::TestRecord::test_a_pending_marker_names_the_bundle_of_a_destroyed_run"
+owner = "ppl"
+residual = "the references are checked for existing, not for supporting the lesson: a reflector can cite a real finding that says nothing of the claim, and the owner's review is the judge of that. record is not a role-output command of refusals.COMMANDS and does not call control.enforce, so a refused answer goes back to the reflector once and then the orchestrator reports it, with no parking of a merged run. The bundle is read from disk, where a role's sandboxed Bash can write: a role that rewrote its own bundle could make a reference resolve, so a bundle is evidence of what the run held only as far as runs/ is trusted. A pipeline role is denied the command by R-GUARD-PPL-CLI-DENIED like every ppl call that is not read-only"
+
+[[rule]]
+id = "R-LESSONS-OWNER-ACCEPTS"
+statement = "Only the owner writes memory.toml. ppl lessons accept, edit and retire change a lesson and ppl lessons reject decides a proposal, the studio's Lessons section calls the same functions, and the studio's history restore of harness:<name>:memory.toml (POST /api/history/restore, files.restore) is the one other writer, an owner path through the same versioned save. The studio's raw file route reads memory.toml and does not save it. ppl lessons record stores proposals and never memory, and a pipeline role's Bash call of any ppl lessons command is denied BOUNDARY_VIOLATION. accept and the other memory writes read memory.toml once and save through the studio's versioned file save with that hash, so a change made in between is refused CHANGED_ON_DISK and nothing is written, and the old file stays in the studio history. A proposal that is already decided is refused ILLEGAL_TRANSITION, a reject without a reason, a harness that is not installed, an unknown id and a new entry for a role that has 12 active ones are refused SCHEMA_INVALID. A merge into an entry of the same role and cue is accepted at 12."
+scope = "ppl CLI"
+event = "ppl lessons accept, reject, retire, edit"
+enforcement = "blocking"
+hook_or_check = "ppl/lessons.py:accept, ppl/lessons.py:_save_memory, ppl/_assets/hooks/ppl_guard.py:_ppl_cli_is_state_changing"
+deny_test = "tests/test_guard.py::TestGuard::test_a_role_may_not_accept_a_lesson, tests/test_lessons.py::TestOwnerReview::test_a_decided_proposal_cannot_be_decided_again, tests/test_lessons.py::TestOwnerReview::test_reject_needs_a_reason_and_keeps_memory_unchanged, tests/test_lessons.py::TestOwnerReview::test_accept_refuses_when_memory_changed_since_it_was_read, tests/test_lessons.py::TestOwnerReview::test_accept_refuses_a_harness_that_is_not_installed"
+allow_test = "tests/test_lessons.py::TestOwnerReview::test_accept_appends_a_new_entry_with_its_sources, tests/test_lessons.py::TestRecord::test_record_leaves_memory_unchanged"
+owner = "ppl"
+residual = "the orchestrator's own session is not a role, so the skill's rule never to accept or apply a lesson is discipline there, and the owner's own shell is the owner. The guard denies a role's call because no lessons shape is in PPL_READ_ONLY_SUBCOMMANDS, which is R-GUARD-PPL-CLI-DENIED at work, and the guard test pins that rather than adding a check. A mark of the proposal that fails after memory.toml was saved leaves the proposal pending with the lesson in memory, and accepting it again marks it without adding it twice"
 
 [[rule]]
 id = "R-DOCTOR-HOOK-SHAPE"

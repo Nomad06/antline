@@ -26,10 +26,22 @@ class TestPresets(panel_client.StudioTestCase):
             example = tomllib.load(handle)
         self.assertEqual(presets.matching(example), "balanced")
 
+    def test_presets_still_match_a_routing_file_without_the_reflector(self):
+        text = (paths.defaults_dir() / "routing.example.toml").read_text(encoding="utf-8")
+        self.assertNotIn("[roles.ppl-reflector]", text)
+        self.assertEqual(presets.matching(routing.loads(text)), "balanced")
+
+    def test_applying_a_preset_does_not_write_the_reflector_fallback(self):
+        routing.apply_preset("economy")
+        written = tomllib.loads(paths.routing_file().read_text(encoding="utf-8"))
+        self.assertNotIn("ppl-reflector", written["roles"])
+
     def test_every_preset_covers_every_role_with_a_declared_tier_and_a_known_effort(self):
         tiers = routing.tiers(routing.load())
         for name, roles in presets.PRESETS.items():
-            self.assertEqual(sorted(roles), sorted(routing.REQUIRED_ROLES), name)
+            # The reflector is not in a preset: it follows the briefer's routing.
+            self.assertEqual(sorted(roles), sorted(
+                r for r in routing.REQUIRED_ROLES if r != "ppl-reflector"), name)
             for role, spec in roles.items():
                 self.assertIn(spec["tier"], tiers, (name, role))
                 self.assertIn(spec["effort"], routing.EFFORT_LEVELS, (name, role))

@@ -4,7 +4,7 @@ import { Badge, Button, Field, Notice } from "../ui/controls.js";
 import { exampleTestPath } from "../ui/testpath.js";
 
 const ROLES = ["ppl-code-worker", "ppl-test-worker", "ppl-briefer", "ppl-brief-challenger",
-               "ppl-verifier", "ppl-review-responder", "operator"];
+               "ppl-verifier", "ppl-review-responder", "ppl-reflector", "operator"];
 const TOOLS = ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Grep", "Glob"];
 
 function examples(doc) {

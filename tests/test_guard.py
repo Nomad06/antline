@@ -70,6 +70,12 @@ class TestGuard(unittest.TestCase):
             "ppl-verifier", "Write", {"file_path": "/tmp/repo/notes.txt"}))
         self.assertIsNotNone(result)
 
+    def test_the_reflector_may_not_write_anything(self):
+        # rule: R-ROLE-READONLY-NO-WRITE
+        result = ppl_guard.decide(payload(
+            "ppl-reflector", "Write", {"file_path": "/tmp/repo/notes.txt"}))
+        self.assertIn("may not write any path", self.deny_reason(result))
+
     def test_brief_challenger_may_not_write_anything(self):
         # rule: R-ROLE-READONLY-NO-WRITE
         inside = ppl_guard.decide(payload(
@@ -1761,6 +1767,12 @@ class TestGuard(unittest.TestCase):
             "ppl-code-worker", "Bash",
             {"command": "ppl findings status --finding-id F1 --status fixed "
                         "--fix-link x --generation 1"}))
+        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+
+    def test_a_role_may_not_accept_a_lesson(self):
+        # rule: R-LESSONS-OWNER-ACCEPTS
+        result = ppl_guard.decide(payload(
+            "ppl-code-worker", "Bash", {"command": "ppl lessons accept KEY-1.1"}))
         self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
 
     def test_test_worker_deleting_a_finding_is_denied(self):
