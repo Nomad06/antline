@@ -1,7 +1,7 @@
 """A harness is a directory outside the repository that holds everything
 project-specific: build gates, guard shapes, task key shape, tracker and forge
-selection, knowledge skills, role prompt overlays. ppl reads it at `ppl init`
-and `ppl harness apply`, never at hook time: `ppl init --harness` freezes the
+selection, knowledge skills, role prompt overlays. ppl reads it at `ppl lane`,
+`ppl init` and `ppl harness apply`, never at hook time: `ppl init` freezes the
 slice the guard enforces into runs/<task>/harness.json (see snapshot) and the
 hook reads that file."""
 import copy
@@ -14,7 +14,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from . import boundary, escape, forges, memory, os_sandbox, paths, routing, sequences, trackers
+from . import boundary, escape, forges, lane_harness, memory, os_sandbox, paths, routing, sequences, trackers
 from .errors import PplError
 
 FORMAT = 1
@@ -34,13 +34,16 @@ _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # verdict.REQUIRED_CHECKS names it, the done gate wants a pass receipt for it.
 FOCUSED_TESTS_GATE = "focused-tests"
 TEST_CLASS_PLACEHOLDER = "<test_class>"
+# The lane number, put in place of this marker when a lane's skill is rendered (the number is
+# known then), in the gate commands and [env] values. Rendered without a lane it stays as written.
+LANE_PLACEHOLDER = "<lane>"
 # What the orchestrator fills in a gate command at run time: the focused test's
 # name and the placeholders of the rendered recipe (_RC_IDIOM, _EVIDENCE and the
 # `git -C <worktree>` line). A project placeholder such as example-maven's
 # <module> is accepted when skill/gates.md or skill/extra-gates.md names it,
 # since those fragments are where the orchestrator reads what to put there.
 RUN_TIME_PLACEHOLDERS = (TEST_CLASS_PLACEHOLDER, "<worktree>", "<TASK-ID>", "<SHA>",
-                         "<GENERATION>")
+                         "<GENERATION>", LANE_PLACEHOLDER)
 _PLACEHOLDER_RE = re.compile(r"<[A-Za-z_][A-Za-z0-9_-]*>")
 _PLACEHOLDER_FRAGMENTS = ("skill/gates.md", "skill/extra-gates.md")
 SKILL_FRAGMENTS = ("skill/gates.md", "skill/baseline.md", "skill/extra-gates.md",
@@ -59,6 +62,7 @@ KNOWN_KEYS = {
     "tests": ("sources",),
     "os_sandbox": ("enabled", "allowed_domains", "allow_write", "allow_ssh_read"),
     "knowledge": ("skills", "extra_tools"),
+    "lanes": ("max",),
     "env": None,
     "gate": ("name", "command"),
     "guard": ("shape",),
@@ -378,6 +382,7 @@ def validate(doc, source):
         if not _strings(knowledge.get(key, [])):
             _fail(source, "knowledge.%s must be a list of strings" % key)
     _check_granted_tools(doc, knowledge, source)
+    lanes_max(doc)
     env = doc.get("env") or {}
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         _fail(source, "[env] must be a table of string values")
@@ -410,6 +415,18 @@ def validate(doc, source):
                         "a harness by the directory name"
                         % (doc["harness"]["name"], installed_name(doc)))
     return warnings
+
+
+def lanes_max(doc):
+    """[lanes] max, how many lanes of this harness may run at once: an integer 1..9, 1 when
+    absent."""
+    table = doc.get("lanes") or {}
+    if not isinstance(table, dict):
+        _fail("harness", "[lanes] must be a table")
+    value = table.get("max", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 9:
+        _fail(doc.get("_dir") or "harness", "lanes.max must be an integer from 1 to 9")
+    return value
 
 
 def shape_rows(doc, source="harness"):
@@ -515,8 +532,10 @@ def derived_name(source):
 
 def add(source, name=None, staging=False):
     """Install a git URL or a local directory as the harness `name`, by default
-    the name derived from the source. The name must pass check_name: only
-    setup, staging a harness in its own <name>.replacing, passes staging."""
+    the name derived from the source. A plain directory is imported into a new git
+    repository (D8). The name must pass check_name: only setup, staging a harness in
+    its own <name>.replacing, passes staging, and it imports the staged copy itself
+    once its answers are written into it, so the import commit holds them."""
     if not name:
         name = derived_name(source)
     if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
@@ -532,6 +551,8 @@ def add(source, name=None, staging=False):
             _clone(name, source, target)
         else:
             _copy(name, source, target)
+            if not staging:
+                lane_harness.import_directory(target, name)
         load(str(target))
     except PplError:
         shutil.rmtree(target, ignore_errors=True)
@@ -555,52 +576,20 @@ def snapshot(doc):
             "tracker": copy.deepcopy(doc["tracker"]),
             "forge": copy.deepcopy(doc["forge"]),
             "os_sandbox": {"needed": os_sandbox.needed(doc)},
+            "lanes": {"max": lanes_max(doc)},
             "shapes": shape_rows(doc),
             "tests": {"sources": list((doc.get("tests") or {}).get("sources")
                                       or boundary.TEST_PATTERNS)},
             "memory": memory.in_effect(doc.get("_memory") or [])}
 
 
-def memory_problem(doc):
-    """None when the memory.toml on disk is the one the last apply rendered, else
-    what to do. Compared by content: a missing record passes only when there is
-    no memory at all, so an install from before memory existed need not re-apply."""
-    from . import config
-    current = memory.digest(memory.read(doc["_dir"], routing.LESSON_ROLES)[1])
-    recorded = config.section("harness").get("memory_sha256")
-    if recorded == current:
-        return None
-    if recorded is None and current == memory.digest(b""):
-        return None
-    return ("memory.toml changed since the last apply: run `ppl harness apply %s`"
-            % installed_name(doc))
-
-
-def require_applied(doc):
-    """Refuse unless the loaded harness is the installed directory that
-    config.toml [harness].active names. The agents and the skill on disk were
-    rendered from that directory, so a copy elsewhere with the same document
-    name is not the applied harness."""
-    from . import config
-    active = config.active_harness()
-    directory = os.path.abspath(doc["_dir"])
-    if active and directory == os.path.abspath(paths.harness_dir(active)):
-        return
-    if os.path.dirname(directory) == os.path.abspath(paths.harnesses_dir()):
-        name = installed_name(doc)
-        raise PplError("HARNESS_NOT_APPLIED",
-                       "harness %r is not the applied one (active: %s). The agents and skill on "
-                       "disk were rendered for another project: run `ppl harness apply %s` first."
-                       % (name, active or "none", name))
-    raise PplError("HARNESS_NOT_APPLIED",
-                   "harness at %s is not an installed harness, add it with `ppl harness add` "
-                   "and apply it" % directory)
-
-
 # The orchestrator skill on disk is a build artifact: skill/ holds skeletons
 # (`*.skeleton`) with include markers and plain files copied as they are, and
 # render_skill fills every marker from the forge adapter and the harness.
-SKILL_NOTICE = "<!-- generated by ppl harness apply - do not edit by hand -->"
+SKILL_NOTICE = "<!-- generated by ppl lane - do not edit by hand -->"
+# The notice an older `ppl harness apply` rendered, which `ppl setup claude` still matches in an
+# old workspace's pipeline skill.
+LEGACY_SKILL_NOTICE = "<!-- generated by ppl harness apply - do not edit by hand -->"
 _INCLUDE_RE = re.compile(r"<!-- include: ([a-z0-9-]+)/([a-z0-9-]+) -->")
 _INCLUDE_OPEN = "<!-- include:"
 _SKELETON_SUFFIX = ".skeleton"
@@ -621,36 +610,37 @@ _SCRATCH_PLACEHOLDER = "<scratch>"
 _FRONTMATTER = "---\n"
 _FRONTMATTER_END = "\n---\n"
 # The sentence after each command the skill runs outside the OS sandbox: escape.decide lets the
-# orchestrator out only for one plain command on a pin, and gh and ppl only from a directory
-# no sandboxed command writes.
+# orchestrator out only for one plain command on a pin, and gh and ppl only from the lane's
+# start directory, which no sandboxed command writes.
 OS_FLAG_NOTE = ("Run each command here that starts with an absolute path exactly as written, "
                 "alone in a Bash call with `dangerouslyDisableSandbox: true`, and from the "
-                "workspace when it runs gh or ppl [R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
+                "lane's start directory when it runs gh or ppl [R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
 # Said once, in stage 1: a gh or ppl call from a directory a sandboxed command can write is
-# denied, and stage 1 leaves the session where it is.
-OS_WORKSPACE_NOTE = ("Run every `gh` and `ppl` call outside the sandbox from the workspace "
-                     "`%s`, and `cd` back there when one is denied for its cwd "
+# denied, and stage 1 leaves the session in the lane's start directory, where it started.
+OS_WORKSPACE_NOTE = ("Run every `gh` and `ppl` call outside the sandbox from the lane's start "
+                     "directory `%s`, and `cd` back there when one is denied for its cwd "
                      "[R-OS-SANDBOX-ORCHESTRATOR-SHAPE].")
-# Stage 1 under the profile: the session stays in the workspace, so a gate names the worktree.
+# Stage 1 under the profile: the session stays in the lane's start directory, so a gate names
+# the worktree.
 OS_GATES_WHERE = ("Every gate and every dispatched worker works in this worktree from now on: "
                   "each gate recipe in `references/gates.md` changes into it in a subshell, so "
-                  "this session stays in the workspace.")
+                  "this session stays in the lane's start directory.")
 _UNKNOWN_REPO = "<owner/name>"
 _UNKNOWN_WORKSPACE = "<workspace>"
 
 
-def _gate_recipes(doc):
+def _gate_recipes(doc, lane=None):
     """The harness gates in their log-and-rc shape. Under the OS sandbox profile the
     orchestrator's session stays in the workspace its gh and ppl calls run from, so each gate
     changes into the worktree in a subshell, which leaves the session where it is."""
-    env = " ".join("%s=%s" % (key, shlex.quote(value))
+    env = " ".join("%s=%s" % (key, shlex.quote(_lane_filled(value, lane)))
                    for key, value in sorted((doc.get("env") or {}).items()))
     run_dir = "%s/<TASK-ID>" % os_sandbox.scratch_root()
     lines = ["mkdir -p %s" % run_dir, "git -C <worktree> rev-parse HEAD", ""]
     in_worktree = os_sandbox.needed(doc)
     for gate in doc.get("gate") or []:
         name = gate["name"]
-        command = ("%s %s" % (env, gate["command"])).strip()
+        command = ("%s %s" % (env, _lane_filled(gate["command"], lane))).strip()
         if in_worktree:
             command = "(cd <worktree> && %s)" % command
         lines.append("# %s" % name)
@@ -661,26 +651,33 @@ def _gate_recipes(doc):
     return "\n".join(lines).rstrip()
 
 
-def _fragment_file(doc, name):
+def _lane_filled(text, lane):
+    return text if lane is None else text.replace(LANE_PLACEHOLDER, str(lane))
+
+
+def _fragment_file(doc, name, lane=None):
     path = Path(doc["_dir"]) / "skill" / ("%s.md" % name)
     if not path.is_file():
         return ""
     text = path.read_text(encoding="utf-8").strip()
-    return (text.replace(_DEFAULT_BRANCH_PLACEHOLDER, doc["repo"]["default_branch"])
-            .replace(_SCRATCH_PLACEHOLDER, str(os_sandbox.scratch_root())))
+    return _lane_filled(text.replace(_DEFAULT_BRANCH_PLACEHOLDER, doc["repo"]["default_branch"])
+                        .replace(_SCRATCH_PLACEHOLDER, str(os_sandbox.scratch_root())), lane)
 
 
 def _os_values(doc, pins, workspace):
-    """The os/* includes. With the OS sandbox profile the GitHub commands run on the pinned
-    binaries, word for word in the shapes the guard lets out of the sandbox, each followed by
-    OS_FLAG_NOTE, and stage 1 runs git with -C instead of a cd, so the session stays in the
-    workspace its gh and ppl calls run from. The repositories, the checkout and the fetch come
-    from the os_sandbox functions the facts and the allow entries are made with, since apply
-    renders before it writes the facts. Without the profile every include is today's text."""
+    """The os/* includes. With the OS sandbox profile the GitHub commands and the ppl commands
+    that write outside the lane's own run run on the pinned binaries, word for word in the
+    shapes the guard lets out of the sandbox, each followed by OS_FLAG_NOTE, and stage 1 runs
+    git with -C instead of a cd, so the session stays in the lane's start directory its gh and
+    ppl calls run from: a sandboxed fetch in the worktree, the GitHub one pinned in the
+    checkout outside the sandbox. The repositories and the GitHub fetch come from the os_sandbox
+    functions the facts and the allow entries are made with. Without the profile stage 1
+    changes into the lane's worktree, where every gate runs, and the commands are the plain
+    ones."""
     repo = doc["repo"]
     default_branch = repo["default_branch"]
     values = {("os", "gh"): "gh", ("os", "ppl"): "ppl", ("os", "flag-note"): "",
-              ("os", "cd"): "cd %s\n" % repo["path"], ("os", "git-dir"): "",
+              ("os", "cd"): "cd <worktree>\n",
               ("os", "fetch"): "git fetch origin %s" % default_branch, ("os", "stage1-note"): "",
               ("os", "push"): "git push -u origin <branch>", ("os", "destroy"): "",
               ("os", "merge-watch"): "",
@@ -690,14 +687,7 @@ def _os_values(doc, pins, workspace):
     if not os_sandbox.needed(doc):
         return values
     pins = pins if pins is not None else os_sandbox.pins()
-    if workspace is None:
-        from . import config
-        try:
-            workspace = config.section("claude").get("workspace") or ""
-        except PplError:
-            workspace = ""
     workspace = os_sandbox.workspace_dir(workspace) if workspace else _UNKNOWN_WORKSPACE
-    checkout = os_sandbox.checkout(doc)
     forge_repo, tracker_repo = os_sandbox.repos(doc)
     forge_repo = forge_repo or _UNKNOWN_REPO
     gh = pins["gh"]["path"]
@@ -708,8 +698,10 @@ def _os_values(doc, pins, workspace):
     values.update({("os", "gh"): gh, ("os", "ppl"): pins["ppl"]["path"],
                    ("os", "flag-note"): OS_FLAG_NOTE, ("os", "forge-repo"): forge_repo,
                    ("os", "tracker-repo"): tracker_repo or _UNKNOWN_REPO,
-                   ("os", "cd"): "", ("os", "git-dir"): "-C %s " % checkout,
-                   ("os", "fetch"): "git -C %s fetch origin %s" % (checkout, default_branch),
+                   ("os", "cd"): "",
+                   # in the worktree: FETCH_HEAD is the worktree's own, in its git dir, which
+                   # the lane's write scope holds, and the checkout's .git is not (R62)
+                   ("os", "fetch"): "git -C <worktree> fetch origin %s" % default_branch,
                    ("os", "gates-where"): OS_GATES_WHERE,
                    ("os", "stage1-note"): "\n\n" + note if note else ""})
     if not github_forge:
@@ -730,7 +722,7 @@ def _os_values(doc, pins, workspace):
     return values
 
 
-def _values(doc, pins=None, workspace=None):
+def _values(doc, pins=None, workspace=None, lane=None):
     forge = forges.get(doc["forge"]["kind"])
     skills = (doc.get("knowledge") or {}).get("skills") or []
     repo = doc["repo"]
@@ -772,16 +764,15 @@ def _values(doc, pins=None, workspace=None):
         ("harness", "name"): installed_name(doc),
         ("harness", "default-branch"): repo["default_branch"],
         ("harness", "scratch"): str(os_sandbox.scratch_root()),
-        ("harness", "worktrees"): repo.get("worktrees") or (repo["path"].rstrip("/") + "/.worktrees"),
-        ("harness", "gates"): _fragment_file(doc, "gates"),
+        ("harness", "gates"): _fragment_file(doc, "gates", lane),
         # One line: the baseline sentence also fills a table cell.
-        ("harness", "baseline"): " ".join(_fragment_file(doc, "baseline").split()) or _DEFAULT_BASELINE,
-        ("harness", "gate-recipes"): _gate_recipes(doc),
+        ("harness", "baseline"): " ".join(_fragment_file(doc, "baseline", lane).split()) or _DEFAULT_BASELINE,
+        ("harness", "gate-recipes"): _gate_recipes(doc, lane),
         # Project-specific recipe steps with their evidence lines, spliced in
         # as written. A marker inside the fragment is refused, not resolved.
-        ("harness", "extra-gates"): _fragment_file(doc, "extra-gates"),
+        ("harness", "extra-gates"): _fragment_file(doc, "extra-gates", lane),
         # One line: it ends a sentence of the closing section.
-        ("harness", "tracker-close"): (" ".join(_fragment_file(doc, "tracker-close").split())
+        ("harness", "tracker-close"): (" ".join(_fragment_file(doc, "tracker-close", lane).split())
                                        or DEFAULT_TRACKER_CLOSE),
         ("harness", "lessons"): memory.section(doc.get("_memory") or [], "orchestrator"),
         ("knowledge", "skills"): (", ".join("`%s`" % s for s in skills) if skills
@@ -808,15 +799,17 @@ def _with_frontmatter(text, skill_name):
     return head + sep + SKILL_NOTICE + "\n" + tail
 
 
-def render_skill(doc, skill_name="pipeline", pins=None, workspace=None):
+def render_skill(doc, skill_name="pipeline", pins=None, workspace=None, lane=None):
     """relative path -> text of every file of the skill, nothing written.
     Refuses SCHEMA_INVALID on an include marker it cannot resolve, so a
-    marker never reaches the disk. `pins` are the binaries apply pinned, looked
+    marker never reaches the disk. `pins` are the binaries the profile pins, looked
     up on PATH when it is None and the harness needs the OS sandbox profile,
-    and `workspace` the [claude] workspace, read from the config when None."""
+    `workspace` the directory the session's gh and ppl calls run from (a lane's start
+    directory; a placeholder when None), and `lane` the lane number a lane's render puts in
+    place of <lane> in the gates and [env] values."""
     if not _NAME_RE.match(skill_name or ""):
         raise PplError("SCHEMA_INVALID", "skill name %r is not a plain directory name" % skill_name)
-    values = _values(doc, pins, workspace)
+    values = _values(doc, pins, workspace, lane)
     root = paths.root() / "skill"
     rendered = {}
     for path in sorted(root.rglob("*")):
@@ -854,56 +847,27 @@ def write_skill(doc, skills_dir, skill_name="pipeline"):
     return _write_files(render_skill(doc, skill_name), Path(skills_dir) / skill_name)
 
 
-def apply(name, agents_dir=None, skills_dir=None):
-    """Render the agents and the skill for an installed harness, then
-    record it as the active one. Everything is rendered before anything is
-    written, so a bad marker or a bad routing.toml leaves the disk as it was."""
-    from . import config, setup, store
+def apply(name):
+    """Check an installed harness and make it the default `ppl lane` runs when it is given none
+    (config.toml [harness] active). It renders and writes nothing else: a lane renders its own
+    session files from the harness commit when it starts. Refuses HARNESS_INVALID on the first
+    error `verify` finds, and whatever lane_harness.commit refuses (no git repository, uncommitted
+    changes, a failed fetch), both before anything is recorded. Returns {"active", "commit",
+    "warnings"}, the warnings `verify` found (a GitHub harness with no repository to pin among
+    them, which ppl lane refuses)."""
+    from . import config
     doc = load(name)
     if os.path.dirname(os.path.abspath(doc["_dir"])) != os.path.abspath(paths.harnesses_dir()):
         _fail(name, "%s is not an installed harness, add it with `ppl harness add` and apply it "
               "by name" % doc["_dir"])
     config.active_harness()
-    pin_map = os_sandbox.pins() if os_sandbox.needed(doc) else None
-    workspace = config.section("claude").get("workspace") or ""
-    skill_files = render_skill(doc, pins=pin_map, workspace=workspace)
-    _size_warnings(skill_files, {role: routing.render(role, doc) for role in routing.REQUIRED_ROLES})
-    try:
-        previous = os_sandbox.load_facts()
-    except PplError:
-        previous = None
-    if not isinstance(previous, dict):
-        previous = {}
-    sandbox_facts = prof = None
-    if os_sandbox.needed(doc):
-        if not workspace:
-            raise PplError("SETUP_INCOMPLETE", "the OS sandbox profile is written to the "
-                           "workspace's local settings and no [claude] workspace is configured. "
-                           "Run ppl setup claude, then ppl harness apply again.")
-        problem = os_sandbox.layout_problem(doc, workspace) or os_sandbox.repo_problem(doc)
-        if problem:
-            raise PplError("SETUP_INCOMPLETE", problem)
-        sandbox_facts = os_sandbox.facts(doc, workspace, pin_map)
-        prof = os_sandbox.profile(doc, workspace, pin_map)
-        sandbox_facts["written_sandbox"] = prof["sandbox"]
-        sandbox_facts["written_allow"] = prof["allow"]
-        setup.check_os_sandbox_settings(workspace, previous)
-    skill_target = (Path(skills_dir) if skills_dir is not None else config.skills_dir()) / "pipeline"
-    facts_path = paths.home() / os_sandbox.FACTS_FILE
-    if sandbox_facts is not None:
-        store.write_json(facts_path, sandbox_facts)
-        os_sandbox.scratch_root().mkdir(parents=True, exist_ok=True)
-    if workspace and (prof or previous.get("written_sandbox") is not None
-                      or previous.get("written_allow")):
-        setup.write_os_sandbox_settings(workspace, prof, previous)
-    if sandbox_facts is None and facts_path.exists():
-        facts_path.unlink()
-    agents = routing.apply(doc, agents_dir)
-    skill = _write_files(skill_files, skill_target)
     active = installed_name(doc)
-    config.set_active_harness(
-        active, memory_sha256=memory.digest(memory.read(doc["_dir"], routing.LESSON_ROLES)[1]))
-    return {"agents": agents, "skill": skill, "active": active}
+    checked = verify(doc["_dir"], active)
+    if checked["errors"]:
+        raise PplError("HARNESS_INVALID", checked["errors"][0])
+    sha = lane_harness.commit(doc["_dir"])
+    config.set_active_harness(active)
+    return {"active": active, "commit": sha, "warnings": checked["warnings"]}
 
 
 def agent_texts(doc):
@@ -990,29 +954,23 @@ def unrunnable_focused_tests(doc):
 
 
 def _missing_skills(doc):
-    """A warning per knowledge skill found in neither the configured skills
-    directory nor ~/.claude/skills. Only a warning: a plugin skill lives elsewhere."""
-    from . import config, doctor
-    roots = []
-    try:
-        roots.append(config.skills_dir())
-    except PplError:
-        pass
-    if doctor.claude_home() / "skills" not in roots:
-        roots.append(doctor.claude_home() / "skills")
+    """A warning per knowledge skill not found under ~/.claude/skills. Only a warning: a plugin
+    skill lives elsewhere."""
+    from . import doctor
+    root = doctor.claude_home() / "skills"
     warnings = []
     for name in (doc.get("knowledge") or {}).get("skills") or []:
-        if not any((root / name / "SKILL.md").is_file() for root in roots):
+        if not (root / name / "SKILL.md").is_file():
             warnings.append("knowledge.skills names %s, which is not under %s: the briefer is "
                             "told to load a skill it may not find (fine for a plugin skill)"
-                            % (name, " or ".join(str(root) for root in roots)))
+                            % (name, root))
     return warnings
 
 
 def _check_pins(doc):
-    """The pins a check renders the skill with: the binaries apply would pin, or their bare
-    names when one is not on PATH. A check measures the rendered text, and apply looks every
-    pin up again and refuses a missing one."""
+    """The pins a check renders the skill with: the binaries a lane would pin, or their bare
+    names when one is not on PATH. A check measures the rendered text, and `ppl lane` looks
+    every pin up again and refuses a missing one."""
     if not os_sandbox.needed(doc):
         return None
     try:

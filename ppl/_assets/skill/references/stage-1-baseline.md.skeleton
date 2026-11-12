@@ -5,13 +5,13 @@ admission -> baseline -> briefing, so skipping this call dead-ends the next stag
 `ppl stage enter briefing` with `ILLEGAL_TRANSITION` [R-FSM-STAGE-GRAPH]. Capture the
 generation it prints, same as any other `stage enter`.
 
-Create the worktree and branch from `<!-- include: harness/default-branch -->`, at the exact
-path you already passed to `ppl init --repo` in Stage 0, with the branch name matching the
-convention `<TASK-ID>-<short-slug>`:
+The worktree and its branch `<TASK-ID>-<slug>` already exist: `ppl lane` made them from
+`<!-- include: harness/default-branch -->` before this session started, at the path `ppl show --json` reports as `repo`
+(`<worktree>` here and in every later stage). Do not make another one. Fetch the default
+branch, so the gates that compare against it see its current head:
 
 ```bash
 <!-- include: os/cd --><!-- include: os/fetch -->
-git <!-- include: os/git-dir -->worktree add <!-- include: harness/worktrees -->/<repo-name>-<TASK-ID> -b <TASK-ID>-<short-slug> origin/<!-- include: harness/default-branch -->
 ```
 
 <!-- include: os/gates-where --><!-- include: os/stage1-note -->

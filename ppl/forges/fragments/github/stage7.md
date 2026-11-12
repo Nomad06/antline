@@ -29,7 +29,7 @@ Each tick:
    <!-- include: os/flag-note --> **You do not resolve a thread, approve or merge** - when
    the hook is armed those three are denied outright [R-FORGE-GH-NO-APPROVE-MERGE]. After
    posting, record it:
-   `ppl review answered --thread <id> --sha <sha> --classification <c> --last-note-id <id> --generation $GENERATION`.
+   `ppl review answered --thread <id> --sha <sha> --classification <c> --last-note-id <id> --generation <GENERATION>`.
 6. Terminal condition: the pull request is approved on the current head SHA (step 2). Then,
    in this order: <!-- include: sequence/close-out -->. `ppl approval check` must read
    `current`.

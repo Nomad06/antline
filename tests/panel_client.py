@@ -115,27 +115,29 @@ def call(method, path, body=None, headers=None, base=None):
 
 
 class StudioTestCase(unittest.TestCase):
-    """A fresh HOME, data root, Claude home and agents/skills dirs per test,
-    the session started and the Claude version pinned. The agents and skills
-    dirs point at temp dirs because apply falls back to ~/.claude/agents and
-    ~/.claude/skills when no workspace is configured: a test that needs the
-    workspace-derived dirs pops the two variables itself."""
+    """A fresh HOME, data root and Claude home per test, the session started and
+    the Claude version pinned."""
 
-    _ENV = ("HOME", "PPL_HOME", "PPL_CLAUDE_HOME", "PPL_AGENTS_DIR", "PPL_SKILLS_DIR")
+    _ENV = ("HOME", "PPL_HOME", "PPL_CLAUDE_HOME")
 
     def setUp(self):
         self._saved_env = {name: os.environ.get(name) for name in self._ENV}
         os.environ["HOME"] = tmphome.mkdtemp(prefix="pplfakehome-")
         os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
         os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
-        self.agents_dir = Path(tmphome.mkdtemp(prefix="pplagents-"))
-        self.skills_dir = Path(tmphome.mkdtemp(prefix="pplskills-"))
-        os.environ["PPL_AGENTS_DIR"] = str(self.agents_dir)
-        os.environ["PPL_SKILLS_DIR"] = str(self.skills_dir)
         ensure_session()
         patcher = mock.patch.object(models, "claude_version", lambda binary="claude": "9.9.9")
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def rendered_files(self):
+        """Every agent file or pipeline skill under the HOME and the Claude home: none, since
+        only a lane renders them, into its own start directory."""
+        found = []
+        for root in (os.environ["HOME"], os.environ["PPL_CLAUDE_HOME"]):
+            found += [str(path) for path in Path(root).rglob("ppl-*.md")]
+            found += [str(path) for path in Path(root).rglob("pipeline/SKILL.md")]
+        return found
 
     def wait(self, payload):
         """The finished state of the job a {"job": id} response started."""

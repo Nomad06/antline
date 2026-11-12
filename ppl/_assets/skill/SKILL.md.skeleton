@@ -1,6 +1,6 @@
 ---
 name: pipeline
-description: Drive a tracker task through the full development lifecycle to an approved <!-- include: vocab/noun -->. Use when the user provides a task link or id and asks to run the pipeline, or types /pipeline. Covers admission, briefing, isolated implementation, independent tests, deterministic gates, independent verification, opening the <!-- include: vocab/noun -->, and monitoring reviewer remarks until approval.
+description: Drive a tracker task through the full development lifecycle to an approved <!-- include: vocab/noun -->, in the lane `ppl lane` started for it. Use when the session opens with /antline:pipeline and a task link or id, or the user provides one and asks to run the pipeline. Covers admission, briefing, implementation in the lane's own worktree, independent tests, deterministic gates, independent verification, opening the <!-- include: vocab/noun -->, and monitoring reviewer remarks until approval.
 ---
 
 # Pipeline Orchestrator
@@ -19,21 +19,17 @@ judgement. `ppl` decides them; you request them and act on the exit code.
   call hoping for a different answer; fix what the message says is wrong, or escalate.
 - **1** - an unexpected crash, not a routed error. Do not retry in a loop. If it recurs on a
   retry, treat it as `OWNER_DECISION` and park.
-- `MODELS_UNVERIFIED`, `SETUP_INCOMPLETE` and `HARNESS_NOT_APPLIED` are installation faults,
+- `MODELS_UNVERIFIED` and `SETUP_INCOMPLETE` are installation faults,
   not run blockers - stop, print the message to the operator, do not park or escalate a run
   that does not exist yet.
 
 ## Always start here
 
-If this session is a sandbox, experiment, or a dry run rather than a real task against the
-real installation, set `PPL_HOME` and `PPL_CLAUDE_HOME` before running anything below, and
-`PPL_AGENTS_DIR` and `PPL_SKILLS_DIR` before any `ppl harness apply` - the two variables that
-keep its render out of the real `~/.claude`. Otherwise `ppl doctor` and `ppl init` are happy
-to read and write the real data root (`~/.ppl`) and answer about the real active run. See
-README.md "Sandbox".
-
-Run `ppl lessons pending` first. For each task it lists, follow `references/reflection.md`
-with the bundle it names, then go on with your own task.
+This session runs in the lane `ppl lane` started for one task: `PPL_TASK` names the lane's
+run, and a `ppl` call without `--task` works on that run. A sandbox, experiment or dry run gets
+a lane of its own, started with `PPL_HOME` and `PPL_CLAUDE_HOME` set to throwaway directories
+(README.md "Sandbox"). Leave both as the session inherited them: the lane's registry entry,
+its run and its guard facts live under the `PPL_HOME` it started with.
 
 You already know the task id (the tracker task you were given, or the id the operator
 named). Run:
@@ -43,8 +39,8 @@ ppl recover --task <TASK-ID>
 ```
 
 If you were told only to "continue" with no task id, run bare `ppl recover` instead - it
-resolves the task through the active-run pointer, and fails the identical way when there is
-no active run to fall back to. There are exactly three outcomes:
+takes the lane's task from `PPL_TASK`, and fails the identical way while no `ppl init` has
+made that run yet. There are exactly three outcomes:
 
 - **Exit 0** - a run for this task already exists. Read the `actions` lines it printed:
   "safe to continue" and "nothing happened" are not the same thing, and a moved head SHA, a
@@ -52,15 +48,16 @@ no active run to fall back to. There are exactly three outcomes:
   line always names the current lease generation - capture that number now. Do
   **not** run `ppl init` - the run is already there. Run `ppl show --task <TASK-ID> --json`
   to see its current `stage`, and resume the pipeline from that stage (its reference is in
-  the stage map below).
+  the stage map below). First, once per session, do step 2 of
+  `references/stage-0-admission.md`: it lists again the reflections this lane claimed and
+  has not recorded, so finish each of them before you resume.
 
-- **Exit 2, `SCHEMA_INVALID`** - three different shapes, read the message to tell them
-  apart. `resolve_task` with no `--task` and no active run, and `run.load` on a task id
-  nobody has `ppl init`'ed yet, both mean no run exists for this task - treat it as a NEW
-  task and go to Stage 0's `ppl init` step (`references/stage-0-admission.md`). A message naming a repo path that "does not
-  exist" means the run DOES exist and its worktree simply was not created yet (typically a
-  run parked before Stage 1 ran) - do **not** run `ppl init` again, create the worktree now
-  (Stage 1) and re-run `ppl recover`.
+- **Exit 2, `SCHEMA_INVALID`** - two different shapes, read the message to tell them
+  apart. `run.load` on a task id nobody has `ppl init`'ed yet means no run exists for this
+  task - treat it as a NEW task and go to Stage 0's `ppl init` step (`references/stage-0-admission.md`). A message naming a repo path that "does not
+  exist" means the run DOES exist and its worktree is gone: `ppl lane` made it before this
+  session started, so do **not** run `ppl init` again and do not make one yourself. Stop and
+  tell the operator, who starts the lane again in a terminal outside it.
 - **Exit 2, `EXTERNAL_BLOCKED` or `OWNER_DECISION`** - a run exists but is blocked: a repo
   that exists but is not a usable git worktree, an unusable control file, or an operator
   `pause`/`stop`/`destroy` in force. Read `error_code` from stderr and follow
@@ -89,18 +86,19 @@ parks the run with `FORMAT_RETRY_EXHAUSTED` on the second and refuses a third ca
 code before reading its input [R-REFUSAL-RETRY-CAP].
 
 **Run `ppl doctor` here too, before you lean on anything in this skill that talks about a
-hook stopping a tool call.** The guard hook is not armed by default, and nothing about
-starting a run arms it on its own [R-GUARD-NOT-ARMED n/a]. `ppl doctor` prints a JSON line
-with a `registration` and a `matcher` field. `registration` `local` (this directory's
-`.claude/settings.local.json` only) with `matcher` `ok` is the isolated, recommended state:
-the present-tense hook claims in this skill hold for this run. On any other reading -
-`none`, `global`, `both`, `unknown`, or `matcher` `incomplete` - read
-`references/guard-hook.md` before going on: it says what each one leaves unprotected and what
-to tell the operator.
+hook stopping a tool call.** The guard hook is armed only in the session `ppl lane` started
+for this run, and a session resumed by hand without the lane flags has none
+[R-LANE-BARE-RESUME n/a]. `ppl doctor` prints a JSON line
+with a `registration` and a `matcher` field. `registration` `local` (the lane's own
+`settings.json`, which `ppl lane` rendered with this run's task on every hook's command line)
+with `matcher` `ok` is the expected state: the present-tense hook claims in this skill hold
+for this run. On any other reading - `none`, `start_local`, `both`, `unknown`, or `matcher`
+`incomplete` - read `references/guard-hook.md` before going on: it says what each one leaves
+unprotected and what to tell the operator.
 
 Every sentence in this skill and its references about a hook stopping, catching or gating a
-tool call holds only when `ppl doctor` reported `local` (or a `global`/`both` you have
-accepted as an owner decision) for this session. Read it that way throughout, not just where
+tool call holds only when `ppl doctor` reported `local` (or a `both` you have accepted as
+an owner decision) for this session. Read it that way throughout, not just where
 it is repeated.
 
 ## Stage map
@@ -111,10 +109,11 @@ last output line. Most references open with that `ppl stage enter` call: when yo
 right after making the call, skip that first step and go on from the next. On a resume, read
 the reference of the stage `ppl show --json` reports.
 
-- **Stage 0 - admission** (`admission`, a NEW task): `references/stage-0-admission.md`. Read
-  the task and its links, `ppl init`, check the admission list, `SPEC_GAP` on a gap.
-- **Stage 1 - baseline** (`baseline`): `references/stage-1-baseline.md`. Create the
-  worktree, then record the baseline, once.
+- **Stage 0 - admission** (`admission`, a NEW task): `references/stage-0-admission.md`.
+  `ppl init`, the pending reflections, then read the task and its links, check the admission
+  list, `SPEC_GAP` on a gap.
+- **Stage 1 - baseline** (`baseline`): `references/stage-1-baseline.md`. Fetch the default
+  branch beside the worktree `ppl lane` made, then record the baseline, once.
 - **Stage 2 - briefing** (`briefing`): `references/stage-2-briefing.md`. `ppl-briefer`
   writes the brief (`ppl brief set`), `ppl-brief-challenger` challenges it (`ppl brief
   challenge`).
@@ -130,7 +129,8 @@ the reference of the stage `ppl show --json` reports.
 - **Stage 7 - review** (`review`): `references/stage-7-review.md`. The review loop with
   `ppl-review-responder`, and the close-out once the <!-- include: vocab/short --> is approved.
 - **Stage 8 - after merge** (`closure`, `merge_watch`): `references/stage-8-after-merge.md`.
-  Record the observed merge, then the tracker note, and finish a close-out left half done.
+  Record the observed merge, then the tracker note, and finish a close-out left half done;
+  last, close the lane.
 
 ## Operator commands
 
@@ -141,15 +141,17 @@ like `status`, `show` and `control get` keep working, so a paused run is still o
 and `control set resume` keeps working too, so the operator can lift their own halt [R-OPERATOR-HALT-CLI].
 `ppl park` and `ppl escalate` also stay available while paused - an operator halt must not
 block recording why the run stopped [R-OPERATOR-HALT-CLI]. When `ppl doctor` reports the guard hook registered, it also checks `control.json` on
-every tool call, so a pause lands within one tool call, not one stage; for the orchestrator's
-own session it does so under the same isolated-scoping rule as the tracker gate
-(`references/stage-8-after-merge.md`). When it
+every tool call, so a pause lands within one tool call, not one stage, for the orchestrator's
+own session as well: every hook of the lane carries this run on its command line
+[R-LANE-HOOK-BINDING]. When it
 is not registered, `ppl`'s own checks above are what a pause has - it still blocks the next
 `ppl` call, just not the tool call the operator actually wanted stopped. If a run carries
-`remote_cleanup.json`, the operator asked for a full destroy: close the <!-- include: vocab/noun -->,
-delete the remote branch, then run `ppl destroy --scope local`.<!-- include: os/destroy --> That is the only outward
-mutation the panel can ask you for, and it only ever happens after the operator typed the
-task id to confirm it.
+`remote_cleanup.json`, the operator asked for a full destroy: close the <!-- include: vocab/noun --> and
+delete the remote branch.<!-- include: os/destroy --> Then stop, and tell the owner to run
+`ppl destroy --scope local --task <TASK-ID>` in a terminal outside this lane: it removes the
+lane's start directory, this session's own cwd, and its worktree, so it is the owner's step,
+not yours. That is the only outward mutation the panel can ask you for, and it only ever
+happens after the operator typed the task id to confirm it.
 
 ## Hard rules
 

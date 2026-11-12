@@ -1,5 +1,7 @@
-"""A throwaway HOME, data root, Claude workspace, sample repository and gh stand-in, all
-driven through real ppl subprocesses."""
+"""A throwaway HOME, data root, sample repository with a stand-in for its GitHub remote, and a
+gh stand-in, all driven through real ppl subprocesses. The run starts as an operator starts
+one: `ppl setup`, then `ppl lane`, whose launch the demo takes without exec'ing claude. Every
+ppl call after that runs as the lane's session runs it."""
 import json
 import os
 import shlex
@@ -27,18 +29,21 @@ class Sandbox:
         self.root = Path(root)
         self.home = self.root / "home"
         self.ppl_home = self.root / "ppl"
-        self.workspace = self.root / "workspace"
-        # beside the workspace, not in it: the OS sandbox profile denies every write under the
-        # workspace, to sandboxed Bash and to the guard's edit tools alike
+        # the sample project's checkout, the harness's [repo] path
         self.repo = self.root / "shop"
+        # the bare repository the sandbox's git reaches in place of sample.REMOTE
+        self.remote = self.root / "remote" / "shop.git"
         self.bin = self.root / "bin"
+        # TASK's lane start directory and the run's worktree, once build has started the lane
+        self.start = None
+        self.worktree = None
         self.env = self._env()
 
     @classmethod
     def create(cls):
         root = Path(tempfile.mkdtemp(prefix="antline-demo-")).resolve()
         box = cls(root)
-        for directory in (box.home, box.workspace, box.bin):
+        for directory in (box.home, box.bin):
             directory.mkdir(parents=True, exist_ok=True)
         return box
 
@@ -50,6 +55,12 @@ class Sandbox:
             HOME=str(self.home), PPL_HOME=str(self.ppl_home),
             PPL_CLAUDE_HOME=str(self.home / ".claude"), GIT_CONFIG_NOSYSTEM="1",
             GIT_CONFIG_GLOBAL="/dev/null", XDG_CONFIG_HOME=str(self.home / ".config"),
+            # an operator's url rewrite to a local mirror, in the command scope of every git
+            # in the sandbox, written to no config file: sample.REMOTE is fetched from and
+            # pushed to self.remote, and nothing leaves the machine. ppl lane checks only the
+            # checkout's local and worktree config, where origin stays the GitHub url.
+            GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="url.%s.insteadOf" % self.remote,
+            GIT_CONFIG_VALUE_0=sample.REMOTE,
             PATH=os.pathsep.join([str(self.bin), env.get("PATH", "")]),
             PYTHONPATH=os.pathsep.join(filter(None, [parent, env.get("PYTHONPATH")])))
         return env
@@ -63,26 +74,50 @@ class Sandbox:
                            % (" ".join(map(str, argv)), TIMEOUT_SECONDS)) from error
 
     def ppl(self, *args):
-        return self._run([sys.executable, "-m", "ppl", *args], cwd=self.workspace)
+        """ppl as the operator runs it before the lane, and once the lane exists as its session
+        runs it: in the start directory, with the environment ppl lane adds (PPL_TASK too)."""
+        return self._run([sys.executable, "-m", "ppl", *args], cwd=self.start or self.root)
 
     def git(self, *args, cwd=None):
-        argv = ["git", *_GIT_FLAGS, *(() if cwd else ("-C", str(self.repo))), *args]
-        done = self._run(argv, cwd=cwd)
+        """git in `cwd`, by default in the run's worktree."""
+        argv = ["git", *_GIT_FLAGS, "-C", str(cwd or self.worktree), *args]
+        done = self._run(argv)
         if done.returncode != 0:
             raise PplError("SCHEMA_INVALID", "demo sandbox: `git %s` failed: %s"
                            % (" ".join(args), (done.stderr or done.stdout).strip()[:500]))
         return done.stdout
 
-    def commit(self, paths_, message):
-        self.git("add", "--", *paths_)
-        self.git("commit", "-q", "-m", message)
-        return self.git("rev-parse", "HEAD").strip()
+    def commit(self, paths_, message, cwd=None):
+        self.git("add", "--", *paths_, cwd=cwd)
+        self.git("commit", "-q", "-m", message, cwd=cwd)
+        return self.git("rev-parse", "HEAD", cwd=cwd).strip()
+
+    def lane_settings(self):
+        """The settings.json ppl lane rendered in TASK's start directory."""
+        return self.start / "settings.json"
+
+    def guard_argv(self):
+        """The guard hook's command line as the lane's settings.json registers it for
+        PreToolUse, the entry whose command runs ppl_guard.py: it ends in --task TASK, which
+        binds the hook to TASK's lane. SCHEMA_INVALID when the settings cannot be read or
+        register no such entry."""
+        try:
+            path = self.lane_settings()
+            settings = json.loads(path.read_text(encoding="utf-8"))
+            commands = [hook.get("command") for entry in settings["hooks"]["PreToolUse"]
+                        for hook in entry["hooks"]]
+            for command in commands:
+                if isinstance(command, str) and "ppl_guard.py" in command:
+                    return shlex.split(command)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            raise PplError("SCHEMA_INVALID", "demo sandbox: the lane's settings.json cannot "
+                           "be read for its guard: %s" % error) from error
+        raise PplError("SCHEMA_INVALID", "demo sandbox: %s registers no ppl_guard.py for "
+                       "PreToolUse" % path)
 
     def guard(self, payload):
-        settings = json.loads((self.workspace / ".claude" / "settings.local.json").read_text())
-        command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         try:
-            done = self._run(shlex.split(command), cwd=self.workspace, input=json.dumps(payload))
+            done = self._run(self.guard_argv(), cwd=self.start, input=json.dumps(payload))
         except PplError as error:
             return {"decision": "error", "code": None, "reason": error.message}
         if done.returncode != 0 or done.stderr.strip():
@@ -107,12 +142,17 @@ class Sandbox:
 
     def build(self):
         self.repo.mkdir(parents=True, exist_ok=True)
-        self.git("init", "-q", "-b", "main", str(self.repo), cwd=self.workspace)
+        self.git("init", "-q", "-b", "main", cwd=self.repo)
         for rel, text in sample.FILES.items():
             target = self.repo / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
-        self.commit(sorted(sample.FILES), "base")
+        self.commit(sorted(sample.FILES), "base", cwd=self.repo)
+        # origin is the GitHub repository the harness names as its forge, which ppl lane
+        # requires before it fetches the run's base from there
+        self.git("init", "-q", "--bare", "-b", "main", str(self.remote), cwd=self.root)
+        self.git("remote", "add", "origin", sample.REMOTE, cwd=self.repo)
+        self.git("push", "-q", "origin", "main", cwd=self.repo)
         source = self.root / "harness-src"
         doc, fragments = sample.harness(str(self.repo))
         source.mkdir()
@@ -120,16 +160,25 @@ class Sandbox:
         for rel, text in fragments.items():
             (source / rel).parent.mkdir(parents=True, exist_ok=True)
             (source / rel).write_text(text, encoding="utf-8")
-        # first on PATH, so harness apply pins these and never a ppl or gh installed elsewhere
+        # a committed repository, so `harness add` keeps it as it is and imports nothing under
+        # the sandbox's empty git config, and ppl lane exports its HEAD (it has no origin)
+        self.git("init", "-q", "-b", "main", cwd=source)
+        self.git("add", "-A", cwd=source)
+        self.git("commit", "-q", "-m", "demo harness", cwd=source)
+        # first on PATH, so the lane's facts pin these and never a ppl or gh installed elsewhere
         for name, text in (("gh", sample.gh_source()), ("ppl", sample.ppl_source())):
             target = self.bin / name
             target.write_text(text, encoding="utf-8")
             target.chmod(0o755)
         self._step("setup", "--non-interactive", "--skip", "models", "--skip", "forge",
-                   "--answer", "workspace=%s" % self.workspace, "--answer", "hooks=local",
                    "--answer", "harness_from=%s" % source, "--answer", "harness_name=demo")
+        launch = json.loads(self._step("lane", TASK, "--harness", "demo", "--no-exec").stdout)
+        self.start = Path(launch["cwd"])
+        self.env.update(launch["env"])
+        self.worktree = Path(json.loads(
+            (self.start / "lane.json").read_text(encoding="utf-8"))["worktree"])
         self._step("init", TASK, "--tracker-url", "https://github.com/demo/shop/issues/1",
-                   "--repo", str(self.repo), "--harness", "demo", "--skip-model-check", "--no-os-sandbox")
+                   "--harness", "demo", "--skip-model-check", "--no-os-sandbox")
 
     def remove(self):
         shutil.rmtree(self.root, ignore_errors=True)

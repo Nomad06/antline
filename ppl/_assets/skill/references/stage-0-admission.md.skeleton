@@ -1,20 +1,23 @@
 # Stage 0 - admission
 
 Only for the NEW-task branch of "Always start here" in `SKILL.md` (`ppl recover --task
-<TASK-ID>` came back `SCHEMA_INVALID`). If a run already existed, skip this stage entirely -
-resume from the stage `ppl show` reported instead; calling `ppl init` on an existing run
-raises `ILLEGAL_TRANSITION`.
+<TASK-ID>` came back `SCHEMA_INVALID`). If a run already existed, do not run `ppl init` again -
+calling it on an existing run raises `ILLEGAL_TRANSITION` - and resume from the stage `ppl
+show` reported; a run still in `admission` goes on from step 3 here, since the resume ran
+step 2.
 
-1. `ppl init <TASK-ID> --tracker-url <url> --repo <worktree path> --harness <!-- include: harness/name -->` -
-   `--repo` is the path the worktree will live at; Stage 1 creates it at exactly this path
-   next, `ppl init` does not require it to exist yet. Leave `--isolated` at its default
-   (true) unless the guard hook is registered somewhere broader than this launch directory -
-   see `references/stage-8-after-merge.md` for what that flag controls. A run has to exist
-   before the task is read, because a fetched issue is stored in the run.
-2. <!-- include: tracker/admission -->
-3. Check the admission list: one outcome, fixed governing revision (the one step 2 names), stable and verifiable
+1. `ppl init <TASK-ID> --tracker-url <url> --harness <!-- include: harness/name -->` - the run
+   takes the lane's worktree, which `ppl lane` made before this session started, and the
+   harness snapshot the lane exported. A run has to exist before the task is read, because a
+   fetched issue is stored in the run, and before any role is dispatched.
+2. Run `<!-- include: os/ppl --> lessons pending`. <!-- include: os/flag-note --> It prints one
+   `<task> <bundle>` line for each run of this harness that ended with its reflection still
+   to do, and claims each for this lane, so no other lane reflects on it. Follow
+   `references/reflection.md` for every line, with the bundle it names, then go on.
+3. <!-- include: tracker/admission -->
+4. Check the admission list: one outcome, fixed governing revision (the one step 3 names), stable and verifiable
    acceptance criteria, closed material decisions, satisfied dependencies, risk tier, a
    non-empty write boundary, enumerated forbidden paths, a proof path defined before any
    implementation, and a budget.
-4. Anything missing: `ppl escalate --code SPEC_GAP --question "..."` and stop. A task that
+5. Anything missing: `ppl escalate --code SPEC_GAP --question "..."` and stop. A task that
    fails admission does not get clarified along the way by a worker.

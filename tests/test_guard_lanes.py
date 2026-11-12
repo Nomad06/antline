@@ -1,0 +1,1523 @@
+"""The hooks know their run from the `--task <id>` their own command line carries, rendered
+into the lane's write-protected settings.json, never from a shared pointer."""
+import json
+import os
+import subprocess
+import sys
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+# tests/ is not a package, so the helper next to this file is imported
+# by path. It must be imported before PPL_HOME is chosen below.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tmphome
+
+os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+HOOKS = Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"
+sys.path.insert(0, str(HOOKS))
+
+import fixtures
+from ppl import control, escape_paths, harness, lanes, os_sandbox, paths, run, store
+import ppl_dispatch
+import ppl_guard
+import ppl_usage
+
+GUARD = HOOKS / "ppl_guard.py"
+HOOK_BOUND_SECONDS = 10
+# what a role can leave where the registry belongs: past the hooks' 1 MiB cap, and too big
+# to read within a hook's timeout
+HUGE_BYTES = 2 * 1024 ** 3
+
+LANE_A = "LANE-5101"
+LANE_B = "LANE-5102"
+UNREGISTERED = "LANE-5199"
+ELSEWHERE = "/home/dev/some/other/project"
+# the CI python-floor job's payload (.github/workflows/tests.yml)
+FLOOR_PAYLOAD = {"hook_event_name": "PreToolUse", "agent_type": "ppl-code-worker",
+                 "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": "/tmp"}
+
+
+def payload(agent, tool, tool_input, cwd="/tmp"):
+    return {"hook_event_name": "PreToolUse", "agent_type": agent,
+            "tool_name": tool, "tool_input": tool_input, "cwd": cwd}
+
+
+def argv(task):
+    return ["--task", task]
+
+
+def reason(result):
+    return result["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def nested_substitutions(depth, size, filler, tail):
+    """echo, `depth` substitutions nested in one another around `filler` repeated to fill the
+    command to `size` characters, then `tail`: the shape whose reading per level grew with the
+    square of the depth (R49)."""
+    room = size - len("echo ") - 3 * depth - len(tail)
+    return ("echo " + "$(" * depth + (filler * (room // len(filler) + 1))[:room] + ")" * depth
+            + tail)
+
+
+class LaneCase(unittest.TestCase):
+    """Each test in its own data root: a lane registry is machine-wide state."""
+
+    def setUp(self):
+        self._home = os.environ.get("PPL_HOME")
+        os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+        self.addCleanup(self.restore_home)
+
+    def restore_home(self):
+        os.environ["PPL_HOME"] = self._home
+
+    def deny_reason(self, result):
+        self.assertIsNotNone(result, "the call was allowed")
+        return reason(result)
+
+    def lane(self, task, lane=1):
+        """A run with a registered lane, its repo a fresh directory. Returns the repo."""
+        repo = tmphome.mkdtemp(prefix="pplrepo-")
+        run.init(task, "u", repo)
+        fixtures.bind_lane(task, repo, lane=lane)
+        return repo
+
+
+class TestTheHookBinding(LaneCase):
+    def test_a_role_without_a_lane_is_denied(self):
+        # rule: R-LANE-ROLE-OUTSIDE
+        # a leftover of the old shared pointer names a live run, and still arms nothing
+        self.lane(LANE_A)
+        paths.legacy_active_file().write_text(LANE_A + "\n", encoding="utf-8")
+        for agent in ("ppl-code-worker", "ppl-reflector", "ppl-not-generated-yet"):
+            with self.subTest(agent=agent):
+                result = ppl_guard.decide(payload(agent, "Bash", {"command": "ls"}))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                self.assertIn("ppl lane", self.deny_reason(result))
+        result = ppl_guard.decide(payload("ppl-verifier", "Read", {"file_path": "/tmp/x"}))
+        self.assertIn("ppl roles run only inside a lane session", self.deny_reason(result))
+
+    def test_an_unroled_session_without_a_lane_gets_only_the_global_denials(self):
+        # rule: R-LANE-ROLE-OUTSIDE
+        repo = self.lane(LANE_A)
+        control.set_command(LANE_A, "pause")
+        # nothing run-scoped: not the run's pause, not its repo write boundary
+        self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": "ls"}, repo)))
+        self.assertIsNone(ppl_guard.decide(payload(None, "Write",
+                                                   {"file_path": repo + "/src/App.java"})))
+        self.assertIsNone(ppl_guard.decide(payload("general-purpose", "Bash",
+                                                   {"command": "ls"})))
+        # the global denials stay
+        for call in (payload(None, "Bash", {"command": "git add -A"}),
+                     payload(None, "Bash", {"command": "git push --force origin x"}),
+                     payload(None, "mcp__GitLab-MCP__merge_merge_request", {})):
+            with self.subTest(tool=call["tool_name"]):
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(ppl_guard.decide(call)))
+
+    def test_a_call_outside_the_sandbox_in_an_unconfirmed_lane_names_the_lane(self):
+        # rule: R-OS-SANDBOX-FAIL-CLOSED
+        # ledger 165: the refusal ended "run ppl lane resume <task>", the placeholder, though
+        # the hook's own command line names the task
+        repo = self.lane(LANE_A)
+        run.init(UNREGISTERED, "u", repo)
+        result = ppl_guard.decide(payload(None, "Bash", {"command": "gh pr view 1",
+                                                         "dangerouslyDisableSandbox": True}),
+                                  argv(UNREGISTERED))
+        reason = self.deny_reason(result)
+        self.assertIn("OWNER_DECISION", reason)
+        self.assertIn("or run ppl lane resume %s" % UNREGISTERED, reason)
+        self.assertNotIn("<task>", reason)
+
+    def test_an_unregistered_lane_denies_roles_and_unroled_writes_but_allows_reads(self):
+        # rule: R-LANE-HOOK-BINDING
+        repo = self.lane(LANE_A)
+        run.init(UNREGISTERED, "u", repo)
+        hook = argv(UNREGISTERED)
+        for agent in ("ppl-code-worker", "ppl-verifier"):
+            with self.subTest(agent=agent):
+                result = ppl_guard.decide(payload(agent, "Read", {"file_path": repo + "/a"}),
+                                          hook)
+                self.assertIn("OWNER_DECISION", self.deny_reason(result))
+                self.assertIn("lane %s is not registered: run ppl lane resume %s"
+                              % (UNREGISTERED, UNREGISTERED), self.deny_reason(result))
+        for agent in (None, "general-purpose"):
+            for call in (payload(agent, "Bash", {"command": "ls"}),
+                         payload(agent, "Write", {"file_path": "/tmp/notes.txt"}),
+                         payload(agent, "mcp__atlassian__addCommentToJiraIssue", {"body": "x"}),
+                         payload(agent, "Bash", {"command": "ls",
+                                                 "dangerouslyDisableSandbox": True})):
+                with self.subTest(agent=agent, tool=call["tool_name"]):
+                    self.assertIn("OWNER_DECISION",
+                                  self.deny_reason(ppl_guard.decide(call, hook)))
+            for call in (payload(agent, "Read", {"file_path": repo + "/a"}),
+                         payload(agent, "Glob", {"pattern": "**/*.java"}),
+                         payload(agent, "Grep", {"pattern": "x"})):
+                with self.subTest(agent=agent, tool=call["tool_name"]):
+                    self.assertIsNone(ppl_guard.decide(call, hook))
+        # a malformed command line binds no lane and fails closed the same way
+        for bad in (["--task"], ["--task", "lane-1"], ["--task", LANE_A, "--task", LANE_A],
+                    ["--task", LANE_A + "\n"], ["-q"], ["--task=" + LANE_A]):
+            with self.subTest(argv=bad):
+                self.assertIn("OWNER_DECISION", self.deny_reason(ppl_guard.decide(
+                    payload("ppl-code-worker", "Read", {"file_path": repo + "/a"}), bad)))
+                self.assertIn("OWNER_DECISION", self.deny_reason(ppl_guard.decide(
+                    payload(None, "Write", {"file_path": "/tmp/notes.txt"}), bad)))
+                self.assertIsNone(ppl_guard.decide(
+                    payload(None, "Read", {"file_path": repo + "/a"}), bad))
+
+    def test_a_bound_session_scopes_every_call_to_its_run(self):
+        # rule: R-LANE-HOOK-BINDING
+        # rule: R-UNROLED-REPO-WRITE
+        repo = self.lane(LANE_A)
+        # a leftover of the old shared pointer names another run, and changes nothing for lane A
+        self.lane(LANE_B, lane=2)
+        paths.legacy_active_file().write_text(LANE_B + "\n", encoding="utf-8")
+        start = str(lanes.start_dir(LANE_A))
+        for cwd in (repo, start, ELSEWHERE):
+            with self.subTest(cwd=cwd):
+                result = ppl_guard.decide(payload(None, "Write",
+                                                  {"file_path": repo + "/src/App.java"}, cwd),
+                                          argv(LANE_A))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                result = ppl_guard.decide(payload(None, "Bash",
+                                                  {"command": "echo x > %s/App.java" % repo},
+                                                  cwd), argv(LANE_A))
+                self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+        # the operator's pause reaches the bound session from any cwd
+        control.set_command(LANE_A, "pause")
+        for cwd in (start, ELSEWHERE):
+            with self.subTest(paused=cwd):
+                result = ppl_guard.decide(payload(None, "Bash", {"command": "ls"}, cwd),
+                                          argv(LANE_A))
+                self.assertIn("OWNER_DECISION", self.deny_reason(result))
+        # an unroled write outside the run's repo is still the session's own business
+        control.clear(LANE_A)
+        self.assertIsNone(ppl_guard.decide(
+            payload(None, "Write", {"file_path": "/tmp/somewhere-else/notes.txt"}, start),
+            argv(LANE_A)))
+
+    def test_before_ppl_init_an_unroled_write_into_the_lane_is_denied(self):
+        # rule: R-UNROLED-REPO-WRITE
+        # R24: ppl lane registered the lane and made its worktree, ppl init has not run, so
+        # there is no state.json to name the run's repo. The registry entry's worktree and
+        # repo stand in for it, and an unreadable state.json changes nothing.
+        repo = tmphome.mkdtemp(prefix="pplrepo-")
+        worktree = tmphome.mkdtemp(prefix="pplworktree-")
+        fixtures.bind_lane(LANE_A, repo, worktree=worktree)
+        hook = argv(LANE_A)
+        start = str(lanes.start_dir(LANE_A))
+        for state in (None, "{not json"):
+            if state is not None:
+                run.state_path(LANE_A).parent.mkdir(parents=True, exist_ok=True)
+                run.state_path(LANE_A).write_text(state, encoding="utf-8")
+            for root in (worktree, repo):
+                for call in (payload(None, "Write", {"file_path": root + "/src/App.java"}, start),
+                             payload(None, "Edit", {"file_path": root + "/src/App.java",
+                                                    "old_string": "a", "new_string": "b"}),
+                             payload(None, "Bash", {"command": "echo x > %s/App.java" % root},
+                                     ELSEWHERE),
+                             payload("general-purpose", "Write", {"file_path": root + "/x"})):
+                    with self.subTest(state=state, root=root, tool=call["tool_name"],
+                                      agent=call["agent_type"]):
+                        result = ppl_guard.decide(call, hook)
+                        self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                        self.assertIn(LANE_A, self.deny_reason(result))
+            # what lands outside the lane stays the session's business
+            self.assertIsNone(ppl_guard.decide(
+                payload(None, "Write", {"file_path": "/tmp/somewhere-else/notes.txt"}), hook))
+            self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": "ls"}), hook))
+            # a target the hook cannot resolve is denied, as everywhere in a lane
+            result = ppl_guard.decide(payload(None, "Bash", {"command": "echo x > $W/App.java"}),
+                                      hook)
+            self.assertIn("could not be resolved", self.deny_reason(result))
+            # and a role is denied every call before ppl init, write or not (R22)
+            result = ppl_guard.decide(payload("ppl-code-worker", "Read",
+                                              {"file_path": worktree + "/src/App.java"}), hook)
+            self.assertIn("OWNER_DECISION", self.deny_reason(result))
+        # an entry that names no worktree or repo places no write, so every write is denied
+        entry = {key: item for key, item in lanes.entry(LANE_A).items()
+                 if key not in ("worktree", "repo")}
+        store.write_json(lanes.registry_path(), {"version": 1, "lanes": [entry]})
+        for call in (payload(None, "Write", {"file_path": "/tmp/somewhere-else/notes.txt"}),
+                     payload(None, "Bash", {"command": "echo x > /tmp/notes.txt"})):
+            with self.subTest(entry="no roots", tool=call["tool_name"]):
+                self.assertIn("OWNER_DECISION",
+                              self.deny_reason(ppl_guard.decide(call, hook)))
+        self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": "ls"}), hook))
+
+    def test_two_lanes_never_see_each_others_state(self):
+        # rule: R-LANE-HOOK-BINDING
+        repo_a = self.lane(LANE_A, lane=1)
+        repo_b = self.lane(LANE_B, lane=2)
+        control.set_command(LANE_A, "pause")
+        for agent in (None, "ppl-code-worker"):
+            with self.subTest(agent=agent):
+                result = ppl_guard.decide(payload(agent, "Bash", {"command": "ls"}),
+                                          argv(LANE_A))
+                self.assertIn("OWNER_DECISION", self.deny_reason(result))
+                self.assertIn(LANE_A, self.deny_reason(result))
+                self.assertIsNone(ppl_guard.decide(payload(agent, "Bash", {"command": "ls"}),
+                                                   argv(LANE_B)))
+        # each lane's write boundary is its own run's repo
+        control.clear(LANE_A)
+        for task, repo in ((LANE_A, repo_a), (LANE_B, repo_b)):
+            with self.subTest(write=task):
+                result = ppl_guard.decide(payload(None, "Write",
+                                                  {"file_path": repo + "/App.java"}),
+                                          argv(task))
+                self.assertIn("run %s's repo" % task, self.deny_reason(result))
+        # a deny is logged to the bound run only
+        def denied_tools(task):
+            return [e["tool"] for e in store.read_log(task) if e.get("event") == "deny"]
+
+        self.assertEqual(denied_tools(LANE_B), ["Write"])
+        self.assertEqual(denied_tools(LANE_A), ["Bash", "Bash", "Write"])
+
+    def test_an_unreadable_registry_fails_closed_without_blocking(self):
+        # rule: R-LANE-HOOK-BINDING
+        # Review Focus 2: the registry a hook reads with no lock is a FIFO, garbage, not
+        # UTF-8 or over the cap. The hook answers within its bound, the run-scoped calls
+        # fail closed and the global denials still fire. Its own data root, run as Claude
+        # Code runs the hook.
+        env = fixtures.isolated_env()
+        registry = Path(env["PPL_HOME"]) / lanes.REGISTRY_FILE
+
+        def fifo():
+            os.mkfifo(str(registry))
+
+        def huge():
+            with open(str(registry), "wb") as handle:
+                handle.truncate(HUGE_BYTES)
+
+        def text(data):
+            return lambda: registry.write_bytes(data)
+
+        cases = (("fifo", fifo), ("truncated", text(b'{"version": 1, "lan')),
+                 ("not json", text(b"garbage")), ("not utf-8", text(b"\xff")),
+                 ("wrong shape", text(b'{"version": 1, "lanes": {}}')),
+                 ("over the cap", huge))
+        calls = ((payload("ppl-code-worker", "Read", {"file_path": "/tmp/x"}), "OWNER_DECISION"),
+                 (payload(None, "Write", {"file_path": "/tmp/notes.txt"}), "OWNER_DECISION"),
+                 (payload(None, "Bash", {"command": "ls", "dangerouslyDisableSandbox": True}),
+                  "OWNER_DECISION"),
+                 (payload(None, "Bash", {"command": "git push --force origin x"}),
+                  "BOUNDARY_VIOLATION"),
+                 (payload(None, "Read", {"file_path": "/tmp/x"}), None))
+        for name, make in cases:
+            make()
+            try:
+                for call, expected in calls:
+                    with self.subTest(registry=name, agent=call["agent_type"],
+                                      tool=call["tool_name"]):
+                        result = self.run_hook(call, env, argv(LANE_A))
+                        if expected is None:
+                            self.assertIsNone(result)
+                        else:
+                            self.assertIn(expected, self.deny_reason(result))
+                            if expected == "OWNER_DECISION":
+                                self.assertIn("lanes.json", self.deny_reason(result))
+            finally:
+                registry.unlink()
+
+    def run_hook(self, call, env, hook_argv):
+        """main() in its own process, as Claude Code runs it, held to a bound."""
+        started = time.monotonic()
+        try:
+            done = subprocess.run([sys.executable, str(GUARD)] + list(hook_argv),
+                                  input=json.dumps(call), capture_output=True, text=True,
+                                  env=env, timeout=HOOK_BOUND_SECONDS)
+        except subprocess.TimeoutExpired:
+            self.fail("the hook was still running after %d s" % HOOK_BOUND_SECONDS)
+        self.assertLess(time.monotonic() - started, HOOK_BOUND_SECONDS)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        return json.loads(done.stdout) if done.stdout.strip() else None
+
+    def test_the_hooks_run_without_the_posix_only_modules(self):
+        # rule: R-LANE-HOOK-BINDING
+        # Windows has no fcntl, pwd, grp, termios or resource. A hook that dies importing one
+        # exits 1 with no output, which Claude Code reads as allow. Only the registry's
+        # writers lock (D1), so no hook imports fcntl, and the rest are imported guarded or
+        # not at all. The shim blocks them the way a platform without them fails the import.
+        env = fixtures.isolated_env()
+        shim = ("import runpy, sys\n"
+                "for name in ('fcntl', 'pwd', 'grp', 'termios', 'resource'):\n"
+                "    sys.modules[name] = None\n"
+                "sys.argv = sys.argv[1:]\n"
+                "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+        push = payload("ppl-code-worker", "Bash", {"command": "git push --force origin x"})
+        for hook_argv in ([], argv(LANE_A)):
+            with self.subTest(argv=hook_argv):
+                done = subprocess.run([sys.executable, "-c", shim, str(GUARD)] + hook_argv,
+                                      input=json.dumps(push), capture_output=True, text=True,
+                                      env=env, timeout=HOOK_BOUND_SECONDS)
+                self.assertEqual((done.returncode, done.stderr), (0, ""))
+                decision = json.loads(done.stdout)["hookSpecificOutput"]
+                self.assertEqual(decision["permissionDecision"], "deny")
+                self.assertIn("BOUNDARY_VIOLATION", decision["permissionDecisionReason"])
+        start = {"hook_event_name": "SubagentStart", "agent_type": "ppl-code-worker",
+                 "cwd": "/tmp"}
+        for hook in ("ppl_dispatch.py", "ppl_usage.py"):
+            with self.subTest(hook=hook):
+                done = subprocess.run([sys.executable, "-c", shim, str(HOOKS / hook)]
+                                      + argv(LANE_A), input=json.dumps(start),
+                                      capture_output=True, text=True, env=env,
+                                      timeout=HOOK_BOUND_SECONDS)
+                self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+
+    def test_the_guard_with_no_argv_still_runs_on_the_floor_job_payload(self):
+        # D10: the python floor runs before argv is read, so the CI job's payload with no
+        # argv gets a decision and exit 0 under a supported python too
+        env = fixtures.isolated_env()
+        result = self.run_hook(FLOOR_PAYLOAD, env, [])
+        self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("ppl lane", self.deny_reason(result))
+        for hook in ("ppl_dispatch.py", "ppl_usage.py"):
+            with self.subTest(hook=hook):
+                done = subprocess.run([sys.executable, str(HOOKS / hook)],
+                                      input=json.dumps(FLOOR_PAYLOAD), capture_output=True,
+                                      text=True, env=env, timeout=HOOK_BOUND_SECONDS)
+                self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+        # and under an older python the floor still answers with a lane on the command line
+        found = fixtures.older_system_python()
+        if found is None:
+            return
+        for hook in ("ppl_guard.py", "ppl_dispatch.py", "ppl_usage.py"):
+            with self.subTest(hook=hook, python=found[1]):
+                done = subprocess.run([found[0], str(HOOKS / hook)] + argv(LANE_A),
+                                      input=json.dumps(FLOOR_PAYLOAD), capture_output=True,
+                                      text=True, env=env, timeout=30)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertIn("needs 3.11 or newer", done.stdout)
+                self.assertIn("BOUNDARY_VIOLATION", done.stdout)
+
+
+class TestTheOtherHooksBind(LaneCase):
+    def transcript(self):
+        path = Path(tmphome.mkdtemp(prefix="ppltranscript-")) / "agent-a1.jsonl"
+        line = {"type": "assistant", "isSidechain": False, "timestamp": "2099-01-01T00:00:00Z",
+                "message": {"id": "m1", "model": "claude-opus-5-5", "usage": {
+                    "input_tokens": 1, "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0, "output_tokens": 7}}}
+        path.write_text(json.dumps(line) + "\n", encoding="utf-8")
+        return path
+
+    def usage_events(self, task):
+        return [e for e in store.read_log(task)
+                if e.get("event") == "usage" and e.get("role") != "orchestrator"]
+
+    def test_usage_is_recorded_in_the_bound_run(self):
+        self.lane(LANE_A, lane=1)
+        self.lane(LANE_B, lane=2)
+        run.init(UNREGISTERED, "u", "/tmp/repo")
+        paths.legacy_active_file().write_text(UNREGISTERED + "\n", encoding="utf-8")
+        stop = {"hook_event_name": "SubagentStop", "session_id": "s1",
+                "transcript_path": str(self.transcript().parent / "missing.jsonl"),
+                "agent_id": "a1", "agent_type": "ppl-code-worker", "cwd": "/tmp",
+                "agent_transcript_path": str(self.transcript())}
+        self.assertIsNone(ppl_usage.on_stop(stop, argv(LANE_A)))
+        self.assertEqual([e["models"]["claude-opus-5-5"]["output"]
+                          for e in self.usage_events(LANE_A)], [7])
+        # no lane, a lane the registry does not hold, a malformed command line: nothing
+        for hook in ([], argv(UNREGISTERED), ["--task"]):
+            with self.subTest(argv=hook):
+                self.assertIsNone(ppl_usage.on_stop(stop, hook))
+        for task in (LANE_B, UNREGISTERED):
+            self.assertEqual(self.usage_events(task), [])
+        self.assertEqual(len(self.usage_events(LANE_A)), 1)
+
+    def test_dispatch_counts_against_the_bound_run(self):
+        self.lane(LANE_A, lane=1)
+        self.lane(LANE_B, lane=2)
+        run.init(UNREGISTERED, "u", "/tmp/repo")
+        start = {"hook_event_name": "SubagentStart", "agent_type": "ppl-code-worker",
+                 "cwd": "/tmp"}
+        self.assertIsNone(ppl_dispatch.on_start(start, argv(LANE_B)))
+        for hook in ([], argv(UNREGISTERED), ["--task", "x"]):
+            with self.subTest(argv=hook):
+                self.assertIsNone(ppl_dispatch.on_start(start, hook))
+        used = {task: run.load(task)["budgets"]["dispatch_used"]
+                for task in (LANE_A, LANE_B, UNREGISTERED)}
+        self.assertEqual(used, {LANE_A: 0, LANE_B: 1, UNREGISTERED: 0})
+
+
+def real(path):
+    return os.path.realpath(str(path))
+
+
+def edit_input(tool, target):
+    key = "notebook_path" if tool == "NotebookEdit" else "file_path"
+    return {key: target, "old_string": "a", "new_string": "b", "content": "x\n"}
+
+
+class TestLaneProtection(LaneCase):
+    """A lane's own session files, and the other lanes' work, are out of a lane's reach. Two
+    lanes on one project checkout, each with its worktree under the checkout's .worktrees, as
+    ppl lane lays them out by default, and each past ppl init."""
+
+    def setUp(self):
+        super().setUp()
+        self.checkout = real(tmphome.mkdtemp(prefix="pplcheckout-"))
+        os.makedirs(os.path.join(self.checkout, ".git"))
+        self.worktree = {}
+        for number, task in ((1, LANE_A), (2, LANE_B)):
+            worktree = os.path.join(self.checkout, ".worktrees", "shop-" + task)
+            os.makedirs(os.path.join(worktree, "src"))
+            # as git worktree add leaves it: a .git file naming its git dir in the checkout
+            git_dir = os.path.join(self.checkout, ".git", "worktrees", "shop-" + task)
+            os.makedirs(git_dir)
+            for name, text in (("gitdir", worktree + "/.git"), ("commondir", "../..")):
+                Path(git_dir, name).write_text(text + "\n", encoding="utf-8")
+            Path(worktree, ".git").write_text("gitdir: %s\n" % git_dir, encoding="utf-8")
+            run.init(task, "u", worktree)
+            fixtures.bind_lane(task, self.checkout, worktree=worktree, lane=number)
+            self.worktree[task] = worktree
+
+    def decide(self, agent, tool, tool_input, cwd=None, task=LANE_A):
+        cwd = str(lanes.start_dir(task)) if cwd is None else cwd
+        return ppl_guard.decide(payload(agent, tool, tool_input, cwd), argv(task))
+
+    def bash(self, command, agent=None, cwd=None, task=LANE_A):
+        return self.decide(agent, "Bash", {"command": command}, cwd, task)
+
+    def assert_lane_file(self, result):
+        """Denied as a lane's file: by the lane files check, or, for an edit tool in a lane, by
+        the protected paths that hold with or without facts (R28)."""
+        reason = self.deny_reason(result)
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertTrue("ppl lane keeps" in reason or escape_paths.PROTECTED_WHY in reason,
+                        reason)
+
+    def test_edit_and_write_into_the_start_directory_are_denied_for_everyone(self):
+        # rule: R-LANE-START-DIR-PROTECTED
+        # R27: the harness needs no OS sandbox, so no facts file names the start directory,
+        # and it is protected all the same: the lane's own, another lane's, and the registry
+        own, other = lanes.start_dir(LANE_A), lanes.start_dir(LANE_B)
+        self.assertFalse((own / os_sandbox.FACTS_FILE).exists())
+        targets = [str(start / rel) for start in (own, other)
+                   for rel in ("settings.json", "plugin/skills/pipeline/SKILL.md",
+                               os_sandbox.FACTS_FILE)]
+        targets.append(str(lanes.registry_path()))
+        for agent in (None, "ppl-code-worker", "general-purpose"):
+            for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+                for target in targets:
+                    with self.subTest(agent=agent, tool=tool, target=target):
+                        self.assert_lane_file(self.decide(agent, tool, edit_input(tool, target)))
+        # a write-shaped Bash too, relative to the start directory the session stands in, and
+        # a removal that takes the start directories with it
+        for command in ("echo x > settings.json", "echo x > %s/settings.json" % own,
+                        "cp /tmp/x %s/mcp.json" % other, "sed -n p x && tee %s/agents.json"
+                        % own, "rm -rf %s" % own.parent, "mv %s /tmp/gone" % other):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    result = self.bash(command, agent=agent)
+                    self.assertIn("BOUNDARY_VIOLATION", self.deny_reason(result))
+                    self.assertIn("ppl lane keeps", self.deny_reason(result))
+        # a session in no lane meets it as well, and one that changes nothing there is free
+        result = ppl_guard.decide(payload(None, "Write", {"file_path": str(own / "settings.json")},
+                                          str(own)))
+        self.assertIn("ppl lane keeps", self.deny_reason(result))
+        self.assertIsNone(self.bash("cat settings.json"))
+        self.assertIsNone(self.decide(None, "Read", {"file_path": str(own / "settings.json")}))
+
+    def test_a_write_into_another_lanes_worktree_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # a lane on another project too, whose worktree lies in no checkout of lane A's
+        elsewhere = real(tmphome.mkdtemp(prefix="pplcheckout-"))
+        theirs_c = os.path.join(elsewhere, ".worktrees", "web-LANE-5103")
+        os.makedirs(theirs_c)
+        run.init("LANE-5103", "u", theirs_c)
+        fixtures.bind_lane("LANE-5103", elsewhere, worktree=theirs_c, lane=3)
+        for owner, worktree in ((LANE_B, self.worktree[LANE_B]), ("LANE-5103", theirs_c)):
+            target = worktree + "/src/App.java"
+            calls = [(tool, edit_input(tool, target))
+                     for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit")]
+            calls += [("Bash", {"command": command}) for command in (
+                "echo x > %s" % target, "cd %s && echo x > src/App.java" % worktree,
+                "cp /tmp/App.java %s" % target, "git -C %s checkout HEAD -- src/App.java"
+                % worktree, "rm -rf %s" % worktree)]
+            for agent in (None, "ppl-code-worker", "general-purpose"):
+                for tool, tool_input in calls:
+                    with self.subTest(owner=owner, agent=agent, tool=tool,
+                                      what=str(tool_input)[:60]):
+                        reason = self.deny_reason(self.decide(agent, tool, tool_input))
+                        self.assertIn("BOUNDARY_VIOLATION", reason)
+                        self.assertIn("lane %s's worktree" % owner, reason)
+        # lane B is held to the same, the other way round
+        result = self.decide(None, "Write", edit_input("Write", self.worktree[LANE_A] + "/x"),
+                             task=LANE_B)
+        self.assertIn("lane %s's worktree" % LANE_A, self.deny_reason(result))
+
+    def test_a_write_into_the_project_checkout_outside_the_lane_worktree_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R26: the checkout the worktrees branch from is no lane's to write, its .git
+        # included, before ppl init and after, for every session
+        fixtures.bind_lane("LANE-5104", self.checkout,
+                           worktree=os.path.join(self.checkout, ".worktrees", "shop-LANE-5104"),
+                           lane=3)
+        for task in (LANE_A, "LANE-5104"):
+            for agent in (None, "general-purpose"):
+                for tool, tool_input in (
+                        ("Write", edit_input("Write", self.checkout + "/README.md")),
+                        ("Edit", edit_input("Edit", self.checkout + "/src/App.java")),
+                        ("Bash", {"command": "echo x >> %s/.git/config" % self.checkout}),
+                        ("Bash", {"command": "cd %s && touch notes.md" % self.checkout})):
+                    with self.subTest(task=task, agent=agent, tool=tool):
+                        reason = self.deny_reason(self.decide(agent, tool, tool_input,
+                                                              task=task))
+                        self.assertIn("BOUNDARY_VIOLATION", reason)
+                        self.assertIn("project checkout %s" % self.checkout, reason)
+        # a role, whose Bash is otherwise free outside its run's repo
+        result = self.bash("echo x > %s/build.log" % self.checkout, agent="ppl-code-worker")
+        self.assertIn("project checkout", self.deny_reason(result))
+        # the lane's own worktree lies in the checkout, and this check leaves it to the run's
+        # own write boundary (R-UNROLED-REPO-WRITE)
+        reason = self.deny_reason(self.decide(None, "Write", edit_input(
+            "Write", self.worktree[LANE_A] + "/src/App.java")))
+        self.assertIn("inside run %s's repo" % LANE_A, reason)
+        self.assertNotIn("project checkout", reason)
+        self.assertIsNone(self.decide(None, "Write", edit_input("Write", "/tmp/elsewhere/n.md")))
+
+    def test_a_removal_that_takes_a_project_checkout_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R28: removing the checkout, or a directory that holds it, takes the lanes' base and
+        # their worktrees with it, whether the checkout is the lane's own or another's
+        parent = real(tmphome.mkdtemp(prefix="pplprojects-"))
+        checkout = os.path.join(parent, "web")
+        worktree = os.path.join(checkout, ".worktrees", "web-LANE-5105")
+        os.makedirs(worktree)
+        run.init("LANE-5105", "u", worktree)
+        fixtures.bind_lane("LANE-5105", checkout, worktree=worktree, lane=3)
+        for command in ("rm -rf %s" % checkout, "mv %s /tmp/gone" % checkout,
+                        "rm -rf %s" % parent, "cd %s && rm -rf web" % parent,
+                        "mv %s /tmp/gone" % parent):
+            for task in ("LANE-5105", LANE_A):
+                with self.subTest(command=command, task=task):
+                    reason = self.deny_reason(self.bash(command, task=task))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    if task == "LANE-5105":
+                        self.assertIn("project checkout %s" % checkout, reason)
+        # lane A's own checkout too, which holds its own worktree
+        for command in ("rm -rf %s" % self.checkout, "mv %s /tmp/gone" % self.checkout):
+            with self.subTest(own=command):
+                reason = self.deny_reason(self.bash(command))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+
+    def test_without_facts_a_lane_keeps_the_protected_paths(self):
+        # rule: R-LANE-START-DIR-PROTECTED
+        # rule: R-OS-SANDBOX-PROTECTED-PATHS
+        # R28: the harness needs no OS sandbox, so the lane has no guard facts, and an edit
+        # tool still never writes the registry the binding trusts, Claude Code's settings,
+        # ppl's own code or its config, for a role or the orchestrator
+        fake_home = real(tmphome.mkdtemp(prefix="pplfakehome-"))
+        self.assertFalse((lanes.start_dir(LANE_A) / os_sandbox.FACTS_FILE).exists())
+        package = os.path.dirname(real(escape_paths.__file__))
+        targets = (str(lanes.registry_path()), str(paths.home() / lanes.LOCK_FILE),
+                   os.path.join(fake_home, ".claude", "settings.json"),
+                   os.path.join(fake_home, ".claude.json"), os.path.join(package, "escape.py"),
+                   str(GUARD), str(paths.home() / "config.toml"),
+                   str(paths.home() / "routing.toml"))
+        with mock.patch.dict(os.environ, {"HOME": fake_home}):
+            for agent in (None, "ppl-code-worker", "general-purpose"):
+                for tool in ("Edit", "Write"):
+                    for target in targets:
+                        with self.subTest(agent=agent, tool=tool, target=target):
+                            reason = self.deny_reason(self.decide(agent, tool,
+                                                                  edit_input(tool, target)))
+                            self.assertIn("BOUNDARY_VIOLATION", reason)
+                            self.assertIn(escape_paths.PROTECTED_WHY, reason)
+            # what is not protected stays the orchestrator's to edit
+            self.assertIsNone(self.decide(None, "Write", edit_input(
+                "Write", os.path.join(fake_home, "notes", "todo.md"))))
+
+    def test_an_unreadable_registry_holds_a_bound_write_and_a_ppl_command(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-CROSS-TASK
+        # the binding read the lane's entry, and the registry cannot be read again for the
+        # other lanes' work: a write and a ppl command fail closed, what neither does passes
+        bound = lanes.binding(argv(LANE_A))
+        start = str(lanes.start_dir(LANE_A))
+        write = payload(None, "Write", {"file_path": self.worktree[LANE_A] + "/x"}, start)
+        refusal = ppl_guard.cross_lane_denial(write, bound, None)
+        self.assertEqual(refusal[0], "OWNER_DECISION")
+        self.assertIn("registry cannot be read", refusal[1])
+        refusal = ppl_guard.ppl_task_mismatch("ppl show", bound, None, start)
+        self.assertEqual(refusal[0], "OWNER_DECISION")
+        self.assertIsNone(ppl_guard.ppl_task_mismatch("ls -la", bound, None, start))
+        self.assertIsNone(ppl_guard.cross_lane_denial(
+            payload(None, "Read", {"file_path": self.worktree[LANE_A] + "/x"}, start), bound,
+            None))
+        # a session in no lane has no other lanes' work to place
+        self.assertIsNone(ppl_guard.cross_lane_denial(
+            payload(None, "Write", {"file_path": "/tmp/elsewhere/n.md"}, start),
+            lanes.binding([]), None))
+
+    def test_a_write_into_another_lanes_worktree_through_a_symlink_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Review Focus 4: lane B, on another project, is recorded through a symlinked parent
+        # and the write names the real path, then the other way round
+        project = real(tmphome.mkdtemp(prefix="pplproject-"))
+        theirs = os.path.join(project, ".worktrees", "web-" + LANE_B)
+        os.makedirs(theirs)
+        alias = os.path.join(real(tmphome.mkdtemp(prefix="pplalias-")), "project")
+        os.symlink(project, alias)
+        through = os.path.join(alias, ".worktrees", "web-" + LANE_B)
+        for recorded, written in ((through, theirs), (theirs, through)):
+            fixtures.bind_lane(LANE_B, os.path.dirname(os.path.dirname(recorded)),
+                               worktree=recorded, lane=2)
+            for tool, tool_input in (
+                    ("Write", edit_input("Write", written + "/src/App.java")),
+                    ("Bash", {"command": "echo x > %s/src/App.java" % written}),
+                    ("Bash", {"command": "cd %s && rm -rf src" % written})):
+                with self.subTest(recorded=recorded, tool=tool):
+                    reason = self.deny_reason(self.decide(None, tool, tool_input))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("lane %s's worktree" % LANE_B, reason)
+
+    def test_ppl_with_another_lanes_task_is_denied(self):
+        # rule: R-LANE-CROSS-TASK
+        theirs, worktree = LANE_B, self.worktree[LANE_B]
+        start = str(lanes.start_dir(LANE_B))
+        commands = ("ppl show --task %s" % theirs, "ppl show --task=%s" % theirs,
+                    "PPL_TASK=%s ppl show" % theirs, "env PPL_TASK=%s ppl show" % theirs,
+                    "export PPL_TASK=%s; ppl show" % theirs,
+                    "ppl findings list --task '%s'" % theirs,
+                    "python3 -m ppl show --task %s" % theirs,
+                    "/opt/pin/bin/ppl show --task %s" % theirs,
+                    "ppl lane close %s" % theirs, "ppl lane resume %s" % theirs,
+                    # any module of the package runs the CLI, ppl.__main__ among them
+                    "python3 -m ppl.__main__ show --task %s" % theirs,
+                    "python3 -mppl show --task %s" % theirs,
+                    "python3.11 -I -m ppl.cli show --task %s" % theirs,
+                    "python3 -Im ppl.__main__ show --task %s" % theirs,
+                    "python3 -bBm ppl show --task %s" % theirs,
+                    "ppl show --task $(echo %s)" % theirs,
+                    # bare ppl takes its run from a cwd inside a lane once PPL_TASK is gone
+                    "cd %s && PPL_TASK= ppl show" % worktree,
+                    "cd %s/src; env -u PPL_TASK ppl show" % worktree,
+                    "env -C %s ppl show" % start, "pushd %s && ppl show" % start)
+        for agent in (None, "ppl-verifier"):
+            for command in commands:
+                with self.subTest(agent=agent, command=command):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    if agent is None:
+                        self.assertIn(theirs, reason)
+        # a shell that already stands in the other lane
+        for cwd in (worktree, start):
+            with self.subTest(cwd=cwd):
+                reason = self.deny_reason(self.bash("ppl show", cwd=cwd))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn(theirs, reason)
+
+    def test_ppl_where_the_guard_cannot_place_the_cwd_is_denied(self):
+        # rule: R-LANE-CROSS-TASK
+        # a bare ppl with no PPL_TASK takes its run from the lane holding its cwd, so a cwd the
+        # walk cannot place fails closed: blinded by a substitution, a cd to a variable, cd -,
+        # a glob or a ~user, whatever directory it would have reached
+        alias = os.path.join(real(tmphome.mkdtemp(prefix="pplalias-")), "b")
+        os.symlink(self.worktree[LANE_B], alias)
+        for command in ("cd %s && env -u PPL_TASK ppl show $(true)" % alias,
+                        "cd %s && env -u PPL_TASK ppl show `true`" % alias,
+                        "cd %s/.. && cd *5102 && env -u PPL_TASK ppl show" % self.worktree[LANE_A],
+                        'cd "$X" && env -u PPL_TASK ppl show', "cd - && ppl show",
+                        'env -C "$D" ppl show', "pushd +1 && ppl show",
+                        "cd ~bob && ppl show", "ppl show --task %s $(true)" % LANE_A):
+            for agent in (None, "ppl-verifier"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("cannot tell the directory", reason)
+        # a directory it can place is judged by where it is
+        for command in ("cd %s && env -u PPL_TASK ppl show" % self.worktree[LANE_A],
+                        "cd /tmp && ls *.log; cd %s && ppl show" % lanes.start_dir(LANE_A)):
+            with self.subTest(placed=command):
+                self.assertIsNone(self.bash(command))
+
+    def test_ppl_behind_a_shell_construct_the_cd_follower_cannot_see_through_is_denied(self):
+        # rule: R-LANE-CROSS-TASK
+        # R38: a cd behind a control keyword, in a function, or in a string the shell runs
+        # again is one the walk does not follow, so a command that spells ppl with one fails
+        # closed, and so does a call that names no cwd at all
+        for command in ("if true; then cd $X; fi; env -u PPL_TASK ppl show",
+                        'while read d; do cd "$d"; done </tmp/f; env -u PPL_TASK ppl show',
+                        "for d in ../*; do (cd $d && env -u PPL_TASK ppl show); done",
+                        "f() { cd $X; }; f; env -u PPL_TASK ppl show",
+                        "function f { cd ..; }; f; env -u PPL_TASK ppl show",
+                        "eval 'cd $X'; env -u PPL_TASK ppl show",
+                        "source /tmp/x.sh; env -u PPL_TASK ppl show",
+                        ". /tmp/x.sh; env -u PPL_TASK ppl show",
+                        "case x in *) cd ..;; esac; env -u PPL_TASK ppl show",
+                        "exec env -u PPL_TASK ppl show"):
+            for agent in (None, "ppl-verifier"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("cannot tell the directory", reason)
+        reason = self.deny_reason(ppl_guard.decide(
+            payload(None, "Bash", {"command": "ppl show"}, None), argv(LANE_A)))
+        self.assertIn("names no cwd", reason)
+        # ledger 213: the remedy names a cd only where the command has one
+        self.assertNotIn("leave the cd out", reason)
+        reason = self.deny_reason(self.bash("eval true; env -u PPL_TASK ppl show"))
+        self.assertNotIn("leave the cd out", reason)
+        self.assertIn("plain command of its own", reason)
+        self.assertIn("leave the cd out", self.deny_reason(self.bash('cd "$X" && ppl show')))
+        for command in ("ppl show", "cd %s && ppl show" % self.worktree[LANE_A],
+                        "if true; then echo x; fi"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command))
+
+    def test_a_git_subcommand_or_command_word_the_shell_builds_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R39: a subcommand, a config value or a command word the shell builds may be
+        # worktree, an alias or git itself, so it fails closed for every session
+        for command in ("W=worktree; git $W prune", 'git "$W" remove shop-%s' % LANE_B,
+                        "git -C %s $W remove --force shop-%s" % (self.checkout, LANE_B),
+                        "git ${W} prune", "git $1 prune", "git work*ee prune",
+                        "git $(echo worktree) prune", "git `printf work`tree prune",
+                        'git -c "$K" wt prune', "G=git; $G worktree remove x",
+                        "$(command -v git) worktree prune",
+                        "C=config; git $C core.hooksPath /tmp/h"):
+            for agent in (None, "ppl-code-worker", "general-purpose"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("git status", "git log -1 $(git rev-parse HEAD)", "echo $HOME"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker",
+                                            cwd=self.worktree[LANE_A]))
+
+    def test_a_git_is_judged_by_its_subcommand_whatever_its_arguments_hold(self):
+        # rule: R-LANE-SHARED-GIT-DIR
+        # rule: R-LANE-CROSS-WRITE
+        # R40: a role's commit with its message in a here-document, and a diff with a
+        # substituted base, are judged as the commit and the diff they are, and only a git whose
+        # subcommand the guard cannot read is judged by its spelling
+        own = self.worktree[LANE_A]
+        commit = ("git commit -m \"$(cat <<'EOF'\nFix worktree config loading (lane), don't\n"
+                  "\nworktree notes\nEOF\n)\"")
+        for command in (commit, "git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "git log --oneline `git merge-base HEAD main`..HEAD -- config"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker", cwd=own))
+        for command, why in (("git $(echo worktree) remove x", "builds or expands"),
+                             ("echo $(git worktree prune)", "git worktree"),
+                             ('git config core.hooksPath "$(cat /tmp/h)"',
+                              "may not write git config"),
+                             ("git commit -m \"$(cat <<'EOF'\nleft open\n)\"", "git worktree")):
+            with self.subTest(denied=command):
+                reason = self.deny_reason(self.bash(command + (" && git worktree prune"
+                                                               if "left open" in command else ""),
+                                                    agent="ppl-code-worker", cwd=own))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn(why, reason)
+
+    def test_every_here_document_body_is_judged_as_commands(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-CROSS-TASK
+        # R45: a here-document body is judged as commands, line by line, whatever its
+        # consumer, its delimiter's quoting or its pipeline, and one fed to an interpreter
+        # may not spell ppl, git worktree or git config besides, which the guard cannot read
+        # inside code
+        for command in ("bash <<'EOF'\ngit worktree remove x\nEOF",
+                        "cat <<'EOF'\ngit worktree remove x\nEOF",
+                        "cat > /tmp/note.md <<'EOF'\ngit worktree prune\nEOF",
+                        "x=$(cat <<'EOF' | bash\ngit worktree remove x\nEOF\n)",
+                        "cat <<EOF\n$(git worktree remove x)\nEOF",
+                        "cat <<EOF\n`git worktree prune`\nEOF",
+                        "cat <<'EOF'\ndon't\n$(git worktree prune)\nEOF",
+                        # mixed quoting of the delimiter, which bash's quote removal joins
+                        "cat <<'E'\"OF\"\ngit worktree remove x\nEOF",
+                        # a pipe past a closing group, a backslash-newline, a process
+                        # substitution, and a consumer a substitution builds
+                        "{ cat <<'EOF'; } | bash\ngit worktree remove x\nEOF",
+                        "cat <<'EOF' \\\n| bash\ngit worktree remove x\nEOF",
+                        "cat <<'EOF' > >(bash)\ngit worktree remove x\nEOF",
+                        "$(printf bash) <<'EOF'\ngit worktree remove x\nEOF",
+                        "sh <<EOF\ngit worktree prune\nEOF",
+                        "env sh <<'EOF'\ncd ..\ngit worktree prune\nEOF",
+                        "bash -s <<'EOF'\ngit $(echo worktree) prune\nEOF",
+                        "xargs -0 sh -c 'true' <<'EOF'\ngit worktree prune\nEOF",
+                        "python3 - <<'EOF'\nimport subprocess\n"
+                        "subprocess.run(['git', 'worktree', 'prune'])\nEOF",
+                        "perl <<'EOF'\nsystem('env -u PPL_TASK ppl show')\nEOF",
+                        "node <<'EOF'\nrequire('child_process').execSync('git config core.x y')\n"
+                        "EOF"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent,
+                                                        cwd=self.worktree[LANE_A]))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        reason = self.deny_reason(self.bash("cat <<'EOF'\ngit config core.hooksPath /tmp/h\nEOF",
+                                            agent="ppl-code-worker", cwd=self.worktree[LANE_A]))
+        self.assertIn("may not write git config", reason)
+        # a commit message whose lines begin with no git or ppl command is a commit
+        commit = ("git commit -m \"$(cat <<'EOF'\nFix config handling\n\nworktree notes\n"
+                  "EOF\n)\"")
+        self.assertIsNone(self.bash(commit, agent="ppl-code-worker", cwd=self.worktree[LANE_A]))
+        self.assertIsNone(self.bash(commit, cwd=self.worktree[LANE_A]))
+
+    def test_a_here_document_bash_may_read_otherwise_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R43, R46: the guard does not model bash's here-document expansion, so a here-document
+        # whose delimiter is not exactly <<'WORD' (bare, double-quoted, backslashed or mixed)
+        # and whose body holds a backslash or a line that leaves a quote open is denied for
+        # every session, whatever it is fed to
+        own = self.worktree[LANE_A]
+        for command in ("bash <<EOF\ngit work\\\\tree prune\nEOF",
+                        "bash <<EOF\ngit work\\\ntree prune\nEOF",
+                        "cat <<EOF\n\\$(git worktree prune)\nEOF",
+                        "cat > /tmp/note.md <<EOF\nline one\\\nline two\nEOF",
+                        "bash <<EOF\ngit \"\nworktree\" prune\nEOF",
+                        "git commit -m \"$(cat <<EOF\nDon't load config twice\nEOF\n)\"",
+                        "git commit -m \"$(cat <<\"EOF\"\nDon't load config twice\nEOF\n)\"",
+                        "cat <<\\EOF\nDon't load config twice\nEOF",
+                        # bash reads each of these delimiters as EOF or EOFx and expands
+                        # nothing, yet only exactly <<'WORD' counts as quoted
+                        "cat <<'E'\"OF\"\nDon't load config twice\nEOF",
+                        "cat <<E\\OF\nDon't load config twice\nEOF",
+                        "cat <<'EOF'x\nDon't load config twice\nEOFx",
+                        "cat <<-\"EOF\"\n\tDon't load config twice\n\tEOF"):
+            for agent in (None, "ppl-code-worker", "general-purpose"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("here-document", reason)
+        for command in ("bash <<'EOF'\ngit status\nEOF",
+                        "cat <<'EOF'\na back\\slash in a quoted one\nEOF",
+                        "cat <<'E'\"OF\"\nplain text\nEOF",
+                        "git commit -m \"$(cat <<'EOF'\nFix config handling\n\nworktree notes\n"
+                        "EOF\n)\""):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker", cwd=own))
+
+    def test_a_quoted_here_document_line_that_does_not_parse_is_read_by_its_spelling(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R46: bash expands nothing in a body under exactly <<'WORD' or <<-'WORD'. Each line
+        # that parses is judged as a command (R45), and one that leaves a quote open, as an
+        # apostrophe in a commit message does, is read by its spelling only and never denied
+        # for not parsing
+        own = self.worktree[LANE_A]
+        for command in ("git commit -m \"$(cat <<'EOF'\nFix the parser so it doesn't drop config"
+                        "\n\nKeep config and worktree notes apart\nEOF\n)\"",
+                        "git commit -m \"$(cat <<-'EOF'\n\tFix the parser so it doesn't drop "
+                        "config\n\n\tKeep config and worktree notes apart\n\tEOF\n)\"",
+                        # an apostrophe opens no quote over the lines after it
+                        "git commit -m \"$(cat <<'EOF'\nDon't drop `--task` from the argv\n\n"
+                        "Let git keep its worktree and config apart\nEOF\n)\"",
+                        "cat > /tmp/note.md <<'EOF'\nIt's the lane's own run\nEOF"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+        for command, why in (("cat <<'EOF' | bash\ngit worktree remove x\nEOF", "git worktree"),
+                             ("cat <<'EOF' | bash\nit's git worktree remove x\nEOF",
+                              "git worktree"),
+                             ("cat <<'EOF'\ndon't\n$(git worktree prune)\nEOF", "git worktree"),
+                             # a backslash-newline joins the lines a shell downstream runs
+                             ("cat <<'EOF' | bash\ngit work\\\ntree prune\nEOF", "git worktree"),
+                             # a line that does not parse is spelled with its backslashes out
+                             ("cat <<'EOF' | bash\ngit work\\tree x 'y\n'\nEOF", "git worktree")):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(denied=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn(why, reason)
+        reason = self.deny_reason(self.bash("cat <<'EOF' | bash\nit's git config core.x y\nEOF",
+                                            agent="ppl-code-worker", cwd=own))
+        self.assertIn("may not write git config", reason)
+
+    def test_a_hyphenated_git_writer_is_a_write_shape(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-GUARD-BASH-WRITE-BOUNDARY
+        # R42: git's hyphenated plumbing writes the index, refs, objects or the tree with no
+        # path the walk could name, so it fails closed in a lane, while the read-only
+        # hyphenated words (merge-base, rev-parse, cat-file, ...) are no write shape
+        theirs = self.worktree[LANE_B]
+        git_dir = self.checkout + "/.git"
+        for command in ("git -C %s update-index --add src/App.java" % theirs,
+                        "git --git-dir=%s update-ref refs/heads/main HEAD" % git_dir,
+                        "git -C %s checkout-index -a -f" % theirs,
+                        "git -C %s symbolic-ref HEAD refs/heads/other" % theirs,
+                        "git -C %s hash-object -w src/App.java" % theirs,
+                        "git -C $(echo %s) update-ref refs/heads/x HEAD" % theirs):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent,
+                                                        cwd=self.worktree[LANE_A]))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "git rev-parse HEAD", "git cat-file -p HEAD", "git symbolic-ref HEAD",
+                        "git ls-files $(git rev-parse --show-toplevel)",
+                        "git hash-object src/App.java"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker",
+                                            cwd=self.worktree[LANE_A]))
+
+    def test_a_write_shape_a_substitution_splits_is_still_a_write_shape(self):
+        # rule: R-GUARD-BASH-WRITE-BOUNDARY
+        # rule: R-LANE-CROSS-WRITE
+        # R47: a command holding a $(...) or a backtick is a write shape when its raw text or
+        # any of its masked views is one, so a verb, a -i or an of= the substitution builds
+        # still leaves a write whose target cannot be placed: denied for the orchestrator and
+        # a role writing into another lane, and for the read-only ppl-verifier in its own
+        # worktree, which the OS profile does not tell apart from a writing role
+        own, theirs = self.worktree[LANE_A], self.worktree[LANE_B]
+        for command in ("$(which sed) -i 's/a/b/' %s/src/App.java" % theirs,
+                        "$(echo sed) -i 's/a/b/' %s/src/App.java" % theirs,
+                        "`which sed` -i 's/a/b/' %s/src/App.java" % theirs,
+                        "sed $(echo -i) 's/a/b/' %s/src/App.java" % theirs,
+                        "dd if=/tmp/x $(echo of=%s/src/App.java)" % theirs,
+                        "$(command -v git) -C %s checkout -- src/App.java" % theirs):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("$(which sed) -i 's/a/b/' src/App.java",
+                        "$(echo sed) -i 's/a/b/' src/App.java",
+                        "dd if=/tmp/x $(echo of=src/App.java)",
+                        "$(command -v git) checkout HEAD -- src/App.java"):
+            with self.subTest(verifier=command):
+                reason = self.deny_reason(self.bash(command, agent="ppl-verifier", cwd=own))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn("holds a $(...) or a backtick", reason)
+        # R40's reads hold no write shape in their raw text either
+        for command in ("git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "git log -1 $(git rev-parse HEAD)",
+                        "git log --oneline `git merge-base HEAD main`..HEAD -- config"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command, agent="ppl-code-worker", cwd=own))
+
+    def test_a_command_word_the_shell_builds_is_read_by_its_raw_spelling(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-SHARED-GIT-DIR
+        # rule: R-LANE-CROSS-TASK
+        # R47: a command word a substitution builds may be git or ppl with its subcommand built
+        # too, so the raw text of the command, substitution or here-document body that holds
+        # it is read by its spelling: git worktree for every session, git config for a role,
+        # an alias set on git's command line, and ppl
+        own = self.worktree[LANE_A]
+        for command in ("$(echo git) $(echo worktree) remove ../shop-%s" % LANE_B,
+                        "$(command -v git) $(echo worktree) prune",
+                        "`which git` `echo worktree` prune",
+                        "$(echo git) -c $(echo alias.x=worktree) x prune",
+                        "echo $($(echo git) $(echo worktree) prune)",
+                        "bash <<'EOF'\n$(echo git) $(echo worktree) prune\nEOF",
+                        "$(echo ppl) show --task %s" % LANE_B,
+                        "`which ppl` show --task %s" % LANE_B,
+                        "$(command -v ppl) verdict --text done"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("$(echo git) $(echo config) core.hooksPath /tmp/h",
+                        "`which git` `echo config` core.hooksPath /tmp/h"):
+            with self.subTest(config=command):
+                reason = self.deny_reason(self.bash(command, agent="ppl-code-worker", cwd=own))
+                self.assertIn("may not write git config", reason)
+        # a commit message line that opens with a backtick is read as a command, and only
+        # its own body by its spelling, so the config and worktree words elsewhere in the
+        # command are no git config or git worktree
+        commit = ("git commit -m \"$(cat <<'EOF'\nRead the worktree config once\n\n"
+                  "`load_config` keeps the result\nEOF\n)\"")
+        for agent in (None, "ppl-code-worker"):
+            with self.subTest(allowed=commit, agent=agent):
+                self.assertIsNone(self.bash(commit, agent=agent, cwd=own))
+
+    def test_a_word_the_shell_builds_behind_a_wrapper_is_read_by_its_raw_spelling(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R47: any word of a segment the shell builds counts, not only its command word, so a
+        # git built behind a wrapper the walk does not unwrap (sudo, timeout, xargs, stdbuf)
+        # is read by the raw spelling of its segment, git then worktree or config each as a
+        # word of its own, while a word that is an argument of a git whose subcommand is read is
+        # judged by that subcommand (R40)
+        own = self.worktree[LANE_A]
+        for command in ("sudo $(echo git) worktree prune",
+                        "timeout 5 $(echo git) $(echo worktree) prune",
+                        "xargs $(echo git) worktree prune < /dev/null",
+                        "stdbuf -o0 `which git` worktree remove ../shop-%s" % LANE_B,
+                        "nice timeout 5 $(echo git) worktree prune",
+                        "timeout 5 $(echo ppl) show --task %s" % LANE_B):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        # R49: a built word beside a config word is refused for every session, a role's
+        # config write among them
+        for agent in (None, "ppl-code-worker"):
+            with self.subTest(config="timeout 5 $(echo git) config", agent=agent):
+                reason = self.deny_reason(self.bash(
+                    "timeout 5 $(echo git) config core.hooksPath /tmp/h", agent=agent, cwd=own))
+                self.assertIn("a word the shell builds", reason)
+        # config in a path, a file name or an option is no git config, a read of git config is
+        # judged in its own segment, and a git whose subcommand is read is judged by it
+        for command in ("git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "nice git log $(git merge-base HEAD main)..HEAD -- config",
+                        "git -C \"$(git rev-parse --show-toplevel)\" log -- config",
+                        "cat \"$(git rev-parse --show-toplevel)/config/app.yml\"",
+                        "$(git rev-parse --show-toplevel)/scripts/check-config.sh",
+                        "cd \"$(git rev-parse --show-toplevel)\" && git config --get user.name",
+                        "git commit -m \"$(cat <<'EOF'\nLet git read the config once\n\n"
+                        "`load_config` keeps the result\nEOF\n)\""):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+
+    def test_a_substitution_nested_past_the_recursion_limit_is_read_by_its_spelling(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R47: substitutions nested deeper than the masking reads are a command it cannot
+        # read, so the whole command is read by its spelling, and no internal error lets the
+        # call through (main() allows an unroled session's call on one)
+        tail = "; git worktree remove ../shop-%s" % LANE_B
+        depth = sys.getrecursionlimit() + 200
+        command = "echo " + "$(" * depth + "true" + ")" * depth + tail
+        reason = self.deny_reason(self.bash(command, cwd=self.worktree[LANE_A]))
+        self.assertIn("git worktree", reason)
+        depth = (ppl_guard.ROLE_COMMAND_LENGTH_LIMIT - len("echo true" + tail)) // 3
+        command = "echo " + "$(" * depth + "true" + ")" * depth + tail
+        reason = self.deny_reason(self.bash(command, agent="ppl-code-worker",
+                                            cwd=self.worktree[LANE_A]))
+        self.assertIn("git worktree", reason)
+        # R49: a command read by its spelling, nested past the 32 levels the masking reads or
+        # spelling its $SUBST mask word, keeps every denial its here-document bodies would
+        # get: a delimiter not exactly <<'WORD', an interpreter's body, a line that does not
+        # parse, read with its backslashes out
+        bodies = (("cat <<EOF | bash\ngit work\\\ntree prune\nEOF\n", "here-document"),
+                  ("python3 <<'E'\nimport subprocess\nsubprocess.run(['ppl', 'show'])\nE\n",
+                   "interpreter"),
+                  ("cat <<'E' | bash\nit's git work\\tree x\nE\n", "git worktree"))
+        for body, expected in bodies:
+            for command in (body + "echo " + "$(" * 33 + "true" + ")" * 33,
+                            body + "echo $SUBST"):
+                for agent in (None, "ppl-code-worker"):
+                    with self.subTest(command=command, agent=agent):
+                        reason = self.deny_reason(self.bash(command, agent=agent,
+                                                            cwd=self.worktree[LANE_A]))
+                        self.assertIn(expected, reason)
+
+    def test_a_command_built_for_here_document_and_substitution_work_is_decided_in_time(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R47: here-documents and substitutions are read in one pass and the views once per
+        # decision, so a role command at the 4096 cap and an orchestrator command of 32 KiB,
+        # each built of here-document operators, substitutions or both, decide well inside
+        # the hook's 5 s timeout (a timeout lets the call through), and still deny the git
+        # worktree they end with
+        own = self.worktree[LANE_A]
+        tail = "\ngit worktree remove ../shop-%s" % LANE_B
+        # (head, repeated unit, the line that ends each unit's here-document or "", close)
+        shapes = (("cat ", "<<A ", "A", ""), ("cat ", "<<'A' ", "A", ""),
+                  ("cat $(true) ", "<<A ", "A", ""), ("x=$(cat ", "<<'A' ", "A", ")"),
+                  ("cat ", "<<'A'\"\" ", "A", ""), ("python3 ", "<<A ", "A", ""),
+                  ("", "A=1 <<A ", "A", ""), ("", "cat <<A; ", "A", ""),
+                  ("", "cat <<'A'\nit's\nA\n", "", ""), ("echo ", "$(true)", "", ""),
+                  ("echo ", "`true`", "", ""), ("echo ", "$(cat <<'A'\nA\n)", "", ""))
+        for size, agent in ((ppl_guard.ROLE_COMMAND_LENGTH_LIMIT, "ppl-code-worker"),
+                            (32 * 1024, None)):
+            commands = []
+            for head, unit, term, close in shapes:
+                per = len(unit) + (len(term) + 1 if term else 0)
+                count = (size - len(head) - (1 if term else 0) - len(close) - len(tail)) // per
+                commands.append((unit, head + unit * count
+                                 + ("\n" + (term + "\n") * count if term else "") + close + tail))
+            # R49: substitutions nested as deep as the masking reads them, filled to the size
+            commands.append(("$( x%d" % ppl_guard._NESTING_LIMIT, nested_substitutions(
+                ppl_guard._NESTING_LIMIT, size, "a;", tail)))
+            for unit, command in commands:
+                with self.subTest(size=size, unit=unit):
+                    self.assertLessEqual(len(command), size)
+                    start = time.perf_counter()
+                    result = self.bash(command, agent=agent, cwd=own)
+                    self.assertLess(time.perf_counter() - start, 0.5)
+                    self.assertIn("git worktree", self.deny_reason(result))
+
+    def test_substitutions_nested_below_the_recursion_limit_are_decided_in_time(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R49: each substitution's text as written holds every level nested in it, so reading
+        # each level's text by itself grew with the square of the depth (a 32 KiB orchestrator
+        # command took 237 s, and a timeout lets the call through). Substitutions nested
+        # deeper than 32 levels are read by their spelling, and a text inside one read
+        # already is not read again, so a role command at the 4096 cap and an orchestrator
+        # command of 32 KiB, nested to any depth below the recursion limit and filled with
+        # what made each level's reading slowest, decide well inside the hook's timeout and
+        # still deny the git worktree they end with
+        own = self.worktree[LANE_A]
+        tail = "; git worktree remove ../shop-%s" % LANE_B
+        depths = (30, ppl_guard._NESTING_LIMIT, ppl_guard._NESTING_LIMIT + 1, 100, 300, 900,
+                  sys.getrecursionlimit() - 60)
+        for size, agent in ((ppl_guard.ROLE_COMMAND_LENGTH_LIMIT, "ppl-code-worker"),
+                            (32 * 1024, None)):
+            for depth in depths:
+                for filler in ("a;", "GIT_CONFIGa", "'a' ", "a "):
+                    command = nested_substitutions(depth, size, filler, tail)
+                    with self.subTest(size=size, depth=depth, filler=filler):
+                        self.assertLessEqual(len(command), size)
+                        start = time.perf_counter()
+                        result = self.bash(command, agent=agent, cwd=own)
+                        self.assertLess(time.perf_counter() - start, 0.5)
+                        self.assertIn("git worktree", self.deny_reason(result))
+
+    def test_a_command_the_guard_reads_by_its_spelling_alone_is_denied_in_a_lane(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Final review, ledger 262: substitutions nested past the 32 levels the masking reads,
+        # or a command that spells the $SUBST mask word, are read by their spelling alone,
+        # which skips the segment walk and the built-ppl check, so a git or ppl spelled other
+        # than the spelling checks read it passed. Such a command is denied in a lane, for
+        # every session, naming the cause.
+        own = self.worktree[LANE_A]
+        deep = "echo " + "$(" * 33 + "true" + ")" * 33
+        for trigger, cause in ((deep + "; ", "nest deeper than 32"),
+                               ("echo $SUBST; ", "$SUBST")):
+            for tail in ("$G worktree prune", "git w''orktree prune",
+                         "$(echo ppl) show --task %s" % LANE_B, "ls"):
+                for agent in (None, "ppl-code-worker"):
+                    with self.subTest(command=trigger + tail, agent=agent):
+                        reason = self.deny_reason(self.bash(trigger + tail, agent=agent,
+                                                            cwd=own))
+                        self.assertIn("BOUNDARY_VIOLATION", reason)
+                        if tail == "ls":
+                            self.assertIn(cause, reason)
+        # read by the walk, the same spellings were denied before
+        for command in ("git w''orktree prune", "$(echo ppl) show --task %s" % LANE_B):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(walked=command, agent=agent):
+                    self.assertIn("BOUNDARY_VIOLATION",
+                                  self.deny_reason(self.bash(command, agent=agent, cwd=own)))
+        # outside a lane nothing changes
+        for command in (deep, "echo $SUBST"):
+            with self.subTest(no_lane=command):
+                self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": command},
+                                                           own)))
+
+    def test_a_command_with_a_substitution_or_here_document_left_open_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R68: a substitution or a here-document left open is read by its spelling alone too,
+        # so in a lane it is denied for every session. A closed one, the here-document commit
+        # message among them, is read as before, and outside a lane nothing changes
+        own = self.worktree[LANE_A]
+        # (command, what the reason names): the here-document and git checks keep theirs
+        for command, why in (("echo $(git worktree prune", "git worktree"),
+                             ("echo `git worktree prune", "git worktree"),
+                             ("ls $(ls", "left open"),
+                             ("cat <<'EOF'\ngit worktree prune\n", "git worktree"),
+                             ("cat <<'EOF'\nhello\n", "left open"),
+                             ("cat <<EOF\nhello", "here-document")):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn(why, reason)
+        for command in ("git commit -m \"$(cat <<'EOF'\nFix the cart\n\nIt's done\nEOF\n)\"",
+                        "grep -c x <<'EOF'\nhello\nEOF", "echo $(git rev-parse HEAD)"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+        for command in ("ls $(ls", "cat <<'EOF'\nhello\n"):
+            with self.subTest(no_lane=command):
+                self.assertIsNone(ppl_guard.decide(payload(None, "Bash", {"command": command},
+                                                           own)))
+
+    def test_a_long_command_read_by_its_spelling_is_decided_in_time(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Final review, ledger 263: a 32 KiB orchestrator command of git words behind
+        # substitutions nested past 32 levels took 9 s, the write shapes searched over it
+        # once per reading, and a timeout lets the call through. It is denied in a lane before
+        # any write shape is searched.
+        own = self.worktree[LANE_A]
+        command = ("echo " + "$(" * 33 + "true" + ")" * 33 + " git" * 8200)[:32 * 1024]
+        self.assertEqual(len(command), 32 * 1024)
+        start = time.perf_counter()
+        result = self.bash(command, cwd=own)
+        self.assertLess(time.perf_counter() - start, 1.0)
+        self.assertIn("nest deeper than 32", self.deny_reason(result))
+
+    def test_an_assignment_that_ends_in_home_hands_git_no_config(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R49: a GIT_CONFIG_*, HOME or XDG_CONFIG_HOME assignment is read at a word's start, so
+        # JAVA_HOME= or GRADLE_USER_HOME= with a substitution beside a git is no config handed
+        # in from elsewhere, while one that does move git's config is still refused
+        own = self.worktree[LANE_A]
+        for command in ("JAVA_HOME=$(/usr/libexec/java_home -v 21) mvn -q test && git status",
+                        "export JAVA_HOME=$(/usr/libexec/java_home -v 21) && git log -1",
+                        "GRADLE_USER_HOME=$(pwd)/.gradle ./gradlew test && git diff --stat"):
+            for agent in (None, "ppl-code-worker", "ppl-verifier"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+        for command in ("HOME=$(mktemp -d) git log -1",
+                        "export HOME=$(mktemp -d) && git log -1",
+                        "GIT_CONFIG_GLOBAL=$(mktemp) git status",
+                        "export XDG_CONFIG_HOME=$(mktemp -d); git status"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("hands git config from elsewhere", reason)
+
+    def test_only_a_git_the_segment_runs_exempts_the_words_the_shell_builds(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R49: the words after a git are that git's own, judged by its subcommand (R40), only
+        # when the segment runs that git: at its command position, or behind a wrapper the
+        # walk models (env, command, nice, ...). A git an echo or sudo spells exempts no word,
+        # so a timeout'd git log whose built argument sits beside a config word is refused too
+        own = self.worktree[LANE_A]
+        for command in ("echo git status $(echo worktree) prune | bash",
+                        "sudo git log $(echo git) worktree prune",
+                        "timeout 5 git log $(git merge-base HEAD main)..HEAD -- config"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "nice git log $(git merge-base HEAD main)..HEAD -- config",
+                        "command git diff --stat $(git merge-base HEAD main) -- src/config",
+                        "env GIT_PAGER=cat git log $(git rev-parse HEAD) -- config"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+
+    def test_a_word_the_shell_builds_beside_a_worktree_config_or_ppl_word_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R49: a word the shell builds in any place of a segment, not only its command word,
+        # may be the git or the ppl a wrapper the walk does not unwrap runs, so a segment that
+        # holds one and a worktree, config or ppl word is refused for every session, as a
+        # variable set by an earlier call (sudo $G worktree prune) shows
+        own = self.worktree[LANE_A]
+        for command in ("sudo $G worktree prune",
+                        "timeout 5 $G config core.hooksPath /tmp/h",
+                        "xargs $P worktree prune < /dev/null",
+                        "stdbuf -o0 $W ppl show"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+        for command in ("ls $(pwd)",
+                        "for f in $(git diff --name-only); do wc -l \"$f\"; done",
+                        "cat \"$(git rev-parse --show-toplevel)/config/app.yml\"",
+                        "git log -1 $(git rev-parse HEAD) -- config"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+
+    def test_a_git_worktree_list_a_segment_runs_is_no_git_worktree_spelled(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R49: the text as written of a segment holding a word the shell builds does not
+        # count a git worktree list it runs, at a command position, as git then worktree, so
+        # a loop over the lanes' worktrees is allowed, while one an echo or a sed spells, or
+        # a built git beside it, is still read
+        own = self.worktree[LANE_A]
+        for command in ("for w in $(git worktree list --porcelain | awk '/^worktree /{print $2}');"
+                        " do echo $w; done",
+                        "echo \"$(git worktree list)\"",
+                        "git worktree list | grep $(git rev-parse --abbrev-ref HEAD)"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(allowed=command, agent=agent):
+                    self.assertIsNone(self.bash(command, agent=agent, cwd=own))
+        for command in ("echo $(git worktree list) $(echo git) worktree prune",
+                        "$(echo git worktree list | sed s/list/prune/)",
+                        "echo $(git worktree list | sed 's/.*/git worktree prune/') | bash"):
+            for agent in (None, "ppl-code-worker"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+
+    def test_git_worktree_in_any_form_but_list_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R34: git takes a worktree by a unique tail of its path from anywhere in the
+        # repository, so no path the guard reads places remove, move, prune, lock or repair
+        theirs = self.worktree[LANE_B]
+        planted = real(tmphome.mkdtemp(prefix="pplplanted-"))
+        os.makedirs(os.path.join(planted, "shop-" + LANE_B))
+        for command in ("git worktree remove --force %s" % theirs,
+                        "git -C %s worktree remove %s" % (self.checkout, theirs),
+                        "git worktree remove shop-%s" % LANE_B,
+                        "cd %s && git worktree remove --force shop-%s" % (planted, LANE_B),
+                        "cd %s/.worktrees && git worktree remove -f shop-%s"
+                        % (self.checkout, LANE_B),
+                        "git worktree move %s /tmp/moved" % theirs, "git worktree prune",
+                        "git worktree add /tmp/extra", "git worktree lock shop-%s" % LANE_B,
+                        "git worktree repair", "timeout 5 git worktree prune",
+                        "git worktree remove $(echo shop-%s)" % LANE_B,
+                        "git worktree remove %s" % self.worktree[LANE_A]):
+            for agent in (None, "ppl-code-worker", "general-purpose"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("git worktree", reason)
+        for command in ("git worktree list", "git worktree list --porcelain"):
+            with self.subTest(read=command):
+                self.assertIsNone(self.bash(command))
+                self.assertIsNone(self.bash(command, agent="ppl-verifier"))
+
+    def test_a_git_whose_subcommand_cannot_be_trusted_is_denied(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R37: the guard reads git's subcommand past its global options, each as git.c reads
+        # it, so an option it does not know fails closed, and so does an alias or include set
+        # on the command line or config handed in from elsewhere, which can turn a word into
+        # git worktree
+        theirs = self.worktree[LANE_B]
+        for command in ("git --attr-source HEAD worktree remove %s" % theirs,
+                        "git --shallow-file /dev/null worktree prune",
+                        "git --frobnicate x worktree remove %s" % theirs,
+                        "git -C%s status" % self.checkout,
+                        "timeout 5 git --frobnicate x worktree prune",
+                        "git -c alias.wt=worktree wt remove %s" % theirs,
+                        "git -c Alias.Wt=worktree wt remove %s" % theirs,
+                        "git --config-env=alias.wt=WT wt remove %s" % theirs,
+                        "git --config-env alias.wt=WT wt prune",
+                        "git -c include.path=/tmp/aliases wt prune",
+                        "git -c includeIf.onbranch:x.path=/tmp/aliases wt prune",
+                        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wt GIT_CONFIG_VALUE_0=worktree "
+                        "git wt prune",
+                        "env GIT_CONFIG_GLOBAL=/tmp/cfg git wt prune",
+                        "HOME=/tmp/fakehome git wt prune",
+                        "git -c alias.st=status st $(true)"):
+            for agent in (None, "ppl-code-worker", "general-purpose"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("git", reason)
+        # a role's git config past an option the table now reads
+        reason = self.deny_reason(self.bash("git --attr-source HEAD config core.hooksPath /x",
+                                            agent="ppl-code-worker"))
+        self.assertIn("may not write git config", reason)
+        for command in ("git --no-pager log -1", "git -C %s status" % self.worktree[LANE_A],
+                        "git -c core.quotepath=off status", "git --attr-source HEAD log -1",
+                        "grep -rn git --include=*.py .", "git --version"):
+            with self.subTest(allowed=command):
+                self.assertIsNone(self.bash(command))
+
+    def test_writes_under_the_checkouts_git_dir_are_denied(self):
+        # rule: R-LANE-SHARED-GIT-DIR
+        # R33, R35: the shared config, hooks and info, which every lane on the checkout and
+        # the operator's own git read and run, and every git dir in it, another lane's
+        # commondir and gitdir that tell its git where to look among them, are no session's
+        # to write, and git's own writes there are no write shape
+        git_dir = self.checkout + "/.git"
+        targets = (git_dir + "/config", git_dir + "/hooks/pre-commit",
+                   git_dir + "/info/attributes", git_dir + "/packed-refs",
+                   git_dir + "/worktrees/shop-%s/commondir" % LANE_B,
+                   git_dir + "/worktrees/shop-%s/gitdir" % LANE_B,
+                   git_dir + "/worktrees/shop-%s/gitdir" % LANE_A,
+                   git_dir + "/objects/info/alternates")
+        for agent in (None, "ppl-code-worker", "general-purpose"):
+            for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+                for target in targets:
+                    with self.subTest(agent=agent, tool=tool, target=target):
+                        reason = self.deny_reason(self.decide(agent, tool,
+                                                              edit_input(tool, target)))
+                        self.assertIn("BOUNDARY_VIOLATION", reason)
+                        self.assertIn("project checkout", reason)
+            for command in ("echo x >> %s/config" % git_dir,
+                            "cp /tmp/h %s/hooks/post-checkout" % git_dir,
+                            "tee %s/info/exclude" % git_dir,
+                            "echo /tmp/evil > %s/worktrees/shop-%s/commondir" % (git_dir, LANE_B),
+                            "cd %s && echo x > ../../.git/hooks/pre-push" % self.worktree[LANE_A]):
+                with self.subTest(agent=agent, command=command):
+                    reason = self.deny_reason(self.bash(command, agent=agent,
+                                                        cwd=self.worktree[LANE_A]))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("project checkout", reason)
+
+    def test_a_role_may_not_write_git_config_in_a_lane(self):
+        # rule: R-LANE-SHARED-GIT-DIR
+        # git config in a worktree writes the checkout's shared .git/config
+        own = self.worktree[LANE_A]
+        for command in ("git -C %s config core.hooksPath /tmp/h" % own,
+                        "git config --local core.hooksPath /tmp/h",
+                        "git config set core.hooksPath /tmp/h",
+                        "git config --add include.path /tmp/x", "git config --unset user.name",
+                        "timeout 5 git config core.fsmonitor /tmp/x",
+                        "/usr/bin/git -c a.b=c config filter.x.smudge /tmp/x",
+                        "git config core.hooksPath $(echo /tmp/h)", "git config core.hooksPath",
+                        # R36: the first word decides, and no action may follow a read
+                        "git config core.hooksPath /tmp/h --list",
+                        "git config --get user.name --add core.hooksPath /tmp/h",
+                        "git config --list --unset-all user.name",
+                        "git config --show-origin core.hooksPath /tmp/h",
+                        "git config --global --get user.name"):
+            for agent in ("ppl-code-worker", "ppl-verifier"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent, cwd=own))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    self.assertIn("may not write git config", reason)
+        for command in ("git config --get user.name", "git config --get-all remote.origin.url",
+                        "git config --get-regexp ^user", "git config --list",
+                        "git config -l --show-origin", "git config get user.name",
+                        "git config list", "git log --grep config"):
+            with self.subTest(read=command):
+                self.assertIsNone(self.bash(command, agent="ppl-verifier", cwd=own))
+
+    def test_ppl_behind_a_wrapper_the_walk_does_not_unwrap_is_still_judged(self):
+        # rule: R-LANE-CROSS-TASK
+        # R30: the walk does not unwrap timeout, xargs, sudo, find -exec, stdbuf or an
+        # env -S string, so a command that spells ppl anywhere, or runs it under any name
+        # shlex reads, is held to every literal mention of another lane's task, free text
+        # included, and a PPL_TASK naming another lane is denied wherever it stands
+        theirs = LANE_B
+        for command in ("timeout 5 ppl show --task %s" % theirs,
+                        "echo %s | xargs ppl show --task" % theirs,
+                        "sudo ppl show --task %s" % theirs,
+                        "find . -maxdepth 0 -exec ppl show --task %s \\;" % theirs,
+                        "env -S 'ppl show --task %s'" % theirs,
+                        "stdbuf -o0 ppl show --task %s" % theirs,
+                        "timeout 5 'ppl' show --task %s" % theirs,
+                        "ppl findings add --title 'same cause as %s'" % theirs,
+                        "export PPL_TASK=%s" % theirs, "PPL_TASK=%s timeout 5 make" % theirs):
+            for agent in (None, "ppl-verifier"):
+                with self.subTest(command=command, agent=agent):
+                    reason = self.deny_reason(self.bash(command, agent=agent))
+                    self.assertIn("BOUNDARY_VIOLATION", reason)
+                    if agent is None:
+                        self.assertIn(theirs, reason)
+        # the lane's own task behind a wrapper is its own
+        for command in ("timeout 5 ppl show --task %s" % LANE_A, "sudo ppl show",
+                        "env -S 'ppl show --task %s'" % LANE_A):
+            with self.subTest(own=command):
+                self.assertIsNone(self.bash(command))
+
+    def test_ppl_with_its_own_task_is_allowed(self):
+        # a task with no lane is no other lane's run: a pending reflection names a destroyed
+        # run's task, and a command that runs no ppl may name another lane's
+        own, worktree = LANE_A, self.worktree[LANE_A]
+        for command in ("ppl show --task %s" % own, "ppl show --task=%s" % own,
+                        "PPL_TASK=%s ppl show" % own, "ppl show", "cd %s && ppl show" % worktree,
+                        "ppl lessons record --task LANE-5000 --file /tmp/lessons.json",
+                        "echo %s" % LANE_B, "git log --grep %s" % LANE_B):
+            with self.subTest(command=command):
+                self.assertIsNone(self.bash(command))
+        for command in ("ppl show --task %s" % own, "ppl show"):
+            with self.subTest(role=command):
+                self.assertIsNone(self.bash(command, agent="ppl-verifier", cwd=worktree))
+
+    def test_gh_from_the_start_directory_is_allowed_and_from_the_worktree_is_denied(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # the lane's own facts, as ppl lane renders them: the start directory is where gh
+        # runs, and the lane's worktree is in its write scope
+        fixtures.install_variant("example-generic", "gh-lane",
+                                 repo={"path": self.checkout, "default_branch": "main",
+                                       "worktrees": self.checkout + "/.worktrees"},
+                                 **fixtures.GITHUB_ISSUES)
+        pins = {name: {"path": "/opt/pin/bin/" + name, "realpath": real("/opt/pin/bin/" + name)}
+                for name in ("gh", "git", "ppl")}
+        start = lanes.start_dir(LANE_A)
+        facts = os_sandbox.facts(harness.load("gh-lane"), start, pins,
+                                 worktree=self.worktree[LANE_A], task=LANE_A)
+        store.write_json(start / os_sandbox.FACTS_FILE, facts)
+        command = {"command": pins["gh"]["path"] + " auth status",
+                   "dangerouslyDisableSandbox": True}
+        for cwd in (str(start), real(start)):
+            with self.subTest(cwd=cwd):
+                self.assertIsNone(self.decide(None, "Bash", command, cwd))
+        for cwd in (self.worktree[LANE_A], self.worktree[LANE_A] + "/src", self.checkout,
+                    str(lanes.start_dir(LANE_B))):
+            with self.subTest(cwd=cwd):
+                reason = self.deny_reason(self.decide(None, "Bash", command, cwd))
+                self.assertIn("BOUNDARY_VIOLATION", reason)
+                self.assertIn(real(start), reason)
+
+
+if __name__ == "__main__":
+    unittest.main()

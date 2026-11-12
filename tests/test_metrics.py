@@ -19,6 +19,8 @@ os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 from ppl import cli, metrics, paths, run, status, store, trail
 from ppl.errors import PplError
 
+import fixtures
+
 PRODUCER_A = {"provider": "claude-code-subagent", "model": "opus", "params_hash": "h1"}
 PRODUCER_B = {"provider": "claude-code-subagent", "model": "sonnet", "params_hash": "h2"}
 COUNTER = itertools.count(700)
@@ -302,14 +304,15 @@ class TestCostPerAcceptedTask(IsolatedFleet):
         self.assertIn("claude-x", cost["reason"])
         self.assertIn("[prices", cost["reason"])
 
-    def test_cost_is_undefined_without_usage_naming_ppl_setup_claude(self):
+    def test_cost_is_undefined_without_usage_naming_ppl_lane(self):
         # rule: R-METRIC-SAMPLE-DEPENDENT-UNDEFINED
         write_prices(PRICED)
         done_run("a1")
         report = metrics.compute()["overall"]
         for key in ("cost_per_accepted_task", "tokens_per_accepted_task", "tokens_by_role"):
             self.assertFalse(report[key]["defined"], key)
-            self.assertIn("ppl setup claude", report[key]["reason"])
+            self.assertIn("ppl lane", report[key]["reason"])
+            self.assertNotIn("ppl setup claude", report[key]["reason"])
 
     def test_cost_is_undefined_when_nothing_reached_done(self):
         # rule: R-METRIC-SAMPLE-DEPENDENT-UNDEFINED
@@ -521,6 +524,44 @@ class TestArchivedRunsAreVisible(IsolatedFleet):
         with self.assertRaises(PplError) as ctx:
             metrics.record_label("DEMO-000000", "a1", "defective")
         self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+
+
+class TestOneRunCannotStopTheReport(IsolatedFleet):
+    def test_a_done_run_whose_state_no_json_parse_reads_is_skipped(self):
+        # Final review I2: a run's state.json is in its lane's sandbox scope, so one no JSON
+        # parse reads is skipped and ppl metrics reports every other run
+        good = new_task()
+        write_verdict(good, "a1", "PASS", PRODUCER_A)
+        mark_done(good, "a1")
+        for text in fixtures.UNPARSEABLE_JSON.values():
+            bad = new_task()
+            write_verdict(bad, "b1", "PASS", PRODUCER_A)
+            mark_done(bad, "b1")
+            run.state_path(bad).write_text(text, encoding="utf-8")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = cli.main(["metrics"])
+        self.assertEqual(code, 0)
+        report = json.loads(out.getvalue())
+        entry = report["producers"]["claude-code-subagent:opus"]["time_to_acceptance_seconds"]
+        self.assertTrue(entry["defined"])
+
+    def test_an_archived_run_whose_state_no_json_parse_reads_is_skipped(self):
+        # the archived state.json was its lane's to write before destroy moved it, so the
+        # fleet's readers, ppl metrics and ppl trail's run lookup, skip it
+        good = new_task()
+        write_verdict(good, "a1", "PASS", PRODUCER_A)
+        mark_done(good, "a1")
+        for name, text in fixtures.UNPARSEABLE_JSON.items():
+            archived = paths.runs_dir() / "_archive" / ("DEMO-1-%s" % name)
+            archived.mkdir(parents=True)
+            (archived / "state.json").write_text(text, encoding="utf-8")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = cli.main(["metrics"])
+        self.assertEqual(code, 0)
+        self.assertIn("claude-code-subagent:opus", json.loads(out.getvalue())["producers"])
+        self.assertEqual(trail.find_run(good), paths.run_dir(good))
 
 
 class TestMetricsDocumentation(unittest.TestCase):

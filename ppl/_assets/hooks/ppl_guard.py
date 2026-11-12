@@ -1,8 +1,10 @@
 """PreToolUse cage. Runs on every tool call, so it stays cheap and never raises."""
+import functools
 import json
 import os
 import re
 import shlex
+import signal
 import sys
 from pathlib import Path
 
@@ -18,7 +20,8 @@ import ppl_python_floor
 # an older interpreter the hook would die here and allow every call
 # [R-GUARD-PYTHON-FLOOR]. Everything in this file parses on 3.9.
 if __name__ == "__main__" and ppl_python_floor.refuse_old_python(
-        sys.version_info, "ppl_guard", "PreToolUse", sys.stdin, sys.stdout, sys.stderr):
+        sys.version_info, "ppl_guard", "PreToolUse", sys.stdin, sys.stdout, sys.stderr,
+        argv=sys.argv[1:]):
     sys.exit(0)
 
 # parents[3] holds the ppl package this hook ships in. It goes first on sys.path
@@ -39,7 +42,8 @@ if not _PPL_FILE or not Path(_PPL_FILE).resolve().is_relative_to(_PACKAGE_PARENT
     sys.stderr.write("ppl_guard: imported ppl from %s, not the one beside this hook in %s\n"
                      % (_PPL_FILE, _PACKAGE_PARENT))
 
-from ppl import boundary, control, escape, gitfacts, paths, run, store, trackers
+from ppl import (boundary, control, escape, escape_paths, gitfacts, lanes, paths, run, store,
+                 trackers)
 from ppl import forges as _forges
 from ppl.errors import PplError
 from ppl.trackers import jira as _jira
@@ -413,11 +417,25 @@ ROLE_COMMAND_LENGTH_LIMIT = 4096
 # from a code worker extracted no target at all. Named here for the
 # runs-root and unparseable-command checks - `_git_write_targets` below is
 # what extracts the path. (`>>?` already covers bash's `&>` and `&>>`.)
+# git subcommands that only read, hyphenated or spelled like a writer's prefix: a word of
+# a writer below that is one of these (merge-base, not merge) is no write shape.
+_GIT_READ_ONLY_WORDS = ("merge-base", "rev-parse", "rev-list", "cat-file", "ls-files", "ls-tree",
+                        "ls-remote", "for-each-ref", "show-ref", "name-rev", "describe",
+                        "cherry", "check-ignore", "check-attr", "diff-tree", "diff-files",
+                        "diff-index", "var", "count-objects", "verify-commit", "verify-tag")
+# git's hyphenated plumbing that writes the index, refs, objects or the tree, and that the
+# write walk cannot place (_git_write_targets): judged as a write shape like apply.
+_GIT_PLUMBING_WRITERS = frozenset({"update-index", "update-ref", "checkout-index", "read-tree",
+                                   "merge-file", "write-tree", "commit-tree", "mktree",
+                                   "pack-refs", "prune-packed", "unpack-objects"})
 BASH_WRITE_SHAPES = re.compile(
     r">>?|\btee\b|\bsed\b[^\n]*-i\b|\bcp\b|\bmv\b|\bdd\b[^\n]*\bof=|\brm\b"
     r"|\btouch\b|\btruncate\b|\bln\b|\binstall\b|\brsync\b|\bpatch\b"
-    r"|\bgit\b[^\n]*\b(?:rm|mv|checkout|switch|restore|apply|merge|rebase|cherry-pick"
-    r"|pull|revert|clean)\b"
+    r"|\bgit\b[^\n]*\b(?!(?:" + "|".join(re.escape(word) for word in _GIT_READ_ONLY_WORDS)
+    + r")(?![\w-]))(?:rm|mv|checkout|switch|restore|apply|merge|rebase|cherry-pick"
+    r"|pull|revert|clean|symbolic-ref|"
+    + "|".join(re.escape(word) for word in sorted(_GIT_PLUMBING_WRITERS))
+    + r"|hash-object(?=[^\n]*\s-w\b))\b"
 )
 
 # Round 1 review (C4): the registry, the lease, the done gate - all of it is
@@ -463,7 +481,10 @@ BASH_WRITE_SHAPES = re.compile(
 # bare `ppl.cli` token are a realistic accident (a worker whose PATH lacks
 # `ppl` reaches for `python3 -m` with no intent to evade anything), so
 # PPL_INVOCATION_RE below matches those shapes too, feeding the exact same
-# read-only allowlist and the exact same fail-closed default. `p''pl` (or
+# read-only allowlist and the exact same fail-closed default. Any module of the
+# package counts, `python3 -m ppl.__main__` (which runs cli.main) among them,
+# by any python, with -m glued, inside a cluster of short flags (-Im) or behind other
+# interpreter flags. `p''pl` (or
 # base64, or any other quote/encoding trick) is not: a lexical matcher
 # cannot win an arms race against arbitrary shell quoting, and chasing this
 # one instance would buy a longer regex and a false sense of completeness,
@@ -483,7 +504,7 @@ BASH_WRITE_SHAPES = re.compile(
 # enter` among them, takes no generation, so for those this lexical check is
 # the only fence a role meets, and it is a speed bump, not a proof.
 PPL_INVOCATION_RE = re.compile(
-    r"\bpython3?\s+-m\s+ppl(?:\.cli)?(?=[\s;&|]|$)"
+    r"\bpython[0-9.]*\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*m\s*ppl(?:\.\w+)*(?=[\s;&|]|$)"
     r"|\bppl\.cli(?=[\s;&|]|$)"
     # Not after a dot: `~/.ppl`, the default data root, is a directory, while
     # `bin/ppl` and `./ppl` are the launcher.
@@ -503,7 +524,7 @@ PPL_READ_ONLY_SUBCOMMANDS = frozenset({
 
 def _ppl_cli_is_state_changing(command):
     """True when `command` contains ANY invocation of the ppl CLI - directly
-    as `ppl`, or as `python3 -m ppl[.cli]` / a bare `ppl.cli` token - that is
+    as `ppl`, or as `python3 -m ppl[.<module>]` / a bare `ppl.cli` token - that is
     not provably read-only. Lexical, like every other Bash check in this
     module: it looks for a fixed set of literal shapes, at every occurrence,
     not only the first. See this module's own limit, spelled out above the
@@ -883,15 +904,6 @@ def unknown_patterns_deny(task_id):
     return deny("OWNER_DECISION", boundary.unknown_patterns_reason(task_id))
 
 
-def _active_task_id():
-    """run.active(), or None when the ACTIVE file cannot be read at all, so the
-    forge denials fall back to the union instead of raising into main()."""
-    try:
-        return run.active(_READ_LIMIT)
-    except Exception:
-        return None
-
-
 def forge_from_snapshot(task_id):
     """(adapter module, forge table) for the forge the run's harness snapshot
     names, or (None, None) when there is no snapshot or its forge table is not
@@ -913,21 +925,55 @@ def github_mcp_prefixes(task_id):
     return escape.forge_github_prefixes(forge_from_snapshot(task_id)[1])
 
 
-def protected_edit_denial(payload):
+def facts_file(argv):
+    """The guard facts the session of the hook whose command line is `argv` runs under: in a
+    lane, the os_sandbox.json ppl lane renders into its start directory, lanes.start_dir of
+    the --task the command line names, where every registry entry records it; in no lane,
+    PPL_HOME/os_sandbox.json, which an older ppl harness apply wrote and ppl setup claude
+    removes. None for a command line that
+    binds no lane cleanly, whose calls lane_denial refuses. Found from argv alone, so neither
+    the registry nor a run file is read for it, and one a role made huge or unreadable holds
+    no edit back."""
+    try:
+        task = lanes.hook_task(argv)
+    except Exception:
+        return None
+    if task is None:
+        return paths.home() / escape.FACTS_FILE
+    return lanes.start_dir(task) / escape.FACTS_FILE
+
+
+def _names_a_lane(argv):
+    """True when the hook's command line carries a --task, well formed or not: a session ppl
+    lane started, whatever the registry says of it."""
+    try:
+        return lanes.hook_task(argv) is not None
+    except Exception:
+        return True
+
+
+def protected_edit_denial(payload, argv=()):
     """(code, reason) when an edit tool call may not write its target, else None: while the
-    guard facts exist it writes only inside the OS sandbox's write scope and Claude Code's
-    projects and plans directories, and never a protected path [R-OS-SANDBOX-PROTECTED-PATHS].
-    Facts that cannot be read put every session in scope with no write scope to check, so
-    every edit is refused until `ppl harness apply` repairs them. No run file is read: the
-    check holds only while the facts exist, which an active run does not change."""
+    guard facts of the session (facts_file) exist it writes only inside the OS sandbox's write
+    scope and Claude Code's projects and plans directories, and never a protected path, a
+    lane's whole start directory among them [R-OS-SANDBOX-PROTECTED-PATHS]. In a lane whose
+    harness has no OS sandbox, and so no facts, it still never writes a protected path every
+    session has: Claude Code's settings, ppl's code, config, routing, harnesses and facts, the
+    lanes' start directories and registry, and the git, ssh and gh config. Facts that cannot
+    be read put every session in scope with no write scope to check, so every edit is refused
+    until they are repaired. No run file is read, nor the registry."""
     home = paths.home()
     try:
-        facts = escape.load_facts(home)
+        facts = escape.load_facts(facts_file(argv))
     except ValueError as err:
+        try:
+            task = lanes.hook_task(argv)
+        except Exception:
+            task = None
         return ("OWNER_DECISION",
                 "the guard's OS sandbox facts are unusable (%s), so an edit tool's target cannot "
-                "be checked against the write scope: %s" % (err, escape.APPLY))
-    reason = escape.edit_denial(payload, home, facts)
+                "be checked against the write scope: %s" % (err, escape.facts_hint(task)))
+    reason = escape.edit_denial(payload, home, facts, _names_a_lane(argv))
     return ("BOUNDARY_VIOLATION", reason) if reason else None
 
 
@@ -1400,12 +1446,9 @@ def bash_denies_main_source_read(command, state, cwd, shapes, patterns):
 # (GNU's optional attached suffix and BSD's mandatory separate one cannot be
 # told apart lexically), a tee/cp/mv/rm/redirect missing its argument, or a
 # relative path after a `cd` this cannot resolve - Task 8's own discipline
-# applied to writes instead of reads. That fail-closed deny only fires when
-# the command is otherwise pipeline-scoped (a ppl-* role, or a session whose
-# cwd sits inside the run's repo): an unrelated session working somewhere
-# else on the machine must not be denied a `sed -i` just because some other
-# run happens to be active, which would be exactly the leak into other
-# projects this cage exists not to cause.
+# applied to writes instead of reads. That fail-closed deny fires only in a
+# session bound to a run, a lane session: one in no lane gets the global
+# denials alone, and the hooks reach no other session at all.
 # `>|` (clobber, writes even under noclobber) is tried before `>`, or its `|`
 # would be read as the start of the target.
 _REDIR_GLUED_RE = re.compile(r"^(?:\d*>\||\d*>>?|&>>?|>&)(.+)$")
@@ -1434,10 +1477,22 @@ def _positionals(args, value_flags=frozenset()):
 
 
 # git's own global options sit between "git" and the subcommand, and these
-# take a value. `-C <dir>` matters most: every path operand after it is relative to
-# <dir>, from whatever cwd the command ran in.
-_GIT_GLOBAL_VALUE_FLAGS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--exec-path",
-                                     "--namespace", "--super-prefix", "--config-env"})
+# take a value as the next word, as git.c's handle_options reads them (git 2.46, with
+# --super-prefix from before 2.40). `-C <dir>` matters most: every path operand after it
+# is relative to <dir>, from whatever cwd the command ran in.
+_GIT_GLOBAL_VALUE_FLAGS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                     "--super-prefix", "--config-env", "--attr-source",
+                                     "--shallow-file"})
+# The global options that take their value glued with `=` only, or none: a bare
+# --exec-path prints the exec path and runs nothing.
+_GIT_GLOBAL_GLUED = ("--git-dir=", "--work-tree=", "--namespace=", "--super-prefix=",
+                     "--config-env=", "--attr-source=", "--exec-path=", "--list-cmds=")
+_GIT_GLOBAL_FLAGS = frozenset({"-p", "--paginate", "-P", "--no-pager", "--no-replace-objects",
+                               "--no-lazy-fetch", "--no-optional-locks", "--no-advice", "--bare",
+                               "--literal-pathspecs", "--no-literal-pathspecs",
+                               "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs",
+                               "--exec-path", "--html-path", "--man-path", "--info-path",
+                               "-h", "--help", "-v", "--version"})
 # Subcommands that rewrite the working tree from history or from a diff with
 # no path operand this could name: the whole tree is the target.
 _GIT_TREE_REWRITERS = frozenset({"merge", "rebase", "cherry-pick", "pull", "revert", "am",
@@ -1461,7 +1516,8 @@ def _git_write_targets(args, cwd):
     any other target this cannot pin down, which for a role is a deny and for
     an unroled session is a deny only when its cwd sits inside the run's repo
     (the orchestrator's Stage 1 `git worktree add`, run from the main checkout
-    beside the repo, is not a shape this parses at all). Read-only
+    beside the repo, is not a shape this parses at all; in a lane every git
+    worktree subcommand but list is denied outright, see lane_git_denial). Read-only
     subcommands, `add`, `commit`, and `stash push`/`stash apply` (the shapes
     references/gates.md sends a role to) write no tree path and pass.
     """
@@ -1507,6 +1563,13 @@ def _git_write_targets(args, cwd):
     if sub == "reset" and any(t in ("--merge", "--keep") for t in rest):
         # --hard is denied outright by DENIED_COMMANDS (R-GIT-RESET-HARD) -
         # --merge and --keep also rewrite the tree, --soft and --mixed do not.
+        return [(None, cwd, False)]
+    # the hyphenated plumbing writes the index, refs, objects or the tree with no path this
+    # could name: symbolic-ref with a target or -d, hash-object with -w, the rest always
+    if (sub in _GIT_PLUMBING_WRITERS
+            or (sub == "symbolic-ref" and (len(_positionals(rest)) >= 2
+                                           or any(t in ("-d", "--delete") for t in rest)))
+            or (sub == "hash-object" and "-w" in rest)):
         return [(None, cwd, False)]
     return []
 
@@ -1739,7 +1802,7 @@ def _placed_in_directory(files, cwd, slash_is_contents):
     return placed
 
 
-def _segment_write_targets(tokens, segment, cwd, dirstack, targets):
+def _segment_write_targets(tokens, segment, cwd, dirstack, targets, commands=None):
     """Append the write targets of one segment's `tokens` to `targets`, and
     return the shell's cwd after it: `cd` and `pushd` move it, `popd` pops
     `dirstack`. Wrapper verbs (`env`, `command`, `builtin`, `exec`, `nohup`,
@@ -1747,7 +1810,9 @@ def _segment_write_targets(tokens, segment, cwd, dirstack, targets):
     `env -C` moves only the command env runs: a redirect on the segment is the
     shell's own and stays on the shell's cwd, the one the segment starts in,
     a cd's own redirect included. Redirects are split off the raw body before
-    the tokens reach here, see _bash_write_targets."""
+    the tokens reach here, see _bash_write_targets. With `commands`, the
+    segment is appended to it as (tokens, index of the command its wrappers
+    run, the cwd that command runs in)."""
     i = 0
     while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
         i += 1
@@ -1768,6 +1833,8 @@ def _segment_write_targets(tokens, segment, cwd, dirstack, targets):
             if BASH_WRITE_SHAPES.search(segment):
                 targets.append((None, cwd, False))
             i = len(tokens)
+    if commands is not None:
+        commands.append((tokens, i, arg_cwd))
     verb = _verb_name(tokens[i]) if i < len(tokens) else ""
     if i < len(tokens) and verb != tokens[i]:
         in_shell = False
@@ -1939,7 +2006,7 @@ def _close_groups(tail, cwd, list_cwd, base_cwd, groups, open_cwds, targets):
     return cwd, list_cwd
 
 
-def _bash_write_targets(command, base_cwd):
+def _bash_write_targets(command, base_cwd, commands=None):
     """(raw, cwd, removal) for every path a write-shaped Bash construct in
     `command` targets: the cwd in effect at that point, and whether the
     construct removes the path (rm, a mv or git mv source, git rm, the
@@ -1952,12 +2019,14 @@ def _bash_write_targets(command, base_cwd):
     found but its target could not be identified at all (see the module
     comment above) - the caller must treat that the same as a target that
     fails to resolve: deny, not skip. A `sh -c` or `bash -c` string is one
-    opaque word: nothing inside it is read.
+    opaque word: nothing inside it is read. With `commands`, every segment the
+    walk reads is appended to it (see _segment_write_targets), one it cannot
+    split into words as (None, its raw text, its cwd), and a command holding a
+    `$(` or a backtick appends nothing: it is one unplaceable write when its
+    raw text or any of its views holds a write shape (_blinded_write_shape).
     """
     if "$(" in command or "`" in command:
-        if BASH_WRITE_SHAPES.search(command):
-            return [(None, base_cwd, False)]
-        return []
+        return [(None, base_cwd, False)] if _blinded_write_shape(command) else []
     targets = []
     cwd = list_cwd = base_cwd
     groups = []
@@ -1975,6 +2044,8 @@ def _bash_write_targets(command, base_cwd):
         if tokens is None:
             if BASH_WRITE_SHAPES.search(segment):
                 targets.append((None, cwd, False))
+            if commands is not None:
+                commands.append((None, segment, cwd))
             if background:
                 cwd = list_cwd
             continue
@@ -1986,7 +2057,7 @@ def _bash_write_targets(command, base_cwd):
         # a cd's own redirect is the shell's, opened in the pre-cd cwd
         targets.extend((target, cwd, False) for target in redirects)
         if tokens:
-            cwd = _segment_write_targets(tokens, segment, cwd, dirstack, targets)
+            cwd = _segment_write_targets(tokens, segment, cwd, dirstack, targets, commands)
         if tail:
             cwd, list_cwd = _close_groups(tail, cwd, list_cwd, base_cwd, groups,
                                           open_cwds, targets)
@@ -2021,7 +2092,7 @@ def bash_write_lands_in_runs(command, cwd, control_inbox=True):
     only with `control_inbox`, which the caller passes for the unroled operator
     session alone: a role that rewrites it can lift the operator's pause. A
     target this cannot resolve (a variable, a substitution) is not judged here,
-    and bash_write_boundary_deny fails closed on it for a pipeline-scoped session.
+    and bash_write_boundary_deny fails closed on it for a session bound to a run.
     BASH_WRITE_SHAPES is not run over the whole command first: its git alternative
     rescans the line from every `git`, which is quadratic, and this check runs on
     every Bash call. A substitution leaves no target to resolve, so it returns at once.
@@ -2050,6 +2121,52 @@ def _has_dotdot(path):
     return ".." in str(path).split("/")
 
 
+# R68 AMENDED 2: a ppl-test-worker Glob pattern's braces are not expanded. A brace group is
+# allowed only when every alternative is a plain name, so none can be empty, absolute, ~ or
+# climb with .. [R-TEST-WORKER-READ-TOOLS].
+_BRACE_DEPTH_LIMIT = 4
+# A plain brace alternative: runs of these characters joined by single dots, no dot at
+# either end. A nested group counts as one character of a run.
+_BRACE_NAME_RE = re.compile(r"[A-Za-z0-9_*?+-]+(?:\.[A-Za-z0-9_*?+-]+)*")
+
+
+def _glob_brace_problem(pattern):
+    """Why ppl-test-worker's Glob `pattern` is refused for its braces, else None: a [ class
+    beside a { (a class can hold a brace or a comma that pairs them otherwise), a brace group
+    with an alternative that is not a plain name (_BRACE_NAME_RE: an empty one, a /, a ~, a
+    .., a dot at an end, a space, a backslash or any other character among them), braces
+    unbalanced, or nested deeper than _BRACE_DEPTH_LIMIT. One pass, no expansion."""
+    if "{" not in pattern and "}" not in pattern:
+        return None
+    if "[" in pattern and "{" in pattern:
+        return "a [ class beside a { brace"
+    groups, index = [], 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            # taken as written: outside a group it opens nothing, inside one it is no name
+            if groups:
+                groups[-1].append(pattern[index:index + 2])
+            index += 2
+            continue
+        if char == "{":
+            groups.append([])
+            if len(groups) > _BRACE_DEPTH_LIMIT:
+                return "braces nested deeper than %d" % _BRACE_DEPTH_LIMIT
+        elif char == "}":
+            if not groups:
+                return "unbalanced braces"
+            alternatives = "".join(groups.pop()).split(",")
+            if not all(_BRACE_NAME_RE.fullmatch(each) for each in alternatives):
+                return "a brace alternative that is not a plain name"
+            if groups:
+                groups[-1].append("x")
+        elif groups:
+            groups[-1].append(char)
+        index += 1
+    return "unbalanced braces" if groups else None
+
+
 def _dotdot_reason(tool, path):
     """A test-worker path with a `..` segment: the guard collapses `..` before
     a symlink is followed, the kernel after, so a link in a test directory
@@ -2061,13 +2178,13 @@ def _dotdot_reason(tool, path):
 
 def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state, patterns):
     """The Bash equivalent of the structured Edit/Write/MultiEdit/
-    NotebookEdit write-boundary checks below (R-GUARD-BASH-WRITE-BOUNDARY).
+    NotebookEdit write-boundary checks below (R-GUARD-BASH-WRITE-BOUNDARY), for a call
+    of a session bound to run `task_id`, every one of which is in that run's scope.
     `patterns` is test_patterns(task_id). Returns a deny dict or None.
     """
     targets = _bash_write_targets(command, payload.get("cwd"))
     if not targets:
         return None
-    pipeline_scoped = is_role or in_scope(payload, state)
     bound = None
     if is_role:
         bound = store.read_json(paths.run_dir(task_id) / "boundary.json",
@@ -2076,12 +2193,19 @@ def bash_write_boundary_deny(command, payload, agent, is_role, task_id, state, p
         if agent == "ppl-test-worker" and raw and _has_dotdot(raw):
             return deny("BOUNDARY_VIOLATION", _dotdot_reason("Bash write", raw))
         resolved = _resolve_path_against_cwd(raw, seg_cwd) if raw else None
+        if resolved is None and raw is None and ("$(" in command or "`" in command):
+            # the walk reads no target of a command holding one (_bash_write_targets), so
+            # the cause is that, not a path it could not resolve (M9)
+            return deny("BOUNDARY_VIOLATION",
+                        "a write-shaped Bash command that holds a $(...) or a backtick, in a "
+                        "here-document body too, is not read for where it writes, denied "
+                        "rather than allowed: write the file with the Write tool, or keep "
+                        "the substitution or the backtick out of the command that writes: %s"
+                        % command)
         if resolved is None:
-            if pipeline_scoped:
-                return deny("BOUNDARY_VIOLATION",
-                            "a write-shaped Bash command's target could not be "
-                            "resolved, denied rather than allowed: %s" % command)
-            continue
+            return deny("BOUNDARY_VIOLATION",
+                        "a write-shaped Bash command's target could not be "
+                        "resolved, denied rather than allowed: %s" % command)
         if not targets_repo(resolved, state):
             continue
         if is_role:
@@ -2135,27 +2259,34 @@ def relative_to_repo(path, state):
     return path.lstrip("/")
 
 
-def active_state():
-    """The pipeline run this machine is currently executing, if any.
+def bound_state(binding):
+    """The run this hook's own argv binds it to (lanes.binding), as (task_id, state).
 
-    Returns (task_id, state). task_id is None only when there is no active run at
-    all. state is None both when there is no active run AND when there is one but
-    its state.json could not be read or parsed into a usable record - the caller
-    must tell those two apart, because "no active run" permits everything and "an
-    active run whose state we cannot trust" must not.
+    task_id is None only outside a lane. state is None both outside a lane AND when the
+    bound run's state.json could not be read or parsed into a usable record - the caller
+    must tell those two apart, because outside a lane every run-scoped check is off and a
+    bound run whose state we cannot trust must not be. A binding with a problem raises
+    PplError OWNER_DECISION naming it, so escape.decide, which takes this as its reader,
+    refuses a flagged call in a lane it cannot confirm [R-LANE-HOOK-BINDING]. _decide
+    answers the problem itself and must never call this with one: main() reads an exception
+    from _decide as an internal error, which allows an unroled call, so the fail-closed
+    refusal would turn into an allow.
 
     run.load raises PplError when state.json is simply missing, but a state.json
     that exists and is corrupt (a half-written file from a crashed process) makes
     the underlying json.load raise json.JSONDecodeError, and a permission problem
-    raises OSError; neither is a PplError. This hook must never raise regardless of
-    which of those it hits.
+    raises OSError; neither is a PplError. None of those escapes, and neither does a
+    ValueError or a RecursionError (an integer past the digit limit, nesting too deep),
+    which store.read_json now maps too.
     """
-    task_id = run.active(_READ_LIMIT)
+    if binding.problem:
+        raise PplError("OWNER_DECISION", binding.problem)
+    task_id = binding.task
     if not task_id:
         return None, None
     try:
         state = run.load(task_id, _READ_LIMIT)
-    except (PplError, OSError, ValueError):
+    except (PplError, OSError, ValueError, RecursionError):
         return task_id, None
     if not isinstance(state, dict):
         return task_id, None
@@ -2182,24 +2313,6 @@ def targets_repo(path, state):
     if not repo or not path:
         return False
     return _inside(path, repo)
-
-
-def in_scope(payload, state):
-    """True when this tool call's session sits inside the active run's worktree.
-
-    ACTIVE is global state, so without a scope check a paused run would deny
-    every tool call in every unrelated Claude session on the machine. cwd is no
-    longer the only way into scope (see decide), but it is still the way the
-    orchestrator's own session - which carries no agent_type and may call a
-    non-write tool - is recognised. Both sides go through realpath for the same
-    symlink-aliasing reason as relative_to_repo.
-    """
-    if not state or not state.get("repo"):
-        return False
-    cwd = payload.get("cwd") or ""
-    if not cwd:
-        return False
-    return _inside(cwd, state["repo"])
 
 
 # A dispatch prompt line in patch syntax. The test worker never needs one.
@@ -2291,7 +2404,1207 @@ def dispatch_leak_deny(prompt, task_id, state, patterns):
                 "brief's interfaces only." % (len(hits), rel, first[:40]))
 
 
-def _decide(payload):
+def stateless_lane_write_denial(tool, tool_input, path, payload, agent, task_id, entry):
+    """R-UNROLED-REPO-WRITE while the bound run has no readable state.json, as between
+    ppl lane and ppl init: the lane's registry entry names its worktree and the project
+    repo, and they stand in for the run's repo, so that window opens no repo write. A role
+    never gets here, every role call is denied while the state cannot be read. An entry
+    that names neither leaves a write nowhere to be placed, so every write is denied."""
+    roots = [root for root in (entry.get("worktree"), entry.get("repo"))
+             if isinstance(root, str) and root]
+    unplaced = deny("OWNER_DECISION",
+                    "lane %s's registry entry names no worktree or repo, so a write cannot be "
+                    "placed: run ppl lane resume %s" % (task_id, task_id))
+    if tool == "Bash":
+        command = tool_input.get("command", "")
+        if not roots:
+            return unplaced if _bash_write_targets(command, payload.get("cwd")) else None
+        for root in roots:
+            refusal = bash_write_boundary_deny(command, payload, agent, False, task_id,
+                                               {"repo": root}, ())
+            if refusal:
+                return refusal
+        return None
+    if not path:
+        return None
+    if not roots:
+        return unplaced
+    if any(targets_repo(path, {"repo": root}) for root in roots):
+        return deny("BOUNDARY_VIOLATION",
+                    "%s may not write repo code: %s is inside lane %s's worktree or repo, which "
+                    "only ppl-code-worker and ppl-test-worker write, inside their boundary"
+                    % (agent or "a session with no role", path, task_id))
+    return None
+
+
+# What an unroled session keeps in a lane whose registry entry cannot be confirmed: it
+# reads, it changes nothing [R-LANE-HOOK-BINDING].
+UNCONFIRMED_LANE_TOOLS = ("Read", "Glob", "Grep")
+
+
+def lane_denial(binding, agent, tool):
+    """The deny for a call this hook's lane binding refuses, else None.
+
+    A hook knows its run from the `--task` its own command line carries, which ppl lane
+    renders into the lane's settings.json, never from shared state. With no --task the
+    session is in no lane: a ppl-* role there is refused [R-LANE-ROLE-OUTSIDE], anything
+    else meets only the global denials. A --task that is malformed, or names a lane the
+    registry does not hold or a registry that cannot be read, fails closed: a role is
+    refused, and any other session keeps Read, Glob and Grep [R-LANE-HOOK-BINDING]."""
+    if binding.problem:
+        if escape.is_role(agent) or tool not in UNCONFIRMED_LANE_TOOLS:
+            return deny("OWNER_DECISION", binding.problem)
+        return None
+    if binding.task is None and escape.is_role(agent):
+        return deny("BOUNDARY_VIOLATION",
+                    "%s is denied: ppl roles run only inside a lane session; start one with "
+                    "ppl lane <link>" % agent)
+    return None
+
+
+def _lane_files(binding, lanes_list):
+    """What ppl lane writes for the lanes and no session does: PPL_HOME/lanes, where it makes
+    every start directory, the registry and its lock, and each start directory a registry
+    entry records, the bound lane's included, whatever the facts say [R-LANE-START-DIR-PROTECTED].
+    A start directory holds the session's settings (its hooks and sandbox profile), skill
+    plugin, agents, MCP config and guard facts, all under the session's cwd, where acceptEdits
+    takes an edit unasked."""
+    home = paths.home()
+    roots = [str(home / "lanes"), str(lanes.registry_path()), str(home / lanes.LOCK_FILE)]
+    for item in list(lanes_list or []) + ([binding.entry] if binding.entry else []):
+        start = item.get("start_dir") if isinstance(item, dict) else None
+        if isinstance(start, str) and os.path.isabs(start):
+            roots.append(start)
+    return roots
+
+
+def _lane_write_forms(tool, tool_input, cwd):
+    """(forms, real forms, removal) for every path the call writes, as escape_paths.landing
+    places it: each path key of an edit tool, and each target of a write-shaped Bash
+    (_bash_write_targets) it can resolve. A Bash target it cannot resolve is left to
+    bash_write_boundary_deny, which denies one in a lane, and a relative edit path with no
+    absolute cwd, which Claude Code does not take, is not placed."""
+    placed = []
+    if tool in WRITE_TOOLS:
+        raws = [(tool_input.get(key), cwd, False) for key in READ_PATH_KEYS]
+    elif tool == "Bash" and isinstance(tool_input.get("command"), str):
+        raws = [(raw, seg_cwd, removal)
+                for raw, seg_cwd, removal in _bash_write_targets(tool_input["command"], cwd)
+                if raw and _resolve_path_against_cwd(raw, seg_cwd)]
+    else:
+        raws = []
+    for raw, at, removal in raws:
+        if not isinstance(raw, str) or not raw:
+            continue
+        forms = escape_paths.landing(raw, at if isinstance(at, str) else None)
+        if forms:
+            placed.append((forms[0], forms[1], removal))
+    return placed
+
+
+def _takes(real_forms, removal, roots):
+    """The root of `roots` a removal of one of `real_forms` takes with it, else None."""
+    if not removal:
+        return None
+    for root in roots:
+        if any(escape_paths.inside(os.path.realpath(root), [form]) for form in real_forms):
+            return os.path.realpath(root)
+    return None
+
+
+def _claimed_bundles(task_id):
+    """The bundles the pending markers the lane of `task_id` claimed name (lessons.claim_pending,
+    D20), read with no lock and through the hook's cap. PPL_HOME/lessons is outside every lane's
+    write scope; a marker that cannot be read names none."""
+    folder = paths.pending_marker("X").parent
+    suffix = ".json" + paths.CLAIMED + task_id
+    try:
+        names = os.listdir(str(folder))
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if not name.endswith(suffix):
+            continue
+        try:
+            doc = json.loads(store.read_regular_text(folder / name, _READ_LIMIT))
+        except Exception:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        bundle = doc.get("bundle")
+        if (doc.get("task") == name[:-len(suffix)] and isinstance(bundle, str)
+                and os.path.isabs(bundle)):
+            found.append(bundle)
+    return found
+
+
+_REFLECTOR_READS = "[R-LANE-REFLECTOR-READS]"
+# A segment of a reflector's Glob pattern or Grep glob: a plain name, and one with * and ?
+# wildcards that holds a character other than a dot, so it cannot match `.` or `..`.
+_PLAIN_NAME = re.compile(r"[A-Za-z0-9._+-]+")
+_WILDCARD_NAME = re.compile(r"[A-Za-z0-9._+*?-]*[A-Za-z0-9_+-][A-Za-z0-9._+*?-]*")
+
+
+def _plain_glob(pattern):
+    """True when `pattern` is a relative glob each of whose /-separated segments is `**`, `*`,
+    a plain name of A-Z a-z 0-9 . _ + - other than `.` and `..`, or such a name with * and ?
+    wildcards that holds a character other than a dot (_WILDCARD_NAME). Nothing else is read:
+    a brace, a class, an extglob, an escape, `~`, whitespace or an empty segment fails."""
+    if not isinstance(pattern, str) or not pattern or os.path.isabs(pattern):
+        return False
+    for segment in pattern.split("/"):
+        if segment in ("*", "**") or _WILDCARD_NAME.fullmatch(segment):
+            continue
+        if not _PLAIN_NAME.fullmatch(segment) or segment in (".", ".."):
+            return False
+    return True
+
+
+def _reflector_roots_hold(raw, cwd, task_id):
+    """True when `raw`, from `cwd`, lies inside the lane of `task_id`'s own run directory, its
+    own scratch directory or a bundle it claimed, placed through every link (escape_paths) and
+    a case variant counting where the file system says it is the same entry. The scratch
+    directory is os_sandbox.scratch_dir's, spelled here so the hook never imports that module;
+    the claims are read only when the lane's own directories do not hold `raw`."""
+    landed = escape_paths.landing(raw, cwd)
+    if not landed:
+        return False
+    roots = [str(paths.run_dir(task_id)), str(paths.home() / "scratch" / task_id)]
+    if all(escape_paths.inside(form, roots) for form in landed[1]):
+        return True
+    roots.extend(_claimed_bundles(task_id))
+    return all(escape_paths.inside(form, roots) for form in landed[1])
+
+
+def reflector_read_denial(tool, tool_input, payload, task_id):
+    """Why ppl-reflector in the lane of `task_id` may not make this Read, Grep or Glob, else
+    None [R-LANE-REFLECTOR-READS]. A Read in runs/_archive, where every destroyed run lies, is
+    allowed only inside the bundle of a pending marker its own lane claimed, so a lane reflects
+    on the runs it took and no other. Grep and Glob go through an allowlist: a Grep names a
+    path, a Glob's root is its path, else the session cwd, and either lies inside a claimed
+    bundle, the lane's own run directory or its own scratch directory (_reflector_roots_hold);
+    a Glob pattern, and a Grep glob, is relative and plain (_plain_glob). A path that starts or
+    ends with whitespace or holds a control character, which Claude Code may trim, is refused."""
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    if tool == "Read":
+        raw = read_target_path(tool_input, payload)
+    else:
+        # Glob and Grep search their path key, whatever other keys the call carries
+        raw = tool_input.get("path")
+        glob = tool_input.get("pattern" if tool == "Glob" else "glob")
+        if tool == "Glob" and isinstance(glob, str) and os.path.isabs(glob):
+            return ("ppl-reflector in lane %s gives Glob the absolute pattern %s: pass the "
+                    "directory as path and give a relative pattern of plain names, * and ** %s"
+                    % (task_id, glob, _REFLECTOR_READS))
+        if (tool == "Glob" or glob is not None) and not _plain_glob(glob):
+            return ("ppl-reflector in lane %s gives %s the pattern %r: a relative pattern whose "
+                    "segments are **, *, or a name of A-Z a-z 0-9 . _ + - with * and ? "
+                    "wildcards and not only dots and wildcards %s"
+                    % (task_id, tool, glob, _REFLECTOR_READS))
+        if tool == "Glob":
+            raw = raw or cwd
+        if not (isinstance(raw, str) and raw):
+            return ("ppl-reflector in lane %s gives %s no path it can place: pass the claimed "
+                    "bundle's directory as path %s" % (task_id, tool, _REFLECTOR_READS))
+    if isinstance(raw, str) and escape_paths.unclear(raw):
+        return ("ppl-reflector in lane %s gives %s the path %r, which starts or ends with "
+                "whitespace or holds a control character that Claude Code may trim: spell the "
+                "path plainly %s" % (task_id, tool, raw, _REFLECTOR_READS))
+    if tool != "Read":
+        if _reflector_roots_hold(raw, cwd, task_id):
+            return None
+        return ("ppl-reflector in lane %s searches only a bundle its lane claimed with ppl "
+                "lessons pending, its own run directory or its own scratch directory, and %s "
+                "is in none of them: pass one of them as path %s"
+                % (task_id, raw, _REFLECTOR_READS))
+    landed = escape_paths.landing(raw, cwd) if isinstance(raw, str) and raw else None
+    archive = str(paths.runs_dir() / "_archive")
+    if not landed or escape_paths.under(landed[0], [archive]) is None:
+        return None
+    claimed = _claimed_bundles(task_id)
+    if claimed and all(escape_paths.inside(form, claimed) for form in landed[1]):
+        return None
+    return ("ppl-reflector in lane %s reads the run archive only inside the bundle of a run this "
+            "lane claimed with ppl lessons pending, and %s is not in one %s"
+            % (task_id, raw, _REFLECTOR_READS))
+
+
+def cross_lane_denial(payload, binding, lanes_list):
+    """("BOUNDARY_VIOLATION", reason) when a call writes where no session of this lane may,
+    else None. Every path key of an edit tool and every target of a write-shaped Bash is
+    placed through every link, in any letter case and by device and inode (escape_paths), and
+    a removal counts for what it takes with it:
+    - any session, in a lane or not: a lane's files, every start directory and the registry
+      (_lane_files) [R-LANE-START-DIR-PROTECTED];
+    - a session bound to a lane: another lane's worktree, and a project checkout a lane works
+      on, outside the bound lane's own worktree [R-LANE-CROSS-WRITE]. The lanes branch from
+      that checkout, and git in a worktree writes only its .git, which ppl's own git reaches.
+    `lanes_list` is the registry as read for this call, None when it could not be read: a
+    bound session then gets ("OWNER_DECISION", why) for a write, since another lane's work
+    cannot be placed."""
+    tool = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    placed = _lane_write_forms(tool, tool_input, payload.get("cwd"))
+    if not placed:
+        return None
+    agent = payload.get("agent_type")
+    who = agent if isinstance(agent, str) and agent else "a session with no role"
+    files = _lane_files(binding, lanes_list)
+    for forms, real_forms, removal in placed:
+        root = escape_paths.under(forms, files) or _takes(real_forms, removal, files)
+        if root:
+            return ("BOUNDARY_VIOLATION",
+                    "%s may not write %s: it is or lies under %s, where ppl lane keeps the "
+                    "lanes' session files (each lane's settings, hooks, skill plugin, agents, MCP "
+                    "config and guard facts) and the lane registry, which no session writes"
+                    % (who, forms[0], root))
+    entry = binding.entry
+    if not (binding.task and isinstance(entry, dict)):
+        return None
+    if lanes_list is None:
+        return ("OWNER_DECISION",
+                "lane %s's registry cannot be read now, so a write cannot be placed against the "
+                "other lanes' work: repair PPL_HOME/lanes.json, then run ppl lane resume %s"
+                % (binding.task, binding.task))
+    own = entry.get("worktree")
+    own = [own] if isinstance(own, str) and os.path.isabs(own) else []
+    others = [item for item in lanes_list
+              if isinstance(item, dict) and item.get("task") != binding.task]
+    for forms, real_forms, removal in placed:
+        for form in real_forms:
+            # where the write lands decides: in the lane's own worktree it is the run's own
+            # boundary's to judge, a link there to elsewhere lands elsewhere
+            if own and escape_paths.inside(form, own):
+                continue
+            for item in others:
+                worktree = item.get("worktree")
+                if not (isinstance(worktree, str) and os.path.isabs(worktree)):
+                    continue
+                if escape_paths.under([form], [worktree]) or _takes([form], removal, [worktree]):
+                    return ("BOUNDARY_VIOLATION",
+                            "%s may not write %s: it lies in lane %s's worktree %s, and lane %s "
+                            "writes only its own" % (who, forms[0], item.get("task"), worktree,
+                                                     binding.task))
+            for item in [entry] + others:
+                checkout = item.get("repo")
+                if not (isinstance(checkout, str) and os.path.isabs(checkout)):
+                    continue
+                within = escape_paths.under([form], [checkout])
+                root = within or _takes([form], removal, [checkout])
+                if root:
+                    return ("BOUNDARY_VIOLATION",
+                            "%s may not write %s: it %s the project checkout %s outside lane "
+                            "%s's worktree %s. The lanes branch from that checkout, and a lane "
+                            "writes only its own worktree"
+                            % (who, forms[0], "lies in" if within else "would take with it",
+                               root, binding.task, own[0] if own else "(none recorded)"))
+    return None
+
+
+# A word that is an assignment, an empty one included: `PPL_TASK= ppl` runs ppl.
+_ASSIGNMENT_WORD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+# The package or any module of it, as python -m takes it: ppl.__main__ runs cli.main too.
+_PPL_MODULE_RE = re.compile(r"ppl(?:\.\w+)*")
+
+
+def _runs_ppl_module(words):
+    """True when an interpreter's `words` name a ppl module for -m: a short-flag word with an
+    m in it (-m, -Im, -bBm) whose rest is the module (-mppl, -Imppl.cli), or, with no rest,
+    whose next word is. Every m of the cluster is tried, so a cluster python reads otherwise
+    is taken as running ppl rather than not."""
+    for index, word in enumerate(words):
+        if not (word.startswith("-") and not word.startswith("--")):
+            continue
+        for at in range(1, len(word)):
+            # the flags before the m are letters, as python's own short flags are
+            if word[at] != "m" or not (at == 1 or word[1:at].isalpha()):
+                continue
+            module = word[at + 1:] or (words[index + 1] if index + 1 < len(words) else "")
+            if _PPL_MODULE_RE.fullmatch(module):
+                return True
+    return False
+
+
+def _is_ppl_command(words):
+    """True when `words`, a command with its wrappers taken off, runs the ppl CLI: ppl or
+    ppl.cli spelled by any path, or python -m ppl[.<module>], past any assignment before
+    it."""
+    i = 0
+    while i < len(words) and _ASSIGNMENT_WORD_RE.match(words[i]):
+        i += 1
+    if i >= len(words):
+        return False
+    verb = _verb_name(words[i])
+    if verb in ("ppl", "ppl.cli"):
+        return True
+    return verb.startswith("python") and _runs_ppl_module(words[i + 1:])
+
+
+def _spells_ppl(command, segments):
+    """True when `command` may run ppl under a wrapper the write walk does not unwrap
+    (timeout, xargs, sudo, find -exec, stdbuf, an env -S string): ppl spelled in the raw text
+    (PPL_INVOCATION_RE), or a word shlex reads as ppl or ppl.cli by any path, or a python with
+    -m ppl[.<module>], anywhere in a segment the walk split."""
+    if PPL_INVOCATION_RE.search(command):
+        return True
+    for tokens, _, _ in segments:
+        for index, word in enumerate(tokens or ()):
+            if _verb_name(word) in ("ppl", "ppl.cli"):
+                return True
+            if _verb_name(word).startswith("python") and _runs_ppl_module(tokens[index + 1:]):
+                return True
+    return False
+
+
+def _whole_word(task, text):
+    return re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(task), text)
+
+
+def _task_named(command, segments, tasks):
+    """The task of `tasks` that `command` mentions: a word the write walk split, of its own or
+    as the value of an assignment or an option (--task=<id>), or a whole word anywhere in the
+    raw text, free text and quoted strings included."""
+    for tokens, _, _ in segments:
+        for word in tokens or ():
+            value = word.rpartition("=")[2]
+            if value in tasks:
+                return value
+    for task in sorted(tasks):
+        if _whole_word(task, command):
+            return task
+    return None
+
+
+def _task_assigned(command, segments, tasks):
+    """The task of `tasks` a PPL_TASK assignment names anywhere in `command`, as a word the
+    write walk split (PPL_TASK=<id> before a command, after env, in an export) or in the raw
+    text."""
+    for tokens, _, _ in segments:
+        for word in tokens or ():
+            if word.startswith("PPL_TASK=") and word[len("PPL_TASK="):] in tasks:
+                return word[len("PPL_TASK="):]
+    for task in sorted(tasks):
+        if re.search(r"PPL_TASK=[\"']?%s(?![A-Za-z0-9_])" % re.escape(task), command):
+            return task
+    return None
+
+
+# What the shell may expand in a directory the walk took as written: a glob, a brace, a ~user.
+_UNPLACED_CHARS = frozenset("*?[{")
+
+
+# What a segment's command position may hold that the cd follower does not see through: a
+# cd behind a control keyword, inside a function or in a string the shell runs again is not
+# one it follows [R-LANE-CROSS-TASK].
+_SHELL_STRUCTURE_WORDS = frozenset({"if", "then", "elif", "else", "while", "until", "for", "do",
+                                    "case", "select", "function", "eval", "source", "."})
+
+
+def _shell_structure(tokens, start):
+    """The control keyword, eval, source, `.`, exec with a command or function definition a
+    segment's command position holds, else None."""
+    word = tokens[start] if start < len(tokens) else ""
+    if word in _SHELL_STRUCTURE_WORDS:
+        return word
+    # `f() {` reaches the walk as the word f(, its ) read as a group closer
+    if "()" in word or word.endswith("(") or tokens[start + 1:start + 2] == ["()"]:
+        return "a function definition"
+    if start < len(tokens) and any(_verb_name(token) == "exec" for token in tokens[:start]):
+        return "exec"
+    return None
+
+
+def _unplaced_cwd(segments, cwd):
+    """Why the directories a command's segments run in cannot be placed, else None: the call
+    names no cwd, the walk was blinded (a $(...) or a backtick, a segment it cannot split
+    into words), a segment runs a control keyword, eval, source, `.`, exec with a command or
+    a function definition (_shell_structure), behind which a cd is not followed, or a cd,
+    pushd, popd or env -C went where it cannot follow (a variable, cd -, pushd +N, a bare cd)
+    or to a glob, a brace or a ~user it takes as written."""
+    if not isinstance(cwd, str):
+        return "a call that names no cwd"
+    if not segments or any(tokens is None for tokens, _, _ in segments):
+        return "a $(...), a backtick or a word the shell may split otherwise"
+    for tokens, start, _ in segments:
+        structure = _shell_structure(tokens, start)
+        if structure:
+            return "%s, behind which a cd is not followed" % structure
+    for _, _, where in segments:
+        if where is None:
+            return "a cd, pushd, popd or env -C to a variable, cd -, pushd +N or a bare cd"
+        if any(char in _UNPLACED_CHARS for char in where) or any(
+                part.startswith("~") for part in where.split("/")):
+            return "a cd to %s, which the shell expands" % where
+    return None
+
+
+def ppl_task_mismatch(command, binding, lanes_list, cwd=None):
+    """("BOUNDARY_VIOLATION", reason) when a Bash command of a session bound to a lane may run
+    ppl on another lane's run, else None [R-LANE-CROSS-TASK], for the orchestrator and every
+    role alike. It fails closed on what the write walk cannot read:
+    - a PPL_TASK assignment anywhere in the command naming a task another registry entry
+      holds, ppl or no ppl;
+    - a command that runs or spells ppl (a segment the walk reads as ppl, ppl spelled in the
+      raw text, or a word shlex reads as ppl, behind any wrapper) and mentions such a task
+      anywhere, as --task <id>, --task=<id>, a positional <id>, or as a whole word of free
+      text;
+    - ppl run in a directory inside another lane's start directory or worktree, where a bare
+      ppl with no PPL_TASK takes that lane's run (cli.resolve_task reads lanes.for_path), the
+      cwd followed through cd, pushd, popd and env -C as the write walk follows it, and the
+      session's own cwd where the walk recognises no ppl segment;
+    - a command that runs or spells ppl where that cwd cannot be placed (_unplaced_cwd): no
+      cwd in the call, the walk blinded by a substitution, a control keyword, eval, source,
+      exec or a function definition, or a cd it cannot follow or that the shell expands.
+    A task with no lane is no other lane's run: a pending reflection names a destroyed run's
+    task. `lanes_list` is the registry as read for this call: None, it could not be read, and
+    a command that may run ppl or sets PPL_TASK gets ("OWNER_DECISION", why)."""
+    if not (isinstance(command, str) and binding.task and not binding.problem):
+        return None
+    segments = []
+    _bash_write_targets(command, cwd if isinstance(cwd, str) else None, segments)
+    places = [where for tokens, start, where in segments
+              if tokens is not None and _is_ppl_command(tokens[start:])]
+    invoked = bool(places) or _spells_ppl(command, segments)
+    assigns = "PPL_TASK" in command or any(
+        word.startswith("PPL_TASK=") for tokens, _, _ in segments for word in tokens or ())
+    if not (invoked or assigns):
+        return None
+    if lanes_list is None:
+        return ("OWNER_DECISION",
+                "lane %s's registry cannot be read now, so a ppl command cannot be placed "
+                "against the other lanes' runs: repair PPL_HOME/lanes.json, then run ppl lane "
+                "resume %s" % (binding.task, binding.task))
+    others = [item for item in lanes_list if isinstance(item, dict)
+              and isinstance(item.get("task"), str) and item.get("task") != binding.task]
+    tasks = set(item["task"] for item in others)
+    assigned = _task_assigned(command, segments, tasks)
+    if assigned:
+        return ("BOUNDARY_VIOLATION",
+                "lane %s may not set PPL_TASK to %s, another lane's run: a lane drives only its "
+                "own run, and ppl reads PPL_TASK, which ppl lane set to %s"
+                % (binding.task, assigned, binding.task))
+    if not invoked:
+        return None
+    named = _task_named(command, segments, tasks)
+    if named:
+        return ("BOUNDARY_VIOLATION",
+                "lane %s may not run ppl on run %s, which is another lane's: a lane drives only "
+                "its own run, and a command that runs ppl may not name %s anywhere, so name %s "
+                "or leave the task out (ppl reads PPL_TASK)"
+                % (binding.task, named, named, binding.task))
+    unplaced = _unplaced_cwd(segments, cwd)
+    if unplaced:
+        # the remedy names a cd only where the cause is one
+        remedy = ("spell the directory plainly, or leave the cd out"
+                  if unplaced.startswith("a cd") else
+                  "run ppl as a plain command of its own, from the lane's own directories")
+        return ("BOUNDARY_VIOLATION",
+                "lane %s may not run ppl where the guard cannot tell the directory it runs in "
+                "(%s): a ppl run from inside another lane takes that lane's run, so %s"
+                % (binding.task, unplaced, remedy))
+    for where in places or [cwd if isinstance(cwd, str) else None]:
+        # the lane's own directories are its own, whatever else a registry entry names there
+        if not where or (binding.entry and lanes.holding([binding.entry], where)):
+            continue
+        holder = lanes.holding(others, where)
+        if holder:
+            return ("BOUNDARY_VIOLATION",
+                    "lane %s may not run ppl from %s, inside lane %s's start directory or "
+                    "worktree, where a bare ppl takes run %s: run it from lane %s's own "
+                    "directories" % (binding.task, where, holder["task"], holder["task"],
+                                     binding.task))
+    return None
+
+
+# The read forms of git config, the only ones a role runs in a lane [R-LANE-SHARED-GIT-DIR]:
+# the first word after config must be one of these, an option of the old syntax or a verb of
+# the new one, and no action option may follow anywhere.
+_GIT_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch",
+                               "--list", "-l", "get", "list"})
+_GIT_CONFIG_ACTIONS = frozenset({"--add", "--replace-all", "--unset", "--unset-all",
+                                 "--rename-section", "--remove-section", "--edit", "-e"})
+
+
+# A config key a command line may not set for git in a lane: an alias turns a word into
+# another subcommand, and an include brings in a file that can define one. Keys are read
+# in any letter case, as git reads a section name.
+_GIT_ALIAS_KEY_RE = re.compile(r"(?:alias|include|includeif)\.", re.IGNORECASE)
+# An environment variable that hands git config from elsewhere, an alias with it: the
+# GIT_CONFIG_* family, and a HOME or XDG_CONFIG_HOME that moves the global config.
+_GIT_CONFIG_ENV_RE = re.compile(r"^(?:GIT_CONFIG\w*|HOME|XDG_CONFIG_HOME)=")
+
+
+def _git_subcommand(words):
+    """(subcommand, the words after it, problem) of what follows a git, past git's own
+    options, each read as git.c reads it. `problem` is why the subcommand cannot be trusted:
+    an option this does not read, which may take a value and shift every word after it, a
+    value-taking option with no value, or an alias or include set on the command line (-c,
+    --config-env), which can make a word another subcommand. (None, [], None) when no
+    subcommand follows."""
+    i = 0
+    while i < len(words) and words[i].startswith("-"):
+        word = words[i]
+        if word in _GIT_GLOBAL_VALUE_FLAGS:
+            if i + 1 >= len(words):
+                return None, [], "%s with no value" % word
+            if word in ("-c", "--config-env") and _git_config_key_problem(words[i + 1]):
+                return None, [], "%s %s, %s" % (word, words[i + 1],
+                                                _git_config_key_problem(words[i + 1]))
+            i += 2
+        elif word.startswith(_GIT_GLOBAL_GLUED):
+            if (word.startswith("--config-env=")
+                    and _git_config_key_problem(word[len("--config-env="):])):
+                return None, [], "%s, %s" % (word,
+                                             _git_config_key_problem(word[len("--config-env="):]))
+            i += 1
+        elif word in _GIT_GLOBAL_FLAGS:
+            i += 1
+        else:
+            return None, [], "the option %s, which the guard does not read" % word
+    if i >= len(words):
+        return None, [], None
+    if any(char in words[i] for char in _BUILT_WORD_CHARS):
+        return None, [], "the subcommand %s, which the shell builds or expands" % words[i]
+    return words[i], words[i + 1:], None
+
+
+# What makes a word one the shell builds or expands before git or the guard sees it: a
+# variable, a substitution, a glob, a brace.
+_BUILT_WORD_CHARS = frozenset("$`*?[{")
+
+
+def _git_config_key_problem(value):
+    """Why a -c or --config-env value cannot be let through in a lane, else None: an alias or
+    an include, or a value the shell builds, which may be either."""
+    if _GIT_ALIAS_KEY_RE.match(value):
+        return "an alias or include set on the command line"
+    if "$" in value or "`" in value:
+        return "a config value the shell builds"
+    return None
+
+
+def _git_config_write(rest):
+    """True unless the words after git config are a read: the first a read option or verb,
+    and no action option among them. Anything else, an implicit get or set included, is a
+    write form."""
+    if not rest or rest[0] not in _GIT_CONFIG_READS:
+        return True
+    return any(word in _GIT_CONFIG_ACTIONS or word.split("=", 1)[0] in _GIT_CONFIG_ACTIONS
+               for word in rest)
+
+
+# A here-document operator and its delimiter word, read as the shell reads a word: quoted and
+# plain parts joined up to a blank or an operator character. The groups: the - of <<-, and
+# the word as written.
+_HEREDOC_OP_RE = re.compile(
+    r"<<(-?)[ \t]*((?:\$?'[^']*'|\$?\"(?:[^\"\\]|\\[\s\S])*\"|\\[\s\S]|[^\s;&|<>()'\"\\])+)")
+# One part of a delimiter word, for quote removal: a single- or a double-quoted string (a $
+# before it dropped), a backslashed character, or a plain one.
+_HEREDOC_WORD_PART_RE = re.compile(
+    r"\$?'([^']*)'|\$?\"((?:[^\"\\]|\\[\s\S])*)\"|\\([\s\S])|([\s\S])")
+# The one delimiter spelling counted as quoted [R-LANE-CROSS-WRITE]: exactly 'WORD', no quote
+# or backslash in WORD, as Claude Code writes it. Bash expands nothing in its body.
+_HEREDOC_QUOTED_WORD_RE = re.compile(r"'[^'\"\\]*'")
+# A backslash-newline a shell joins: one after an even run of backslashes.
+_CONTINUED_LINE_RE = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
+
+
+class _Unreadable(Exception):
+    """A substitution or a here-document left open."""
+
+
+class _NestedTooDeep(Exception):
+    """Substitutions and here-documents nested deeper than _NESTING_LIMIT."""
+
+
+# How deep the masking reads substitutions and here-document bodies nested in one another
+# [R-LANE-CROSS-WRITE]. A command nested deeper is read by its spelling only, so the work per
+# level, and the stack, stay bounded whatever the length of the command.
+_NESTING_LIMIT = 32
+
+
+# What feeds a here-document to an interpreter, whose body is code the walk cannot read: the
+# usual wrappers before it, and the interpreters [R-LANE-CROSS-WRITE].
+_HEREDOC_WRAPPERS = frozenset({"env", "command", "builtin", "exec", "nohup", "nice", "time",
+                               "sudo", "doas", "xargs", "timeout", "stdbuf"})
+_HEREDOC_INTERPRETERS = frozenset({"perl", "ruby", "node", "nodejs", "php", "osascript", "lua",
+                                   "tclsh", "Rscript", "deno", "bun", "pwsh", "awk", "gawk",
+                                   "irb", "julia", "jshell", "groovy"})
+
+
+def _heredoc_feeds_interpreter(part):
+    """Whether a here-document of the simple command whose text before the operator is `part`
+    is fed to python or another interpreter, read off its first word past assignments,
+    options, numbers, redirect words and the usual wrappers: True or False once `part` holds
+    such a word, None while it holds none yet. An operator's own word (<<EOF) is one, so a
+    simple command is read at most twice, whatever number of operators it holds
+    (_mask_text). Such a body is judged as commands like every other here-document's, and
+    spelled out besides."""
+    tokens = _shlex_tokens(part)
+    if tokens is None:
+        return False
+    for token in tokens:
+        if (_ASSIGNMENT_WORD_RE.match(token) or token.startswith("-") or token.isdigit()
+                or token in (">", ">>", "<") or _verb_name(token) in _HEREDOC_WRAPPERS):
+            continue
+        name = _verb_name(token)
+        return (name.startswith("python") or name.startswith("pypy")
+                or name in _HEREDOC_INTERPRETERS)
+    return None
+
+
+# What ends a simple command for _heredoc_feeds_interpreter, outside quotes: a separator, a
+# pipe, a newline, a subshell's or a group's parenthesis or brace, and the second & of &&.
+_COMMAND_ENDS = frozenset(";|\n(){}")
+
+
+def _heredoc_delimiter(written):
+    """The line that ends a here-document whose delimiter word is `written`: the word with its
+    quotes and backslashes removed, as bash reads it ('E'"OF" and E\\OF end at EOF)."""
+    out = []
+    for part in _HEREDOC_WORD_PART_RE.finditer(written):
+        single, double, escaped, plain = part.groups()
+        if single is not None:
+            out.append(single)
+        elif double is not None:
+            out.append(re.sub(r"\\([$`\"\\\n])",
+                              lambda m: "" if m.group(1) == "\n" else m.group(1), double))
+        elif escaped is not None:
+            out.append("" if escaped == "\n" else escaped)
+        else:
+            out.append(plain)
+    return "".join(out)
+
+
+def _quoted_body_commands(text, spelled):
+    """The body `text` of a here-document under exactly <<'WORD' as the commands it holds
+    [R-LANE-CROSS-WRITE]: each line that parses kept, to be judged as a command, and each line
+    that leaves a quote open, as an apostrophe in a commit message does, blanked and appended
+    to `spelled`, raw and with its backslashes taken out, to be read by its spelling only.
+    Bash expands nothing in such a body, but a shell it is piped to joins a backslash-newline,
+    so those lines are joined first."""
+    lines = []
+    for line in _CONTINUED_LINE_RE.sub(r"\1", text).split("\n"):
+        if _outside_quotes(line) is None:
+            spelled.append(line)
+            if "\\" in line:
+                spelled.append(line.replace("\\", ""))
+            line = ""
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _mask_text(text, i, closer, inner, fed, unsure, spelled, level=0):
+    """(text[i:] up to `closer` outside quotes, with each $(...) and backtick replaced by the
+    word $SUBST and the text inside each appended to `inner`, the substitutions it masks, the
+    index after `closer`). Every here-document body is taken out of the text and appended to
+    `inner` as commands, masked the same way, whatever its consumer or its pipeline; one fed
+    to an interpreter is appended to `fed` as well. `inner` takes (masked, substitutions)
+    pairs, and the substitutions of a text are (index of its view, a backtick) in the order
+    of its $SUBST words, a view's index being 0 for the outer text and 1 + its place in
+    `inner` otherwise, so the text as written is put together only where a check reads it
+    (_written_text) [R-LANE-CROSS-WRITE]. The guard does not model bash's here-document
+    expansion, so the body is read by its delimiter's spelling [R-LANE-CROSS-WRITE]:
+    - under exactly <<'WORD' or <<-'WORD' bash expands nothing: the lines that parse are the
+      commands, and each line that leaves a quote open goes to `spelled` (_quoted_body_commands);
+    - under any other spelling, bare, double-quoted, backslashed or mixed, a body that holds
+      a backslash or a line that leaves a quote open, which bash may read otherwise than this,
+      is appended to `unsure` too (lane_heredoc_denial).
+    One pass: whether a here-document feeds an interpreter is read once per simple command,
+    from where it starts in `out`, not from the whole text before each operator. `level` is
+    how deep this text is nested in substitutions and here-document bodies.
+    Raises _Unreadable on a substitution or a here-document left open, and _NestedTooDeep on
+    one nested deeper than _NESTING_LIMIT."""
+    out, pending = [], []
+    # (index of its view, a backtick) for each $SUBST of `out`, in order
+    masked = []
+    if level > _NESTING_LIMIT:
+        raise _NestedTooDeep("nested deeper than %d" % _NESTING_LIMIT)
+    quote, depth, n = None, 0, len(text)
+    # where the simple command being read starts in `out`, and whether its here-documents
+    # feed an interpreter, None until a word of it tells (_heredoc_feeds_interpreter)
+    command_at, feeds = 0, None
+    while i < n:
+        char = text[i]
+        if quote == "'":
+            out.append(char)
+            quote = None if char == "'" else quote
+            i += 1
+            continue
+        if char == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote is None and closer is not None and char == closer and (
+                closer == "`" or depth == 0):
+            return "".join(out), tuple(masked), i + 1
+        if text.startswith("$(", i) or char == "`":
+            start = i + (1 if char == "`" else 2)
+            body, kids, i = _mask_text(text, start, "`" if char == "`" else ")", inner, fed,
+                                       unsure, spelled, level + 1)
+            inner.append((body, kids))
+            masked.append((len(inner), char == "`"))
+            out.append("$SUBST")
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+        elif quote is None and char == "'":
+            quote = "'"
+        elif quote is None and text.startswith("<<", i) and not text.startswith("<<<", i):
+            match = _HEREDOC_OP_RE.match(text, i)
+            if match:
+                if feeds is None:
+                    feeds = _heredoc_feeds_interpreter("".join(out[command_at:]))
+                quoted = bool(_HEREDOC_QUOTED_WORD_RE.fullmatch(match.group(2)))
+                pending.append((match.group(1) == "-", _heredoc_delimiter(match.group(2)),
+                                bool(feeds), quoted))
+                out.append(match.group())
+                i = match.end()
+                continue
+        elif quote is None and char == "\n" and pending:
+            out.append(char)
+            i += 1
+            command_at, feeds = len(out), None
+            for strip_tabs, word, interpreted, quoted in pending:
+                body = []
+                while True:
+                    if i >= n:
+                        raise _Unreadable("here-document %s left open" % word)
+                    end = text.find("\n", i)
+                    end = n if end < 0 else end
+                    line = text[i:end]
+                    i = end + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == word:
+                        break
+                    body.append(line)
+                text_of_body = "\n".join(body)
+                if interpreted:
+                    fed.append(text_of_body)
+                if quoted:
+                    judged = _quoted_body_commands(text_of_body, spelled)
+                else:
+                    judged = text_of_body
+                    if ("\\" in text_of_body
+                            or any(_outside_quotes(line) is None for line in body)):
+                        unsure.append(text_of_body)
+                try:
+                    inner.append(_mask_text(judged, 0, None, inner, fed, unsure, spelled,
+                                            level + 1)[:2])
+                except _Unreadable:
+                    # a $( or a backtick left open in the body: kept raw, read by its spelling
+                    inner.append((judged, ()))
+            pending = []
+            continue
+        elif quote is None and char == "(":
+            depth += 1
+        elif quote is None and char == ")" and depth:
+            depth -= 1
+        out.append(char)
+        i += 1
+        if quote is None and (char in _COMMAND_ENDS or text[i - 2:i] == "&&"):
+            command_at, feeds = len(out), None
+    if closer is not None:
+        raise _Unreadable("%s left open" % closer)
+    return "".join(out), tuple(masked), n
+
+
+def _written_text(text, kids, views, substitutions):
+    """`text`, a view or a part of one, with each $SUBST in it put back as written, its own
+    substitutions too, here-document bodies out: `kids` are the substitutions of `text` in
+    order, and `views` and `substitutions` those _command_views gives."""
+    if not kids:
+        return text
+    parts = text.split("$SUBST")
+    out = [parts[0]]
+    for (index, backtick), part in zip(kids, parts[1:]):
+        inside = _written_text(views[index], substitutions[index], views, substitutions)
+        out.append(("`%s`" if backtick else "$(%s)") % inside)
+        out.append(part)
+    return "".join(out)
+
+
+def _command_views(command):
+    """((the command with every $(...) and backtick masked to the word $SUBST and every
+    here-document body taken out, then the same of the text inside each substitution and of
+    each here-document body, judged as commands line by line), (each here-document body fed
+    to an interpreter), (each body bash may read otherwise than the masking), (each line of a
+    body under <<'WORD' that leaves a quote open, to be read by its spelling only), (the
+    substitutions of each view, in the order of its $SUBST words: (index of the view of the
+    text inside, a backtick)), or None, and the command is read by its spelling, when a
+    substitution or a here-document is left open, they nest deeper than _NESTING_LIMIT
+    (_mask_text), or the command itself spells $SUBST, which would stand for a substitution
+    it does not hold. Read once per command: every check of a decision asks for the same
+    views, and they are shared, so the lists are tuples."""
+    return _read_views(command)[0] if isinstance(command, str) else None
+
+
+# Why the masking reads a command by its spelling alone, which a lane refuses
+# (lane_spelling_denial).
+_SPELLED_TOO_DEEP = ("its substitutions and here-documents nest deeper than %d levels"
+                     % _NESTING_LIMIT)
+_SPELLED_MASK_WORD = "it spells $SUBST, the word the guard masks a substitution with"
+_SPELLED_LEFT_OPEN = "a substitution or a here-document in it is left open"
+
+
+@functools.lru_cache(maxsize=8)
+def _read_views(command):
+    """(the views _command_views gives, None), else (None, why the masking reads the command
+    by its spelling alone: _SPELLED_TOO_DEEP, _SPELLED_MASK_WORD or _SPELLED_LEFT_OPEN)."""
+    # with backslash-newlines joined, as the views are when they are split (_built_raws)
+    if "$SUBST" in _CONTINUED_LINE_RE.sub(r"\1", command):
+        return None, _SPELLED_MASK_WORD
+    inner, fed, unsure, spelled = [], [], [], []
+    try:
+        outer, kids, _ = _mask_text(command, 0, None, inner, fed, unsure, spelled)
+    except (_NestedTooDeep, RecursionError):
+        return None, _SPELLED_TOO_DEEP
+    except _Unreadable:
+        return None, _SPELLED_LEFT_OPEN
+    return ((outer,) + tuple(view for view, _ in inner), tuple(fed), tuple(unsure),
+            tuple(spelled), (kids,) + tuple(kids for _, kids in inner)), None
+
+
+@functools.lru_cache(maxsize=8)
+def _blinded_write_shape(command):
+    """True when `command`, which holds a $(...) or a backtick the write walk does not read,
+    holds a write shape in its raw text or in any of its views, here-document bodies line by
+    line and the lines of a body under <<'WORD' that do not parse among them (_command_views)
+    [R-GUARD-BASH-WRITE-BOUNDARY]. The raw text keeps a shape a substitution splits (a verb,
+    a -i or an of= it builds), the views one a here-document's backslash-newline joins. Read
+    once per command, as every check of a decision asks."""
+    if BASH_WRITE_SHAPES.search(command):
+        return True
+    found = _command_views(command)
+    if found is None:
+        # read by its spelling, a here-document's backslash-newlines joined as its views are.
+        # The raw text was searched above, so the joined one only when it differs
+        joined = _CONTINUED_LINE_RE.sub(r"\1", command)
+        return joined != command and bool(BASH_WRITE_SHAPES.search(joined))
+    return bool(BASH_WRITE_SHAPES.search("\n".join(found[0] + found[1] + found[3])))
+
+
+def _built_word(tokens, start):
+    """The first of a segment's `tokens` the shell builds ($ or a backtick in it), whatever its
+    place: the command word, a wrapper's operand the walk does not unwrap (sudo, timeout,
+    xargs, stdbuf) or an argument, else None. Only a git the segment runs, at its command
+    position `start` past its assignments and the wrappers the walk models (env, command,
+    builtin, exec, nohup, nice, time), whose subcommand the walk reads has the words after it
+    judged by that subcommand (R40), so none of them counts; a git anywhere else, an echo's
+    argument or an operand of sudo or timeout, exempts nothing [R-LANE-CROSS-WRITE]."""
+    if not tokens:
+        return None
+    end = len(tokens)
+    if start < end and _verb_name(tokens[start]) == "git":
+        sub, _, problem = _git_subcommand(tokens[start + 1:])
+        if sub and not problem:
+            end = start
+    for word in tokens[:end]:
+        if "$" in word or "`" in word:
+            return word
+    return None
+
+
+def _built_raws(index, views, substitutions, covered):
+    """The text as written (_written_text) of each segment of view `index` that holds a word
+    the shell builds (_built_word), the segments read by the write walk's splitting with
+    backslash-newlines joined; the whole view's when only the walk of the whole view finds such
+    a word. The substitutions inside each such text are added to `covered`: whatever their own
+    texts spell, this one spells too, so they are not put together and read again. None when
+    the view's $SUBST words and its substitutions do not pair, which _read_views prevents."""
+    view, kids = views[index], substitutions[index]
+    segments = [text for text, _, _ in _write_segments(_CONTINUED_LINE_RE.sub(r"\1", view))]
+    counts = [text.count("$SUBST") for text in segments]
+    if sum(counts) != len(kids):
+        return None
+    found, at = [], 0
+    for text, count in zip(segments, counts):
+        mine, at = kids[at:at + count], at + count
+        if "$" not in text and "`" not in text:
+            continue
+        walked = []
+        _bash_write_targets(text, None, walked)
+        if any(_built_word(tokens, start) for tokens, start, _ in walked):
+            found.append(_CONTINUED_LINE_RE.sub(
+                r"\1", _written_text(text, mine, views, substitutions)))
+            covered.update(child for child, _ in mine)
+    if not found:
+        found.append(_CONTINUED_LINE_RE.sub(r"\1", _written_text(view, kids, views,
+                                                                 substitutions)))
+        covered.update(child for child, _ in kids)
+    return found
+
+
+def _read_by_spelling(command):
+    """What _lane_git_segments gives for a command the masking cannot read: no segment, the
+    command unread as written and with backslash-newlines joined and backslashes taken out, as
+    a line of a body under <<'WORD' that does not parse is read (_quoted_body_commands), and
+    the command as a body an interpreter may be fed when it holds a here-document."""
+    return ([], [command, _CONTINUED_LINE_RE.sub(r"\1", command).replace("\\", "")],
+            (command,) if "<<" in command else (), [])
+
+
+def _lane_git_segments(command, cwd):
+    """(every segment the write walk reads over each view of `command` (_command_views), the
+    texts it could not read as words, the here-document bodies fed to an interpreter, the
+    texts as written where a word is one the shell builds): the whole command is unread when
+    the masking cannot read it, else each segment the walk cannot split and each line of a
+    body under <<'WORD' that does not parse. A segment holding a word the shell builds
+    (_built_word) may run git or ppl with its subcommand built too, so its text as written,
+    its substitutions in it and here-document bodies out (_built_raws), is read by its
+    spelling [R-LANE-CROSS-WRITE]. A view is read before the substitutions it holds, and one
+    whose text as written is inside such a text already read is walked but not read again:
+    every spelling check holds on the larger text whenever it holds on the smaller, which
+    $( or a backtick and ) or a backtick bound, so each character is put together and read
+    once, however deep the substitutions nest."""
+    found = _command_views(command)
+    if found is None:
+        return _read_by_spelling(command)
+    views, fed, _, spelled, substitutions = found
+    base = cwd if isinstance(cwd, str) else None
+    walked, unread, built, covered = {}, {}, {}, set()
+    # each view comes after the substitutions it holds (_mask_text), so read backwards
+    for index in [0] + list(range(len(views) - 1, 0, -1)):
+        view = views[index]
+        if index in covered:
+            covered.update(child for child, _ in substitutions[index])
+        if "$(" in view or "`" in view:
+            # a substitution the masking could not see, as in a here-document body after an
+            # apostrophe: the view is read by its spelling
+            unread[index] = view
+            continue
+        segments = walked[index] = []
+        _bash_write_targets(view, base, segments)
+        if index not in covered and any(_built_word(tokens, start)
+                                        for tokens, start, _ in segments):
+            texts = _built_raws(index, views, substitutions, covered)
+            if texts is None:
+                return _read_by_spelling(command)
+            built[index] = texts
+    order = range(len(views))
+    segments = [segment for index in order for segment in walked.get(index, ())]
+    return (segments,
+            list(spelled) + [unread[index] for index in order if index in unread]
+            + [text for tokens, text, _ in segments if tokens is None],
+            fed, [text for index in order for text in built.get(index, ())])
+
+
+# What an interpreter's here-document may not spell in a lane: ppl, or git and then worktree
+# or config, which the walk cannot read inside code (_interpreted_spelling).
+_INTERPRETED_PPL_RE = re.compile(r"(?<![\w.-])ppl\b")
+_SPELLED_WORKTREE_OR_CONFIG_RE = re.compile(r"\b(?:worktree|config)\b")
+# What the text as written of a segment holding a word the shell builds may not spell in a
+# lane [R-LANE-CROSS-WRITE]: git by any path, then worktree or config, each a word of its own
+# (not .git/config, src/config, check-config.sh or -Dconfig=x), or an alias or include set
+# after it, and ppl as a command ($(echo ppl), `which ppl`, /usr/local/bin/ppl, -m ppl.cli),
+# not ~/.ppl, a ppl/ directory or a test_ppl.py file.
+_GIT_WORD_RE = re.compile(r"(?<![\w.-])git(?![\w./-])")
+_WORKTREE_WORD_RE = re.compile(r"(?<![\w./-])worktree(?![\w./-])")
+_CONFIG_WORD_RE = re.compile(r"(?<![\w./-])config(?![\w./-])")
+_ALIAS_SET_RE = re.compile(r"(?:-c\s*|--config-env[\s=]*)[\"']?(?:alias|include)", re.IGNORECASE)
+_PPL_SPELLED_RE = re.compile(r"(?<![\w.-])ppl(?:\.\w+)*(?![\w./-])")
+# The one git worktree a lane may run, at a command position of such a text (its start, or
+# after a separator, a pipe, a newline, a $(, a backtick or a group's opener): not read as git
+# and then worktree [R-LANE-CROSS-WRITE]. One an echo or a sed spells is read.
+_GIT_WORKTREE_LIST_RE = re.compile(r"(^|[\n;&|(`{])([ \t]*)git[ \t]+worktree[ \t]+list(?![\w./-])")
+# What a text the walk could not read as words may not spell in a lane: git, then worktree,
+# or for a role config, or an alias or include set after it (_git_then).
+_SPELLED_GIT_RE = re.compile(r"\bgit\b")
+_SPELLED_GIT_ANY_CASE_RE = re.compile(r"\bgit\b", re.IGNORECASE)
+_SPELLED_WORKTREE_RE = re.compile(r"\bworktree\b")
+_SPELLED_CONFIG_RE = re.compile(r"\bconfig\b")
+# An assignment of a variable that hands git config from elsewhere (_GIT_CONFIG_ENV_RE),
+# spelled at a word's start in a text: JAVA_HOME= and GRADLE_USER_HOME= are none, and a run of
+# word characters is tried once, from its start.
+_GIT_CONFIG_ENV_SPELLED_RE = re.compile(r"(?<!\w)(?:GIT_CONFIG\w*|HOME|XDG_CONFIG_HOME)=")
+
+
+def _git_then(word_re, text, git_re=_GIT_WORD_RE):
+    """True when `word_re` matches in `text` after its first git word (`git_re`): one search
+    each, so a text with many git words is read in one pass."""
+    git = git_re.search(text)
+    return bool(git and word_re.search(text, git.end()))
+
+
+def _interpreted_spelling(body):
+    """The first ppl, or git through the worktree or config after it, that the here-document
+    `body` fed to an interpreter spells, else None: three searches, so a body of many git
+    words is read in one pass."""
+    ppl = _INTERPRETED_PPL_RE.search(body)
+    git = _SPELLED_GIT_RE.search(body)
+    after = git and _SPELLED_WORKTREE_OR_CONFIG_RE.search(body, git.end())
+    if after and not (ppl and ppl.start() < git.start()):
+        return body[git.start():after.end()]
+    return ppl.group() if ppl else None
+
+
+def lane_heredoc_denial(command, binding):
+    """("BOUNDARY_VIOLATION", reason) when a Bash command of a session bound to a lane holds a
+    here-document bash may read otherwise than the guard does, else None
+    [R-LANE-CROSS-WRITE]: one whose delimiter is spelled other than exactly <<'WORD' or
+    <<-'WORD' (bare, double-quoted, backslashed or mixed) and whose body holds a backslash
+    (bash may collapse \\\\, \\$ and \\` and join a backslash-newline first) or a line that
+    leaves a quote open. Denied for every session, whatever the body is fed to, since every
+    check that reads the command's words would read that body as written. A body under
+    exactly <<'WORD' is never denied here: its lines that do not parse are read by their
+    spelling (_quoted_body_commands). A command the masking cannot read (_command_views), its
+    bodies unread too, is denied when it holds any operator not exactly <<'WORD'."""
+    if not (isinstance(command, str) and binding.task and not binding.problem
+            and "<<" in command):
+        return None
+    found = _command_views(command)
+    if found is None:
+        unsure = any(not _HEREDOC_QUOTED_WORD_RE.fullmatch(operator.group(2))
+                     for operator in _HEREDOC_OP_RE.finditer(command))
+    else:
+        unsure = bool(found[2])
+    if not unsure:
+        return None
+    return ("BOUNDARY_VIOLATION",
+            "lane %s may not run a here-document whose delimiter is not exactly <<'WORD' and "
+            "whose body holds a backslash or a line that leaves a quote open, or that the guard "
+            "cannot read: bash may read it otherwise than the guard, so write the delimiter as "
+            "<<'EOF'" % binding.task)
+
+
+def lane_spelling_denial(command, agent, binding, cwd=None):
+    """("BOUNDARY_VIOLATION", reason) for a Bash command of a session bound to a lane that the
+    masking reads by its spelling alone (_read_views): its substitutions and here-documents
+    nest deeper than _NESTING_LIMIT, it spells $SUBST, or a substitution or a here-document in
+    it is left open (R68). Else None [R-LANE-CROSS-WRITE]. Read by its spelling, the command
+    skips the segment walk and the built-ppl check, so a git or a ppl spelled otherwise than
+    the spelling checks read would pass: such a command is denied, after the here-document and
+    git checks, which keep their reasons. Decided before the write shapes are searched, which
+    on a long command of git words takes seconds."""
+    if not (isinstance(command, str) and binding.task and not binding.problem):
+        return None
+    why = _read_views(command)[1]
+    if why is None:
+        return None
+    return (lane_heredoc_denial(command, binding) or lane_git_denial(command, agent, binding, cwd)
+            or ("BOUNDARY_VIOLATION",
+                "lane %s may not run a command the guard can read only by its spelling, "
+                "since %s: close what is open, write it with fewer nested substitutions, or "
+                "name the variable otherwise" % (binding.task, why)))
+
+
+def lane_git_denial(command, agent, binding, cwd=None):
+    """("BOUNDARY_VIOLATION", reason) for a git command a session bound to a lane may not run,
+    else None. Any word read as git counts, by any path and behind any wrapper, and a command
+    the write walk cannot split fails closed on the spelling:
+    - git worktree in any form but list, for every session [R-LANE-CROSS-WRITE]: git takes a
+      worktree by a unique tail of its path from anywhere in the repository, so remove,
+      move, prune, lock, unlock and repair can reach another lane's worktree whatever path
+      the guard reads, and ppl lane makes and ppl destroy removes a lane's own;
+    - git config in any form but a read, for a ppl-* role [R-LANE-SHARED-GIT-DIR]: git in a
+      worktree writes its config into the project checkout's shared .git/config, which every
+      lane on that checkout and the operator's own git read;
+    - a git whose subcommand cannot be trusted, for every session [R-LANE-CROSS-WRITE]: an
+      alias or include set on its command line (-c, --config-env, keys in any case), config
+      handed in from elsewhere by GIT_CONFIG_*, HOME or XDG_CONFIG_HOME, or a global option
+      the guard does not read, which may take a value and shift the words (_git_subcommand);
+    - a segment holding a word the shell builds, in any place but after a git it runs whose
+      subcommand the walk reads (_built_word), and a worktree, config or ppl word, for every
+      session [R-LANE-CROSS-WRITE];
+    - such a segment is read as written by its spelling as well (_lane_git_segments): git
+      then worktree, or for a role config, each a word of its own, an alias or include set
+      after git, or ppl, so a git or a ppl built behind a wrapper is judged by its spelling;
+      a git worktree list it runs is no git then worktree.
+    Aliases in the operator's own global config are the operator's, and the checkout's
+    .git/config is kept from the lanes (R-LANE-SHARED-GIT-DIR)."""
+    if not (isinstance(command, str) and binding.task and not binding.problem):
+        return None
+    role = escape.is_role(agent)
+    segments, unread, fed, built = _lane_git_segments(command, cwd)
+    for body in fed:
+        spelled = _interpreted_spelling(body)
+        if spelled:
+            return ("BOUNDARY_VIOLATION",
+                    "lane %s may not feed an interpreter a here-document that spells %r: the "
+                    "guard cannot read ppl, git worktree or git config inside code"
+                    % (binding.task, spelled[:60]))
+    # only what the walk could not read as words is judged by its spelling: a git whose
+    # subcommand it reads, a commit whose message is a substitution among them, is judged by
+    # that subcommand
+    worktree = (any(_git_then(_SPELLED_WORKTREE_RE, text, _SPELLED_GIT_RE) for text in unread)
+                or any(_git_then(_WORKTREE_WORD_RE, _GIT_WORKTREE_LIST_RE.sub(r"\1\2", text))
+                       for text in built))
+    config = role and (any(_git_then(_SPELLED_CONFIG_RE, text, _SPELLED_GIT_RE)
+                           for text in unread)
+                       or any(_git_then(_CONFIG_WORD_RE, text) for text in built))
+    untrusted = ((any(_git_then(_ALIAS_SET_RE, text, _SPELLED_GIT_ANY_CASE_RE)
+                      for text in unread)
+                  or any(_git_then(_ALIAS_SET_RE, text) for text in built))
+                 and "an alias or include set on the command line")
+    if not untrusted and any(_PPL_SPELLED_RE.search(text) for text in built):
+        untrusted = "a word the shell builds where ppl is spelled"
+    runs_git = (any(_SPELLED_GIT_RE.search(text) for text in unread)
+                or any(_GIT_WORD_RE.search(text) for text in built))
+    for tokens, start, _ in segments:
+        if tokens is None:
+            continue
+        word = _built_word(tokens, start)
+        if word and ({"worktree", "config"} & set(tokens) or _runs_ppl_module(tokens)
+                     or any(_verb_name(each) in ("ppl", "ppl.cli") for each in tokens)):
+            untrusted = untrusted or ("%s, a word the shell builds, beside a worktree, config "
+                                      "or ppl word" % word)
+        for index, word in enumerate(tokens):
+            if _verb_name(word) != "git":
+                continue
+            runs_git = True
+            sub, rest, problem = _git_subcommand(tokens[index + 1:])
+            # an option it cannot read shifts every word after it: in command position the
+            # git is refused, elsewhere (a wrapper's operand, a search word) when a
+            # subcommand it guards follows anywhere
+            if problem and ("alias or include" in problem or index == start
+                            or {"worktree", "config"} & set(tokens[index + 1:])):
+                untrusted = untrusted or problem
+            if sub == "worktree" and rest[:1] != ["list"]:
+                worktree = True
+            if sub == "config" and role and _git_config_write(rest):
+                config = True
+    if runs_git:
+        moved = [word for tokens, _, _ in segments for word in tokens or ()
+                 if _GIT_CONFIG_ENV_RE.match(word)]
+        if moved or any(_GIT_CONFIG_ENV_SPELLED_RE.search(text) for text in unread + built):
+            untrusted = untrusted or ("%s, which hands git config from elsewhere"
+                                      % (moved[0].split("=", 1)[0] + "=" if moved
+                                         else "an environment assignment"))
+    if untrusted:
+        return ("BOUNDARY_VIOLATION",
+                "lane %s may not run a command with %s: the guard reads git's subcommand to "
+                "keep git worktree and a role's git config in bounds, and that could make it "
+                "another" % (binding.task, untrusted))
+    if worktree:
+        return ("BOUNDARY_VIOLATION",
+                "lane %s may not run git worktree but git worktree list: git takes a worktree "
+                "by a tail of its path, which can name another lane's, and ppl lane and ppl "
+                "destroy make and remove a lane's own" % binding.task)
+    if config:
+        return ("BOUNDARY_VIOLATION",
+                "%s may not write git config in lane %s: the project checkout's .git/config is "
+                "shared by every lane on it and by the operator's own git, so only a read is a "
+                "role's, its first word one of %s and no %s after it"
+                % (agent, binding.task, ", ".join(sorted(_GIT_CONFIG_READS)),
+                   ", ".join(sorted(_GIT_CONFIG_ACTIONS))))
+    return None
+
+
+def _named_task(argv):
+    """The task the hook's command line names, read from its words alone (no file), else
+    None: what a refusal's remedy names when the lane cannot be confirmed."""
+    try:
+        return lanes.hook_task(argv)
+    except ValueError:
+        return None
+
+
+def _decide(payload, argv=()):
+    """The decision on one tool call, for the hook whose command line is `argv`."""
     if not isinstance(payload, dict):
         return None
     tool = payload.get("tool_name", "")
@@ -2299,12 +3612,22 @@ def _decide(payload):
     if not isinstance(tool_input, dict):
         tool_input = {}
     agent = payload.get("agent_type")
+    # The lane binding, read once and only when a check needs it: the role checks just
+    # below decide from the call alone.
+    bound = []
+
+    def binding():
+        if not bound:
+            bound.append(lanes.binding(argv, _READ_LIMIT))
+        return bound[0]
+
     # R-OS-SANDBOX-ROLE-NO-ESCAPE, R-OS-SANDBOX-ORCHESTRATOR-SHAPE: a call that asks to run
     # outside the OS sandbox is decided first, before any file read, so a ppl-* role is
     # refused from the call alone. One the escape check lets through still meets every
     # check below, the tracker gate and the forge denials included.
     if escape.flagged(payload):
-        refusal = escape.decide(payload, paths.home(), active_state)
+        refusal = escape.decide(payload, facts_file(argv), lambda: bound_state(binding()),
+                                _named_task(argv))
         if refusal:
             return deny(*refusal)
 
@@ -2328,13 +3651,16 @@ def _decide(payload):
     # R-OS-SANDBOX-PROTECTED-PATHS: an edit tool runs outside the OS sandbox too, so while the
     # guard facts exist it writes only where sandboxed Bash may, and never what an unsandboxed
     # gh, git or ppl reads, for roles and the orchestrator alike, before any run file is read.
-    # Every path key of the call is checked, not only the one target_path takes.
+    # In a lane with no facts the protected paths every session has still hold. Every path
+    # key of the call is checked, not only the one target_path takes.
     if tool in WRITE_TOOLS:
-        refusal = protected_edit_denial(payload)
+        refusal = protected_edit_denial(payload, argv)
         if refusal:
             return deny(*refusal)
 
-    active = _active_task_id()
+    # The bound task's snapshot only adds to the global denials below, so it is asked even
+    # for a lane the registry cannot confirm. A malformed --task names no snapshot.
+    active = binding().task
 
     denied = denied_tools(active)
     if isinstance(tool, str) and tool in denied:
@@ -2395,13 +3721,46 @@ def _decide(payload):
         return deny("BOUNDARY_VIOLATION",
                     "run state is written only by ppl, use the ppl CLI")
 
-    task_id, state = active_state()
+    # R-LANE-ROLE-OUTSIDE, R-LANE-HOOK-BINDING: past the global denials every check is the
+    # bound run's, so a session in no lane stops here, and one in a lane that cannot be
+    # confirmed fails closed.
+    refusal = lane_denial(binding(), agent, tool)
+    if refusal:
+        return refusal
+    if binding().problem:
+        return None
+
+    # R-LANE-START-DIR-PROTECTED, R-LANE-CROSS-WRITE, R-LANE-CROSS-TASK and
+    # R-LANE-SHARED-GIT-DIR: before the bound run's state is read, so a lane before ppl init
+    # is held to them as after it, and the start directories for a session in no lane too.
+    # The registry is read for the other lanes, the binding having read only this lane's
+    # entry.
+    if tool in WRITE_TOOLS or tool == "Bash":
+        refusal = (lane_spelling_denial(tool_input.get("command"), agent, binding(),
+                                        payload.get("cwd")) if tool == "Bash" else None)
+        if refusal:
+            return deny(*refusal)
+        try:
+            listed = lanes.read(_READ_LIMIT)
+        except Exception:
+            listed = None
+        refusal = cross_lane_denial(payload, binding(), listed)
+        if refusal is None and tool == "Bash":
+            refusal = (lane_heredoc_denial(tool_input.get("command"), binding())
+                       or ppl_task_mismatch(tool_input.get("command"), binding(), listed,
+                                            payload.get("cwd"))
+                       or lane_git_denial(tool_input.get("command"), agent, binding(),
+                                          payload.get("cwd")))
+        if refusal:
+            return deny(*refusal)
+
+    task_id, state = bound_state(binding())
     if state is None:
-        # state.json for the active run is missing, corrupt, or malformed. We
-        # cannot scope by cwd without a readable repo path, but a ppl-* agent_type
-        # is pipeline-internal and never appears in an unrelated session, so a
-        # tool call carrying one is denied outright rather than silently falling
-        # through every scoped check because state could not be read.
+        # state.json for the bound run is missing, corrupt, or malformed. The
+        # write boundary cannot be checked without a readable repo path, and a
+        # ppl-* agent_type is pipeline-internal, so a tool call carrying one is
+        # denied outright rather than silently falling through every scoped check
+        # because state could not be read.
         if task_id and agent in boundary.ROLE_RULES:
             return deny("OWNER_DECISION",
                         "run %s state is unreadable, cannot verify write boundary "
@@ -2412,6 +3771,11 @@ def _decide(payload):
                         "run %s state is unreadable, cannot check the ppl-test-worker "
                         "dispatch for implementation content. Repair or restore "
                         "state.json to continue." % task_id)
+        if task_id:
+            # R-UNROLED-REPO-WRITE before ppl init, or over an unreadable state.json: the
+            # lane's own worktree and repo place the write instead
+            return stateless_lane_write_denial(tool, tool_input, path, payload, agent,
+                                               task_id, binding().entry)
         return None
 
     is_role = agent in boundary.ROLE_RULES
@@ -2421,8 +3785,7 @@ def _decide(payload):
     patterns = test_patterns(task_id)
 
     # R-TEST-WORKER-DISPATCH-LEAK. ppl-test-worker is a pipeline role name, so a
-    # dispatch of it is this run's business wherever the dispatching session sits,
-    # and the check runs before any cwd-based scoping.
+    # dispatch of it is this run's business wherever the dispatching session sits.
     if dispatches_test_worker(tool, tool_input):
         try:
             leak = dispatch_leak_deny(tool_input.get("prompt"), task_id, state, patterns)
@@ -2439,7 +3802,7 @@ def _decide(payload):
     if tool == "Bash":
         # R-GUARD-BASH-WRITE-BOUNDARY (whole-branch review, C1): a
         # write-shaped Bash construct (redirect, tee, sed -i, cp, mv, dd, rm)
-        # targeting a path inside the active run's repo gets the same
+        # targeting a path inside the bound run's repo gets the same
         # per-role decision a structured Write does, from any cwd, for a
         # role or for an unroled session. See the function's own docstring
         # for exactly what this does and does not cover.
@@ -2450,29 +3813,10 @@ def _decide(payload):
             return bash_result
 
     hits_repo = targets_repo(path, state)
-    # Three independent ways into scope, because cwd alone was none of them in
-    # practice: a ppl-* agent_type is pipeline-internal wherever its session
-    # sits, a write aimed into the run's repo is the run's business whoever
-    # launched it, and cwd still catches the orchestrator's own session doing
-    # something that has no target path at all (a Jira write, a Bash call).
-    scoped = is_role or hits_repo or in_scope(payload, state)
-    # DESIGN 5.4: an isolated run (the default - see `ppl init --isolated`) is
-    # one whose guard hook is assumed to be registered only in its own launch
-    # directory, so it never fires in an unrelated session at all. Under that
-    # assumption, the unroled main session - the orchestrator, which carries no
-    # agent_type - can safely be scoped by "this run is active" rather than by
-    # cwd for the Jira gate and the operator pause: the documented workflow
-    # creates the worktree beside the orchestrator's session rather than under
-    # it, so cwd never lined up for exactly that session. This does not widen
-    # the write-boundary tail below, which stays gated on `scoped` alone - an
-    # unroled session's ordinary file write outside any run's repo is still
-    # untouched. The accepted residual: if the operator's actual hook
-    # registration is broader than an isolated launch despite the flag, both
-    # gates reach their other projects' own unroled sessions too, for as long
-    # as this run is active.
-    halt_scoped = scoped or (agent is None and bool(state.get("isolated", True)))
-    if not halt_scoped:
-        return None
+    # Every call from here on is the bound run's, whatever the session's cwd: the hook
+    # fires only in its own lane's session, which ppl lane started with this run's
+    # settings, so neither cwd nor the target path has to place the call. An unroled
+    # session's write outside the run's repo is still untouched, see the tail below.
 
     # R-TRACKER-CLI-GATE and R-JIRA-GATE: one stage check for both transports. The
     # CLI gate runs first, as it needs no snapshot, and asks the stage before reading
@@ -2497,9 +3841,6 @@ def _decide(payload):
         return deny("OWNER_DECISION",
                     "run %s is %sd by the operator" % (task_id, record["command"]))
 
-    if not scoped:
-        return None
-
     # R-TEST-WORKER-READ-TOOLS / R-TEST-WORKER-BASH-READS: the test worker
     # writes tests from behaviour, never from the implementation (5.3/5.4).
     # Placed before the write-only checks below because these are read
@@ -2517,27 +3858,56 @@ def _decide(payload):
                 return deny("BOUNDARY_VIOLATION", boundary.unknown_patterns_reason(task_id)
                             if patterns is None else reason)
         elif tool in READ_TOOLS:
-            raw = read_target_path(tool_input, payload)
+            # every path key the call carries is judged, whichever one the tool reads
+            named = [str(tool_input[key]) for key in READ_PATH_KEYS if tool_input.get(key)]
+            raws = named or [read_target_path(tool_input, payload)]
             glob = tool_input.get("pattern") if tool == "Glob" else None
-            for named in (raw, glob):
-                if isinstance(named, str) and _has_dotdot(named):
-                    return deny("BOUNDARY_VIOLATION", _dotdot_reason(tool, named))
-            # A relative path is the session's, so it resolves against the
-            # payload cwd, never the hook process's own.
-            target = _resolve_path_against_cwd(raw, payload.get("cwd"))
-            if not target:
-                return deny("BOUNDARY_VIOLATION",
-                            "ppl-test-worker's %s call names no resolvable path" % tool)
-            if targets_repo(target, state):
-                rel = relative_to_repo(target, state)
-                if not boundary.path_is_test_scoped(rel, read_patterns):
-                    if patterns is None:
-                        return deny("BOUNDARY_VIOLATION",
-                                    boundary.unknown_patterns_reason(task_id))
+            for each in raws + [glob]:
+                if isinstance(each, str) and _has_dotdot(each):
+                    return deny("BOUNDARY_VIOLATION", _dotdot_reason(tool, each))
+            # Claude Code trims a path before it reads it and the guard does not, so a blank
+            # at either end would place it against the session cwd, outside the repo in a lane
+            for each in named + [glob]:
+                if isinstance(each, str) and escape_paths.unclear(each):
                     return deny("BOUNDARY_VIOLATION",
-                                "ppl-test-worker may not read %s: only test sources are "
-                                "visible to it, reading the implementation is the exact "
-                                "channel this cage exists to close" % target)
+                                "ppl-test-worker gives %s %r, which starts or ends with "
+                                "whitespace or holds a control character that Claude Code may "
+                                "trim: spell the path plainly" % (tool, each))
+            # Glob expands braces, so a group that could make an alternative absolute or
+            # climbing is refused (R68 AMENDED), then an absolute pattern, which lists what it
+            # names whatever the path
+            braces = _glob_brace_problem(glob) if isinstance(glob, str) else None
+            if braces:
+                return deny("BOUNDARY_VIOLATION",
+                            "ppl-test-worker gives Glob the pattern %s, which has %s: keep "
+                            "each brace alternative to a plain name such as {ts,tsx}, or glob "
+                            "twice" % (glob, braces))
+            if isinstance(glob, str) and os.path.isabs(os.path.expanduser(glob)):
+                return deny("BOUNDARY_VIOLATION",
+                            "ppl-test-worker gives Glob the absolute pattern %s: pass the test "
+                            "directory as path and give a relative pattern" % glob)
+            for raw in raws:
+                # A relative path is the session's, so it resolves against the
+                # payload cwd, never the hook process's own.
+                target = _resolve_path_against_cwd(raw, payload.get("cwd"))
+                if not target:
+                    return deny("BOUNDARY_VIOLATION",
+                                "ppl-test-worker's %s call names no resolvable path" % tool)
+                if targets_repo(target, state):
+                    rel = relative_to_repo(target, state)
+                    if not boundary.path_is_test_scoped(rel, read_patterns):
+                        if patterns is None:
+                            return deny("BOUNDARY_VIOLATION",
+                                        boundary.unknown_patterns_reason(task_id))
+                        return deny("BOUNDARY_VIOLATION",
+                                    "ppl-test-worker may not read %s: only test sources are "
+                                    "visible to it, reading the implementation is the exact "
+                                    "channel this cage exists to close" % target)
+
+    if agent == "ppl-reflector" and tool in READ_TOOLS:
+        reason = reflector_read_denial(tool, tool_input, payload, task_id)
+        if reason:
+            return deny("BOUNDARY_VIOLATION", reason)
 
     if agent == "ppl-review-responder" and tool == "Bash":
         command = tool_input.get("command", "")
@@ -2573,7 +3943,7 @@ def _decide(payload):
     if hits_repo:
         # DESIGN 5.3: the orchestrator writes state through ppl and nothing else.
         # It carries no agent_type, and neither does any other session, so the
-        # discriminator is the target path: inside an active run's repo it is
+        # discriminator is the target path: inside the bound run's repo it is
         # repo code that only a worker role may touch, and outside it this
         # branch is never reached at all.
         return deny("BOUNDARY_VIOLATION",
@@ -2594,19 +3964,21 @@ def _is_doctor_probe(payload):
             and payload.get("tool_input") == {"file_path": "/dev/null"})
 
 
-def log_denial(payload, result):
-    """Append one deny event to the active run's log. Best effort: whatever goes
-    wrong here, the decision already made stands [R-GUARD-DENIAL-LOGGED]. The
-    doctor's probe is not logged: it is not a call any session made. A log.jsonl
+def log_denial(payload, result, argv=()):
+    """Append one deny event to the log of the run this hook's `argv` binds it to,
+    nothing outside a lane or in one the registry cannot confirm. Best effort:
+    whatever goes wrong here, the decision already made stands [R-GUARD-DENIAL-LOGGED].
+    The doctor's probe is not logged: it is not a call any session made. A log.jsonl
     that is there but not a regular file is skipped, since opening a FIFO for
     append blocks until a reader appears."""
     try:
         if _is_doctor_probe(payload):
             return
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        task_id = run.active(_READ_LIMIT)
-        if not task_id:
+        bound = lanes.binding(argv, _READ_LIMIT)
+        if bound.problem or not bound.task:
             return
+        task_id = bound.task
         log = paths.run_dir(task_id) / "log.jsonl"
         if os.path.lexists(log) and not os.path.isfile(log):
             return
@@ -2627,44 +3999,112 @@ def log_denial(payload, result):
         pass
 
 
-def decide(payload):
-    result = _decide(payload)
+def decide(payload, argv=()):
+    """The decision on `payload` for the hook whose command line is `argv` (the arguments
+    after the script, as main() passes sys.argv[1:]), with a deny logged to the bound run."""
+    result = _decide(payload, argv)
     if result and isinstance(payload, dict):
-        log_denial(payload, result)
+        log_denial(payload, result, argv)
     return result
 
 
+# R66: Claude Code allows a call whose hook outruns its 5 s timeout, so in a lane the guard
+# gives its decision a deadline well inside that, and a decision that outruns it refuses the
+# call as an internal error does [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A module constant, so
+# a test can shorten it.
+HOOK_DEADLINE_SECONDS = 3.0
+_DEADLINE = {"passed": False}
+
+
+class _DeadlinePassed(BaseException):
+    """Raised by the hook deadline's alarm. A BaseException, so no `except Exception` inside
+    the decision takes it for a failed read and decides on."""
+
+    def __str__(self):
+        return "the decision outran the hook's %s s deadline" % HOOK_DEADLINE_SECONDS
+
+
+def _deadline_passed(_signum, _frame):
+    _DEADLINE["passed"] = True
+    raise _DeadlinePassed()
+
+
+def _arm_deadline(seconds):
+    """Start the hook deadline: SIGALRM after `seconds` of real time raises _DeadlinePassed
+    wherever the decision is, a regex search included. Returns the step that stops it and puts
+    the old handler back, or None where no such timer can be set (no SIGALRM, not the main
+    thread)."""
+    try:
+        previous = signal.signal(signal.SIGALRM, _deadline_passed)
+    except (AttributeError, ValueError, OSError):
+        return None
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+
+    def disarm():
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    return disarm
+
+
 def main():
+    # The lane binding is the hook's own command line [R-LANE-HOOK-BINDING]. The python
+    # floor ran before any of it was read.
+    argv = sys.argv[1:]
     try:
         payload = json.load(sys.stdin)
     except Exception:
         return 0
+    # R65: hooks exist only in lane sessions, and --task on the command line says this is one
+    lane = ppl_python_floor.in_lane(argv)
+    _DEADLINE["passed"] = False
+    disarm = None
     try:
-        result = _decide(payload)
-    except Exception as err:
+        # R66: armed only in a lane and only here, on the hook's own path: outside a lane a
+        # decision runs to its end as before
+        disarm = _arm_deadline(HOOK_DEADLINE_SECONDS) if lane else None
+        try:
+            result = _decide(payload, argv)
+        finally:
+            if disarm:
+                disarm()
+        if _DEADLINE["passed"]:
+            # it passed while something inside caught everything and decided on
+            raise _DeadlinePassed()
+    except (Exception, _DeadlinePassed) as err:
         # Claude Code reads exit 0 with no output as allow. A ppl-* role is
-        # refused instead, an unroled session keeps the allow so a hook defect
-        # cannot lock the operator out of unrelated sessions, unless the call
-        # asks to leave the OS sandbox [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. The deny goes out before the
+        # refused instead. Outside a lane an unroled session keeps the allow so a
+        # hook defect cannot lock the operator out of unrelated sessions, unless
+        # the call asks to leave the OS sandbox. In a lane it keeps only Read,
+        # Glob and Grep (R65), and a decision past the deadline goes the same way
+        # [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. The deny goes out before the
         # diagnostic, and a broken stderr is swallowed, since a nonzero exit
         # would not block the call either.
+        if disarm:
+            # the alarm fires once, so a disarm it cut short is finished here
+            disarm()
+        late = isinstance(err, _DeadlinePassed)
         agent = payload.get("agent_type") if isinstance(payload, dict) else None
+        tool = payload.get("tool_name") if isinstance(payload, dict) else None
         # A call that asks to leave the OS sandbox is refused whatever its agent
         # [R-OS-SANDBOX-FAIL-CLOSED]. A check that fails reads as flagged.
         try:
             unsandboxed = escape.flagged(payload)
         except Exception:
             unsandboxed = True
-        if unsandboxed or (isinstance(agent, str) and agent in boundary.ROLE_RULES):
+        role = isinstance(agent, str) and agent in boundary.ROLE_RULES
+        if unsandboxed or role or (lane and tool not in UNCONFIRMED_LANE_TOOLS):
+            what = "unsandboxed" if unsandboxed else ("role" if role else "lane")
             refusal = deny(
                 "BOUNDARY_VIOLATION",
-                "guard internal error, %s call refused: %s"
-                % ("unsandboxed" if unsandboxed else "role", type(err).__name__))
+                "guard decision past its %s s deadline, %s call refused"
+                % (HOOK_DEADLINE_SECONDS, what) if late else
+                "guard internal error, %s call refused: %s" % (what, type(err).__name__))
             sys.stdout.write(json.dumps(refusal))
             sys.stdout.flush()
-            log_denial(payload, refusal)
+            log_denial(payload, refusal, argv)
         try:
-            sys.stderr.write("ppl_guard internal error: %s\n" % err)
+            sys.stderr.write("ppl_guard %s: %s\n" % ("deadline" if late else "internal error",
+                                                    err))
         except Exception:
             pass
         return 0
@@ -2673,7 +4113,7 @@ def main():
         sys.stdout.write(json.dumps(result))
         sys.stdout.flush()
         if isinstance(payload, dict):
-            log_denial(payload, result)
+            log_denial(payload, result, argv)
     return 0
 
 

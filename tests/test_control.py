@@ -1,9 +1,11 @@
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # tests/ is not a package, so the helper next to this file is imported
 # by path. It must be imported before PPL_HOME is chosen below.
@@ -12,7 +14,8 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import control, paths, run, status, store, trail
+import fixtures
+from ppl import control, lanes, paths, run, status, store, trail
 from ppl.errors import PplError
 
 
@@ -63,14 +66,28 @@ class TestControl(unittest.TestCase):
 
 
 class TestDestroy(unittest.TestCase):
-    def test_local_destroy_archives_the_run_and_clears_active(self):
+    def test_local_destroy_archives_the_run_and_releases_the_lane(self):
+        entry = fixtures.bind_lane("DEMO-430", "/tmp/repo")
+        other = fixtures.bind_lane("DEMO-434", "/tmp/repo-b", lane=2)
         run.init("DEMO-430", "u", "/tmp/repo")
         result = run.destroy("DEMO-430", "local")
         self.assertEqual(result["status"], "archived")
-        from ppl import paths
+        self.assertEqual(result["lane"], "released")
         self.assertFalse((paths.run_dir("DEMO-430") / "state.json").exists())
         self.assertTrue(any(paths.runs_dir().glob("_archive/DEMO-430-*")))
-        self.assertIsNone(run.active())
+        self.assertIsNone(lanes.entry("DEMO-430"))
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+        self.assertEqual(lanes.entry("DEMO-434"), other)
+        self.assertTrue(os.path.isdir(other["start_dir"]))
+        self.assertFalse((paths.runs_dir() / "ACTIVE").exists())
+
+    def test_local_destroy_of_a_run_whose_lane_was_closed_removes_its_start_dir(self):
+        entry = fixtures.bind_lane("DEMO-435", "/tmp/repo")
+        run.init("DEMO-435", "u", "/tmp/repo")
+        lanes.release("DEMO-435")
+        result = run.destroy("DEMO-435", "local")
+        self.assertEqual((result["status"], result["lane"]), ("archived", "none"))
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
 
     def test_local_destroy_removes_the_scratch_dir(self):
         from ppl import os_sandbox
@@ -365,10 +382,20 @@ class TestStatusUsage(unittest.TestCase):
         self.assertEqual(status.tokens_line("USG-440"), "a 412 (out 7)")
 
 
+def name_as_the_legacy_run(test, task_id):
+    """Write runs/ACTIVE naming `task_id`, as ppl init did before lanes, removed again after
+    the test."""
+    pointer = paths.legacy_active_file()
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(task_id + "\n", encoding="utf-8")
+    test.addCleanup(pointer.unlink, missing_ok=True)
+
+
 class TestDestroyRemovesTheWorktree(unittest.TestCase):
     """I1: the removal used to run without -C, so git executed it against ppl's
     own cwd rather than the target repository, and the discarded exit code let
-    the archive report success over an orphaned worktree.
+    the archive report success over an orphaned worktree. These runs are from
+    before lanes: runs/ACTIVE names each, so destroy takes its state.json repo.
     """
 
     def make_worktree(self):
@@ -386,6 +413,7 @@ class TestDestroyRemovesTheWorktree(unittest.TestCase):
     def test_a_real_worktree_is_actually_removed(self):
         main, tree = self.make_worktree()
         run.init("DEMO-460", "u", tree)
+        name_as_the_legacy_run(self, "DEMO-460")
         result = run.destroy("DEMO-460", "local")
         self.assertEqual(result["status"], "archived")
         self.assertEqual(result["worktree"], "removed")
@@ -398,6 +426,7 @@ class TestDestroyRemovesTheWorktree(unittest.TestCase):
     def test_a_failed_removal_is_reported_rather_than_swallowed(self):
         not_a_worktree = tmphome.mkdtemp(prefix="pplrepo-")
         run.init("DEMO-461", "u", not_a_worktree)
+        name_as_the_legacy_run(self, "DEMO-461")
         result = run.destroy("DEMO-461", "local")
         self.assertEqual(result["worktree"], "left_behind")
         self.assertTrue(result["worktree_error"])
@@ -408,6 +437,424 @@ class TestDestroyRemovesTheWorktree(unittest.TestCase):
         run.init("DEMO-462", "u", "/tmp/definitely-not-a-repo-xyz")
         run.destroy("DEMO-462", "local")
         self.assertFalse(paths.run_dir("DEMO-462").exists())
+
+
+class TestDestroyCleansUpTheLane(unittest.TestCase):
+    """ppl destroy --scope local takes the lane with the run: its worktree, its branch while
+    nothing of it was pushed (D23), its registry slot and its start directory, before ppl init
+    too (R15). Its git in the project checkout carries the operator's pinned -c words (R19)."""
+
+    def git(self, directory, *args):
+        return subprocess.run(["git", "-C", str(directory), "-c", "user.email=t@t",
+                               "-c", "user.name=t", *args],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def checkout(self):
+        """A project checkout with a bare origin, its default branch pushed."""
+        base = Path(tmphome.mkdtemp(prefix="ppldestroy-"))
+        origin, main = base / "origin.git", base / "shop"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(main)], check=True)
+        (main / "a.txt").write_text("one\n", encoding="utf-8")
+        self.git(main, "add", "a.txt")
+        self.git(main, "commit", "-q", "-m", "base")
+        self.git(main, "remote", "add", "origin", str(origin))
+        self.git(main, "push", "-q", "origin", "main")
+        return main
+
+    def lane(self, task_id, main, branch=None, lane=1, record_branch=False):
+        """A worktree on `branch` (<task>-work by default), as ppl lane adds it, and its lane,
+        whose record names the branch when `record_branch`."""
+        tree = main.parent / ("shop-" + task_id)
+        branch = branch or task_id + "-work"
+        self.git(main, "worktree", "add", "-q", "-b", branch, str(tree))
+        return fixtures.bind_lane(task_id, main, tree, lane=lane,
+                                  branch=branch if record_branch else None), tree
+
+    def branches(self, main):
+        return self.git(main, "branch", "--list", "--format=%(refname:short)").split()
+
+    def test_local_destroy_deletes_an_unpushed_branch_and_keeps_a_pushed_one(self):
+        main = self.checkout()
+        _, pushed_tree = self.lane("DEMO-470", main)
+        self.git(pushed_tree, "push", "-q", "origin", "DEMO-470-work")
+        self.git(main, "fetch", "-q", "origin")
+        _, tree = self.lane("DEMO-471", main, lane=2)
+        for task_id in ("DEMO-470", "DEMO-471"):
+            run.init(task_id, "u", str(main.parent / ("shop-" + task_id)))
+        kept = run.destroy("DEMO-470", "local")
+        self.assertEqual((kept["worktree"], kept["branch"], kept["branch_name"]),
+                         ("removed", "kept", "DEMO-470-work"))
+        deleted = run.destroy("DEMO-471", "local")
+        self.assertEqual((deleted["worktree"], deleted["branch"], deleted["branch_name"]),
+                         ("removed", "deleted", "DEMO-471-work"))
+        self.assertNotIn("branch_error", deleted)
+        self.assertEqual(self.branches(main), ["DEMO-470-work", "main"])
+        self.assertFalse(tree.exists())
+
+    def test_local_destroy_after_lane_close_still_deletes_the_branch(self):
+        # D24: ppl lane close frees the slot and leaves the worktree, so the branch is reached
+        # through the git dir the worktree names
+        main = self.checkout()
+        entry, tree = self.lane("DEMO-477", main)
+        run.init("DEMO-477", "u", str(tree))
+        lanes.release("DEMO-477")
+        result = run.destroy("DEMO-477", "local")
+        self.assertEqual((result["worktree"], result["branch"], result["lane"]),
+                         ("removed", "deleted", "none"))
+        self.assertNotIn("DEMO-477-work", self.branches(main))
+        self.assertFalse(tree.exists())
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+
+    def test_a_closed_lanes_destroy_never_removes_the_worktree_its_state_names(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R53: state.json is in the lane's own sandbox scope, so after ppl lane close a role
+        # could point its repo at lane B's worktree: destroy reads the lane's record instead
+        main = self.checkout()
+        _, tree_a = self.lane("DEMO-479", main, lane=1)
+        _, tree_b = self.lane("DEMO-480", main, lane=2)
+        (tree_b / "work-in-progress.txt").write_text("not committed\n", encoding="utf-8")
+        state = run.init("DEMO-479", "u", str(tree_a))
+        state["repo"] = str(tree_b)
+        run.save(state)
+        lanes.release("DEMO-479")
+        result = run.destroy("DEMO-479", "local")
+        self.assertEqual((result["worktree"], result["branch"]), ("removed", "deleted"))
+        self.assertFalse(tree_a.exists())
+        self.assertTrue((tree_b / "work-in-progress.txt").is_file())
+        self.assertIn(str(tree_b), self.git(main, "worktree", "list"))
+        self.assertIsNotNone(lanes.entry("DEMO-480"))
+
+    def test_a_run_from_before_lanes_leaves_a_live_lanes_worktree_alone(self):
+        # rule: R-LANE-CROSS-WRITE
+        # no registry entry and no start directory: state.json's repo is all there is, and a
+        # path that is, or lies in, a live lane's worktree is left behind
+        main = self.checkout()
+        _, tree_b = self.lane("DEMO-481", main)
+        (tree_b / "src").mkdir()
+        for task_id, repo in (("DEMO-482", tree_b), ("DEMO-483", tree_b / "src")):
+            run.init(task_id, "u", str(repo))
+            name_as_the_legacy_run(self, task_id)
+            result = run.destroy(task_id, "local")
+            self.assertEqual(result["worktree"], "left_behind", task_id)
+            self.assertIn("DEMO-481", result["worktree_error"])
+            self.assertNotIn("branch_name", result)
+            self.assertEqual(result["status"], "archived")
+        self.assertTrue(tree_b.is_dir())
+        self.assertIn(str(tree_b), self.git(main, "worktree", "list"))
+
+    def test_the_legacy_fallback_places_paths_as_the_guard_does(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R54: a letter-case variant of a live lane's worktree, and a closed lane's recorded
+        # worktree, are left behind
+        main = self.checkout()
+        _, live = self.lane("DEMO-486", main, lane=1)
+        (live / "wip.txt").write_text("uncommitted\n", encoding="utf-8")
+        _, closed = self.lane("DEMO-487", main, lane=2)
+        lanes.release("DEMO-487")
+        variant = str(live.parent / live.name.upper())
+        cases = [("DEMO-489", str(closed), "DEMO-487")]
+        if os.path.isdir(variant):
+            # a case-insensitive file system, where the variant is the live lane's worktree
+            cases.insert(0, ("DEMO-488", variant, "DEMO-486"))
+        else:
+            # a case-sensitive one, where it names no directory: there is nothing to remove
+            run.init("DEMO-488", "u", variant)
+            name_as_the_legacy_run(self, "DEMO-488")
+            self.assertEqual(run.destroy("DEMO-488", "local")["worktree"], "absent")
+        for task_id, repo, holder in cases:
+            run.init(task_id, "u", repo)
+            name_as_the_legacy_run(self, task_id)
+            result = run.destroy(task_id, "local")
+            self.assertEqual(result["worktree"], "left_behind", task_id)
+            self.assertIn(holder, result["worktree_error"])
+            self.assertNotIn("branch_name", result)
+        self.assertTrue((live / "wip.txt").is_file())
+        self.assertTrue(closed.is_dir())
+        listed = self.git(main, "worktree", "list")
+        self.assertIn(str(live), listed)
+        self.assertIn(str(closed), listed)
+
+    def test_the_legacy_fallback_fails_closed_on_a_record_it_cannot_read(self):
+        main = self.checkout()
+        tree = main.parent / "shop-old"
+        self.git(main, "worktree", "add", "-q", "-b", "DEMO-490-work", str(tree))
+        self.lane("DEMO-491", main)
+        lanes.release("DEMO-491")
+        lanes.record_path("DEMO-491").write_text("not json", encoding="utf-8")
+        # the unreadable record would hold every later fallback in this data root
+        self.addCleanup(shutil.rmtree, str(lanes.start_dir("DEMO-491")), True)
+        run.init("DEMO-490", "u", str(tree))
+        name_as_the_legacy_run(self, "DEMO-490")
+        result = run.destroy("DEMO-490", "local")
+        self.assertEqual(result["worktree"], "left_behind")
+        self.assertIn("lane.json", result["worktree_error"])
+        self.assertTrue(tree.is_dir())
+
+    def test_a_run_no_pointer_names_keeps_its_worktree_whatever_its_state_says(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R54: no entry, no record, and runs/ACTIVE names another run (or none): only the
+        # pointer's run is from before lanes, so state.json's repo is named, not removed
+        main = self.checkout()
+        tree = main.parent / "shop-orphan"
+        self.git(main, "worktree", "add", "-q", "-b", "DEMO-492-work", str(tree))
+        run.init("DEMO-492", "u", str(tree))
+        for pointer in (None, "DEMO-493"):
+            if pointer:
+                name_as_the_legacy_run(self, pointer)
+            result = run.destroy("DEMO-492", "local")
+            self.assertEqual(result["worktree"], "left_behind", pointer)
+            self.assertIn(str(tree), result["worktree_error"])
+            self.assertIn("git worktree remove", result["worktree_error"])
+            self.assertNotIn("branch_name", result)
+            self.assertTrue(tree.is_dir())
+            run.init("DEMO-492", "u", str(tree))
+        self.assertIn("DEMO-492-work", self.branches(main))
+
+    def test_a_run_dir_left_behind_keeps_the_record_for_the_retry(self):
+        # rule: R-LANE-CROSS-WRITE
+        # R54, the re-review's repro: a role links runs/<task>/log.jsonl so the archive
+        # fails and points state.json's repo at another lane's worktree. The slot is freed,
+        # the start directory and its lane.json are kept, and the retry reads the record.
+        main = self.checkout()
+        entry, tree_a = self.lane("DEMO-494", main, lane=1, record_branch=True)
+        _, tree_b = self.lane("DEMO-495", main, lane=2, record_branch=True)
+        (tree_b / "wip.txt").write_text("uncommitted\n", encoding="utf-8")
+        state = run.init("DEMO-494", "u", str(tree_a))
+        state["repo"] = str(tree_b)
+        run.save(state)
+        log = paths.run_dir("DEMO-494") / "log.jsonl"
+        log.unlink(missing_ok=True)
+        log.symlink_to(main.parent / "elsewhere.txt")
+        lanes.release("DEMO-494")
+        lanes.release("DEMO-495")
+        first = run.destroy("DEMO-494", "local")
+        self.assertEqual((first["worktree"], first["branch"], first["run_dir"],
+                          first["lane"], first["start_dir"]),
+                         ("removed", "deleted", "left_behind", "none", "kept"))
+        self.assertTrue(lanes.record_path("DEMO-494").is_file())
+        second = run.destroy("DEMO-494", "local")
+        self.assertEqual((second["worktree"], second["run_dir"], second["start_dir"]),
+                         ("absent", "left_behind", "kept"))
+        self.assertTrue((tree_b / "wip.txt").is_file())
+        self.assertIn(str(tree_b), self.git(main, "worktree", "list"))
+        # the owner removes the link: the next destroy archives the run and the start dir
+        log.unlink()
+        third = run.destroy("DEMO-494", "local")
+        self.assertEqual((third["status"], third["start_dir"]), ("archived", "removed"))
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+        self.assertTrue(tree_b.is_dir())
+
+    def test_destroy_deletes_the_recorded_branch_after_a_role_moved_head(self):
+        # N2, D23: the record names the run's branch, so a HEAD a role moved elsewhere in the
+        # worktree does not decide which branch goes
+        main = self.checkout()
+        _, tree = self.lane("DEMO-496", main, record_branch=True)
+        self.git(tree, "checkout", "-q", "-b", "DEMO-496-elsewhere")
+        run.init("DEMO-496", "u", str(tree))
+        result = run.destroy("DEMO-496", "local")
+        self.assertEqual((result["worktree"], result["branch"], result["branch_name"]),
+                         ("removed", "deleted", "DEMO-496-work"))
+        self.assertNotIn("DEMO-496-work", self.branches(main))
+        self.assertIn("DEMO-496-elsewhere", self.branches(main))
+
+    def test_a_start_dir_without_its_record_never_falls_back_to_the_state(self):
+        main = self.checkout()
+        entry, tree = self.lane("DEMO-484", main)
+        run.init("DEMO-484", "u", str(tree))
+        lanes.release("DEMO-484")
+        lanes.record_path("DEMO-484").unlink()
+        result = run.destroy("DEMO-484", "local")
+        self.assertEqual(result["worktree"], "left_behind")
+        self.assertIn("lane.json", result["worktree_error"])
+        self.assertTrue(tree.is_dir())
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+
+    def test_a_run_directory_that_is_a_link_is_left_and_the_lane_still_freed(self):
+        target = Path(tmphome.mkdtemp(prefix="pplelsewhere-"))
+        entry = fixtures.bind_lane("DEMO-485", "/tmp/definitely-not-a-repo-xyz")
+        paths.runs_dir().mkdir(parents=True, exist_ok=True)
+        paths.run_dir("DEMO-485").symlink_to(target)
+        result = run.destroy("DEMO-485", "local")
+        self.assertEqual((result["status"], result["run_dir"], result["lane"],
+                          result["start_dir"]), ("released", "left_behind", "released", "kept"))
+        self.assertIn("link", result["run_dir_error"])
+        self.assertTrue(target.is_dir())
+        self.assertTrue(lanes.record_path("DEMO-485").is_file())
+        paths.run_dir("DEMO-485").unlink()
+        result = run.destroy("DEMO-485", "local")
+        self.assertEqual((result["status"], result["start_dir"]), ("released", "removed"))
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+
+    def test_local_destroy_keeps_a_branch_not_named_for_the_run(self):
+        # the worktree's HEAD is in a role's reach: a branch it checked out there that is not
+        # <TASK-ID>-<slug> is not the run's to delete
+        main = self.checkout()
+        self.lane("DEMO-472", main, branch="release-notes")
+        run.init("DEMO-472", "u", str(main.parent / "shop-DEMO-472"))
+        result = run.destroy("DEMO-472", "local")
+        self.assertEqual((result["worktree"], result["branch"]), ("removed", "none"))
+        self.assertIn("release-notes", self.branches(main))
+
+    def test_local_destroy_runs_no_hook_the_checkout_plants(self):
+        # rule: R-LANE-LAUNCH-GIT-CONFIG
+        main = self.checkout()
+        self.lane("DEMO-473", main)
+        run.init("DEMO-473", "u", str(main.parent / "shop-DEMO-473"))
+        marker = main.parent / "hook.ran"
+        hook = main / ".git" / "hooks" / "reference-transaction"
+        hook.write_text("#!/bin/sh\necho ran >> %s\n" % marker, encoding="utf-8")
+        hook.chmod(0o755)
+        result = run.destroy("DEMO-473", "local")
+        self.assertEqual(result["branch"], "deleted")
+        self.assertFalse(marker.exists())
+
+    def test_local_destroy_frees_a_lane_whose_run_never_started(self):
+        main = self.checkout()
+        entry, tree = self.lane("DEMO-474", main)
+        # a denial the guard logged before ppl init made the run directory
+        store.append_log("DEMO-474", {"event": "denial"})
+        result = run.destroy("DEMO-474", "local")
+        self.assertEqual((result["status"], result["lane"], result["start_dir"]),
+                         ("archived", "released", "removed"))
+        self.assertEqual((result["worktree"], result["branch"]), ("removed", "deleted"))
+        self.assertIsNone(lanes.entry("DEMO-474"))
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+        self.assertFalse(tree.exists())
+        self.assertNotIn("DEMO-474-work", self.branches(main))
+        self.assertFalse(paths.run_dir("DEMO-474").exists())
+        self.assertTrue((Path(result["archive"]) / "log.jsonl").is_file())
+
+    def test_local_destroy_of_a_lane_with_no_run_directory_releases_it(self):
+        entry = fixtures.bind_lane("DEMO-475", "/tmp/definitely-not-a-repo-xyz")
+        result = run.destroy("DEMO-475", "local")
+        self.assertEqual((result["status"], result["archive"], result["lane"]),
+                         ("released", None, "released"))
+        self.assertFalse(paths.run_dir("DEMO-475").exists())
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
+        # the empty run directory ppl lane makes is removed, not archived
+        fixtures.bind_lane("DEMO-478", "/tmp/definitely-not-a-repo-xyz")
+        paths.run_dir("DEMO-478").mkdir(parents=True)
+        result = run.destroy("DEMO-478", "local")
+        self.assertEqual((result["status"], result["archive"]), ("released", None))
+        self.assertFalse(paths.run_dir("DEMO-478").exists())
+        self.assertFalse(any(paths.runs_dir().glob("_archive/DEMO-478-*")))
+
+    def test_local_destroy_with_no_run_and_no_lane_is_refused(self):
+        with self.assertRaises(PplError) as caught:
+            run.destroy("DEMO-476", "local")
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("DEMO-476", caught.exception.message)
+
+    def test_destroying_the_run_from_before_lanes_retires_its_pointer(self):
+        # rule: R-LANE-LEGACY-RUN
+        # ledger 283: runs/ACTIVE stayed after the destroy, so a later lane that reused the
+        # task id counted as the run from before lanes. A pointer naming another run stays
+        run.init("DEMO-520", "u", "/tmp/definitely-not-a-repo-xyz")
+        name_as_the_legacy_run(self, "DEMO-521")
+        run.destroy("DEMO-520", "local")
+        self.assertEqual(paths.legacy_active_file().read_text(encoding="utf-8"), "DEMO-521\n")
+        run.init("DEMO-521", "u", "/tmp/definitely-not-a-repo-xyz")
+        result = run.destroy("DEMO-521", "local")
+        self.assertEqual((result["status"], result["pointer"]), ("archived", "retired"))
+        self.assertFalse(os.path.lexists(paths.legacy_active_file()))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads a 000 file")
+    def test_a_pointer_that_cannot_be_read_leaves_the_worktree_and_raises_nothing(self):
+        # rule: R-LANE-LEGACY-RUN
+        # ledger 284: an unreadable runs/ACTIVE raised a traceback in destroy and in ppl lane.
+        # destroy now leaves the worktree it cannot place, and ppl lane refuses
+        main = self.checkout()
+        tree = main.parent / "shop-DEMO-522"
+        self.git(main, "worktree", "add", "-q", "-b", "DEMO-522-work", str(tree))
+        run.init("DEMO-522", "u", str(tree))
+        name_as_the_legacy_run(self, "DEMO-522")
+        pointer = paths.legacy_active_file()
+        os.chmod(pointer, 0)
+        self.addCleanup(os.chmod, pointer, 0o600)
+        result = run.destroy("DEMO-522", "local")
+        self.assertEqual(result["worktree"], "left_behind")
+        self.assertIn("runs/ACTIVE cannot be read", result["worktree_error"])
+        self.assertTrue(tree.is_dir())
+        from ppl import lane_launch
+        with self.assertRaises(PplError) as caught:
+            lane_launch.start("KEY-1", exec_=False)
+        self.assertEqual(caught.exception.code, "OWNER_DECISION")
+        self.assertIn("runs/ACTIVE cannot be read", caught.exception.message)
+
+    def test_a_lane_whose_state_cannot_be_parsed_is_destroyed_all_the_same(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Final review I2: destroy takes the worktree from the lane's entry or record, so a
+        # state.json its sandbox made unparseable holds neither the slot nor the cleanup, for
+        # a live lane and for one ppl lane close freed. Its own data root: the archived states
+        # are no other test's business.
+        self.enterContext(mock.patch.dict(os.environ,
+                                          {"PPL_HOME": tmphome.mkdtemp(prefix="pplhome-")}))
+        main = self.checkout()
+        tasks = iter(("DEMO-510", "DEMO-511", "DEMO-512", "DEMO-513"))
+        for name, text in sorted(fixtures.UNPARSEABLE_JSON.items()):
+            for closed in (False, True):
+                task = next(tasks)
+                with self.subTest(state=name, closed=closed):
+                    entry, tree = self.lane(task, main, record_branch=True)
+                    run.init(task, "u", str(tree))
+                    run.state_path(task).write_text(text, encoding="utf-8")
+                    if closed:
+                        lanes.release(task)
+                    result = run.destroy(task, "local")
+                    self.assertEqual((result["worktree"], result["branch"], result["status"],
+                                      result["start_dir"]),
+                                     ("removed", "deleted", "archived", "removed"))
+                    self.assertEqual(result["lane"], "none" if closed else "released")
+                    self.assertIsNone(lanes.entry(task))
+                    self.assertFalse(tree.exists())
+                    self.assertFalse(os.path.lexists(entry["start_dir"]))
+
+    def test_a_worktree_a_role_locked_is_removed(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Final review I3: R35 leaves the lane's own .git/worktrees/<id> writable, and a lock
+        # planted there made one --force refuse, so destroy freed the slot and deleted the
+        # record while the worktree and branch stayed. A lock is a planted cleanup blocker
+        # (R19): two --force take a locked worktree.
+        main = self.checkout()
+        entry, tree = self.lane("DEMO-514", main, record_branch=True)
+        run.init("DEMO-514", "u", str(tree))
+        git_dir = Path(self.git(tree, "rev-parse", "--absolute-git-dir"))
+        (git_dir / "locked").write_text("planted\n", encoding="utf-8")
+        result = run.destroy("DEMO-514", "local")
+        self.assertEqual((result["worktree"], result["branch"], result["lane"],
+                          result["start_dir"]), ("removed", "deleted", "released", "removed"))
+        self.assertNotIn("worktree_error", result)
+        self.assertFalse(tree.exists())
+        self.assertNotIn("DEMO-514-work", self.branches(main))
+
+    def test_a_worktree_left_behind_keeps_the_record_for_the_retry(self):
+        # rule: R-LANE-CROSS-WRITE
+        # Final review I3: a worktree destroy could not remove keeps the start directory and
+        # its lane.json, as a run directory left behind does, so the retry reads the record
+        main = self.checkout()
+        entry, tree = self.lane("DEMO-515", main, record_branch=True)
+        run.init("DEMO-515", "u", str(tree))
+        real = run._git
+
+        def git(directory, args):
+            if args[:2] == ["worktree", "remove"]:
+                return subprocess.CompletedProcess(args, 128, "", "fatal: cannot remove it")
+            return real(directory, args)
+        with mock.patch.object(run, "_git", git):
+            first = run.destroy("DEMO-515", "local")
+        self.assertEqual((first["worktree"], first["lane"], first["start_dir"]),
+                         ("left_behind", "released", "kept"))
+        self.assertIn("cannot remove it", first["worktree_error"])
+        self.assertIsNone(lanes.entry("DEMO-515"))
+        self.assertTrue(lanes.record_path("DEMO-515").is_file())
+        self.assertTrue(tree.is_dir())
+        second = run.destroy("DEMO-515", "local")
+        self.assertEqual((second["worktree"], second["branch"], second["start_dir"]),
+                         ("removed", "deleted", "removed"))
+        self.assertFalse(tree.exists())
+        self.assertNotIn("DEMO-515-work", self.branches(main))
+        self.assertFalse(os.path.lexists(entry["start_dir"]))
 
 
 if __name__ == "__main__":

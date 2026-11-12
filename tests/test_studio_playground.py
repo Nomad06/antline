@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
+import fixtures
 import panel_client
 import ppl_guard
 from ppl import config, harness, paths, run, store, tomlout
@@ -24,6 +25,7 @@ MAIN_SOURCE = "source/core/orders/src/main/java/Foo.java"
 
 class PlaygroundTestCase(panel_client.StudioTestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         super().setUp()
         config.ensure()
         self.repo = panel_client.make_repo({"Makefile": "test:\n\ttrue\n", MAIN_SOURCE: "class Foo {}\n"})
@@ -219,7 +221,7 @@ class TestPlayground(PlaygroundTestCase):
         real_run = subprocess.run
 
         def stalled(command, **kwargs):
-            if command[-1].endswith("ppl_guard.py"):
+            if command[1].endswith("ppl_guard.py"):
                 raise subprocess.TimeoutExpired(command, kwargs["timeout"])
             return real_run(command, **kwargs)
 
@@ -274,18 +276,19 @@ class TestPlayground(PlaygroundTestCase):
         if not paths.run_dir(playground.TASK).exists():
             scratch = Path(tmphome.mkdtemp(prefix="pplscratch-"))
             folder = drafts.write("demo", self.draft["doc"], self.draft["fragments"], root=scratch)
-            run.init(playground.TASK, "https://tracker.invalid/x", str(self.repo), isolated=False,
+            run.init(playground.TASK, "https://tracker.invalid/x", str(self.repo),
                      model_check="skipped", harness={"name": "demo"})
             store.write_json(paths.run_dir(playground.TASK) / "harness.json",
                              harness.snapshot(harness.load(str(folder))))
             store.write_json(paths.run_dir(playground.TASK) / "boundary.json",
                              {"write": ["**"], "forbid": []})
+            fixtures.bind_lane(playground.TASK, self.repo, harness="demo")
         previous = os.getcwd()
         os.chdir(self.repo)
         try:
             answer = ppl_guard.decide({"hook_event_name": "PreToolUse", "agent_type": role,
                                        "tool_name": tool, "tool_input": tool_input,
-                                       "cwd": str(self.repo)})
+                                       "cwd": str(self.repo)}, ["--task", playground.TASK])
         finally:
             os.chdir(previous)
         return "allow" if answer is None else "deny"
@@ -361,7 +364,7 @@ class TestPlayground(PlaygroundTestCase):
         real_run = subprocess.run
 
         def stalled(command, **kwargs):
-            if command[-1].endswith("ppl_guard.py"):
+            if command[1].endswith("ppl_guard.py"):
                 raise subprocess.TimeoutExpired(command, kwargs["timeout"])
             return real_run(command, **kwargs)
 

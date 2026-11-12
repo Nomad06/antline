@@ -72,7 +72,7 @@ def pins(which=shutil.which):
         if not path:
             raise PplError("SETUP_INCOMPLETE",
                            "the OS sandbox profile pins %s but no %s is on PATH. Put %s on "
-                           "PATH, then run ppl harness apply again." % (name, name, name))
+                           "PATH, then run ppl lane again." % (name, name, name))
         found[name] = {"path": path, "realpath": os.path.realpath(path)}
     return found
 
@@ -84,10 +84,60 @@ def _repo(doc):
     return checkout, worktrees
 
 
-def write_scope(doc):
-    """Where a sandboxed command may write, each entry resolved."""
-    checkout, worktrees = _repo(doc)
-    scope = [paths.home() / "runs", paths.home() / "labels", scratch_root(), checkout, worktrees]
+# What git in a worktree writes in the checkout's common .git besides its own worktrees/<id>:
+# objects, branch and stash refs, and their reflogs (commit, add, branch, stash, checkout,
+# rebase, reset and switch, as test_git_in_a_worktree_writes_only_objects_refs_logs_and_its_git_dir
+# runs them).
+_COMMON_GIT_WRITES = ("objects", "refs", "logs")
+
+
+def worktree_git_dir(doc, worktree):
+    """The lane's own git dir in the checkout, `<checkout>/.git/worktrees/<id>`, `realpath`-ed:
+    the gitdir line of `<worktree>/.git`, which git worktree add wrote. SETUP_INCOMPLETE when
+    that file does not name one there, since the lane's sandbox could not then be scoped to
+    its own worktree's git."""
+    marker = os.path.join(str(worktree), ".git")
+    try:
+        with open(marker, encoding="utf-8") as handle:
+            line = handle.readline().strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PplError("SETUP_INCOMPLETE", "%s cannot be read (%s), so the lane's sandbox "
+                       "cannot be scoped to its worktree's git dir" % (marker, exc))
+    if not line.startswith("gitdir:"):
+        raise PplError("SETUP_INCOMPLETE", "%s has no gitdir line, so %s is not a worktree "
+                       "git worktree add made" % (marker, worktree))
+    git_dir = os.path.realpath(os.path.join(str(worktree), line[len("gitdir:"):].strip()))
+    worktrees = os.path.join(checkout(doc), ".git", "worktrees")
+    if os.path.dirname(git_dir) != worktrees:
+        raise PplError("SETUP_INCOMPLETE", "%s names the git dir %s, which is not in %s, the "
+                       "worktrees of the checkout %s" % (marker, git_dir, worktrees,
+                                                         checkout(doc)))
+    return git_dir
+
+
+def write_scope(doc, worktree=None, task=None):
+    """Where a sandboxed command may write, each entry resolved. For a lane, given its
+    `worktree` and its `task`: the run's own directory runs/<task>, its labels/<task> and its
+    scratch/<task>, the parts of the checkout's common .git that git in a worktree writes
+    (objects, refs, logs) and its own git dir there (worktree_git_dir), and the lane's own
+    worktree, so no lane's Bash writes another lane's run or labels, the checkout's working
+    tree, another lane's worktree or git dir, or the shared config, hooks, info and
+    packed-refs. The ppl CLI in a lane writes its own run's files and nothing else under runs/,
+    labels/ or scratch/, and ppl lane makes the three directories before the session starts,
+    since making one needs a write in its parent. With no worktree, outside a lane: runs,
+    labels and scratch whole, the whole checkout and the whole worktrees root. [os_sandbox]
+    allow_write is added to either."""
+    checkout_dir, worktrees = _repo(doc)
+    if worktree is None:
+        scope = [paths.runs_dir(), paths.home() / "labels", scratch_root(), checkout_dir,
+                 worktrees]
+    else:
+        if task is None:
+            raise ValueError("a lane's write scope needs its task")
+        scope = [paths.run_dir(task), paths.label_dir(task), scratch_dir(task)]
+        git_dir = os.path.join(checkout(doc), ".git")
+        scope.extend(os.path.join(git_dir, name) for name in _COMMON_GIT_WRITES)
+        scope.extend([worktree_git_dir(doc, worktree), worktree])
     scope.extend(_table(doc).get("allow_write") or [])
     return [_real(entry) for entry in scope]
 
@@ -116,18 +166,18 @@ def is_within(path, parent):
 
 
 def layout_problem(doc, workspace):
-    """A refusal message when the checkout or the worktrees lie inside the workspace or contain
-    it, else None. The profile write-denies the whole workspace, so such a layout would deny
-    the run its own repository."""
+    """A refusal message when the checkout or the worktrees lie inside `workspace`, the lane's
+    start directory, or contain it, else None. The profile write-denies the whole start
+    directory, so such a layout would deny the run its own repository."""
     root = workspace_dir(workspace)
     for key, entry in zip(("[repo] path", "[repo] worktrees"), _repo(doc)):
         real = _real(entry)
         if _inside(real, root) or _inside(root, real):
-            return ("%s %s and the workspace %s overlap, and the OS sandbox keeps the workspace "
-                    "wholly write-denied (it holds CLAUDE.md, agents, skills and settings), so "
-                    "the run could not write its own repository. Move the checkout or the "
-                    "workspace so neither lies inside the other, then run ppl harness apply "
-                    "again." % (key, real, root))
+            return ("%s %s and the lane's start directory %s overlap, and the OS sandbox keeps "
+                    "the start directory wholly write-denied (it holds the session's settings, "
+                    "agents, skill and guard facts), so the run could not write its own "
+                    "repository. Move the checkout or PPL_HOME so neither lies inside the other, "
+                    "then run ppl lane again." % (key, real, root))
     return None
 
 
@@ -139,13 +189,13 @@ def repo_problem(doc):
     if tracker.get("kind") == "github-issues" and not tracker.get("repo"):
         return ("[tracker] repo is not set for the github-issues tracker, so the OS sandbox "
                 "guard has no repository to allow. Set repo = \"owner/name\" in the harness "
-                "[tracker] table, then run ppl harness apply again.")
+                "[tracker] table, then run ppl lane again.")
     if (doc.get("forge") or {}).get("kind") == "github" and not forge_repo:
         return ("forge_repo cannot be derived: the checkout %s has no github.com origin remote "
                 "and the tracker names no GitHub repository, so the OS sandbox guard has no "
                 "repository to allow. Add a github.com origin to the checkout, or use a "
                 "github-issues tracker with [tracker] repo = \"owner/name\", then run ppl "
-                "harness apply again." % checkout(doc))
+                "lane again." % checkout(doc))
     return None
 
 
@@ -159,9 +209,12 @@ def workspace_dir(workspace):
     return _real(workspace)
 
 
-def facts(doc, workspace, pin_map):
-    """The slice the guard reads, the shape of PPL_HOME/os_sandbox.json. deny_write is the
-    profile's denyWrite, `realpath`-ed, which the guard holds edit tools to as well."""
+def facts(doc, workspace, pin_map, worktree=None, task=None):
+    """The slice the guard reads, the shape of os_sandbox.json: a lane's, with its start
+    directory as `workspace` and its own `worktree` and run (`task`) in the write scope, or
+    PPL_HOME's.
+    deny_write is the profile's denyWrite, `realpath`-ed, which the guard holds edit tools to
+    as well."""
     _, worktrees = _repo(doc)
     forge_repo, tracker_repo = repos(doc)
     return {"version": 1,
@@ -172,9 +225,10 @@ def facts(doc, workspace, pin_map):
             "forge_repo": forge_repo,
             "tracker_repo": tracker_repo,
             "scratch": _real(scratch_root()),
-            "write_scope": write_scope(doc),
-            "deny_write": list(dict.fromkeys(os.path.realpath(entry)
-                                             for entry in deny_write(workspace, pin_map))),
+            "write_scope": write_scope(doc, worktree, task),
+            "deny_write": list(dict.fromkeys(
+                os.path.realpath(entry)
+                for entry in _lane_deny_write(doc, workspace, pin_map, worktree))),
             "pins": {name: dict(pin_map[name]) for name in PIN_NAMES}}
 
 
@@ -216,12 +270,13 @@ def _allow_entries(doc, pin_map):
 
 
 def deny_write(workspace, pin_map):
-    """The profile's filesystem.denyWrite: the workspace and the directory of each pin's path
-    and realpath, each as given and `realpath`-ed, then every path escape_paths protects from
-    edit tools (the git, ssh and gh config, Claude Code's settings, ppl's config, harnesses,
-    guard facts and code, the workspace's .claude and .mcp.json, the pins). A deny wins over an
-    allow from any settings source, so the boundary does not rest on no other source granting
-    a write there."""
+    """The profile's filesystem.denyWrite: the workspace, for a lane its start directory, and
+    the directory of each pin's path and realpath, each as given and `realpath`-ed, then every
+    path escape_paths protects from edit tools (the git, ssh and gh config, Claude Code's
+    settings, ppl's config, harnesses, guard facts and code, the workspace as a whole, which
+    in a lane holds its settings.json, mcp.json, agents and skill plugin, the pins). A deny
+    wins over an allow from any settings source, so the boundary does not rest on no other
+    source granting a write there."""
     from . import escape_paths
     entries = [_real(workspace)]
     for name in PIN_NAMES:
@@ -265,61 +320,124 @@ def deny_read(doc):
     return entries
 
 
-def profile(doc, workspace, pin_map):
-    """The sandbox settings block and the permissions.allow entries ppl owns."""
+def shared_git(doc):
+    """What every lane on the checkout and the operator's own git read and run from its .git,
+    and git in a worktree never writes: config, hooks and info, each as found and
+    `realpath`-ed. A lane's profile write-denies them inside its allowance of that .git, so
+    no lane plants a hook, a core.hooksPath or an attribute there [R-LANE-SHARED-GIT-DIR]."""
+    git_dir = os.path.join(checkout(doc), ".git")
+    entries = []
+    for name in ("config", "hooks", "info"):
+        for entry in (os.path.join(git_dir, name), os.path.realpath(os.path.join(git_dir, name))):
+            if entry not in entries:
+                entries.append(entry)
+    return entries
+
+
+def _lane_deny_write(doc, workspace, pin_map, worktree):
+    """deny_write, and for a lane (`worktree` given) the checkout's shared .git parts and the
+    gitdir and commondir files of its own git dir, which tell git where the worktree and the
+    common dir are, so no lane points its own, or another's, git elsewhere."""
     denied = deny_write(workspace, pin_map)
+    if worktree is not None:
+        own = worktree_git_dir(doc, worktree)
+        for entry in shared_git(doc) + [os.path.join(own, "gitdir"),
+                                         os.path.join(own, "commondir")]:
+            if entry not in denied:
+                denied.append(entry)
+    return denied
+
+
+def profile(doc, workspace, pin_map, worktree=None, task=None):
+    """The sandbox settings block and the permissions.allow entries ppl owns, for a lane
+    whose own `worktree` and `task` are given or for the workspace (write_scope). A lane's denyWrite also
+    holds the checkout's shared .git parts (shared_git) and its own git dir's gitdir and
+    commondir, which its allowWrite would otherwise take in: a denyWrite entry wins over an
+    allowWrite one."""
+    denied = _lane_deny_write(doc, workspace, pin_map, worktree)
     sandbox = {"enabled": True,
                "failIfUnavailable": True,
                "allowUnsandboxedCommands": True,
                "network": {"deniedDomains": list(DENIED_DOMAINS),
                            "deniedDomainReasons": {d: DENY_REASON for d in DENIED_DOMAINS},
                            "allowedDomains": list(_table(doc).get("allowed_domains") or [])},
-               "filesystem": {"allowWrite": write_scope(doc), "denyWrite": denied,
+               "filesystem": {"allowWrite": write_scope(doc, worktree, task), "denyWrite": denied,
                               "denyRead": deny_read(doc)}}
     return {"sandbox": sandbox, "allow": _allow_entries(doc, pin_map)}
 
 
-def load_facts():
-    """The parsed PPL_HOME/os_sandbox.json, None when absent. Extra keys are kept."""
-    path = paths.home() / FACTS_FILE
+def rendered_by_lane(task_id=None):
+    """What a lane whose guard facts are missing or unreadable is told: ppl lane renders them,
+    and only when the lane starts, so rendering them again is the owner's step outside the
+    lane."""
+    from . import lanes
+    return "ppl lane renders it into the lane's start directory when the lane starts: %s" \
+        % lanes.restart_hint(task_id)
+
+
+def facts_path(task_id=None):
+    """The guard facts of the lane of `task_id`, else of the lane this call is in (resolved as
+    every ppl command resolves its run, lanes.task_for_call): <start>/os_sandbox.json, which
+    ppl lane renders and no lane's sandbox can write. None outside a lane: no machine-wide file
+    is read."""
+    from . import lanes
+    task = task_id or lanes.task_for_call(None)
+    return lanes.start_dir(task) / FACTS_FILE if task else None
+
+
+def load_facts(task_id=None):
+    """The parsed guard facts of a lane (facts_path), None when there are none: outside a lane,
+    or a lane whose harness needs no OS sandbox. Extra keys are kept."""
+    path = facts_path(task_id)
+    if path is None:
+        return None
+    task = path.parent.name
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:
-        raise PplError("SETUP_INCOMPLETE", "cannot read %s: %s. Run ppl harness apply."
-                       % (path, exc))
+        raise PplError("SETUP_INCOMPLETE", "cannot read %s: %s. %s"
+                       % (path, exc, rendered_by_lane(task)))
     try:
         doc = json.loads(text)
     except ValueError:
         doc = None
     if not isinstance(doc, dict):
-        raise PplError("SETUP_INCOMPLETE", "%s is not a JSON object. Run ppl harness apply."
-                       % path)
+        raise PplError("SETUP_INCOMPLETE", "%s is not a JSON object. %s"
+                       % (path, rendered_by_lane(task)))
     return doc
 
 
-def pinned_repo(key, snapshot_repo):
-    """The repository a ppl command run outside the OS sandbox reaches. With the guard facts
-    present it is their `key` (tracker_repo or forge_repo), and a run snapshot naming another
-    one is refused SCHEMA_INVALID, since a role can write the snapshot but not the facts.
-    Without the facts, the snapshot's."""
-    doc = load_facts()
+def pinned_repo(key, snapshot_repo, task_id=None):
+    """The repository a ppl command run outside the OS sandbox reaches for the run of `task_id`
+    (the lane this call is in when None): the `key` (tracker_repo or forge_repo) of the lane's
+    guard facts, which a run snapshot naming another one cannot change, since a role can write
+    the snapshot but not the facts. SCHEMA_INVALID when they differ, SETUP_INCOMPLETE when the
+    lane has no facts: the snapshot alone is never trusted."""
+    doc = load_facts(task_id)
     if doc is None:
-        return snapshot_repo
+        raise PplError("SETUP_INCOMPLETE",
+                       "%s has no guard facts naming its %s, and a command outside the OS "
+                       "sandbox never takes the repository from the run's harness snapshot, which "
+                       "a role can write: run it for a lane ppl lane started on a GitHub harness"
+                       % ("run %s" % task_id if task_id else "this call's lane", key))
     repo = doc.get(key)
     if not (isinstance(repo, str) and repo) or repo != snapshot_repo:
         raise PplError("SCHEMA_INVALID",
                        "the run's harness snapshot names %r as its repository and %s names %r "
-                       "as %s, so this command reaches neither: run ppl harness apply, or "
-                       "restore the run's harness.json" % (snapshot_repo, FACTS_FILE, repo, key))
+                       "as %s, so this command reaches neither: restore the run's harness.json, "
+                       "which a role can write, since %s is what ppl lane rendered for the lane"
+                       % (snapshot_repo, FACTS_FILE, repo, key, FACTS_FILE))
     return repo
 
 
-def gh_path():
-    """The pinned gh when the facts exist, else a bare gh."""
+def gh_path(task_id=None):
+    """The gh the guard facts of the lane of `task_id` pin (load_facts: the lane this call is
+    in when None), else a bare gh. A command that reaches GitHub for a run passes its task, so
+    its gh and its repository (pinned_repo) come from the same lane."""
     try:
-        doc = load_facts()
+        doc = load_facts(task_id)
         path = doc["pins"]["gh"]["path"] if doc else None
     except (PplError, KeyError, TypeError):
         path = None

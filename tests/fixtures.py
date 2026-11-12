@@ -4,7 +4,9 @@ import os
 import shutil
 import subprocess
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 import tmphome
 from ppl import paths, tomlout
@@ -15,6 +17,11 @@ SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
 # on PATH, so a render needs no gh or ppl installed.
 FAKE_PINS = {name: {"path": "/opt/pin/bin/" + name, "realpath": "/opt/pin/bin/" + name}
              for name in ("gh", "git", "ppl")}
+
+# What a lane's sandbox can leave in its run's state.json or log that no JSON parse turns into
+# a document: an integer of more than 4,300 digits, a plain ValueError on every supported
+# Python, and nesting that raises RecursionError on Python 3.11-3.13 (3.14 parses it).
+UNPARSEABLE_JSON = {"digits": "1" * 4301, "deep": "[" * 100000 + "]" * 100000}
 
 # The tables that turn an example harness into a GitHub Issues one.
 GITHUB_ISSUES = {"tracker": {"kind": "github-issues", "repo": "o/r", "task_prefix": "GH"},
@@ -127,3 +134,66 @@ def older_system_python():
     if result.returncode != 0 or len(fields) != 2 or fields[1] != "1":
         return None
     return SYSTEM_PYTHON, fields[0]
+
+
+def commit_harness(target):
+    """Make an installed harness directory a git repository with one commit, as `ppl harness
+    add` leaves a plain directory, under a test-only identity (a temporary repository, never
+    this project's). Returns `target`."""
+    for args in (("init", "-q", "-b", "main"), ("add", "-A"),
+                 ("-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                  "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "Import")):
+        subprocess.run(["git", "-C", str(target), *args], check=True, capture_output=True)
+    return target
+
+
+def lane_settings(task_id):
+    """The hooks a lane's settings.json carries as `ppl lane` renders them, each command ending
+    in --task <task_id>, and no OS sandbox profile."""
+    from ppl import setup
+    return {"hooks": {event: [entry] for event, entry in
+                      setup.hook_entries(paths.root(), task_id).items()}}
+
+
+def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
+              session_id="00000000-0000-4000-8000-000000000001", branch=None, settings=True):
+    """Register a lane for `task_id` and create its start directory, as `ppl lane` leaves them.
+    The entry is written directly with the given lane number, and the start directory gets the
+    lane's record lane.json (its worktree, checkout and `branch`) and, with `settings`, its
+    settings.json (lane_settings). An installed harness is copied to <start>/harness/<harness>,
+    what `ppl lane` exports, and the machine's routing.toml to <start>/routing.toml, the copy
+    `ppl lane` freezes (D15). Returns the entry."""
+    from ppl import lanes, store
+    start = lanes.start_dir(task_id)
+    start.mkdir(parents=True, exist_ok=True)
+    store.write_json(lanes.record_path(task_id), {
+        "task": task_id, "worktree": str(worktree or repo), "checkout": str(repo),
+        "branch": branch, "harness": harness})
+    if settings:
+        store.write_json(start / "settings.json", lane_settings(task_id))
+    installed = paths.harness_dir(harness)
+    if installed.is_dir():
+        target = start / "harness" / harness
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(installed, target)
+    if paths.machine_routing_file().is_file():
+        shutil.copyfile(paths.machine_routing_file(), start / "routing.toml")
+    record = {"lane": lane, "task": task_id, "harness": harness, "harness_sha": "0" * 40,
+              "repo": str(repo), "worktree": str(worktree or repo), "start_dir": str(start),
+              "session_id": session_id, "pid": None, "started": store.now()}
+    kept = [item for item in lanes.read() if item.get("task") != task_id]
+    store.write_json(lanes.registry_path(), {"version": 1, "lanes": kept + [record]})
+    return record
+
+
+@contextmanager
+def git_identity():
+    """Give git a test-only identity (and no signing) through the environment, so a
+    plain directory can be imported as a harness without the developer's or CI's
+    global git config. Never used for this project's own commits."""
+    config = Path(tmphome.mkdtemp(prefix="pplgitcfg-")) / "gitconfig"
+    config.write_text("[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n",
+                      encoding="utf-8")
+    with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1"}):
+        yield

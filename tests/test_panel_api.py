@@ -22,7 +22,7 @@ import panel_client
 HOME = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_HOME"] = HOME
 
-from ppl import control, findings, paths, run, store
+from ppl import control, findings, lanes, paths, run, status as status_mod, store, usage as usage_mod
 from ppl.errors import PplError
 from ppl.panel import server, session
 
@@ -415,13 +415,12 @@ class TestPanelApi(unittest.TestCase):
         bad_row = [r for r in rows if r["task_id"] == other_task][0]
         self.assertEqual(bad_row["status"], "error")
 
-    # --- defect: the archive dir and the ACTIVE marker are not runs ---
+    # --- defect: the archive dir is not a run ---
 
-    def test_list_runs_ignores_archive_and_active_marker(self):
+    def test_list_runs_ignores_archive(self):
         server.handle_control(self.task, {"command": "destroy", "scope": "local"})
         ids = [r["task_id"] for r in server.list_runs()]
         self.assertNotIn("_archive", ids)
-        self.assertNotIn("ACTIVE", ids)
 
     # --- Handler: real cross-origin and missing-header rejection ---
 
@@ -589,6 +588,107 @@ class TestPanelApi(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+class TestLanesApi(panel_client.StudioTestCase):
+    def _lane(self, number, task, stage="verify", pid=None):
+        run.init(task, "https://j/x", "/tmp/repo")
+        state = run.load(task)
+        state["stage"] = stage
+        store.write_json(run.state_path(task), state)
+        return {"lane": number, "task": task, "harness": "h", "harness_sha": "a" * 40,
+                "repo": "/r", "worktree": "/w", "start_dir": "/s", "session_id": "sess-secret",
+                "pid": pid, "started": "t"}
+
+    def test_api_lanes_lists_every_lane_with_stage_and_spend(self):
+        lanes._write([self._lane(2, "LN-2", "verify"), self._lane(1, "LN-1", "implement")])
+        status, payload, _ = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(status, 200)
+        self.assertEqual([row["lane"] for row in payload["lanes"]], [1, 2])
+        first = payload["lanes"][0]
+        self.assertEqual((first["task"], first["harness"], first["stage"], first["alive"]),
+                         ("LN-1", "h", "implement", False))
+        self.assertEqual(first["resume"], "ppl lane resume LN-1")
+        self.assertTrue(first["usd"].startswith("usd "))
+        self.assertEqual(payload["machine_max"], 3)
+        self.assertEqual(payload["day"]["cap"], 0.0)
+        self.assertIn("issues", payload["day"])
+        self.assertIsNone(payload["error"])
+
+    def test_api_lanes_with_an_unreadable_registry_returns_an_error_row_not_a_500(self):
+        lanes.registry_path().parent.mkdir(parents=True, exist_ok=True)
+        lanes.registry_path().write_text("not json", encoding="utf-8")
+        status, payload, _ = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["lanes"], [])
+        self.assertIn("not valid JSON", payload["error"])
+
+    def test_api_lanes_leaves_out_the_registrys_internal_fields(self):
+        lanes._write([self._lane(1, "LN-1", pid=4242)])
+        _, payload, _ = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(sorted(payload["lanes"][0]),
+                         sorted(["lane", "task", "harness", "stage", "outcome", "alive", "usd",
+                                 "resume"]))
+        text = json.dumps(payload)
+        for secret in ("sess-secret", "4242", "/s", "worktree", "start_dir", "session_id"):
+            self.assertNotIn(secret, text)
+
+    def test_api_lanes_returns_a_script_stage_as_plain_data(self):
+        lanes._write([self._lane(1, "LN-1", stage="<script>alert(1)</script>")])
+        status, payload, headers = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        self.assertEqual(payload["lanes"][0]["stage"], "<script>alert(1)</script>")
+
+    def test_api_lanes_is_get_only(self):
+        status, payload, _ = panel_client.call("POST", "/api/lanes", {})
+        self.assertEqual((status, payload["error_code"]), (405, "SCHEMA_INVALID"))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads a 000 file")
+    def test_api_lanes_with_a_registry_it_cannot_open_returns_the_error_not_a_500(self):
+        lanes._write([self._lane(1, "LN-1")])
+        os.chmod(lanes.registry_path(), 0)
+        self.addCleanup(os.chmod, lanes.registry_path(), 0o600)
+        status, payload, _ = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["lanes"], [])
+        self.assertTrue(payload["error"])
+
+    def test_a_lane_whose_spend_cannot_be_read_says_so_and_the_response_stays_200(self):
+        # a failure reads "usd unreadable", never what no spend prints, and any exception the
+        # lane's own files raise stays in its row
+        lanes._write([self._lane(1, "LN-1"), self._lane(2, "LN-2")])
+        real = status_mod.usd_text
+        for error in (PplError("SCHEMA_INVALID", "bad state"), RecursionError("deep"),
+                      AttributeError("list has no get")):
+            def usd_text(task):
+                if task == "LN-1":
+                    raise error
+                return real(task)
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(status_mod, "usd_text", usd_text):
+                    code, payload, _ = panel_client.call("GET", "/api/lanes")
+                self.assertEqual(code, 200)
+                self.assertEqual(payload["lanes"][0]["usd"], "usd unreadable")
+                self.assertTrue(payload["lanes"][1]["usd"].startswith("usd "))
+
+    def test_the_day_error_path_keeps_the_lanes_and_the_response_200(self):
+        lanes._write([self._lane(1, "LN-1")])
+        with mock.patch.object(usage_mod, "spent_today", side_effect=PplError("SCHEMA_INVALID", "bad runs")):
+            code, payload, _ = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(payload["lanes"]), 1)
+        self.assertEqual(payload["day"]["error"], "bad runs")
+        self.assertIsNone(payload["day"]["usd"])
+
+    def test_the_day_reports_counts_of_uncounted_runs_not_their_names(self):
+        lanes._write([self._lane(1, "LN-1")])
+        issues = {"blocked": [], "unpriced": [], "unreadable": ["SECRET-1", "SECRET-2"],
+                  "unpriced_other": []}
+        with mock.patch.object(usage_mod, "spent_today", return_value=(1.5, issues)):
+            _, payload, _ = panel_client.call("GET", "/api/lanes")
+        self.assertEqual(payload["day"]["issues"]["unreadable"], 2)
+        self.assertNotIn("SECRET", json.dumps(payload))
 
 
 class TestPanelRowOsSandbox(unittest.TestCase):

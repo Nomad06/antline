@@ -7,7 +7,6 @@ through clean(), and parse() refuses a file whose text differs from its own
 cleaned form. This module imports no routing: the roles a file may name are
 passed in.
 """
-import hashlib
 import re
 import stat
 import tomllib
@@ -172,10 +171,6 @@ def read(harness_dir, roles):
     except OSError as exc:
         _fail(str(path), "cannot be read: %s" % exc)
     return parse(data, str(path), roles), data
-
-
-def digest(data):
-    return hashlib.sha256(data).hexdigest()
 
 
 def active(entries, role=None):

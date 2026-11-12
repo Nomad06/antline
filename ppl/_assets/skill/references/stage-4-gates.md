@@ -6,10 +6,10 @@ the current candidate SHA with the check name from that file - use these names e
 because two of them are load-bearing:
 
 ```bash
-ppl evidence add --check focused-tests --result <pass|fail> --sha $SHA --log <log> \
-  --rc <rc file> --generation $GENERATION --from orchestrator
-ppl evidence add --check secret-scan --result <pass|fail> --sha $SHA --log <log> \
-  --rc <rc file> --generation $GENERATION --from orchestrator
+ppl evidence add --check focused-tests --result <pass|fail> --sha <SHA> --log <log> \
+  --rc <rc file> --generation <GENERATION> --from orchestrator
+ppl evidence add --check secret-scan --result <pass|fail> --sha <SHA> --log <log> \
+  --rc <rc file> --generation <GENERATION> --from orchestrator
 ```
 
 Take each `--result` from the rc file the gate wrote, `pass` when it holds 0 and `fail`

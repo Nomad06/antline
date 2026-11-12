@@ -1,11 +1,8 @@
-"""config.toml: per-machine settings in the data root. It records the active
-harness, where the generated agents and skill go, and the `ppl setup`
-bookkeeping in [setup]."""
+"""config.toml: per-machine settings in the data root. It records the Claude Code binary, the
+default harness, the limits and the `ppl setup` bookkeeping in [setup]."""
 import math
-import os
 import shutil
 import tomllib
-from pathlib import Path
 
 from . import paths
 from .errors import PplError
@@ -45,8 +42,9 @@ def ensure():
     paths.home().mkdir(parents=True, exist_ok=True)
     if not paths.config_file().is_file():
         shutil.copy(paths.defaults_dir() / "config.example.toml", paths.config_file())
-    if not paths.routing_file().is_file():
-        shutil.copy(paths.defaults_dir() / "routing.example.toml", paths.routing_file())
+    # the machine's, which a lane only reads a frozen copy of (D15)
+    if not paths.machine_routing_file().is_file():
+        shutil.copy(paths.defaults_dir() / "routing.example.toml", paths.machine_routing_file())
     return load()
 
 
@@ -58,26 +56,36 @@ def active_harness():
     return active or None
 
 
-BUDGET_KEYS = ("usd_max",)
+BUDGET_KEYS = ("usd_max", "usd_max_per_day")
+
+
+def _budget_cap(key):
+    table = _section(load(), "budgets")
+    unknown = sorted(name for name in table if name not in BUDGET_KEYS)
+    if unknown:
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: [budgets] has the unknown key %s, the known keys are %s"
+                       % (paths.config_file(), ", ".join(unknown), ", ".join(BUDGET_KEYS)))
+    value = table.get(key, 0.0)
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0):
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: budgets.%s must be a number >= 0"
+                       % (paths.config_file(), key))
+    return float(value)
 
 
 def budgets_usd_max():
     """[budgets] usd_max, the run's dollar cap that ppl init copies. 0.0, no cap,
     when absent. An unknown key is refused: a misspelt cap must not leave the run
     uncapped."""
-    table = _section(load(), "budgets")
-    unknown = sorted(key for key in table if key not in BUDGET_KEYS)
-    if unknown:
-        raise PplError("SCHEMA_INVALID",
-                       "config.toml at %s: [budgets] has the unknown key %s, the known key is %s"
-                       % (paths.config_file(), ", ".join(unknown), ", ".join(BUDGET_KEYS)))
-    value = table.get("usd_max", 0.0)
-    if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or not math.isfinite(value) or value < 0):
-        raise PplError("SCHEMA_INVALID",
-                       "config.toml at %s: budgets.usd_max must be a number >= 0"
-                       % paths.config_file())
-    return float(value)
+    return _budget_cap("usd_max")
+
+
+def budgets_usd_max_per_day():
+    """[budgets] usd_max_per_day, the dollar cap on the local day's spend across every run on
+    this machine. 0.0, no cap, when absent, and validated like usd_max."""
+    return _budget_cap("usd_max_per_day")
 
 
 LESSON_KEYS = ("reflect",)
@@ -101,37 +109,47 @@ def lessons_reflect():
     return value
 
 
-def _dir_setting(key, env_var, fallback):
-    """The environment wins over config, so a test or a one-off render
-    (PPL_AGENTS_DIR=... ppl harness apply) never writes into the real dir."""
-    if os.environ.get(env_var):
-        return Path(os.environ[env_var])
-    value = _section(load(), "claude").get(key)
-    if value is not None and not isinstance(value, str):
+LANE_KEYS = ("max",)
+
+
+def lanes_max():
+    """[lanes] max, how many task windows may run at once on this machine: an integer
+    1..9, 3 when absent. An unknown key, a bool or a string is refused, the [budgets]
+    pattern: a misspelt limit must not leave the machine on the default unseen."""
+    table = _section(load(), "lanes")
+    unknown = sorted(key for key in table if key not in LANE_KEYS)
+    if unknown:
         raise PplError("SCHEMA_INVALID",
-                       "config.toml at %s: claude.%s must be a string" % (paths.config_file(), key))
-    return Path(value).expanduser() if value else fallback
+                       "config.toml at %s: [lanes] has the unknown key %s, the known key is %s"
+                       % (paths.config_file(), ", ".join(unknown), ", ".join(LANE_KEYS)))
+    value = table.get("max", 3)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 9:
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: lanes.max must be an integer from 1 to 9"
+                       % paths.config_file())
+    return value
 
 
-def skills_dir():
-    """Where `ppl harness apply` writes the skill."""
-    return _dir_setting("skills_dir", "PPL_SKILLS_DIR", Path.home() / ".claude" / "skills")
-
-
-def agents_dir():
-    """Where `ppl harness apply` writes the agent files."""
-    return _dir_setting("agents_dir", "PPL_AGENTS_DIR", Path.home() / ".claude" / "agents")
-
-
-def set_active_harness(name, memory_sha256=None):
+def set_active_harness(name):
+    """[harness] active, the harness `ppl lane` runs when it is given none. A memory_sha256
+    an older `ppl harness apply` recorded beside it is dropped: nothing reads it."""
     doc = load()
     _section(doc, "harness")
     doc.setdefault("harness", {})["active"] = name
-    if memory_sha256 is None:
-        doc["harness"].pop("memory_sha256", None)
-    else:
-        doc["harness"]["memory_sha256"] = memory_sha256
+    doc["harness"].pop("memory_sha256", None)
     save(doc)
+
+
+def remove(section, keys):
+    """Drop `keys` from one table of config.toml and return the ones that were there."""
+    doc = load()
+    table = _section(doc, section)
+    present = [key for key in keys if key in table]
+    if present:
+        for key in present:
+            doc[section].pop(key)
+        save(doc)
+    return present
 
 
 def _step_lists(doc):

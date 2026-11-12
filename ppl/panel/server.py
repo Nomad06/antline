@@ -64,8 +64,7 @@ def list_runs():
     if not root.is_dir():
         return rows
     for folder in sorted(root.iterdir()):
-        # runs/_archive holds destroyed runs one directory deeper, and
-        # runs/ACTIVE is a marker file, not a run directory. Skip both
+        # runs/_archive holds destroyed runs one directory deeper: skip it
         # explicitly instead of relying only on the state.json probe below.
         if not folder.is_dir() or folder.name == "_archive":
             continue

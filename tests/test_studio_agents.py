@@ -10,6 +10,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+import fixtures
 import panel_client
 from ppl import boundary, config, harness, memory, models, paths, routing, rules, tomlout
 from ppl.errors import PplError
@@ -94,6 +95,7 @@ class TestEnforced(unittest.TestCase):
 
 class AgentsTestCase(panel_client.StudioTestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         super().setUp()
         config.ensure()
         harness.add(str(paths.defaults_dir() / "harnesses" / "example-generic"), name="demo")
@@ -316,7 +318,7 @@ class TestAgentsApi(AgentsTestCase):
         for body in ({"overlay": "- Use pnpm, never npm.\n"}, {"routing": doc}, {}):
             status, _, _ = panel_client.call("POST", "/api/agents/ppl-code-worker/preview", body=body)
             self.assertEqual(status, 200)
-        self.assertEqual(list(self.agents_dir.iterdir()), [])
+        self.assertEqual(self.rendered_files(), [])
 
     def test_notes_with_a_nul_are_refused_by_the_preview_and_the_save(self):
         key = "harness:demo:templates/ppl-verifier.part"

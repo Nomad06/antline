@@ -1120,13 +1120,14 @@ def _blocked(why, command="ppl tracker fetch"):
                     "repository and run %s again%s." % (why, command, note))
 
 
-def _gh(runner, argv, what, command="ppl tracker fetch"):
+def _gh(runner, argv, what, command="ppl tracker fetch", gh=None):
     """(returncode, stdout, stderr) of one gh call, EXTERNAL_BLOCKED when gh is missing or
-    does not answer in time. gh runs by the pinned path when the guard facts name one."""
+    does not answer in time. gh is `gh`, else the pinned path when the guard facts of the lane
+    this call is in name one (os_sandbox.gh_path)."""
     import subprocess
     from .. import os_sandbox
     try:
-        done = runner([os_sandbox.gh_path()] + argv, capture_output=True, text=True,
+        done = runner([gh or os_sandbox.gh_path()] + argv, capture_output=True, text=True,
                       encoding="utf-8", errors="replace", timeout=GH_TIMEOUT)
     except FileNotFoundError:
         raise _blocked("gh is not on PATH, so %s cannot be read" % what, command)
@@ -1146,8 +1147,8 @@ def _json(text, what):
         raise _blocked("gh answered %s with text that is not JSON" % what)
 
 
-def _link(runner, route, what):
-    code, out, err = _gh(runner, ["api", route], what)
+def _link(runner, route, what, gh=None):
+    code, out, err = _gh(runner, ["api", route], what, gh=gh)
     if code != 0:
         if _NOT_FOUND.search(err):
             return UNAVAILABLE
@@ -1160,14 +1161,16 @@ def fetch(table, task_id, dest_dir, runner=None):
     issue.md under dest_dir, a directory under runs/ reached through no link
     (store.checked_run_path). Returns {"revision": updatedAt, "url": the issue url}. A 404 on
     a link endpoint records "unavailable", any other failure raises EXTERNAL_BLOCKED before a
-    write."""
+    write. gh is the one the guard facts of the task's own lane pin, the lane its repository
+    comes from (os_sandbox.pinned_repo)."""
     import subprocess
-    from .. import store
+    from .. import os_sandbox, store
     runner = runner or subprocess.run
+    gh = os_sandbox.gh_path(task_id)
     number = issue_number(task_id)
     repo = table["repo"]
     code, out, err = _gh(runner, ["issue", "view", str(number), "-R", repo, "--json",
-                                  _VIEW_FIELDS], "the issue")
+                                  _VIEW_FIELDS], "the issue", gh=gh)
     if code != 0:
         raise _blocked("gh issue view %d failed: %s" % (number, err.strip()[:300] or
                                                        "exit %s" % code))
@@ -1175,8 +1178,8 @@ def fetch(table, task_id, dest_dir, runner=None):
     if not isinstance(issue, dict) or not isinstance(issue.get("updatedAt"), str):
         raise _blocked("gh answered the issue without an updatedAt")
     base = "repos/%s/issues/%d" % (repo, number)
-    links = {"parent": _link(runner, base + "/parent", "the parent issue"),
-             "sub_issues": _link(runner, base + "/sub_issues", "the sub-issues")}
+    links = {"parent": _link(runner, base + "/parent", "the parent issue", gh),
+             "sub_issues": _link(runner, base + "/sub_issues", "the sub-issues", gh)}
     doc = {"issue": issue, "links": links}
     text = render_issue(doc)
     # again after the network calls, right before the write, as a role may have swapped a

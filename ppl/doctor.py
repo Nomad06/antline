@@ -1,13 +1,11 @@
-"""Whether the PreToolUse guard hook is actually registered where the
-`isolated` flag (DESIGN 5.4) assumes it is - a fact `isolated` cannot check
-about itself, only assert. `ppl doctor` reports it; `ppl init --isolated`
-refuses on the configurations that make that assertion silently wrong: hook
-registered only globally, hook registered both locally and globally (the
-global copy still fires everywhere), or registration that could not be
-confirmed at all because a settings file exists but could not be read or
-parsed - including a global file that is unreadable even when the local
-side is a confirmed yes, since a working local registration says nothing
-about whether the global side is actually clear.
+"""Where the PreToolUse guard hook is registered, in the session's own settings and one other
+side, and whether each registration can fire. In a lane the session's own settings are the
+settings.json `ppl lane` rendered into the lane's start directory (lane_settings_path), whose
+hooks carry the lane's task on their command line, and the other side is the start
+directory's .claude/settings.local.json, which the lane session loads, not the Claude home's
+settings.json, which it does not (_sides, R56); `ppl init` refuses a run whose lane settings
+register no guard naming its task (lane_guard_problem). Outside a lane `ppl doctor` checks the
+machine alone: the setup steps, the models, the harnesses and the Claude Code binary.
 
 Claude Code scopes a `.claude/settings.local.json` hook to sessions launched
 inside that directory tree; a hook in `~/.claude/settings.json` fires for
@@ -21,7 +19,7 @@ acts on. A name the matcher never passes is a denial that cannot fire however
 correct the code behind it - the Jira gate was dead this way when the Atlassian
 server turned out to register under a different prefix - so `inspect()` reports
 the uncovered names per file, and `ppl init` refuses to create a run while any
-registered matcher leaves one uncovered, isolated or not (`matcher_problem`).
+registered matcher leaves one uncovered (`matcher_problem`).
 
 Known blind spots, not closed by this module (DESIGN 5.4's residual list):
 `PPL_CLAUDE_HOME` fully substitutes for `~/.claude` when set, so a stray
@@ -35,12 +33,14 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from . import lanes
 from .errors import PplError
 
 GUARD_MARKER = "ppl_guard.py"
@@ -72,12 +72,70 @@ def global_settings_path():
     return claude_home() / "settings.json"
 
 
+def lane_settings_path(entry):
+    """The settings.json `ppl lane` rendered into the start directory of the lane registry entry
+    `entry`: the hooks its session runs, each ending in --task <task>, and its OS sandbox
+    profile."""
+    return Path(str(entry.get("start_dir"))) / "settings.json"
+
+
+def _lane_at(cwd=None):
+    """The registry entry of the lane the session is in, else None: with `cwd`, the lane whose
+    start directory or worktree holds it; without, the lane a ppl call is in, resolved as
+    cli.resolve_task resolves its run (PPL_TASK, then the process cwd). A registry that cannot
+    be read is no lane here: ppl init and ppl lane refuse it on their own."""
+    try:
+        if cwd is not None:
+            return lanes.for_path(cwd)
+        task = lanes.task_for_call(None)
+        return lanes.entry(task) if task else None
+    except PplError:
+        return None
+
+
 def local_settings_path(cwd=None):
+    """The settings file of the session's own: in a lane its settings.json
+    (lane_settings_path), else <cwd>/.claude/settings.local.json."""
+    entry = _lane_at(cwd)
+    if entry is not None:
+        return lane_settings_path(entry)
     # PPL_LOCAL_SETTINGS_DIR exists only so tests can pin this without
     # changing the process's actual working directory, which is shared with
     # everything else running in the same interpreter.
     base = cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd()
     return Path(base) / ".claude" / "settings.local.json"
+
+
+def session_dir(cwd=None):
+    """The directory the session starts in: the lane's start directory in a lane, else `cwd`
+    (PPL_LOCAL_SETTINGS_DIR, then the process cwd, when None)."""
+    entry = _lane_at(cwd)
+    if entry is not None:
+        return Path(str(entry.get("start_dir")))
+    return Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd())
+
+
+def _sides(cwd=None):
+    """[(name, path)] of the two settings files a guard registration is read from. In a lane,
+    the two sources its session loads (R56): its settings.json ("local") and its start
+    directory's .claude/settings.local.json ("start_local"), the local source of its cwd, since
+    --setting-sources local keeps the Claude home's settings.json and a project settings.json
+    out. Elsewhere, the directory's .claude/settings.local.json ("local") and the Claude home's
+    settings.json ("global")."""
+    entry = _lane_at(cwd)
+    if entry is not None:
+        start = Path(str(entry.get("start_dir")))
+        return [("local", lane_settings_path(entry)),
+                ("start_local", start / ".claude" / "settings.local.json")]
+    return [("local", local_settings_path(cwd)), ("global", global_settings_path())]
+
+
+def hook_remedy(cwd=None):
+    """How the hook entries of the session are written again: in a lane ppl lane renders them,
+    pinned to the interpreter that runs it, so the owner starts the lane again outside it."""
+    entry = _lane_at(cwd)
+    return ("ppl lane renders the hook entries, pinned to the interpreter that runs it (Python "
+            "3.11 or newer): %s" % lanes.restart_hint(entry.get("task") if entry else None))
 
 
 def _guard_matchers(doc):
@@ -111,7 +169,9 @@ def _has_guard(doc):
 # `ppl doctor` runs each registered guard command once on a payload the cage
 # allows and that writes nothing: an unroled Read of /dev/null.
 HOOK_RUN_TIMEOUT_SECONDS = 10
-HOOK_RUN_REMEDY = "ppl setup claude"
+# The command a hook remedy names, also in the interpreter floor's own line, so a problem that
+# already names it is not told it twice.
+HOOK_RUN_REMEDY = "ppl lane"
 
 
 def _guard_commands(doc):
@@ -127,11 +187,51 @@ def _guard_commands(doc):
     return commands
 
 
+def _command_task(command):
+    """The task a guard command names after its script as `--task <id>`, else None."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    scripts = [index for index, word in enumerate(words) if os.path.basename(word) == GUARD_MARKER]
+    if not scripts:
+        return None
+    try:
+        return lanes.hook_task(words[scripts[0] + 1:])
+    except ValueError:
+        return None
+
+
+def lane_guard_problem(entry):
+    """None when the lane's settings.json (lane_settings_path) registers the guard and every
+    guard command there ends in --task <the lane's task>, else the message ppl init refuses
+    with: a run starts only under its own lane's guard."""
+    task = entry.get("task")
+    path = lane_settings_path(entry)
+    remedy = ("ppl lane renders it with every hook ending in --task %s: %s"
+              % (task, lanes.restart_hint(task)))
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return ("lane %s's %s cannot be read (%s), so the guard of its session cannot be "
+                "confirmed: %s" % (task, path, exc, remedy))
+    commands = _guard_commands(doc)
+    if not commands:
+        return ("lane %s's %s registers no guard hook (%s), so its session would run unguarded: "
+                "%s" % (task, path, GUARD_MARKER, remedy))
+    for command in commands:
+        if _command_task(command) != task:
+            return ("lane %s's %s registers the guard hook `%s`, whose command line does not end "
+                    "in --task %s, so it does not bind its calls to this run: %s"
+                    % (task, path, command, task, remedy))
+    return None
+
+
 def registered_guard_commands(cwd=None):
-    """Every guard command in the local and the global settings file, each once.
+    """Every guard command in the two settings files of the session (_sides), each once.
     A file that cannot be read or parsed contributes none, `inspect` reports it."""
     commands = []
-    for path in (local_settings_path(cwd), global_settings_path()):
+    for _, path in _sides(cwd):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -144,7 +244,7 @@ def registered_guard_commands(cwd=None):
 
 def guard_probe_session_id():
     """The session_id that marks the probe below, read from the hook file so the two
-    cannot drift: the guard does not log a deny of it against the active run."""
+    cannot drift: the guard does not log a deny of it against any run."""
     _hooks_on_path()
     import ppl_guard
     return ppl_guard.DOCTOR_PROBE_SESSION_ID
@@ -176,23 +276,23 @@ def _run_problem(command, workspace):
 def hook_runs(cwd=None, workspace=None):
     """{"ok": True} when every registered guard command executes clean,
     {"ok": False, "problem": ...} naming the first one that does not and the
-    remedy, {"ok": None} when no guard is registered. `cwd` picks the local
-    settings file, `workspace` is the payload's cwd (default: `cwd`, then the
-    process cwd). Kept out of `inspect`, which `ppl init` calls on every run:
+    remedy, {"ok": None} when no guard is registered. `cwd` picks the session's
+    settings file (local_settings_path: in a lane the lane's guard, with its
+    --task), `workspace` is the payload's cwd (default: the session's directory,
+    session_dir). Kept out of `inspect`, which `ppl init` calls on every run:
     this is the one place doctor runs what a settings file names, so the
     interpreter's version is asked here too, before the hook runs."""
     commands = registered_guard_commands(cwd)
     if not commands:
         return {"ok": None, "problem": None}
-    workspace = str(workspace or cwd or os.getcwd())
+    workspace = str(workspace or session_dir(cwd))
     for command in commands:
         problem = _interpreter_problem(command) or _run_problem(command, workspace)
         if problem:
             message = "the registered guard hook `%s` %s" % (command, problem.rstrip("."))
             # The interpreter floor's own line already names the remedy.
             if HOOK_RUN_REMEDY not in problem:
-                message += ". Run `%s` to register it with the interpreter that runs ppl" \
-                    % HOOK_RUN_REMEDY
+                message += ". %s" % hook_remedy(cwd)
             return {"ok": False, "problem": message + "."}
     return {"ok": True, "problem": None}
 
@@ -333,11 +433,44 @@ def _command_problems(command, marker):
     return found
 
 
+def lane_hook_problems(start_dir):
+    """What keeps a ppl hook of the lane's settings.json in `start_dir` from running as the
+    cage, one line each, [] when nothing does: for the guard, dispatch and usage hooks, an
+    interpreter or script that does not exist (_command_problems), and an interpreter older
+    than the floor or not a Python (_interpreter_problem, which runs it once to ask). A
+    pinned interpreter that vanished makes the shell exit 127, a non-blocking error, so every
+    call is allowed. A settings.json that cannot be read, or that registers none of a hook,
+    counts too [R-GUARD-PYTHON-FLOOR]."""
+    from . import store
+    path = Path(str(start_dir)) / "settings.json"
+    try:
+        doc = store.read_json(path)
+    except (PplError, OSError) as exc:
+        return ["%s cannot be read: %s" % (path, getattr(exc, "message", None) or exc)]
+    if not isinstance(doc, dict):
+        return ["%s is missing or not an object" % path]
+    problems, asked = [], {}
+    for event, marker in HOOK_EVENTS:
+        hooks = _hooks_of(doc, event, marker)
+        if not hooks:
+            problems.append("%s registers no %s hook" % (path, marker))
+        for hook in hooks:
+            command = str(hook.get("command", ""))
+            found = _command_problems(command, marker)
+            if not found:
+                interpreter = command.split(" ", 1)[0]
+                if interpreter not in asked:
+                    asked[interpreter] = _interpreter_problem(command)
+                found = [asked[interpreter]] if asked[interpreter] else []
+            problems += ["%s: the %s hook %s" % (path, marker, text) for text in found]
+    return problems
+
+
 def _readable_settings(cwd):
-    """(path, parsed document) of each settings file that exists and parses
-    into an object. `inspect` reports the others."""
+    """(path, parsed document) of each of the session's two settings files (_sides) that
+    exists and parses into an object. `inspect` reports the others."""
     found = []
-    for path in (local_settings_path(cwd), global_settings_path()):
+    for _, path in _sides(cwd):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -356,9 +489,8 @@ def guard_shape_problem(cwd=None):
                 for marker, text in _shape_problems(doc, path) if marker == GUARD_MARKER]
     if not problems:
         return None
-    return ("%s. Run `ppl setup claude` to write the hook entries again (README.md \"Hooks\"), "
-            "and `ppl doctor`, which runs the hook and reports an interpreter older than Python "
-            "3.11." % "; ".join(problems))
+    return ("%s. %s. `ppl doctor` runs the hook and reports an interpreter older than Python "
+            "3.11." % ("; ".join(problems), hook_remedy(cwd)))
 
 
 def _hook_warning(cwd, event, marker, name, consequence):
@@ -372,11 +504,10 @@ def _hook_warning(cwd, event, marker, name, consequence):
                 for found, text in _shape_problems(doc, path) if found == marker]
     if not any(_hooks_of(doc, event, marker) for _, doc in settings):
         problems.append("the %s %s hook (%s) is registered in neither %s nor %s"
-                        % (event, name, marker, local_settings_path(cwd), global_settings_path()))
+                        % ((event, name, marker) + tuple(path for _, path in _sides(cwd))))
     if not problems:
         return None
-    return ("%s. %s: run `ppl setup claude` to write the hook entries again."
-            % ("; ".join(problems), consequence))
+    return ("%s. %s. %s." % ("; ".join(problems), consequence, hook_remedy(cwd)))
 
 
 def dispatch_warning(cwd=None):
@@ -431,8 +562,8 @@ def hook_location_warning(cwd=None):
                         found.append("%s: the %s hook runs %s" % (path, marker, script))
     if not found:
         return None
-    return ("%s, not the hook of this install under %s. Run `ppl setup claude` to point the "
-            "entries at this install's hooks." % ("; ".join(found), hooks_dir))
+    return ("%s, not the hook of this install under %s. %s." % ("; ".join(found), hooks_dir,
+                                                                hook_remedy(cwd)))
 
 
 def matcher_covers(matcher, tool_name):
@@ -546,18 +677,11 @@ def inspect(cwd=None):
     """The full picture: per-location state plus the combined registration.
 
     The two sides answer different questions, so an unreadable side is not
-    interchangeable with the other one (round 3 finding): `isolated=true`
-    asserts both "the hook fires here" (needs a confirmed *local* yes) and
-    "the hook does not fire elsewhere" (needs a confirmed *global* no). A
-    confirmed local yes says nothing about whether the global side is
-    actually clear, so it must not paper over an unreadable global file -
-    "local yes, global unreadable" is "unknown", not "local", because the
-    thing isolation actually depends on (no global registration) was never
-    confirmed. The reverse asymmetry is fine: a confirmed *global* yes is
-    disqualifying on its own regardless of whether the local side could be
-    read, so "global yes, local unreadable" is "global", which already
-    refuses under `isolated=true` - there is nothing an unreadable local file
-    could tell us that would make an armed global hook acceptable.
+    interchangeable with the other one (round 3 finding): a confirmed local yes says
+    nothing about whether the global side, which fires in every session on the machine,
+    is clear, so "local yes, global unreadable" is "unknown", not "local". The reverse
+    asymmetry is fine: a confirmed *global* yes holds on its own, whatever the local side
+    reads, so "global yes, local unreadable" is "global".
 
     So: `registration` is `"both"` only when both sides are confirmed yes;
     `"local"` when local is a confirmed yes and global is a confirmed no
@@ -569,29 +693,33 @@ def inspect(cwd=None):
 
     `matcher` is the coverage verdict over the confirmed registrations (see
     `_matcher_verdict`), and each side carries the `uncovered` names behind it.
+
+    In a lane the second side is not the Claude home's settings.json, which the lane session
+    does not load, but its start directory's .claude/settings.local.json, which it does
+    (_sides, R56): the result then carries `start_local` in place of `global`, and a
+    registration only there reads "start_local".
     """
-    local_path = local_settings_path(cwd)
-    global_path = global_settings_path()
-    local = _location(local_path)
-    global_ = _location(global_path)
-    local_state, global_state = local["state"], global_["state"]
-    if global_state == "unknown":
+    (own_name, own_path), (other_name, other_path) = _sides(cwd)
+    own = _location(own_path)
+    other = _location(other_path)
+    own_state, other_state = own["state"], other["state"]
+    if other_state == "unknown":
         where = "unknown"
-    elif local_state == "yes" and global_state == "yes":
+    elif own_state == "yes" and other_state == "yes":
         where = "both"
-    elif local_state == "yes":
-        where = "local"
-    elif global_state == "yes":
-        where = "global"
-    elif local_state == "unknown":
+    elif own_state == "yes":
+        where = own_name
+    elif other_state == "yes":
+        where = other_name
+    elif own_state == "unknown":
         where = "unknown"
     else:
         where = "none"
     return {
         "registration": where,
-        "matcher": _matcher_verdict(local, global_),
-        "local": dict(local, path=str(local_path)),
-        "global": dict(global_, path=str(global_path)),
+        "matcher": _matcher_verdict(own, other),
+        own_name: dict(own, path=str(own_path)),
+        other_name: dict(other, path=str(other_path)),
     }
 
 
@@ -614,14 +742,13 @@ def matcher_problem(inspected):
     """None when every confirmed registration's matcher covers every guarded
     tool name, else a message naming the file, the names and the fix.
 
-    Unlike `mismatch` this does not depend on `isolated`: a registered hook
-    whose matcher never passes a tool name to it is a denial that cannot fire
-    wherever the hook lives. Sides that are not a confirmed yes contribute
-    nothing - an unarmed hook is the documented unregistered state, and an
-    unreadable file is `mismatch`'s business.
+    A registered hook whose matcher never passes a tool name to it is a denial
+    that cannot fire wherever the hook lives. Sides that are not a confirmed yes
+    contribute nothing: an unarmed hook is the documented unregistered state, and
+    an unreadable file is reported as "unknown".
     """
     problems = []
-    for side in (inspected.get("local"), inspected.get("global")):
+    for side in (inspected.get("local"), inspected.get("global"), inspected.get("start_local")):
         if not side or side.get("state") != "yes" or not side.get("uncovered"):
             continue
         names = side["uncovered"]
@@ -635,71 +762,6 @@ def matcher_problem(inspected):
     return ("%s. A denial the hook never sees cannot fire, however the code behind it reads. "
             "Set that entry's matcher to \"%s\" (README.md \"Hooks\") and re-run "
             "ppl doctor." % ("; ".join(problems), RECOMMENDED_MATCHER))
-
-
-def mismatch(isolated, inspected):
-    """None when `inspected` is consistent with `isolated`, else a message naming a fix.
-
-    `inspected` is normally the dict `inspect()` returns; a bare registration
-    string (one of "local"/"global"/"both"/"none"/"unknown") is also accepted,
-    for callers - and tests - that already have just the combined state and
-    do not need the per-file detail in the "unknown" message.
-
-    Three combinations are silently wrong and worth refusing over, all only
-    under isolated=true (the default, and the documented recommended path):
-
-    - "global": the hook is confirmed registered only globally. That denies
-      5.4's own claim - the Jira gate and the pause would reach every session
-      on the machine, not just this run, while asserting the opposite.
-    - "unknown": this check could not confirm the global side is clear (see
-      `inspect()`), so isolated=true's "the hook does not fire elsewhere"
-      half cannot be confirmed either. Treating "unknown" as "fine" here
-      would be the exact bug this module exists to remove, now living inside
-      the fix for it.
-    - "both": the hook fires locally, which is what isolated=true wants, but
-      it is *also* registered globally, which means it fires everywhere else
-      too - the same violation as "global" alone, just with a working local
-      registration sitting next to it. A deliberate migration in progress
-      (global first, local added afterward) looks identical to this from a
-      file on disk, and the refusal is the same either way: isolation is not
-      what this run has until the global registration is gone.
-
-    "none" is not flagged: an unarmed hook is the pre-existing, openly
-    documented unregistered state (README.md "Hooks"), not a mismatch between a flag and
-    reality.
-    """
-    if not isolated:
-        return None
-    if isinstance(inspected, dict):
-        where = inspected["registration"]
-        broken = [loc["detail"] for loc in (inspected.get("local"), inspected.get("global"))
-                 if loc and loc.get("detail")]
-    else:
-        where = inspected
-        broken = []
-    if where == "unknown":
-        detail = "; ".join(broken) if broken else "a settings file could not be confirmed"
-        return ("the guard hook's registration could not be confirmed (%s). Isolation cannot "
-                "be verified from a settings file this check cannot read or parse - fix it, or "
-                "re-run with --no-isolated to accept the cwd-scoped fallback knowing this "
-                "could not be checked." % detail)
-    if where == "global":
-        return ("the guard hook is registered only globally (%s), not in this directory's "
-                "settings.local.json (%s). With isolated=true, that means the Jira gate and "
-                "the operator pause reach every Claude Code session on this machine, not "
-                "just this run - the opposite of what isolated=true asserts. Fix by "
-                "registering the hook locally instead (see README.md \"Hooks\"), or by "
-                "passing --no-isolated to accept the cwd-scoped fallback."
-                % (global_settings_path(), local_settings_path()))
-    if where == "both":
-        return ("the guard hook is registered both locally (%s) and globally (%s). The global "
-                "registration still fires in every session on this machine, so isolation is "
-                "not what this run has, regardless of the local one - the same problem as "
-                "\"global\" alone, not made safer by also having a working local copy. Remove "
-                "the global registration for isolation to mean anything, or pass "
-                "--no-isolated to accept that the hook reaches every session."
-                % (local_settings_path(), global_settings_path()))
-    return None
 
 
 # The setup steps a run cannot start without. paths, claude and forge are
@@ -801,13 +863,17 @@ def setup_problem(report, skip_model_check):
     return message
 
 
-def workspace():
-    """The configured workspace, where Claude Code sessions start, else the cwd."""
+def claude_binary():
+    """{"binary", "path"}: the Claude Code binary config.toml names (claude when it names none)
+    and where PATH finds it, None when PATH finds none. It never raises."""
     from . import config
     try:
-        return config.section("claude").get("workspace") or os.getcwd()
+        binary = config.section("claude").get("binary") or "claude"
     except Exception:
-        return os.getcwd()
+        binary = "claude"
+    if not isinstance(binary, str):
+        return {"binary": None, "path": None}
+    return {"binary": binary, "path": shutil.which(binary)}
 
 
 SKIPPED_IN_SANDBOX = "skipped inside the OS sandbox, run ppl doctor --forge outside it"
@@ -824,7 +890,7 @@ def _gh_kinds(doc):
 def gh_checks(doc, env=None):
     """(forge, tracker) check results of a loaded harness. Inside the OS sandbox the gh
     checks are skipped, since GitHub is closed there by design."""
-    from . import config, forges, trackers
+    from . import forges, trackers
     skipped = {"ok": None, "detail": SKIPPED_IN_SANDBOX}
     forge_gh, tracker_gh = _gh_kinds(doc)
     inside = _in_os_sandbox(env)
@@ -834,9 +900,8 @@ def gh_checks(doc, env=None):
         forge.update(skipped)
     else:
         try:
-            workspace = config.section("claude").get("workspace") or str(Path.home())
             forge.update(forges.get(settings["kind"]).doctor_check(
-                settings, claude_home().parent / ".claude.json", workspace))
+                settings, claude_home().parent / ".claude.json", str(Path.home())))
         except Exception as exc:
             forge.update(ok=False, detail="the forge check failed: %s" % _problem(exc))
     table = doc["tracker"]
@@ -866,9 +931,11 @@ def forge_report(env=None):
     return result
 
 
-def _server_names(doc):
+def _servers(doc):
     servers = doc.get("mcpServers") if isinstance(doc, dict) else None
-    return [name for name in servers if isinstance(name, str)] if isinstance(servers, dict) else []
+    if not isinstance(servers, dict):
+        return {}
+    return {name: config for name, config in servers.items() if isinstance(name, str)}
 
 
 def _json_object(path):
@@ -879,44 +946,51 @@ def _json_object(path):
     return doc if isinstance(doc, dict) else None
 
 
-def mcp_server_names(cwd=None, claude_json=None):
-    """The names, never a command, args or env, of every MCP server a session launched in the
-    workspace sees: its .mcp.json, ~/.claude.json (top level and the workspace's project
-    entry) and the mcpServers of the user, project and local settings files."""
-    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
-    cwd = str(base)
+def operator_mcp_servers(project_dir=None, claude_json=None):
+    """{name: config} from the operator's own ~/.claude.json only: the project entry for
+    `project_dir` (local scope, keyed by the path and its realpath) over the top-level
+    mcpServers (user scope). Never <project_dir>/.mcp.json or a settings file: those are
+    controlled by whoever commits to the project, and a lane's --strict-mcp-config launch
+    never asks the operator to approve what they name."""
+    base = Path(project_dir) if project_dir else session_dir()
     claude_json = Path(claude_json) if claude_json else claude_home().parent / ".claude.json"
-    names = []
-    for doc in (_json_object(base / ".mcp.json"),
-                _json_object(global_settings_path()),
-                _json_object(base / ".claude" / "settings.json"),
-                _json_object(local_settings_path(cwd))):
-        names += _server_names(doc)
     user = _json_object(claude_json)
-    if user is not None:
-        names += _server_names(user)
-        projects = user.get("projects")
-        if isinstance(projects, dict):
-            for key in dict.fromkeys((str(base), os.path.realpath(base))):
-                names += _server_names(projects.get(key))
-    return sorted(dict.fromkeys(names))
+    if user is None:
+        return {}
+    found = _servers(user)
+    projects = user.get("projects")
+    if isinstance(projects, dict):
+        for key in dict.fromkeys((str(base), os.path.realpath(base))):
+            found.update(_servers(projects.get(key)))
+    return found
 
 
-def mcp_servers_warning(cwd=None, claude_json=None):
-    """One line naming the MCP servers the pipeline workspace's sessions load, when the OS
-    sandbox facts exist: they run outside the sandbox and the edit-tool boundary cannot see
-    them. None without facts or without servers."""
+def mcp_server_names(cwd=None):
+    """The names, never a command, args or env, of the MCP servers a lane's session loads: those
+    of the mcp.json ppl lane rendered into its start directory, the only ones its
+    --strict-mcp-config launch loads. [] outside a lane."""
+    entry = _lane_at(cwd)
+    if entry is None:
+        return []
+    return sorted(_servers(_json_object(Path(str(entry.get("start_dir"))) / "mcp.json")))
+
+
+def mcp_servers_warning(cwd=None):
+    """One line naming the MCP servers a lane's session loads, when the lane has OS sandbox
+    facts: they run outside the sandbox and the edit-tool boundary cannot see them. None
+    outside a lane, without facts or without servers."""
     from . import os_sandbox
+    entry = _lane_at(cwd)
     try:
-        if os_sandbox.load_facts() is None:
+        if entry is None or os_sandbox.load_facts(entry.get("task")) is None:
             return None
     except PplError:
         return None
-    names = mcp_server_names(cwd, claude_json)
+    names = mcp_server_names(cwd)
     if not names:
         return None
     return ("MCP servers run outside the OS sandbox and can write anywhere: %s. Register no "
-            "file-writing MCP server for the pipeline workspace. The list leaves out plugin MCP "
+            "file-writing MCP server for a pipeline lane. The list leaves out plugin MCP "
             "servers and claude.ai connectors, which run outside it as well." % ", ".join(names))
 
 
@@ -1045,15 +1119,27 @@ def _plugin_hook_files(names):
     return files
 
 
+def _settings_sources(cwd=None):
+    """Every settings file the session loads, each once. In a lane (R56): its settings.json,
+    its start directory's .claude/settings.local.json and the managed one, which no
+    --setting-sources keeps out, and never the Claude home's or a project settings.json.
+    Elsewhere: the user's, the directory's project and local ones and the managed one."""
+    if _lane_at(cwd) is not None:
+        return tuple(path for _, path in _sides(cwd)) + (managed_settings_path(),)
+    base = session_dir(cwd)
+    return tuple(dict.fromkeys((global_settings_path(), base / ".claude" / "settings.json",
+                                base / ".claude" / "settings.local.json",
+                                local_settings_path(cwd), managed_settings_path())))
+
+
 def foreign_bash_hooks(cwd=None):
-    """Every PreToolUse hook other than ppl's guard whose matcher passes Bash, from the user,
-    project, local and managed settings and the hooks/hooks.json of each enabled plugin, as
+    """Every PreToolUse hook other than ppl's guard whose matcher passes Bash, from the settings
+    the session loads (_settings_sources: in a lane its settings.json, its start directory's
+    .claude/settings.local.json and the managed settings, R56; elsewhere the user, project,
+    local and managed settings) and the hooks/hooks.json of each plugin they enable, as
     {"source": file, "hook": _hook_label}. Such a hook may rewrite a Bash call with
     updatedInput, and whether that keeps dangerouslyDisableSandbox is unverified."""
-    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or workspace())
-    settings = [global_settings_path(), base / ".claude" / "settings.json",
-                local_settings_path(str(base)), managed_settings_path()]
-    documents = [(path, _json_object(path)) for path in settings]
+    documents = [(path, _json_object(path)) for path in _settings_sources(cwd)]
     sources = documents + [(path, _json_object(path)) for path in
                            _plugin_hook_files(_enabled_plugins([doc for _, doc in documents]))]
     found = []
@@ -1199,12 +1285,13 @@ def _undoing(cwd, recorded=None):
     """What in a settings source undoes the profile: sandbox.excludedCommands, the sandbox or
     the unsandboxed retry switched off, a write grant (sandbox.filesystem.allowWrite or
     permissions.additionalDirectories) over a protected path, and any unix socket allowance.
-    ppl's own block in the local settings, the one apply recorded, is not another source."""
+    ppl's own block in the session's settings, the one the facts record, is not another source.
+    The sources are the ones the session loads (_settings_sources): in a lane its settings.json,
+    its start directory's .claude/settings.local.json and the managed settings (R56)."""
     recorded = recorded or {}
-    base = Path(cwd or os.environ.get("PPL_LOCAL_SETTINGS_DIR") or os.getcwd())
+    base = session_dir(cwd)
     local = local_settings_path(cwd)
-    sources = (global_settings_path(), base / ".claude" / "settings.json", local,
-               managed_settings_path())
+    sources = _settings_sources(cwd)
     protected = _protected(recorded)
     found = []
     for path in sources:
@@ -1247,13 +1334,15 @@ def _undoing(cwd, recorded=None):
 
 def os_sandbox_facts(cwd=None, env=None, probe=None):
     """Whether Claude Code's OS sandbox closes GitHub for this session. `state` is "on" only
-    with the env marker, ppl's profile in the workspace local settings, a denied live probe
-    and nothing undoing it. Nothing here carries the proxy URL."""
+    with the env marker, ppl's profile in the session's settings (in a lane its settings.json,
+    whose sandbox block must equal written_sandbox in the lane's os_sandbox.json), a denied
+    live probe and nothing undoing it. Nothing here carries the proxy URL."""
     from . import os_sandbox
     env = dict(os.environ) if env is None else env
     marker = env.get("SANDBOX_RUNTIME") == "1"
+    entry = _lane_at(cwd)
     try:
-        recorded = os_sandbox.load_facts() or {}
+        recorded = (os_sandbox.load_facts(entry.get("task")) if entry is not None else None) or {}
     except PplError:
         recorded = {}
     written = recorded.get("written_sandbox")
@@ -1279,29 +1368,57 @@ def os_sandbox_facts(cwd=None, env=None, probe=None):
 
 
 def report(task_id=None, cwd=None, env=None, probe=None):
-    """What `ppl doctor` prints as JSON: the hook registration, the setup
-    report, the active run's isolation and whether the registered guard runs.
-    `cwd` is the directory whose .claude/settings.local.json is read, the
-    process cwd by default."""
+    """What `ppl doctor` prints as JSON. The lane is found as every ppl command finds its run
+    (lanes.task_for_call: `task_id`, else PPL_TASK of `env`, else the lane holding `cwd`, the
+    process cwd by default), and `task` is that run when its state can be read, else None.
+    `lane_problem` says why a lane was named and cannot be confirmed (a registry that cannot be
+    read, a task with no entry), and `start_dir` is the confirmed lane's start directory.
+    Outside a lane (`lane` None) it checks the machine alone: the setup report, the models, the
+    harnesses, the Claude Code binary and the GitHub token variables. In a lane it adds where
+    the guard is registered in the lane's settings.json and its start directory's
+    .claude/settings.local.json (inspect), the lane guard's task, every hook's interpreter and script (lane_hooks, what ppl lane resume refuses on),
+    the OS sandbox facts, the foreign Bash hooks, the MCP servers and whether the lane's guard
+    runs."""
     from . import run
-    inspected = inspect(cwd)
-    task_id = task_id or run.active()
-    isolated = None
+    problem = None
+    try:
+        task_id = lanes.task_for_call(task_id, cwd, env)
+    except PplError as err:
+        task_id, problem = None, err.message
+    entry = None
     if task_id:
         try:
-            isolated = run.load(task_id).get("isolated")
-        except PplError:
-            task_id = None
-    result = dict(inspected)
+            entry = lanes.entry(task_id)
+        except PplError as err:
+            problem = ("lane %s cannot be confirmed, the lane registry cannot be read (%s): "
+                       "repair %s, then run ppl lane resume %s"
+                       % (task_id, err.message, lanes.registry_path(), task_id))
+        else:
+            if entry is None:
+                problem = ("lane %s is not registered: run ppl lane resume %s"
+                           % (task_id, task_id))
+    try:
+        if task_id:
+            run.load(task_id)
+    except PplError:
+        task_id = None
+    result = {"lane": entry.get("task") if entry else None, "task": task_id}
+    if problem:
+        result["lane_problem"] = problem
     result.update(inspect_setup(env))
-    result["os_sandbox"] = os_sandbox_facts(cwd, env, probe)
+    result["claude_binary"] = claude_binary()
     result["github_token_env"] = github_token_names(env)
-    result["foreign_bash_hooks"] = foreign_bash_hooks(cwd)
-    result["mcp_servers"] = mcp_server_names(cwd)
-    result["task"] = task_id
-    result["isolated"] = isolated
-    result["mismatch"] = mismatch(isolated, inspected) if isolated is not None else None
-    runs = hook_runs(cwd=cwd, workspace=workspace())
+    if entry is None:
+        return result
+    where = str(entry.get("start_dir"))
+    result["start_dir"] = where
+    result.update(inspect(where))
+    result["lane_guard_problem"] = lane_guard_problem(entry)
+    result["lane_hooks"] = lane_hook_problems(where)
+    result["os_sandbox"] = os_sandbox_facts(where, env, probe)
+    result["foreign_bash_hooks"] = foreign_bash_hooks(where)
+    result["mcp_servers"] = mcp_server_names(where)
+    runs = hook_runs(cwd=where, workspace=where)
     result["hook_runs"] = runs["ok"]
     if runs["problem"]:
         result["hook_runs_problem"] = runs["problem"]

@@ -13,7 +13,7 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import paths, usage
+from ppl import config, paths, run, usage
 from ppl.errors import PplError
 
 USAGE = {"input_tokens": 2, "cache_creation_input_tokens": 30848,
@@ -328,6 +328,234 @@ class TestUsage(unittest.TestCase):
         self.log([{"event": "usage", "agent_id": "a1", "role": "r1",
                    "models": {"x": {"output": 1}}}])
         self.assertEqual(usage.run_dollars(self.dir), (None, ["x"]))
+
+
+class TestSpentToday(unittest.TestCase):
+    """What every run spent since local midnight [R-BUDGET-USD-PER-DAY]. Model "m" costs 1 USD
+    per million output tokens, "n" has no price."""
+
+    def setUp(self):
+        self.home = Path(tmphome.mkdtemp(prefix="pplday-"))
+        self.enterContext(mock.patch.dict(os.environ, {"PPL_HOME": str(self.home)}))
+        self.zone = os.environ.get("TZ")
+        self.addCleanup(self.restore_zone)
+        os.environ["TZ"] = "Europe/Amsterdam"
+        time.tzset()
+        # 2026-11-05 12:00 Amsterdam (UTC+1)
+        self.now = time.mktime((2026, 11, 5, 12, 0, 0, 0, 0, -1))
+
+    def restore_zone(self):
+        if self.zone is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self.zone
+        time.tzset()
+
+    def issues(self, **kinds):
+        """The `issues` spent_today reports for a clean sheet with `kinds` filled in."""
+        return dict({"blocked": [], "unpriced": [], "unreadable": [], "unpriced_other": []},
+                    **kinds)
+
+    def make_run(self, name, prices=None, archived=False):
+        root = self.home / "runs" / ("_archive/2026-11-01-%s" % name if archived else name)
+        root.mkdir(parents=True)
+        budgets = {"prices": {"m": {"input": 0, "cache_write": 0, "cache_read": 0,
+                                    "output": 1.0}} if prices is None else prices}
+        (root / "state.json").write_text(json.dumps({"task_id": name, "budgets": budgets}),
+                                         encoding="utf-8")
+        return root
+
+    def log(self, root, at, output, agent="a1", model="m"):
+        event = {"event": "usage", "role": "worker", "agent_id": agent, "at": at,
+                 "models": {model: {"input": 0, "cache_write": 0, "cache_read": 0,
+                                    "output": output, "thinking": 0}}}
+        with open(root / "log.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
+
+    def test_only_the_spend_after_local_midnight_counts(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        root = self.make_run("T-1")
+        # 23:50 yesterday and 00:10 today, Amsterdam, are 22:50Z and 23:10Z
+        self.log(root, "2026-11-04T22:50:00+00:00", 3000000)
+        self.log(root, "2026-11-04T23:10:00+00:00", 5000000)
+        usd, issues = usage.spent_today(self.now)
+        self.assertEqual((round(usd, 6), issues), (2.0, self.issues()))
+
+    def test_a_run_that_spent_only_before_midnight_counts_nothing(self):
+        root = self.make_run("T-1")
+        self.log(root, "2026-11-04T22:50:00+00:00", 3000000)
+        self.assertEqual(usage.spent_today(self.now), (0.0, self.issues()))
+
+    def test_an_agent_first_seen_today_counts_in_full(self):
+        root = self.make_run("T-1")
+        self.log(root, "2026-11-05T09:00:00+00:00", 1000000)
+        self.assertEqual(round(usage.spent_today(self.now)[0], 6), 1.0)
+
+    def test_archived_runs_count(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.log(self.make_run("T-1"), "2026-11-05T09:00:00+00:00", 1000000)
+        self.log(self.make_run("T-2", archived=True), "2026-11-05T10:00:00+00:00", 2000000)
+        self.assertEqual(round(usage.spent_today(self.now)[0], 6), 3.0)
+
+    def read_logs(self):
+        """(spent_today(self.now), the run directories whose log it read)."""
+        read, real = [], usage._log_events
+
+        def log_events(directory):
+            read.append(str(directory))
+            return real(directory)
+        with mock.patch.object(usage, "_log_events", log_events):
+            return usage.spent_today(self.now), read
+
+    def test_an_archived_run_last_written_before_midnight_is_not_read(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        # M5: the day cap read every archived run's whole log at every stage gate. An
+        # archived run lies outside every lane's reach, so its log's mtime is the owner's, and
+        # one last written before local midnight holds nothing of today's: it is skipped
+        archived = self.make_run("T-2", archived=True)
+        self.log(archived, "2026-11-05T10:00:00+00:00", 2000000)
+        yesterday = time.mktime((2026, 11, 4, 18, 0, 0, 0, 0, -1))
+        os.utime(archived / "log.jsonl", (yesterday, yesterday))
+        (usd, issues), read = self.read_logs()
+        self.assertEqual((usd, issues), (0.0, self.issues()))
+        self.assertNotIn(str(archived), read)
+        # written since midnight, it is read
+        today = time.mktime((2026, 11, 5, 11, 0, 0, 0, 0, -1))
+        os.utime(archived / "log.jsonl", (today, today))
+        (usd, _), read = self.read_logs()
+        self.assertEqual(round(usd, 6), 2.0)
+        self.assertIn(str(archived), read)
+
+    def test_a_run_destroyed_today_counts_whatever_mtime_its_sandbox_left(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        # R69: until destroy moves it, the run's log is its lane sandbox's to backdate, so
+        # destroy stamps the archived log with the time it archived it, outside every sandbox
+        live = self.make_run("TT-3")
+        self.log(live, "2026-11-05T09:00:00+00:00", 1000000)
+        yesterday = time.mktime((2026, 11, 4, 18, 0, 0, 0, 0, -1))
+        real_move = run.shutil.move
+
+        def backdated_move(source, target):
+            # the sandbox's last word, after destroy's own log line and before the move
+            os.utime(os.path.join(source, "log.jsonl"), (yesterday, yesterday))
+            return real_move(source, target)
+        with mock.patch.object(run.shutil, "move", backdated_move):
+            result = run.destroy("TT-3", "local")
+        self.assertEqual(result["status"], "archived")
+        log = os.path.join(result["archive"], "log.jsonl")
+        self.assertGreaterEqual(os.stat(log).st_mtime, self._midnight())
+        (usd, issues), read = self.read_logs()
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues()))
+        self.assertIn(result["archive"], read)
+
+    def _midnight(self):
+        return time.mktime((2026, 11, 5, 0, 0, 0, 0, 0, -1))
+
+    def test_a_live_run_last_written_before_midnight_is_still_read(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        # M5: a live run's files are its lane's sandbox's to write, its mtime among them, so
+        # a live run is never skipped by it
+        live = self.make_run("T-1")
+        self.log(live, "2026-11-05T09:00:00+00:00", 1000000)
+        yesterday = time.mktime((2026, 11, 4, 18, 0, 0, 0, 0, -1))
+        os.utime(live / "log.jsonl", (yesterday, yesterday))
+        (usd, issues), read = self.read_logs()
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues()))
+        self.assertIn(str(live), read)
+
+    def test_each_run_is_priced_with_its_frozen_prices(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        self.log(self.make_run("T-1"), "2026-11-05T09:00:00+00:00", 1000000)
+        dear = {"m": {"input": 0, "cache_write": 0, "cache_read": 0, "output": 10.0}}
+        self.log(self.make_run("T-2", prices=dear), "2026-11-05T09:00:00+00:00", 1000000)
+        config.update("prices", {"m": {"input": 0, "cache_write": 0, "cache_read": 0,
+                                       "output": 100.0}})
+        self.assertEqual(round(usage.spent_today(self.now)[0], 6), 11.0)
+
+    def test_an_unpriced_model_is_listed(self):
+        # rule: R-BUDGET-USD-PER-DAY
+        root = self.make_run("T-1")
+        self.log(root, "2026-11-05T09:00:00+00:00", 1000000, model="n")
+        self.assertEqual(usage.spent_today(self.now), (0.0, self.issues(unpriced_other=["n"])))
+        self.assertEqual(usage.spent_today(self.now, task="T-1"),
+                         (None, self.issues(unpriced=["n"])))
+
+    def test_an_unpriced_model_that_did_not_spend_today_is_not_listed(self):
+        root = self.make_run("T-1", prices={})
+        self.log(root, "2026-11-04T09:00:00+00:00", 1000000, model="n")
+        self.assertEqual(usage.spent_today(self.now), (0.0, self.issues()))
+
+    def test_an_unreadable_run_is_skipped_and_listed(self):
+        self.log(self.make_run("T-1"), "2026-11-05T09:00:00+00:00", 1000000)
+        broken = self.make_run("T-2")
+        (broken / "log.jsonl").mkdir()
+        usd, issues = usage.spent_today(self.now)
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues(unreadable=["T-2"])))
+
+    def test_a_log_over_the_cap_is_unreadable(self):
+        root = self.make_run("T-1")
+        self.log(root, "2026-11-05T09:00:00+00:00", 1)
+        with mock.patch.object(usage, "DAY_LOG_LIMIT", 10):
+            self.assertEqual(usage.spent_today(self.now), (0.0, self.issues(unreadable=["T-1"])))
+
+    def test_a_corrupt_archived_state_is_skipped_and_listed(self):
+        self.log(self.make_run("T-1"), "2026-11-05T09:00:00+00:00", 1000000)
+        old = self.make_run("T-2", archived=True)
+        (old / "state.json").write_text("{not json", encoding="utf-8")
+        usd, issues = usage.spent_today(self.now)
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues(unreadable=["2026-11-01-T-2"])))
+
+    def test_a_counter_reset_mid_day_counts_in_full(self):
+        root = self.make_run("T-1")
+        self.log(root, "2026-11-04T22:50:00+00:00", 100000000)
+        self.log(root, "2026-11-05T08:00:00+00:00", 130000000)
+        self.log(root, "2026-11-05T09:00:00+00:00", 2000000)
+        self.assertEqual(round(usage.spent_today(self.now)[0], 6), 32.0)
+
+    def test_the_midnight_of_a_dst_change_day_is_the_calendar_midnight(self):
+        # 2026-10-25 in Amsterdam is 25 hours: midnight is 2026-10-24T22:00Z, not 23:00Z
+        root = self.make_run("T-1")
+        self.log(root, "2026-10-24T21:30:00+00:00", 1000000)
+        self.log(root, "2026-10-24T22:30:00+00:00", 4000000)
+        self.log(root, "2026-10-25T23:30:00+00:00", 9000000)
+        noon = time.mktime((2026, 10, 25, 12, 0, 0, 0, 0, -1))
+        self.assertEqual(round(usage.spent_today(noon)[0], 6), 8.0)
+
+    def test_negative_frozen_prices_do_not_lower_the_total_and_are_listed(self):
+        self.log(self.make_run("T-1"), "2026-11-05T09:00:00+00:00", 1000000)
+        bad = {"m": {"input": 0, "cache_write": 0, "cache_read": 0, "output": -50.0}}
+        self.log(self.make_run("T-2", prices=bad), "2026-11-05T09:00:00+00:00", 1000000)
+        usd, issues = usage.spent_today(self.now)
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues(unreadable=["T-2"])))
+        usd, issues = usage.spent_today(self.now, task="T-2")
+        self.assertEqual((usd, issues), (None, self.issues(blocked=["T-2"])))
+
+    def test_a_malformed_count_in_another_run_is_skipped_not_raised(self):
+        self.log(self.make_run("T-1"), "2026-11-05T09:00:00+00:00", 1000000)
+        root = self.make_run("T-2")
+        self.log(root, "2026-11-05T09:00:00+00:00", "many")
+        self.log(root, "2026-11-05T09:10:00+00:00", [1])
+        usd, issues = usage.spent_today(self.now)
+        self.assertEqual((round(usd, 6), issues), (1.0, self.issues(unreadable=["T-2"])))
+
+    def test_a_malformed_count_in_the_checked_runs_own_log_blocks_it(self):
+        root = self.make_run("T-2")
+        self.log(root, "2026-11-05T09:00:00+00:00", 5)
+        event = {"event": "usage", "agent_id": "a1", "at": "2026-11-05T09:10:00+00:00",
+                 "models": {"m": 7}}
+        with open(root / "log.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
+        self.assertEqual(usage.spent_today(self.now, task="T-2"), (None, self.issues(blocked=["T-2"])))
+
+    def test_a_live_run_over_the_read_cap_blocks_when_it_is_the_checked_run(self):
+        root = self.make_run("T-1")
+        self.log(root, "2026-11-05T09:00:00+00:00", 1)
+        with mock.patch.object(usage, "DAY_LOG_LIMIT", 10):
+            self.assertEqual(usage.spent_today(self.now, task="T-1"), (None, self.issues(blocked=["T-1"])))
+            self.assertEqual(usage.spent_today(self.now, task="T-9"), (0.0, self.issues(unreadable=["T-1"])))
+
+    def test_no_runs_spent_nothing(self):
+        self.assertEqual(usage.spent_today(self.now), (0.0, self.issues()))
 
 
 if __name__ == "__main__":

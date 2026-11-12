@@ -10,7 +10,7 @@ EVERY_ROLE = frozenset({
     "active run", "active run, any ppl-* role", "guard hook", "active run, scoped as in 5.4",
     "active or no run, a ppl role in boundary.ROLE_RULES",
     "active run whose state.json is missing, corrupt or malformed",
-    "active run, scoped by role, target path, cwd, or the isolated broadening",
+    "lane session", "session in no lane, every role",
     "every PreToolUse call carrying a role", "every hook call, under an interpreter older than 3.11",
 })
 WRITING = tuple(role for role, rule in boundary.ROLE_RULES.items() if rule["may_write"])
@@ -21,11 +21,13 @@ READ_ONLY_SCOPES = frozenset({"active run, read-only roles", "global, every disp
 # session, not a caged role.
 NOT_A_ROLE = frozenset({
     "ppl CLI", "ppl CLI and panel", "ppl CLI and panel stop", "ppl CLI, panel, hook",
-    "ppl CLI, the eleven call sites in cli.py", "ppl CLI, this directory plus the Claude home",
+    "ppl CLI, the eleven call sites in cli.py",
+    "ppl CLI, the lane's start directory",
     "panel", "hook registration", "active run, session with no agent_type",
     "docs/DESIGN.md, README.md, every rendered file of both example skills and this table",
     "this table and ppl/_assets/hooks/ppl_guard.py",
-    "the unroled session, while PPL_HOME/os_sandbox.json exists or a run is active",
+    "the unroled session, while its guard facts exist (the lane's <start>/os_sandbox.json, "
+    "PPL_HOME/os_sandbox.json in no lane) or a run is bound",
 })
 
 

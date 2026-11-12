@@ -21,7 +21,7 @@ def _body(body):
 
 
 def _answer(name, entry=None):
-    answer = {"apply": "run ppl harness apply %s to render it" % name}
+    answer = {"apply": lessons.lane_hint(name)}
     if entry is not None:
         answer["entry"] = entry
     return answer

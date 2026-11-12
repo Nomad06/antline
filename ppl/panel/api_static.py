@@ -29,6 +29,7 @@ MANIFEST = {
     "pages/agents.js": JS,
     "pages/harness.js": JS,
     "pages/playground.js": JS,
+    "pages/lanes.js": JS,
     "vendor/htm-preact.mjs": JS,
     "vendor/LICENSE-htm": TEXT,
     "vendor/LICENSE-preact": TEXT,

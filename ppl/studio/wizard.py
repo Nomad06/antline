@@ -53,7 +53,7 @@ def state():
                       "skipped" if name in steps["skipped"] else "todo")
         rows.append({"name": name, "intro": setup.STEP_INTROS[name], "state": state_word})
     return {"steps": rows, "next": _next(steps), "data_root": str(paths.home()),
-            "code_root": code_root, "workspace": config.section("claude").get("workspace")}
+            "code_root": code_root}
 
 
 def run_step(step, answers, emit):

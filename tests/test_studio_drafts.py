@@ -12,6 +12,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
+import fixtures
 import panel_client
 from ppl import cli, config, harness, trackers
 from ppl.errors import PplError
@@ -20,6 +21,7 @@ from ppl.studio import drafts, project, stacks
 
 class DraftTestCase(panel_client.StudioTestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         super().setUp()
         patcher = mock.patch("ppl.setup._origin_repo", lambda checkout: "acme/demo")
         patcher.start()

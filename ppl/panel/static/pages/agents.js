@@ -83,7 +83,7 @@ function RoleDetail({ role, routingDoc, mode, onDirty }) {
           ${problem ? html`<${Notice} kind="error">${problem}<//>` : null}`
           : html`<p class="muted">Set up a harness first: the notes live in it.</p>`}
       </div>
-      <div><h3>The agent file apply writes</h3>
+      <div><h3>The agent a lane renders</h3>
         ${previewProblem ? html`<${Notice} kind="error">${previewProblem}<//>` : null}
         <pre>${rendered || "No harness yet."}</pre></div>
     </div>
@@ -191,7 +191,7 @@ function LessonsSection() {
   });
   return html`<section>
     <h2>Lessons</h2>
-    <p class="muted">Finished runs propose lessons. A lesson reaches the agents only when you accept it here and then apply.</p>
+    <p class="muted">Finished runs propose lessons. A lesson reaches the agents of the next lane once you accept it here and commit memory.toml in the harness repository.</p>
     ${message ? html`<${Notice} kind="ok">${message}<//>` : null}
     ${problem ? html`<${Notice} kind="error">${problem}<//>` : null}
     ${(data.skipped || []).map((item) => html`<${Notice} key=${item.path} kind="warn">Skipped proposals file ${item.path}: ${item.reason}<//>`)}
@@ -262,17 +262,17 @@ export function AgentsPage({ mode }) {
   });
   const preset = (name) => act("preset", async () => {
     await post("/api/routing/preset", { name, hash: data.routing_hash });
-    done("The " + name + " preset is in routing.toml. Apply to write the agent files.");
+    done("The " + name + " preset is in routing.toml. The next lane renders its agents from it.");
     await load();
   });
   const apply = () => act("apply", async () => {
     setLog([]);
     await runJob(post("/api/harnesses/" + encodeURIComponent(data.harness) + "/apply"), (lines) => setLog((old) => old.concat(lines)));
-    done("The agent files and the skill are written.");
+    done(data.harness + " is the default harness for ppl lane.");
   });
-  const applyHelp = dirty ? "Save the routing first: apply writes the saved one."
-    : notesDirty ? "Save the project notes first: apply writes the saved ones."
-    : data.harness ? "Apply writes the agent files and the skill from the saved routing and the active harness."
+  const applyHelp = dirty ? "Save the routing first."
+    : notesDirty ? "Save the project notes first."
+    : data.harness ? "Apply checks the active harness at its commit and keeps it the default for ppl lane. A lane renders its agents from the saved routing when it starts."
       : data.harness_error ? "Apply is off until the active harness loads."
         : "Apply needs an active harness: set one up on the Harness page.";
   const setByRisk = (entry, tier) => {
@@ -303,7 +303,7 @@ export function AgentsPage({ mode }) {
   };
   return html`<section>
     <h1>Agents</h1>
-    <p class="muted">Each role runs as its own Claude Code subagent. Changes reach the agent files when you apply, and a run already started keeps the files it started with.</p>
+    <p class="muted">Each role runs as its own Claude Code subagent. Changes reach the next lane ppl lane starts, and a lane already started keeps the agents it started with.</p>
     ${data.harness_error ? html`<${Notice} kind="warn">The active harness does not load, so Apply is off. Fix it on the Harness page. The routing can still be edited here.<br />${data.harness_error}<//>` : null}
     <div class="cards">${data.presets.map((p) => html`<button class=${"card" + (data.preset === p.name ? " on" : "")} disabled=${dirty || Boolean(busy)} onClick=${() => preset(p.name)}>
       <strong>${p.label}</strong> <${Badge}>${p.cost} cost<//>

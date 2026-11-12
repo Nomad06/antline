@@ -38,7 +38,7 @@ Each tick:
    do not argue in the thread yourself.
 5. Post replies through the GitLab MCP. **You do not resolve a thread** - only the person
    who wrote the remark may [R-MCP-RESOLVE-THREAD]. After posting, record it:
-   `ppl review answered --thread <id> --sha <sha> --classification <c> --last-note-id <id> --generation $GENERATION`,
+   `ppl review answered --thread <id> --sha <sha> --classification <c> --last-note-id <id> --generation <GENERATION>`,
    so the next tick does not name the same thread again unless a newer note lands on it.
 6. Terminal condition: the MR is approved on the current head SHA. Then, in this order:
    <!-- include: sequence/close-out -->. `ppl review approved` is the only writer of the
@@ -47,5 +47,5 @@ Each tick:
    `ppl doctor` reported the guard hook is not registered - **if it is armed**, it will not
    let you write to the tracker until the run's stage is exactly `merge_watch` and the merge is
    recorded (see `references/stage-8-after-merge.md`); if it is not armed, nothing stops the write
-   either way [R-GUARD-NOT-ARMED n/a],
+   either way [R-LANE-BARE-RESUME n/a],
    so entering `merge_watch` first is the only thing that still holds the line.

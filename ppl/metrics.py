@@ -27,7 +27,7 @@ temporary (no labels filed yet) or a gap (nothing records it at all):
   and the reason names the model [R-METRIC-COST-NEEDS-PRICES].
 - **tokens per accepted task** and **tokens by role** are the mean of the four
   token counts per accepted run, and the counts summed per role over those
-  runs. They need no prices but do need the usage hook (`ppl setup claude`),
+  runs. They need no prices but do need the usage hook (a lane's, `ppl lane`),
   so they are undefined until an accepted run has recorded usage
   [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED].
 - **human minutes** is undefined always: it IS buildable (a `--minutes` flag on `ppl label`, or a
@@ -177,18 +177,23 @@ def _run_records():
     """(task_id, directory) for every run this pipeline can still read from -
     live under `runs/<task_id>`, or archived under `runs/_archive/...`
     [R-METRIC-SCANS-ARCHIVE]. The task id for an archived directory comes
-    from its own state.json, not from the (mangled) directory name."""
+    from its own state.json, not from the (mangled) directory name, and one
+    whose state.json cannot be parsed or is no object is skipped: its lane's
+    sandbox wrote it, and one run must not stop every reader of the fleet."""
     records = []
     root = paths.runs_dir()
     if root.is_dir():
         for entry in sorted(root.iterdir()):
-            if entry.name in ("ACTIVE", "_archive"):
+            if entry.name == "_archive":
                 continue
             if entry.is_dir() and (entry / "state.json").is_file():
                 records.append((entry.name, entry))
     for directory in _archived_dirs():
-        state = store.read_json(directory / "state.json")
-        task_id = (state or {}).get("task_id")
+        try:
+            state = store.read_json(directory / "state.json")
+        except PplError:
+            continue
+        task_id = state.get("task_id") if isinstance(state, dict) else None
         if task_id:
             records.append((task_id, directory))
     return records
@@ -350,8 +355,8 @@ def _usage_metrics(run_records, producer_key):
     usages = [u for u in (usage.run_usage(directory) for _, directory in accepted)
               if _run_models(u)]
     if not usages:
-        why = ("%d accepted task(s) but no usage recorded - install the usage hook "
-               "with `ppl setup claude`" % len(accepted))
+        why = ("%d accepted task(s) but no usage recorded - the usage hook of a lane `ppl "
+               "lane` starts records it" % len(accepted))
         return tuple(_metric(None, why) for _ in range(3))
     try:
         table, table_error = usage.prices(), None
@@ -468,15 +473,20 @@ def _accepted_runs(run_records, producer_key):
     """(task_id, directory) of every run that reached `done`, narrowed to
     those whose accepted PASS verdict (the one at the run's `candidate_sha`)
     has `producer_key`, or all of them when it is None. Reads state.json
-    directly so an archived run counts too [R-METRIC-SCANS-ARCHIVE]."""
+    directly so an archived run counts too [R-METRIC-SCANS-ARCHIVE]. A run whose
+    state.json cannot be parsed is skipped: its lane's sandbox can write it, and one
+    run must not stop the report."""
     accepted = []
     for task_id, directory in run_records:
         events = store.read_log_at(directory)
         if not _event(events, "init") or not _event(events, "lifecycle", to="done"):
             continue
         if producer_key is not None:
-            state = store.read_json(directory / "state.json")
-            sha = (state or {}).get("candidate_sha")
+            try:
+                state = store.read_json(directory / "state.json")
+            except PplError:
+                continue
+            sha = state.get("candidate_sha") if isinstance(state, dict) else None
             doc = store.read_json(directory / "verdicts" / ("%s.json" % sha)) if sha else None
             if _producer_key((doc or {}).get("producer")) != producer_key:
                 continue

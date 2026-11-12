@@ -3,7 +3,7 @@ import shutil
 import subprocess
 import uuid
 
-from . import fsm, paths, store
+from . import fsm, lanes, paths, store
 from .errors import PplError, role_output
 
 DEFAULT_BUDGETS = {
@@ -37,19 +37,14 @@ def state_path(task_id):
     return paths.run_dir(task_id) / "state.json"
 
 
-def active(limit=None):
-    """The active run's task id, or None. A pointer that is not a regular file, or with
-    `limit` one over that many bytes, is refused SCHEMA_INVALID without blocking
-    (store.read_regular_text)."""
+def legacy_active_task():
+    """The task the single-run pointer runs/ACTIVE names, else None. ppl init wrote it before
+    lanes and nothing writes it now, so the run it names is the one from before lanes.
+    SCHEMA_INVALID when the pointer is no regular file or over lanes.READ_LIMIT."""
     try:
-        return store.read_regular_text(paths.active_file(), limit).strip() or None
+        return store.read_regular_text(paths.legacy_active_file(), lanes.READ_LIMIT).strip() or None
     except FileNotFoundError:
         return None
-
-
-def set_active(task_id):
-    paths.runs_dir().mkdir(parents=True, exist_ok=True)
-    paths.active_file().write_text(paths.check_task_id(task_id) + "\n", encoding="utf-8")
 
 
 def load(task_id, limit=None):
@@ -66,9 +61,9 @@ def save(state):
 RISK_TIERS = ("low", "normal", "high")
 
 
-def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check="verified",
+def _new_state(task_id, tracker_url, repo, risk="normal", model_check="verified",
                harness=None, usd_max=0.0, prices=None, routing_preset=None,
-               os_sandboxed=False):
+               os_sandboxed=False, lane=None):
     pid = os.getpid()
     budgets = dict(DEFAULT_BUDGETS)
     budgets["usd_max"] = usd_max
@@ -83,8 +78,8 @@ def _new_state(task_id, tracker_url, repo, isolated, risk="normal", model_check=
         "harness": harness,
         "routing_preset": routing_preset,
         "repo": repo,
-        "isolated": isolated,
         "os_sandboxed": os_sandboxed,
+        "lane": lane,
         "branch": None,
         "base_sha": None,
         "candidate_sha": None,
@@ -112,8 +107,10 @@ def _routing_preset(presets, routing):
         return None
 
 
-def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="verified",
-         harness=None, os_sandboxed=False):
+def init(task_id, tracker_url, repo, risk="normal", model_check="verified", harness=None,
+         os_sandboxed=False, lane=None):
+    """Create the run. `lane` is {"number", "start_dir", "session_id"} of the lane it runs in,
+    as ppl init passes it, None for a run made outside one (the tests', the playground's)."""
     paths.check_task_id(task_id)
     if risk not in RISK_TIERS:
         raise PplError("SCHEMA_INVALID", "risk must be one of %s" % ", ".join(RISK_TIERS))
@@ -125,12 +122,11 @@ def init(task_id, tracker_url, repo, isolated=True, risk="normal", model_check="
     # The cap and the prices it is computed with are frozen into state.json, which
     # the guard write-protects (R-RUNS-WRITE-PROTECTION), since config.toml stays
     # editable mid-run.
-    state = _new_state(task_id, tracker_url, repo, isolated, risk, model_check, harness,
+    state = _new_state(task_id, tracker_url, repo, risk, model_check, harness,
                        usd_max=config.budgets_usd_max(), prices=usage.prices(),
                        routing_preset=_routing_preset(presets, routing),
-                       os_sandboxed=os_sandboxed)
+                       os_sandboxed=os_sandboxed, lane=lane)
     save(state)
-    set_active(task_id)
     store.append_log(task_id, {"event": "init", "tracker_url": tracker_url, "repo": repo,
                                "model_check": model_check,
                                "harness": (harness or {}).get("name")})
@@ -494,13 +490,23 @@ def park(task_id, blocker, safe_next, unsafe_to_repeat, refusals=None):
 
 
 def destroy(task_id, scope):
-    """Local scope is file work and happens here. Remote scope is an outward mutation and
-    is queued for the orchestrator, which is the only component holding GitLab credentials.
+    """Local scope is file work and happens here: the worktree and the run's branch while
+    nothing of it was pushed (D23), the scratch directory, the run (archived), the lane's
+    registry slot and its start directory. The worktree, checkout and branch come from the
+    lane's registry entry, else from its record <start>/lane.json once ppl lane close freed the
+    slot (_worktree_source), never from state.json, which the lane's own sandbox can write, but
+    for the one run from before lanes that runs/ACTIVE names: state.json is read only when the
+    task has neither, so a lane whose state cannot be parsed is destroyed all the same. A run
+    directory that cannot be archived, or a worktree that cannot be removed while the record
+    was read, is left, and then the slot is still freed but the start directory and its record
+    are kept, so a retry reads the record again. A lane whose run never reached ppl init goes
+    the same way. Remote scope is an outward mutation and is queued for the orchestrator, which
+    is the only component holding GitLab credentials.
     """
     if scope not in ("local", "full"):
         raise PplError("SCHEMA_INVALID", "destroy scope must be local or full")
-    state = load(task_id)
     if scope == "full":
+        state = load(task_id)
         store.write_json(paths.run_dir(task_id) / "remote_cleanup.json", {
             "task_id": task_id, "scope": "full",
             "mr": state.get("mr"), "branch": state.get("branch"),
@@ -509,48 +515,280 @@ def destroy(task_id, scope):
         store.append_log(task_id, {"event": "destroy", "scope": "full",
                                    "status": "queued_remote_cleanup"})
         return {"status": "queued_remote_cleanup",
-                "next": "orchestrator closes the MR and deletes the remote branch, then "
-                        "runs ppl destroy --scope local"}
+                "next": "the orchestrator closes the MR and deletes the remote branch, then "
+                        "the owner runs ppl destroy --scope local --task %s in a terminal "
+                        "outside the lane" % task_id}
 
-    repo = state.get("repo")
-    worktree = "absent"
-    worktree_error = None
-    if repo and os.path.isdir(repo):
-        # -C <repo> matters: without it git runs against ppl's own cwd, which is
-        # not the target repository, so the removal silently did nothing and the
-        # discarded exit code made the archive below report success anyway,
-        # leaving an orphan worktree with nothing pointing at it.
-        removal = subprocess.run(
-            ["git", "-C", str(repo), "worktree", "remove", "--force", str(repo)],
-            capture_output=True, text=True)
-        if removal.returncode == 0:
-            worktree = "removed"
-        else:
-            worktree = "left_behind"
-            worktree_error = (removal.stderr.strip() or removal.stdout.strip()
-                              or "git worktree remove exited %d" % removal.returncode)
+    entry = lanes.entry(task_id)
+    found = lanes.record(task_id)
+    state = None
+    if entry is None and found is None:
+        # the run from before lanes, or nothing: the only reading of the state.json a role
+        # can write
+        state = store.read_json(state_path(task_id))
+        if state is None:
+            raise PplError("SCHEMA_INVALID", "no run and no lane for %s, so there is nothing to "
+                           "destroy: ppl lane list shows the lanes" % task_id)
+    worktree, checkout, branch, problem = _worktree_source(task_id, state, entry, found)
+    if problem:
+        result = {"worktree": "left_behind", "worktree_error": problem, "branch": "none"}
+    else:
+        result = _remove_worktree(task_id, worktree, checkout, branch)
     from . import os_sandbox
     shutil.rmtree(os_sandbox.scratch_dir(task_id), ignore_errors=True)
-    # Logged before the move: append_log would otherwise recreate the run
-    # directory it has just archived.
-    store.append_log(task_id, {"event": "destroy", "scope": "local",
-                               "worktree": worktree, "worktree_error": worktree_error})
-    # store.now() has second resolution, so appending a random suffix keeps two
-    # destroys of the same task id (even inside the same second) from colliding:
-    # a name collision would make shutil.move nest the second archive inside the
-    # first instead of placing it beside it.
-    archive = paths.runs_dir() / "_archive" / ("%s-%s-%s" % (
-        task_id, store.now().replace(":", ""), uuid.uuid4().hex[:8]))
-    archive.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(paths.run_dir(task_id)), str(archive))
-    if active() == task_id:
-        paths.active_file().unlink(missing_ok=True)
-    result = {"status": "archived", "archive": str(archive), "worktree": worktree}
-    if worktree_error:
+    result.update(_archive_run_dir(task_id, result))
+    result["lane"] = "released" if lanes.release(task_id) else "none"
+    if result.get("run_dir") == "left_behind" or (result["worktree"] == "left_behind"
+                                                  and found is not None):
+        # the record stays with the run, so the retry once it is fixed reads the record, never
+        # the state.json a role can write
+        start = lanes.start_dir(task_id)
+        result["start_dir"] = "kept" if os.path.lexists(str(start)) else "absent"
+    else:
+        result.update(_remove_start_dir(task_id))
+    if result.get("run_dir") != "left_behind" and _retire_pointer(task_id):
+        result["pointer"] = "retired"
+    # the lane is gone, so the reflections it claimed and did not record go back to pending
+    # for the next lane of their harness (R60). Imported here: lessons imports this module
+    from . import lessons
+    result.update(lessons.hand_back(task_id))
+    return result
+
+
+def _retire_pointer(task_id):
+    """Remove runs/ACTIVE when it names `task_id`, the run from before lanes that destroy has
+    just archived, so a later lane that reuses the task id is not taken for it. True when it
+    went; a pointer that cannot be read or names another run stays."""
+    try:
+        if legacy_active_task() != task_id:
+            return False
+        os.unlink(str(paths.legacy_active_file()))
+    except (PplError, OSError, UnicodeDecodeError):
+        return False
+    return True
+
+
+def _worktree_source(task_id, state, entry, found):
+    """(worktree, checkout, branch, problem) of a local destroy. The registry entry, else the
+    lane's record `found` in its start directory, both out of every lane's reach: state.json
+    lies in runs/<task>, which the lane's sandbox writes, so a role there could name another
+    lane's worktree in it [R-LANE-CROSS-WRITE]. A run that has a start directory but no
+    readable record is left alone. A run with neither takes state.json's repo only when
+    runs/ACTIVE names it, the run from before lanes, and only when that path is not, and lies
+    in no, live or closed lane's worktree (_legacy_problem); any other is named for removal by
+    hand."""
+    branch = found.get("branch") if found else None
+    if entry is not None:
+        return entry.get("worktree"), entry.get("repo"), branch, None
+    if found is not None:
+        return found["worktree"], found["checkout"], branch, None
+    if os.path.lexists(str(lanes.start_dir(task_id))):
+        return None, None, None, ("the lane's record %s cannot be read, and state.json is in "
+                                  "its sandbox's reach, so destroy removes no worktree: remove "
+                                  "it with git worktree remove once you have checked it"
+                                  % lanes.record_path(task_id))
+    repo = state.get("repo") if isinstance(state, dict) else None
+    if not isinstance(repo, str) or not repo or not os.path.isdir(repo):
+        return None, None, None, None
+    problem = _legacy_problem(task_id, repo)
+    if problem:
+        return None, None, None, problem
+    return repo, None, None, None
+
+
+def _legacy_problem(task_id, repo):
+    """Why destroy may not remove the worktree `repo` that state.json names for a run with no
+    lane entry and no record, else None. Only the run runs/ACTIVE names is from before lanes;
+    any other is a lane's whose record is gone, its state.json in a role's reach. And no path
+    that is, or lies in, a live or closed lane's worktree, placed as the guard places a write
+    (escape_paths.under: through every link, in any letter case, by device and inode), with a
+    registry or record that cannot be read failing closed."""
+    from . import escape_paths
+    by_hand = ("check %s and remove it with git worktree remove --force if it is the run's"
+               % repo)
+    try:
+        named = legacy_active_task()
+    except (PplError, OSError, UnicodeDecodeError) as err:
+        return ("runs/ACTIVE cannot be read (%s), so destroy cannot tell whether %s is the run "
+                "from before lanes and takes no worktree from its state.json: %s"
+                % (getattr(err, "message", None) or err, task_id, by_hand))
+    if named != task_id:
+        return ("run %s has no lane entry and no lane record, and runs/ACTIVE does not name it "
+                "as the run from before lanes, so destroy takes no worktree from its state.json: "
+                "%s" % (task_id, by_hand))
+    try:
+        worktrees = [(item.get("task"), item.get("worktree")) for item in lanes.read()]
+        worktrees += [(task, item["worktree"]) for task, item in lanes.records().items()]
+    except (PplError, OSError) as err:
+        return ("the lanes cannot all be read (%s), so %s cannot be told apart from a lane's "
+                "worktree: %s" % (getattr(err, "message", None) or err, repo, by_hand))
+    roots = {os.path.realpath(path): task for task, path in worktrees
+             if isinstance(path, str) and path}
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = "/"
+    landed = escape_paths.landing(repo, cwd)
+    hit = escape_paths.under(landed[0] if landed else [repo], list(roots))
+    if hit is not None:
+        return ("%s is, or lies in, lane %s's worktree %s, which a run from before lanes does "
+                "not remove" % (repo, roots.get(hit, "?"), hit))
+    return None
+
+
+def _archive_run_dir(task_id, result):
+    """Archive runs/<task>, or remove it when it is the empty one ppl lane made, as
+    {"status", "archive"} plus "run_dir" and "run_dir_error" when it is left: a link or no
+    directory there, or a move that fails. A run directory that cannot go never keeps the lane
+    held: the caller releases the slot either way."""
+    done = {"status": "released", "archive": None}
+    directory = paths.run_dir(task_id)
+    if os.path.islink(str(directory)) or (os.path.lexists(str(directory))
+                                          and not os.path.isdir(str(directory))):
+        done.update(run_dir="left_behind", run_dir_error="%s is a link or not a directory, so "
+                    "destroy leaves it" % directory)
+        return done
+    if not os.path.isdir(str(directory)):
+        return done
+    try:
+        if not any(directory.iterdir()):
+            # the one ppl lane made for a run that never wrote into it
+            directory.rmdir()
+            return done
+    except OSError:
+        # something landed in it meanwhile, a hook's log line say: it is archived instead
+        pass
+    try:
+        # Logged before the move: append_log would otherwise recreate the run
+        # directory it has just archived.
+        store.append_log(task_id, {"event": "destroy", "scope": "local",
+                                   "worktree": result["worktree"],
+                                   "worktree_error": result.get("worktree_error"),
+                                   "branch": result["branch"]})
+        # store.now() has second resolution, so appending a random suffix keeps two
+        # destroys of the same task id (even inside the same second) from colliding:
+        # a name collision would make shutil.move nest the second archive inside the
+        # first instead of placing it beside it.
+        archive = paths.runs_dir() / "_archive" / ("%s-%s-%s" % (
+            task_id, store.now().replace(":", ""), uuid.uuid4().hex[:8]))
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(directory), str(archive))
+    except (OSError, PplError) as exc:
+        done.update(run_dir="left_behind", run_dir_error=getattr(exc, "message", None) or str(exc))
+        return done
+    _stamp_archived_log(archive)
+    done.update(status="archived", archive=str(archive))
+    return done
+
+
+def _stamp_archived_log(archive):
+    """Set the archived log.jsonl's times to now (R69). Until the move the log was the lane
+    sandbox's to backdate, and the day cap skips an archived run whose log was last written
+    before local midnight (usage._quiet_since), so the time it trusts is one ppl wrote, out of
+    every sandbox. A link there is left as it is; a log that cannot be stamped is skipped,
+    since the destroy's own log line just wrote it."""
+    log = os.path.join(str(archive), "log.jsonl")
+    try:
+        if os.path.isfile(log) and not os.path.islink(log):
+            os.utime(log)
+    except OSError:
+        pass
+
+
+def _git(directory, args):
+    """git in a project checkout or worktree outside any sandbox, through lane_harness.git: the
+    -c words of escape_git.OPERATOR_PINNED_CONFIG first and no replace refs, so no hook or other
+    program a role planted there runs. A git that cannot start or runs out of time comes back
+    as a failed run, so a cleanup reports it and goes on."""
+    from . import lane_harness
+    try:
+        return lane_harness.git(directory, args)
+    except PplError as err:
+        return subprocess.CompletedProcess(args, 1, "", err.message)
+
+
+def _failure(done, what):
+    """What a failed git said, or its exit code when it said nothing."""
+    return ((done.stderr or "").strip() or (done.stdout or "").strip()
+            or "git %s exited %d" % (what, done.returncode))
+
+
+def _run_branch(task_id, worktree):
+    """(the git dir the worktree shares, its branch) read before the worktree goes: the branch
+    only when it is named for the run, <TASK-ID>-<slug> (D5), since a role can check out any
+    branch in its worktree and its HEAD says which."""
+    found = _git(worktree, ["rev-parse", "--git-common-dir"])
+    common = found.stdout.strip() if found.returncode == 0 else ""
+    common = os.path.realpath(os.path.join(worktree, common)) if common else None
+    head = _git(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    branch = head.stdout.strip() if head.returncode == 0 else ""
+    return common, (branch if branch.startswith(task_id + "-") else None)
+
+
+def _remove_worktree(task_id, worktree, checkout, branch=None):
+    """Remove the run's worktree, then its branch unless refs/remotes/origin/<branch> exists,
+    as {"worktree", "branch"} states plus "branch_name" and the errors. `checkout` and
+    `branch` are the lane's, from its registry entry or its record, None for a run from before
+    lanes: the branch is then the worktree's HEAD when it is named for the run, reached through
+    the git dir the worktree names. No config check comes first: a key planted in the checkout
+    must not block a cleanup, and the pinned words run nothing. Two --force take a locked
+    worktree too: the lane's sandbox can write its own .git/worktrees/<id>, so a lock there is
+    a planted cleanup blocker like a config key (R19)."""
+    result = {"worktree": "absent", "branch": "none"}
+    if not worktree or not os.path.isdir(str(worktree)):
+        return result
+    worktree = str(worktree)
+    common, head = _run_branch(task_id, worktree)
+    branch = branch or head
+    # -C <worktree> matters: without it git runs against ppl's own cwd, which is
+    # not the target repository, so the removal silently did nothing and the
+    # discarded exit code made the archive report success anyway, leaving an
+    # orphan worktree with nothing pointing at it.
+    removal = _git(worktree, ["worktree", "remove", "--force", "--force", worktree])
+    if removal.returncode != 0:
         # The run is archived either way, but a destroy that could not remove
         # the worktree has to say so rather than report a clean success.
-        result["worktree_error"] = worktree_error
+        result.update(worktree="left_behind", worktree_error=_failure(removal, "worktree remove"))
+        return result
+    result["worktree"] = "removed"
+    if branch is None:
+        return result
+    result["branch_name"] = branch
+    if checkout and os.path.isdir(str(checkout)):
+        where, words = str(checkout), []
+    elif common:
+        where, words = common, ["--git-dir=" + common]
+    else:
+        result["branch"] = "left_behind"
+        result["branch_error"] = "the git dir of %s could not be read" % worktree
+        return result
+    pushed = _git(where, words + ["rev-parse", "--verify", "--quiet",
+                                  "refs/remotes/origin/" + branch])
+    if pushed.returncode == 0:
+        # pushed: deleting it is the owner's call, after the remote one is dealt with
+        result["branch"] = "kept"
+        return result
+    deleted = _git(where, words + ["branch", "-D", branch])
+    if deleted.returncode == 0:
+        result["branch"] = "deleted"
+    else:
+        result["branch"] = "left_behind"
+        result["branch_error"] = _failure(deleted, "branch -D")
     return result
+
+
+def _remove_start_dir(task_id):
+    """Remove the lane's start directory, which `ppl lane close` leaves, as {"start_dir": state}
+    plus "start_dir_error" when it could not be removed: a start directory left behind makes the
+    task's next `ppl lane` refuse."""
+    start = lanes.start_dir(task_id)
+    if not os.path.lexists(str(start)):
+        return {"start_dir": "absent"}
+    try:
+        shutil.rmtree(str(start))
+    except OSError as exc:
+        return {"start_dir": "left_behind", "start_dir_error": str(exc)}
+    return {"start_dir": "removed"}
 
 
 def record_tracker_fetch(task_id, revision):

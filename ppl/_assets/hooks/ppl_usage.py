@@ -35,7 +35,7 @@ if not _PPL_FILE or not Path(_PPL_FILE).resolve().is_relative_to(_PACKAGE_PARENT
     sys.stderr.write("ppl_usage: imported ppl from %s, not the one beside this hook in %s\n"
                      % (_PPL_FILE, _PACKAGE_PARENT))
 
-from ppl import boundary, run, store, usage
+from ppl import boundary, lanes, run, store, usage
 
 DEADLINE_SECONDS = 2.0
 # the run files the hook reads or appends besides state.json
@@ -94,13 +94,15 @@ def _record_orchestrator(task_id, payload, deadline):
         _record_failure(task_id, "orchestrator", "orchestrator:%s" % session, err)
 
 
-def on_stop(payload):
+def on_stop(payload, argv=()):
     """Record the stopped role's cumulative usage, then the orchestrator's.
 
     SubagentStop is informational here: the hook only appends `usage` events to
-    the active run's log and never returns or prints a decision
-    [R-USAGE-HOOK-CANNOT-BLOCK]. Scoped by agent_type like ppl_dispatch.py, a
-    role stopping anywhere this hook fires belongs to the one active run. The
+    the log of the run its command line `argv` binds it to (`--task <id>`,
+    lanes.binding), nothing outside a lane or in one the registry cannot
+    confirm, and never returns or prints a decision [R-USAGE-HOOK-CANNOT-BLOCK].
+    Scoped by agent_type like ppl_dispatch.py, a role stopping anywhere this
+    hook fires belongs to the bound run. The
     whole call shares one 2 s deadline: a role read past it is an error event,
     an orchestrator read stops early, keeps its offset and logs what it
     counted.
@@ -110,9 +112,10 @@ def on_stop(payload):
     role = payload.get("agent_type") or ""
     if role not in boundary.ROLE_RULES:
         return None
-    task_id = run.active()
-    if not task_id:
+    bound = lanes.binding(argv)
+    if bound.problem or not bound.task:
         return None
+    task_id = bound.task
     try:
         state = run.state_path(task_id)
         if not state.is_file():
@@ -133,12 +136,14 @@ def on_stop(payload):
 
 
 def main():
+    # the lane binding is this hook's own command line, read after the python floor
+    argv = sys.argv[1:]
     try:
         payload = json.load(sys.stdin)
     except Exception:
         return 0
     try:
-        on_stop(payload)
+        on_stop(payload, argv)
     except Exception as err:
         sys.stderr.write("ppl_usage internal error: %s\n" % err)
     return 0

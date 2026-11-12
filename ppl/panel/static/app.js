@@ -4,12 +4,14 @@ import { SetupPage } from "./pages/setup.js";
 import { AgentsPage } from "./pages/agents.js";
 import { HarnessPage } from "./pages/harness.js";
 import { PlaygroundPage } from "./pages/playground.js";
+import { LanesPage } from "./pages/lanes.js";
 import { AntMark } from "./ui/ant.js";
 
 const PAGES = { "": HomePage, setup: SetupPage, agents: AgentsPage, harness: HarnessPage,
-                playground: PlaygroundPage };
+                playground: PlaygroundPage, lanes: LanesPage };
 const NAV = [{ route: "", label: "Home" }, { route: "setup", label: "Setup" },
              { route: "agents", label: "Agents" }, { route: "harness", label: "Harness" },
+             { route: "lanes", label: "Lanes" },
              { route: "playground", label: "Playground", expert: true }];
 
 function currentRoute() {

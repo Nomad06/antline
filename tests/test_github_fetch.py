@@ -17,7 +17,7 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import cli, harness, os_sandbox, paths, run, store
+from ppl import cli, harness, lanes, os_sandbox, paths, run, store
 from ppl.errors import PplError
 from ppl.forges import github_fetch
 
@@ -190,13 +190,16 @@ class TestReviewFetchCli(unittest.TestCase):
         self.task = "GH-9"
         shutil.rmtree(paths.run_dir(self.task), ignore_errors=True)
         run.init(self.task, "https://github.com/o/r/issues/9", "/tmp/repo")
-        run.set_active(self.task)
+        # the lane session's environment names the run a bare ppl works on
+        self.enterContext(mock.patch.dict(os.environ, {"PPL_TASK": self.task}))
         fixtures.install_variant("example-generic", "gh-forge", forge={"kind": "github"},
                                  **fixtures.GITHUB_ISSUES)
         store.write_json(paths.run_dir(self.task) / "harness.json",
                          harness.snapshot(harness.load("gh-forge")))
-        self.facts = paths.home() / os_sandbox.FACTS_FILE
+        # the guard facts ppl lane renders into the lane's start directory
+        self.facts = lanes.start_dir(self.task) / os_sandbox.FACTS_FILE
         self.addCleanup(lambda: self.facts.unlink() if self.facts.exists() else None)
+        self.write_facts()
         self.gh = FakeGh(threads=[(101, True)])
         patcher = mock.patch("subprocess.run", self.gh)
         patcher.start()
@@ -278,9 +281,30 @@ class TestReviewFetchCli(unittest.TestCase):
                     code, _, err = call("review", "fetch", "--pr", "5")
                 self.assertEqual(code, 2, err)
                 self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
-                self.assertIn("ppl harness apply", json.loads(err)["message"])
+                self.assertIn("ppl lane", json.loads(err)["message"])
                 self.assertEqual(self.gh.argvs, [])
                 self.assertFalse(self.target().exists())
+
+    def test_from_a_terminal_outside_the_lane_gh_is_the_lanes_pin(self):
+        # minor 5: the forge's gh comes from the facts of the lane --task names
+        store.write_json(self.facts, {"version": 1, "forge_repo": "o/r", "tracker_repo": "o/r",
+                                      "pins": {"gh": {"path": "/pin/gh", "realpath": "/pin/gh"}}})
+        with mock.patch.dict(os.environ, {"PPL_TASK": ""}):
+            code, _, err = call("review", "fetch", "--task", self.task, "--pr", "5")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(self.gh.argvs)
+        self.assertEqual({argv[0] for argv in self.gh.argvs}, {"/pin/gh"})
+
+    def test_without_its_lanes_guard_facts_the_fetch_is_refused_and_runs_no_git(self):
+        # R31: the snapshot and the run's repo are role-writable, so neither is taken alone
+        self.facts.unlink()
+        with mock.patch("ppl.setup._origin_repo",
+                        side_effect=AssertionError("git ran in the run's repo")):
+            code, _, err = call("review", "fetch", "--pr", "5")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SETUP_INCOMPLETE")
+        self.assertEqual(self.gh.argvs, [])
+        self.assertFalse(self.target().exists())
 
     def test_a_non_github_forge_is_refused(self):
         fixtures.install_variant("example-generic", "gl-forge", forge={"kind": "gitlab",

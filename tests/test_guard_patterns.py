@@ -21,11 +21,17 @@ REPO = "/tmp/pyrepo"
 PYTHON = ["tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]
 PRODUCT = REPO + "/src/shop/cart.py"
 TEST = REPO + "/tests/unit/test_cart.py"
+# The hook's own command line in PYRUN-1's lane session, as the lane's settings render it.
+LANE = ["--task", TASK]
 
 
 def payload(agent, tool, tool_input, cwd=REPO):
     return {"hook_event_name": "PreToolUse", "agent_type": agent,
             "tool_name": tool, "tool_input": tool_input, "cwd": cwd}
+
+
+def decide(call):
+    return ppl_guard.decide(call, LANE)
 
 
 def snapshot_reason():
@@ -52,13 +58,11 @@ class TestPythonRun(unittest.TestCase):
                          {"write": ["src/**"], "forbid": []})
         fixtures.install_harness("example-generic")
         store.write_json(cls.snapshot_path(), python_snapshot())
+        fixtures.bind_lane(TASK, REPO, harness="example-generic")
 
     @staticmethod
     def snapshot_path():
         return paths.run_dir(TASK) / "harness.json"
-
-    def setUp(self):
-        run.set_active(TASK)
 
     def deny_reason(self, result):
         self.assertIsNotNone(result, "the call was allowed")
@@ -70,13 +74,13 @@ class TestPythonRun(unittest.TestCase):
         return saved
 
     def test_the_test_worker_may_write_a_python_test(self):
-        self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Write",
-                                                   {"file_path": TEST})))
+        self.assertIsNone(decide(payload("ppl-test-worker", "Write",
+                                         {"file_path": TEST})))
 
     def test_the_test_worker_may_not_write_product_code(self):
         # rule: R-ROLE-TEST-WORKER-MAIN
-        reason = self.deny_reason(ppl_guard.decide(payload("ppl-test-worker", "Write",
-                                                           {"file_path": PRODUCT})))
+        reason = self.deny_reason(decide(payload("ppl-test-worker", "Write",
+                                                 {"file_path": PRODUCT})))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("may only write test sources", reason)
 
@@ -86,33 +90,33 @@ class TestPythonRun(unittest.TestCase):
         # Python globs can refuse it.
         for target in (TEST, REPO + "/src/shop/test_cart.py"):
             with self.subTest(target=target):
-                reason = self.deny_reason(ppl_guard.decide(payload(
+                reason = self.deny_reason(decide(payload(
                     "ppl-code-worker", "Write", {"file_path": target})))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn("may not write test sources", reason)
-                reason = self.deny_reason(ppl_guard.decide(payload(
+                reason = self.deny_reason(decide(payload(
                     "ppl-code-worker", "Bash", {"command": "echo x > %s" % target})))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn("may not write test sources", reason)
 
     def test_the_test_worker_reads_what_it_may_write(self):
         # rule: R-TEST-WORKER-READ-TOOLS
-        self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Read",
-                                                   {"file_path": TEST})))
-        self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Grep",
-                                                   {"pattern": "cart", "path": REPO + "/tests"})))
+        self.assertIsNone(decide(payload("ppl-test-worker", "Read",
+                                         {"file_path": TEST})))
+        self.assertIsNone(decide(payload("ppl-test-worker", "Grep",
+                                         {"pattern": "cart", "path": REPO + "/tests"})))
         for tool, tool_input in (("Read", {"file_path": PRODUCT}),
                                  ("Grep", {"pattern": "cart", "path": REPO + "/pkg/tests"})):
             with self.subTest(tool=tool, target=tool_input):
-                reason = self.deny_reason(ppl_guard.decide(payload("ppl-test-worker", tool,
-                                                                   tool_input)))
+                reason = self.deny_reason(decide(payload("ppl-test-worker", tool,
+                                                         tool_input)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
 
     def test_bash_reads_follow_the_python_patterns(self):
         # rule: R-TEST-WORKER-BASH-READS
-        self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Bash",
-                                                   {"command": "cat tests/unit/test_cart.py"})))
-        reason = self.deny_reason(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload("ppl-test-worker", "Bash",
+                                         {"command": "cat tests/unit/test_cart.py"})))
+        reason = self.deny_reason(decide(payload(
             "ppl-test-worker", "Bash", {"command": "cat src/shop/cart.py"})))
         self.assertIn("BOUNDARY_VIOLATION", reason)
 
@@ -125,8 +129,8 @@ class TestPythonRun(unittest.TestCase):
                      ("ppl-test-worker", "Write", {"file_path": TEST}))
             for agent, tool, tool_input in calls:
                 with self.subTest(agent=agent, tool=tool):
-                    reason = self.deny_reason(ppl_guard.decide(payload(agent, tool,
-                                                                       tool_input)))
+                    reason = self.deny_reason(decide(payload(agent, tool,
+                                                             tool_input)))
                     self.assertIn("OWNER_DECISION", reason)
                     self.assertIn("harness.json", reason)
                     self.assertIn(snapshot_reason(), reason)
@@ -139,8 +143,8 @@ class TestPythonRun(unittest.TestCase):
         snap["tests"] = {"sources": []}
         saved = self.replace_snapshot(json.dumps(snap))
         try:
-            reason = self.deny_reason(ppl_guard.decide(payload("ppl-test-worker", "Write",
-                                                               {"file_path": TEST})))
+            reason = self.deny_reason(decide(payload("ppl-test-worker", "Write",
+                                                     {"file_path": TEST})))
             self.assertIn("OWNER_DECISION", reason)
             self.assertIn("harness.json", reason)
             self.assertIn(snapshot_reason(), reason)
@@ -148,8 +152,8 @@ class TestPythonRun(unittest.TestCase):
             for tool, tool_input in (("Read", {"file_path": TEST}),
                                      ("Bash", {"command": "cat tests/unit/test_cart.py"})):
                 with self.subTest(tool=tool):
-                    reason = self.deny_reason(ppl_guard.decide(payload("ppl-test-worker", tool,
-                                                                       tool_input)))
+                    reason = self.deny_reason(decide(payload("ppl-test-worker", tool,
+                                                             tool_input)))
                     self.assertIn("BOUNDARY_VIOLATION", reason)
                     self.assertIn(snapshot_reason(), reason)
         finally:
@@ -163,7 +167,7 @@ class TestPythonRun(unittest.TestCase):
                         "tool_input": {"description": "write the tests",
                                        "prompt": "AC-1: an empty cart totals zero.",
                                        "subagent_type": "ppl-test-worker"}}
-            reason = self.deny_reason(ppl_guard.decide(dispatch))
+            reason = self.deny_reason(decide(dispatch))
             self.assertIn("OWNER_DECISION", reason)
             self.assertIn("harness.json", reason)
             self.assertIn(snapshot_reason(), reason)
@@ -175,12 +179,12 @@ class TestPythonRun(unittest.TestCase):
         del snap["tests"]
         saved = self.replace_snapshot(json.dumps(snap))
         try:
-            reason = self.deny_reason(ppl_guard.decide(payload(
+            reason = self.deny_reason(decide(payload(
                 "ppl-code-worker", "Write",
                 {"file_path": REPO + "/src/test/java/FooTest.java"})))
             self.assertIn("BOUNDARY_VIOLATION", reason)
             self.assertIn("may not write test sources", reason)
-            self.assertIsNone(ppl_guard.decide(payload(
+            self.assertIsNone(decide(payload(
                 "ppl-code-worker", "Write", {"file_path": REPO + "/src/tests_helper.py"})))
         finally:
             self.snapshot_path().write_text(saved, encoding="utf-8")
@@ -200,7 +204,7 @@ class TestPythonRun(unittest.TestCase):
                                  {"command": "echo x > tests/unit/test_cart.py"}),
                          dispatch):
                 with self.subTest(tool=call["tool_name"]):
-                    reason = self.deny_reason(ppl_guard.decide(call))
+                    reason = self.deny_reason(decide(call))
                     self.assertIn("OWNER_DECISION", reason)
                     self.assertIn(snapshot_reason(), reason)
         finally:
@@ -228,18 +232,18 @@ class TestPythonRun(unittest.TestCase):
                  ("grep -n total tests/{unit,../src}", REPO))
         for command, cwd in cases:
             with self.subTest(command=command):
-                reason = self.deny_reason(ppl_guard.decide(payload(
+                reason = self.deny_reason(decide(payload(
                     "ppl-test-worker", "Bash", {"command": command}, cwd=cwd)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn("shell expansion", reason)
         # a command substitution is refused before any path is looked at
-        reason = self.deny_reason(ppl_guard.decide(payload(
+        reason = self.deny_reason(decide(payload(
             "ppl-test-worker", "Bash", {"command": "cat tests/`echo x`.py"})))
         self.assertIn("BOUNDARY_VIOLATION", reason)
 
     def test_git_add_of_a_brace_token_is_denied(self):
         # rule: R-TEST-WORKER-BASH-READS
-        reason = self.deny_reason(ppl_guard.decide(payload(
+        reason = self.deny_reason(decide(payload(
             "ppl-test-worker", "Bash", {"command": "git add tests/{x,../src/shop/cart.py}"})))
         self.assertIn("BOUNDARY_VIOLATION", reason)
         self.assertIn("shell expansion", reason)
@@ -249,12 +253,12 @@ class TestPythonRun(unittest.TestCase):
                         "head -n 5 tests/unit/*.py", "grep -n total tests/unit/test_?art.py",
                         "git add tests/unit/*.py"):
             with self.subTest(command=command):
-                self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Bash",
-                                                           {"command": command})))
+                self.assertIsNone(decide(payload("ppl-test-worker", "Bash",
+                                                 {"command": command})))
 
     def assert_denied(self, code, command, *words):
         """The test worker's Bash `command` is denied with `code` and every word."""
-        reason = self.deny_reason(ppl_guard.decide(payload(
+        reason = self.deny_reason(decide(payload(
             "ppl-test-worker", "Bash", {"command": command})))
         self.assertIn(code, reason)
         for word in words:
@@ -367,8 +371,8 @@ class TestPythonRun(unittest.TestCase):
                         "head -n 5 tests/unit/test_cart.py", "tail -n5 tests/unit/test_cart.py",
                         "cat -n tests/unit/test_cart.py", "echo x | grep -c total"):
             with self.subTest(command=command):
-                self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Bash",
-                                                           {"command": command})))
+                self.assertIsNone(decide(payload("ppl-test-worker", "Bash",
+                                                 {"command": command})))
 
     # --- H2: .. is not resolved for the test worker ---
 
@@ -380,8 +384,8 @@ class TestPythonRun(unittest.TestCase):
                                  ("Glob", {"pattern": "*.py", "path": REPO + "/tests/link/.."}),
                                  ("Glob", {"pattern": "../src/**/*.py", "path": REPO + "/tests"})):
             with self.subTest(tool=tool, target=tool_input):
-                reason = self.deny_reason(ppl_guard.decide(payload("ppl-test-worker", tool,
-                                                                   tool_input)))
+                reason = self.deny_reason(decide(payload("ppl-test-worker", tool,
+                                                         tool_input)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn(".. paths are not resolved", reason)
 
@@ -393,13 +397,13 @@ class TestPythonRun(unittest.TestCase):
                                  ("NotebookEdit", {"notebook_path": target}),
                                  ("Bash", {"command": "echo x > tests/link/../unit/test_new.py"})):
             with self.subTest(tool=tool):
-                reason = self.deny_reason(ppl_guard.decide(payload("ppl-test-worker", tool,
-                                                                   tool_input)))
+                reason = self.deny_reason(decide(payload("ppl-test-worker", tool,
+                                                         tool_input)))
                 self.assertIn("BOUNDARY_VIOLATION", reason)
                 self.assertIn(".. paths are not resolved", reason)
 
     def test_the_code_workers_dotdot_write_is_judged_as_before(self):
-        self.assertIsNone(ppl_guard.decide(payload(
+        self.assertIsNone(decide(payload(
             "ppl-code-worker", "Write", {"file_path": REPO + "/src/x/../shop/cart.py"})))
 
     # --- H3: every word of a read or git add segment, not only its paths ---
@@ -437,8 +441,8 @@ class TestPythonRun(unittest.TestCase):
                         "grep -E '(ab)+' tests/x.py", 'grep "foo.*bar" tests/x.py',
                         "CC=gcc make test"):
             with self.subTest(command=command):
-                self.assertIsNone(ppl_guard.decide(payload("ppl-test-worker", "Bash",
-                                                           {"command": command})))
+                self.assertIsNone(decide(payload("ppl-test-worker", "Bash",
+                                                 {"command": command})))
 
 
 if __name__ == "__main__":

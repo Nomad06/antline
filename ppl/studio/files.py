@@ -61,7 +61,8 @@ def _installed(name):
 
 def resolve(key):
     if key == "routing":
-        return paths.routing_file()
+        # the machine's, which the owner edits, never a lane's frozen copy (D15)
+        return paths.machine_routing_file()
     name, rel = _split(key)
     return _inside(_installed(name), rel)
 

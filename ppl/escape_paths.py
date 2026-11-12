@@ -36,11 +36,11 @@ _CLAUDE_SETTINGS = ("settings.json", "settings.local.json")
 # The part of Claude Code's config directory an edit tool writes in every session: memory
 # and transcripts under projects, plans under plans.
 _CLAUDE_WRITABLE = ("projects", "plans")
-# What a workspace session loads from the workspace: the sandbox profile and hooks under
-# .claude, and its MCP servers.
-_WORKSPACE_FILES = (".claude", ".mcp.json")
-# What an unsandboxed ppl reads under PPL_HOME, and the guard's own facts.
-_PPL_FILES = ("config.toml", "harnesses", FACTS_FILE)
+# What an unsandboxed ppl reads under PPL_HOME, the guard's own facts, and what ppl lane keeps
+# there: the routing it freezes into each lane, every lane's start directory, and the lane
+# registry with its lock, which each hook's binding trusts.
+_PPL_FILES = ("config.toml", "harnesses", FACTS_FILE, "routing.toml", "lanes", "lanes.json",
+              "lanes.lock")
 # What JavaScript's trim removes besides the Zs spaces: ECMAScript's other WhiteSpace and
 # its LineTerminators. Claude Code trims a path with it before it resolves it.
 _JS_TRIMMED = frozenset(chr(code) for code in (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x2028, 0x2029,
@@ -123,10 +123,13 @@ def protected_paths(home, facts):
     """Every path an edit tool may not write in a pipeline session, `realpath`-ed: the git,
     ssh and gh config under the home directory and wherever an absolute XDG_CONFIG_HOME,
     XDG_DATA_HOME, GH_CONFIG_DIR or GIT_CONFIG_GLOBAL in this environment moves it, Claude
-    Code's settings and .claude.json (_claude_config), the workspace's .claude directory and
-    .mcp.json, ppl's config, harnesses and guard facts under `home`, ppl's own code
-    (_ppl_code), and each pin's path and realpath. With `facts` None, the workspace and the
-    pins are not known and not listed."""
+    Code's settings and .claude.json (_claude_config), the facts' workspace as a whole (a
+    lane's start directory: the session's settings, hooks, plugin, agents, MCP config and
+    facts, all under the session's cwd, where acceptEdits would take an edit unasked), ppl's
+    config, routing, harnesses and guard facts, the lanes' start directories and the lane
+    registry with its lock under `home` (_PPL_FILES), ppl's own code (_ppl_code), and each
+    pin's path and realpath. With `facts` None, the workspace and the pins are not known and
+    not listed."""
     entries = [os.path.join(user_home, rel) for user_home in _homes() for rel in _HOME_CONFIG]
     for variable, rel in _MOVED_CONFIG:
         value = os.environ.get(variable)
@@ -134,7 +137,7 @@ def protected_paths(home, facts):
             entries.append(os.path.join(value, rel) if rel else value)
     entries.extend(_claude_config())
     if facts:
-        entries.extend(os.path.join(facts["workspace"], name) for name in _WORKSPACE_FILES)
+        entries.append(facts["workspace"])
     entries.extend(os.path.join(str(home), name) for name in _PPL_FILES)
     entries.extend(_ppl_code())
     if facts:
@@ -178,7 +181,7 @@ def _within(path, root):
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-def _unclear(raw):
+def unclear(raw):
     """True when `raw` starts or ends with what JavaScript's trim removes, which Claude Code
     drops before it resolves a path, or holds a control character anywhere."""
     for char in (raw[:1], raw[-1:]):
@@ -294,6 +297,27 @@ def _outside(real_forms, roots):
     return None
 
 
+def landing(raw, cwd):
+    """(every form, the real forms) of where a write of `raw` from `cwd` may land, as
+    target_denial reads an edit tool's path (_target_forms), or None when `raw` is relative
+    and `cwd` is not absolute. The guard places a lane's writes with it."""
+    return _target_forms(raw, cwd)
+
+
+def under(forms, roots):
+    """The `realpath`-ed entry of `roots` one of `forms` is or lies under, in any letter case,
+    by text and by device and inode, as a protected path is found (_protected_hit), else
+    None. For a denial: a case variant counts."""
+    return _protected_hit(forms, _unique_real(roots))
+
+
+def inside(real_form, roots):
+    """True when `real_form` lies under one of `roots`, compared exactly as text or by device
+    and inode with the parts below kept in their case (_outside). For an allowance: a case
+    variant counts only where the file system says it is the same entry."""
+    return _outside([real_form], _unique_real(roots)) is None
+
+
 def _multi_linked(real_forms):
     """The first of `real_forms` that is a regular file with more than one link, or None."""
     for form in real_forms:
@@ -311,31 +335,50 @@ def _shown(value):
     return text if len(text) <= 120 else text[:117] + "..."
 
 
-def target_denial(raw, cwd, home, facts, who, tool):
-    """Why `who`'s `tool` call may not write `raw`, or None. The check holds only under an OS
-    sandbox profile, while `facts` is there: a harness without one keeps today's behaviour.
-    A path is refused when it starts or ends with whitespace or holds a control character,
-    when it cannot be placed, when it is or lies under a protected path or a denyWrite entry
-    of the profile, outside the allowed roots, in a .git directory or file, and as a file with
-    more than one link, which may be another name of a file outside them."""
-    if facts is None:
-        return None
+def _protected_check(raw, cwd, home, facts, who, tool):
+    """(why `raw` may not be written as a protected path, the forms it lands on): a path that
+    is not a string, starts or ends with whitespace or holds a control character, cannot be
+    placed, or is or lies under a protected path (protected_paths with `facts`)."""
     if not isinstance(raw, str):
         return ("%s's %s names a path that is not a string, %s, so the guard cannot tell where "
-                "it writes" % (who, tool, _shown(raw)))
-    if _unclear(raw):
+                "it writes" % (who, tool, _shown(raw))), None
+    if unclear(raw):
         return ("%s's %s path %s starts or ends with whitespace or holds a control character, "
                 "which Claude Code may trim or read otherwise than the guard: spell the path "
-                "plainly" % (who, tool, _shown(raw)))
+                "plainly" % (who, tool, _shown(raw))), None
     resolved = _target_forms(raw, cwd)
     if resolved is None:
         return ("%s's %s names the relative path %s and no absolute cwd, so the guard cannot "
-                "tell where it writes" % (who, tool, _shown(raw)))
-    forms, real_forms = resolved
-    hit = _protected_hit(forms, protected_paths(home, facts))
+                "tell where it writes" % (who, tool, _shown(raw))), None
+    hit = _protected_hit(resolved[0], protected_paths(home, facts))
     if hit:
         return ("%s may not %s %s while the pipeline is set up or running: it is or lies under "
-                "%s, %s" % (who, tool, _shown(raw), hit, PROTECTED_WHY))
+                "%s, %s" % (who, tool, _shown(raw), hit, PROTECTED_WHY)), resolved
+    return None, resolved
+
+
+def protected_denial(raw, cwd, home, who, tool):
+    """Why `who`'s `tool` call may not write `raw`, or None, with no facts at all: what
+    _protected_check refuses with the protected paths every session has (protected_paths with
+    no facts), Claude Code's settings, ppl's code, config, routing, harnesses and facts, the
+    lanes' start directories and registry, and the git, ssh and gh config. A lane whose harness
+    has no OS sandbox profile is held to it."""
+    return _protected_check(raw, cwd, home, None, who, tool)[0]
+
+
+def target_denial(raw, cwd, home, facts, who, tool):
+    """Why `who`'s `tool` call may not write `raw`, or None. The check holds only under an OS
+    sandbox profile, while `facts` is there (protected_denial is the one without it). A path is
+    refused when it starts or ends with whitespace or holds a control character, when it
+    cannot be placed, when it is or lies under a protected path or a denyWrite entry of the
+    profile, outside the allowed roots, in a .git directory or file, and as a file with more
+    than one link, which may be another name of a file outside them."""
+    if facts is None:
+        return None
+    reason, resolved = _protected_check(raw, cwd, home, facts, who, tool)
+    if reason:
+        return reason
+    forms, real_forms = resolved
     # the profile's denyWrite wins over its allowWrite for Bash, so it does here too
     hit = _protected_hit(forms, deny_write(facts))
     if hit:

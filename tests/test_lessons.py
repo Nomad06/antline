@@ -18,7 +18,11 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
 import fixtures
-from ppl import cli, evidence, findings, harness, lessons, memory, paths, review, run, store, verdict
+from ppl import (cli, evidence, findings, harness, lanes, lessons, memory, os_sandbox, paths,
+                 review, run, store, verdict)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "hooks"))
+import ppl_guard
 from ppl.errors import PplError
 
 PRODUCER = {"provider": "claude-code-subagent", "model": "claude-test", "params_hash": ""}
@@ -71,15 +75,12 @@ def read_bundle(target, name):
 
 
 class LessonsTestCase(unittest.TestCase):
-    """A fresh data root per test with example-maven installed, one lesson in its memory,
-    and the reflector's agent file in place."""
+    """A fresh data root per test with example-maven installed and one lesson in its memory.
+    Each run built here gets the lane agents file ppl lane renders, ppl-reflector in it."""
 
     def setUp(self):
-        self._env = {key: os.environ.get(key) for key in ("PPL_HOME", "PPL_AGENTS_DIR")}
+        self._env = {key: os.environ.get(key) for key in ("PPL_HOME",)}
         os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
-        os.environ["PPL_AGENTS_DIR"] = tmphome.mkdtemp(prefix="pplagents-")
-        self.reflector = Path(os.environ["PPL_AGENTS_DIR"]) / "ppl-reflector.md"
-        self.reflector.write_text("---\nname: ppl-reflector\n---\n", encoding="utf-8")
         fixtures.install_harness("example-maven")
         row = {"id": "M-1", "role": "ppl-code-worker", "cue": "a change touches the cart",
                "lesson": "run the cart tests before handing back",
@@ -107,6 +108,8 @@ class LessonsTestCase(unittest.TestCase):
         doc = harness.load("example-maven")
         run.init(task, "https://tracker/%s" % task, repo,
                  harness={"name": "example-maven", "path": doc["_dir"], "format": harness.FORMAT})
+        store.write_json(lanes.start_dir(task) / "agents.json",
+                         {"ppl-reflector": {"description": "d", "prompt": "p"}})
         directory = paths.run_dir(task)
         store.write_json(directory / "harness.json", harness.snapshot(doc))
         store.write_json(directory / "brief.json", {"task_id": task, "acceptance": ["AC1"]})
@@ -246,17 +249,23 @@ class TestBundle(LessonsTestCase):
         self.assertIsNone(lessons.bundle("DEMO-9104"))
         self.assertFalse((built["directory"] / "lessons").exists())
 
-    def test_bundle_names_a_missing_reflector_agent_file(self):
+    def test_bundle_names_a_lane_agents_file_without_the_reflector(self):
         built = self.build_run("DEMO-9105")
         self.merge(built)
-        self.reflector.unlink()
-        code, _, err = call("lessons", "bundle", "--task", "DEMO-9105")
-        self.assertEqual(code, 2)
-        payload = json.loads(err)
-        self.assertEqual(payload["error_code"], "SETUP_INCOMPLETE")
-        self.assertIn(str(self.reflector), payload["message"])
-        self.assertIn("ppl harness apply example-maven", payload["message"])
-        self.assertFalse((built["directory"] / "lessons").exists())
+        agents = lanes.start_dir("DEMO-9105") / "agents.json"
+        for content in ('{"ppl-verifier": {}}', None):
+            with self.subTest(content=content):
+                if content is None:
+                    agents.unlink()
+                else:
+                    agents.write_text(content, encoding="utf-8")
+                code, _, err = call("lessons", "bundle", "--task", "DEMO-9105")
+                self.assertEqual(code, 2)
+                payload = json.loads(err)
+                self.assertEqual(payload["error_code"], "SETUP_INCOMPLETE")
+                self.assertIn(str(agents), payload["message"])
+                self.assertIn("ppl lane resume DEMO-9105", payload["message"])
+                self.assertFalse((built["directory"] / "lessons").exists())
 
     def test_a_paused_run_still_gets_its_bundle(self):
         # no control.enforce: the bundle changes no run state
@@ -683,6 +692,26 @@ class TestRecord(LessonsTestCase):
         self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
         self.assertIn("ppl lessons bundle", payload["message"])
 
+    def test_a_lane_records_only_under_its_own_harness(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # R59: record runs outside the sandbox, and the lane's own bundle lies in its run, which
+        # its sandbox writes, so a lane names the harness from its registry entry, not the bundle
+        built = self.bundled("DEMO-9230")
+        fixtures.bind_lane("DEMO-9230", "/tmp/repo-9230", harness="example-maven")
+        store.write_json(built["bundle"] / "memory-in-effect.json",
+                         {"harness": "other-harness", "entries": []})
+        doc = self.doc(built, assessments=[])
+        with mock.patch.dict(os.environ, {"PPL_TASK": "DEMO-9230"}):
+            message = self.refused("SCHEMA_INVALID", built, doc)
+        self.assertIn("other-harness", message)
+        self.assertIn("example-maven", message)
+        self.assertFalse((lessons.lessons_home() / "other-harness").exists())
+        # from a terminal outside every lane the owner records as before, under the bundle's
+        lanes.release("DEMO-9230")
+        code, out, err = self.record(built, doc)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(lessons.proposals_path("other-harness", "DEMO-9230").is_file())
+
     def test_a_harness_name_that_is_not_a_plain_name_is_refused(self):
         # rule: R-LESSONS-EVIDENCE-RESOLVES
         built = self.bundled("DEMO-9216")
@@ -836,7 +865,8 @@ class TestOwnerReview(LessonsTestCase):
     memory.toml."""
 
     KEY = "harness:example-maven:memory.toml"
-    APPLY = "run ppl harness apply example-maven to render it"
+    APPLY = ("commit memory.toml in harness example-maven's repository, and push it when it "
+             "has an origin: the next lane ppl lane starts renders it")
 
     def setUp(self):
         super().setUp()
@@ -1130,6 +1160,24 @@ class TestAbandonedRun(LessonsTestCase):
                           "blocker": None, "why": "spec was wrong"})
         self.assertFalse(built["directory"].exists())
 
+    def test_a_run_directory_left_behind_writes_no_marker_and_says_so(self):
+        # ledger 285: with the run directory left behind there is no archive, and the marker
+        # path was built from None (TypeError). Now no marker is written, the result says why,
+        # and the destroy run again once the run directory can move leaves the marker
+        built = self.build_run("DEMO-9330")
+
+        def stuck(source, target):
+            raise OSError("the run directory is busy")
+        with mock.patch.object(run.shutil, "move", stuck):
+            result = lessons.destroy_with_reflection("DEMO-9330", "gave up")
+        self.assertEqual((result["run_dir"], result["archive"]), ("left_behind", None))
+        self.assertEqual(result["reflection"], "left_behind")
+        self.assertIn(str(built["directory"]), result["reflection_error"])
+        self.assertFalse(lessons.pending_path("DEMO-9330").exists())
+        result = lessons.destroy_with_reflection("DEMO-9330", "gave up")
+        self.assertEqual((result["status"], result["reflection"]), ("archived", "pending"))
+        self.assertTrue(lessons.pending_path("DEMO-9330").is_file())
+
     def test_a_resumed_run_has_a_null_blocker(self):
         # build_run parks the run once and resumes it, and parking.json stays on disk
         built = self.build_run("DEMO-9313")
@@ -1296,6 +1344,423 @@ class TestAbandonedRun(LessonsTestCase):
         self.assertEqual([line.split()[0] for line in out.splitlines()], ["DEMO-9330"])
         self.assertEqual(len(err.strip().splitlines()), 2)
         self.assertIn("DEMO-9331", err)
+
+    def abandon(self, task, harness_name="example-maven", files_name=None):
+        """A run in a lane of `harness_name` that the owner destroyed with reflection: its
+        pending marker's bundle. `files_name` is the harness its own harness.json, and so its
+        bundle's memory-in-effect.json, are rewritten to name, as its lane's sandbox can."""
+        built = self.build_run(task)
+        fixtures.bind_lane(task, "/nonexistent/repo-" + task, lane=9, harness=harness_name)
+        if files_name is not None:
+            snapshot = json.loads((built["directory"] / "harness.json").read_text(
+                encoding="utf-8"))
+            store.write_json(built["directory"] / "harness.json", dict(snapshot,
+                                                                      name=files_name))
+        return lessons.destroy_with_reflection(task, "gave up")["archive"] + "/lessons/bundle"
+
+    def in_lane(self, lane, *args):
+        """`ppl <args>` as the session of `lane` runs it."""
+        with mock.patch.dict(os.environ, {"PPL_TASK": lane}):
+            return call(*args)
+
+    def test_pending_lists_only_this_harness(self):
+        # D20: a lane reflects only on the runs of its own harness, and claims what it lists
+        mine = self.abandon("DEMO-9340")
+        self.abandon("DEMO-9341", harness_name="other-harness")
+        fixtures.bind_lane("DEMO-9350", "/tmp/repo-9350", harness="example-maven")
+        self.assertEqual([m["task"] for m in lessons.pending("example-maven")], ["DEMO-9340"])
+        self.assertEqual([m["task"] for m in lessons.pending("other-harness")], ["DEMO-9341"])
+        self.assertEqual(sorted(m["task"] for m in lessons.pending()), ["DEMO-9340", "DEMO-9341"])
+        # R59: a lane claims no marker of a run of another harness, even named directly
+        self.assertFalse(lessons.claim_pending("DEMO-9341", "DEMO-9350"))
+        self.assertTrue(lessons.pending_path("DEMO-9341").is_file())
+        code, out, err = self.in_lane("DEMO-9350", "lessons", "pending")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.splitlines(), ["DEMO-9340 %s" % mine])
+        self.assertFalse(lessons.pending_path("DEMO-9340").exists())
+        self.assertTrue(lessons.claimed_path("DEMO-9340", "DEMO-9350").is_file())
+        # the other harness's marker stays for a lane of its own harness
+        self.assertEqual([m["task"] for m in lessons.pending()], ["DEMO-9341"])
+
+    def test_a_claimed_marker_is_not_listed_twice(self):
+        # D20: the first lane's rename wins, and two lanes never reflect on the same run
+        bundle = self.abandon("DEMO-9342")
+        fixtures.bind_lane("DEMO-9351", "/tmp/repo-9351", lane=1)
+        fixtures.bind_lane("DEMO-9352", "/tmp/repo-9352", lane=2)
+        self.assertTrue(lessons.claim_pending("DEMO-9342", "DEMO-9351"))
+        self.assertFalse(lessons.claim_pending("DEMO-9342", "DEMO-9352"))
+        self.assertFalse(lessons.claim_pending("DEMO-9342", "DEMO-9351"))
+        self.assertEqual(lessons.pending(), [])
+        self.assertEqual(lessons.pending("example-maven"), [])
+        code, out, err = self.in_lane("DEMO-9352", "lessons", "pending")
+        self.assertEqual((code, out.strip()), (0, "no pending reflections"), err)
+        # the claiming lane lists its claim again, so a resumed session finishes it
+        code, out, err = self.in_lane("DEMO-9351", "lessons", "pending")
+        self.assertEqual((code, out.splitlines()), (0, ["DEMO-9342 %s" % bundle]), err)
+        self.assertEqual(lessons.find_bundle("DEMO-9342", "DEMO-9351"), Path(bundle))
+        # outside a lane the owner still sees nothing pending to claim
+        self.assertEqual(call("lessons", "pending")[1].strip(), "no pending reflections")
+
+    def test_a_marker_carries_the_harness_its_lane_ran_not_the_runs_own_files(self):
+        # R61: the run's harness.json and its bundle lie in its own lane's write scope, so the
+        # marker carries the harness the registry named, and only that decides who reflects
+        bundle = self.abandon("DEMO-9345", harness_name="example-maven",
+                              files_name="other-harness")
+        self.assertEqual(read_bundle(bundle, "memory-in-effect.json")["harness"], "other-harness")
+        marker = json.loads(lessons.pending_path("DEMO-9345").read_text(encoding="utf-8"))
+        self.assertEqual(marker, {"task": "DEMO-9345", "bundle": bundle,
+                                  "harness": "example-maven"})
+        fixtures.bind_lane("DEMO-9355", "/tmp/repo-9355", lane=1, harness="other-harness")
+        fixtures.bind_lane("DEMO-9356", "/tmp/repo-9356", lane=2, harness="example-maven")
+        self.assertEqual(lessons.pending("other-harness"), [])
+        self.assertFalse(lessons.claim_pending("DEMO-9345", "DEMO-9355"))
+        code, out, err = self.in_lane("DEMO-9355", "lessons", "pending")
+        self.assertEqual((code, out.strip()), (0, "no pending reflections"), err)
+        self.assertTrue(lessons.pending_path("DEMO-9345").is_file())
+        # the stamped harness's lane claims it and records under that harness
+        code, out, err = self.in_lane("DEMO-9356", "lessons", "pending")
+        self.assertEqual((code, out.split()), (0, ["DEMO-9345", bundle]), err)
+        answer = Path(tmphome.mkdtemp(prefix="pplreflect-")) / "answer.json"
+        answer.write_text(json.dumps({"task": "DEMO-9345", "no_entry": True}), encoding="utf-8")
+        code, out, err = self.in_lane("DEMO-9356", "lessons", "record", "--task", "DEMO-9345",
+                                      "--file", str(answer))
+        self.assertEqual(code, 0, err)
+        self.assertTrue(lessons.proposals_path("example-maven", "DEMO-9345").is_file())
+        self.assertFalse((lessons.lessons_home() / "other-harness").exists())
+
+    def test_a_marker_stamped_after_the_lane_closed_takes_its_record(self):
+        # R61: after ppl lane close the registry entry is gone, and lane.json still names the
+        # harness ppl lane started the run with
+        self.build_run("DEMO-9347")
+        fixtures.bind_lane("DEMO-9347", "/nonexistent/repo-9347", harness="example-maven")
+        lanes.release("DEMO-9347")
+        self.assertEqual(lanes.record("DEMO-9347")["harness"], "example-maven")
+        lessons.destroy_with_reflection("DEMO-9347", "gave up")
+        marker = json.loads(lessons.pending_path("DEMO-9347").read_text(encoding="utf-8"))
+        self.assertEqual(marker["harness"], "example-maven")
+        # a record whose harness is not a name is no record, and stamps nothing
+        self.build_run("DEMO-9372")
+        fixtures.bind_lane("DEMO-9372", "/nonexistent/repo-9372", harness="example-maven")
+        lanes.release("DEMO-9372")
+        record = json.loads(lanes.record_path("DEMO-9372").read_text(encoding="utf-8"))
+        store.write_json(lanes.record_path("DEMO-9372"), dict(record, harness=7))
+        self.assertIsNone(lanes.record("DEMO-9372"))
+        lessons.destroy_with_reflection("DEMO-9372", "gave up")
+        marker = json.loads(lessons.pending_path("DEMO-9372").read_text(encoding="utf-8"))
+        self.assertNotIn("harness", marker)
+
+    def test_an_unstamped_marker_is_reflected_only_from_outside_every_lane(self):
+        # R61: a marker from before lanes names no harness, so no lane claims it
+        bundle = self.abandon("DEMO-9348")
+        store.write_json(lessons.pending_path("DEMO-9348"), {"task": "DEMO-9348",
+                                                             "bundle": bundle})
+        fixtures.bind_lane("DEMO-9357", "/tmp/repo-9357", lane=1)
+        self.assertEqual(lessons.pending("example-maven"), [])
+        self.assertFalse(lessons.claim_pending("DEMO-9348", "DEMO-9357"))
+        self.assertEqual(self.in_lane("DEMO-9357", "lessons", "pending")[1].strip(),
+                         "no pending reflections")
+        self.assertEqual([m["task"] for m in lessons.pending()], ["DEMO-9348"])
+
+    def test_an_owner_terminal_in_a_lanes_directory_claims_nothing(self):
+        # R63: the claim and the in-lane record key on PPL_TASK alone, never on the cwd
+        bundle = self.abandon("DEMO-9349")
+        fixtures.bind_lane("DEMO-9358", "/tmp/repo-9358", lane=1)
+        start = lanes.start_dir("DEMO-9358")
+        before = os.getcwd()
+        os.chdir(str(start))
+        try:
+            with mock.patch.dict(os.environ, {"PPL_TASK": ""}):
+                code, out, err = call("lessons", "pending")
+        finally:
+            os.chdir(before)
+        self.assertEqual((code, out.split()), (0, ["DEMO-9349", bundle]), err)
+        self.assertTrue(lessons.pending_path("DEMO-9349").is_file())
+        self.assertEqual(lessons.claimed("DEMO-9358"), [])
+
+    def close_lane(self, lane):
+        """A lane whose own run is merged, so ppl lane close frees it."""
+        built = self.build_run(lane)
+        self.merge(built)
+        fixtures.bind_lane(lane, "/nonexistent/repo-" + lane, lane=1)
+
+    def test_closing_a_lane_hands_its_unrecorded_claims_back(self):
+        # R60: a claim the lane did not record goes back to pending/<T>.json, so the next lane
+        # of its harness lists it, and one whose task has a marker again stays and is reported
+        self.close_lane("DEMO-9360")
+        handed = self.abandon("DEMO-9361")
+        self.abandon("DEMO-9362")
+        for task in ("DEMO-9361", "DEMO-9362"):
+            self.assertTrue(lessons.claim_pending(task, "DEMO-9360"))
+        store.write_json(lessons.pending_path("DEMO-9362"), {"task": "DEMO-9362",
+                                                             "bundle": "/elsewhere",
+                                                             "harness": "example-maven"})
+        code, out, err = self.in_lane("DEMO-9360", "lane", "close")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result["claims_handed_back"], ["DEMO-9361"])
+        self.assertEqual([kept["task"] for kept in result["claims_kept"]], ["DEMO-9362"])
+        self.assertIn("DEMO-9362.json", result["claims_kept"][0]["reason"])
+        self.assertIsNone(lanes.entry("DEMO-9360"))
+        self.assertFalse(lessons.claimed_path("DEMO-9361", "DEMO-9360").exists())
+        self.assertTrue(lessons.claimed_path("DEMO-9362", "DEMO-9360").is_file())
+        fixtures.bind_lane("DEMO-9363", "/tmp/repo-9363", lane=2)
+        code, out, err = self.in_lane("DEMO-9363", "lessons", "pending")
+        self.assertEqual(code, 0, err)
+        self.assertIn("DEMO-9361 %s" % handed, out.splitlines())
+
+    def test_a_hand_back_that_fails_holds_the_claim_and_still_frees_the_lane(self):
+        # N2: the slot is freed before the hand-back, so an error there is reported with the
+        # claim it held, never a crash that leaves no lane to close again
+        self.close_lane("DEMO-9374")
+        self.abandon("DEMO-9375")
+        self.abandon("DEMO-9376")
+        for task in ("DEMO-9375", "DEMO-9376"):
+            self.assertTrue(lessons.claim_pending(task, "DEMO-9374"))
+        real = os.link
+
+        def link(source, target, *rest, **more):
+            if "DEMO-9375" in str(source):
+                raise OSError(1, "Operation not permitted")
+            return real(source, target, *rest, **more)
+
+        with mock.patch.object(os, "link", side_effect=link):
+            code, out, err = self.in_lane("DEMO-9374", "lane", "close")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertIsNone(lanes.entry("DEMO-9374"))
+        self.assertEqual(result["claims_handed_back"], ["DEMO-9376"])
+        self.assertEqual([kept["task"] for kept in result["claims_kept"]], ["DEMO-9375"])
+        self.assertIn("Operation not permitted", result["claims_kept"][0]["reason"])
+        self.assertTrue(lessons.claimed_path("DEMO-9375", "DEMO-9374").is_file())
+        # a destroy goes the same way
+        self.build_run("DEMO-9377")
+        fixtures.bind_lane("DEMO-9377", "/nonexistent/repo-9377", lane=1)
+        self.abandon("DEMO-9378")
+        self.assertTrue(lessons.claim_pending("DEMO-9378", "DEMO-9377"))
+        with mock.patch.object(os, "link", side_effect=OSError(31, "Too many links")):
+            code, out, err = call("destroy", "--scope", "local", "--task", "DEMO-9377")
+        self.assertEqual(code, 0, err)
+        kept = json.loads(out)["claims_kept"]
+        self.assertEqual([item["task"] for item in kept], ["DEMO-9378"])
+        self.assertIn("Too many links", kept[0]["reason"])
+
+    def test_a_local_destroy_hands_the_lanes_claims_back(self):
+        # R60: a lane freed by ppl destroy --scope local hands its claims back too
+        self.build_run("DEMO-9364")
+        fixtures.bind_lane("DEMO-9364", "/nonexistent/repo-9364", lane=1)
+        self.abandon("DEMO-9365")
+        self.assertTrue(lessons.claim_pending("DEMO-9365", "DEMO-9364"))
+        code, out, err = call("destroy", "--scope", "local", "--task", "DEMO-9364")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["claims_handed_back"], ["DEMO-9365"])
+        self.assertTrue(lessons.pending_path("DEMO-9365").is_file())
+        self.assertEqual(lessons.claimed("DEMO-9364"), [])
+
+    def test_a_ppl_task_that_is_not_a_task_id_is_refused_by_record(self):
+        # M5: a PPL_TASK that names no task is a routed refusal, never a traceback
+        answer = Path(tmphome.mkdtemp(prefix="pplreflect-")) / "answer.json"
+        answer.write_text(json.dumps({"task": "DEMO-9371", "no_entry": True}), encoding="utf-8")
+        for value in ("../x", "a/b", "demo-1"):
+            with self.subTest(ppl_task=value):
+                code, _, err = self.in_lane(value, "lessons", "record", "--task", "DEMO-9371",
+                                            "--file", str(answer))
+                self.assertEqual((code, json.loads(err)["error_code"]), (2, "SCHEMA_INVALID"))
+
+    def reflector_lane(self):
+        """Lane DEMO-9366 with its own run, the archived bundle it claimed (mine), one another
+        lane claimed (theirs) and one no lane claimed, its scratch directory holding a link to
+        that last one, and `decide(tool, agent=..., **tool_input)` for a call of that lane's
+        session, ppl-reflector unless `agent` says otherwise (None: no role)."""
+        self.build_run("DEMO-9366")
+        fixtures.bind_lane("DEMO-9366", "/nonexistent/repo-9366", lane=1)
+        fixtures.bind_lane("DEMO-9367", "/nonexistent/repo-9367", lane=2)
+        mine = self.abandon("DEMO-9368")
+        theirs = self.abandon("DEMO-9369")
+        unclaimed = self.abandon("DEMO-9370")
+        self.assertTrue(lessons.claim_pending("DEMO-9368", "DEMO-9366"))
+        self.assertTrue(lessons.claim_pending("DEMO-9369", "DEMO-9367"))
+        # a claim that is no marker names no bundle, and breaks nothing
+        lessons.claimed_path("DEMO-9373", "DEMO-9366").write_text("[1]", encoding="utf-8")
+        scratch = os_sandbox.scratch_dir("DEMO-9366")
+        scratch.mkdir(parents=True)
+        os.symlink(unclaimed, str(scratch / "link"))
+        start = str(lanes.start_dir("DEMO-9366"))
+
+        def decide(tool, agent="ppl-reflector", **tool_input):
+            payload = {"hook_event_name": "PreToolUse", "tool_name": tool,
+                       "tool_input": tool_input, "cwd": start}
+            if agent is not None:
+                payload["agent_type"] = agent
+            return ppl_guard.decide(payload, ["--task", "DEMO-9366"])
+
+        return {"mine": mine, "theirs": theirs, "unclaimed": unclaimed, "start": start,
+                "run": str(paths.run_dir("DEMO-9366")), "scratch": str(scratch),
+                "decide": decide}
+
+    def deny_reason(self, result):
+        """The reason of a reflector call the guard refused, which names its rule."""
+        self.assertIsNotNone(result, "the call was allowed")
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("BOUNDARY_VIOLATION", reason)
+        self.assertIn("R-LANE-REFLECTOR-READS", reason)
+        return reason
+
+    def test_the_reflector_reads_an_archived_bundle_only_of_a_run_its_lane_claimed(self):
+        # rule: R-LANE-REFLECTOR-READS
+        # R63: ppl-reflector in a lane reads the archive only inside the bundle of a marker
+        # that lane claimed, through the guard's role checks. R64: it searches with Grep and
+        # Glob only from such a bundle, its own run directory or its own scratch directory.
+        lane = self.reflector_lane()
+        mine, theirs, unclaimed = lane["mine"], lane["theirs"], lane["unclaimed"]
+        decide = lane["decide"]
+        # N4: an archived run's name carries its UTC offset, so the claimed bundle's path does
+        self.assertIn("+0000", mine)
+        for tool, tool_input in (("Read", {"file_path": mine + "/outcome.json"}),
+                                 ("Grep", {"pattern": "x", "path": mine}),
+                                 ("Grep", {"pattern": "x", "path": mine + "/outcome.json"}),
+                                 ("Grep", {"pattern": "x", "path": mine, "glob": "*.json"}),
+                                 ("Grep", {"pattern": "x", "path": lane["run"]}),
+                                 ("Glob", {"pattern": "**/*.json", "path": lane["run"]}),
+                                 ("Glob", {"pattern": "lessons-*.json",
+                                           "path": lane["scratch"]})):
+            with self.subTest(tool=tool, allowed=True, tool_input=tool_input):
+                self.assertIsNone(decide(tool, **tool_input))
+        # the unclaimed bundle in another letter case: the same entry on a case-insensitive disk
+        case_variant = unclaimed.replace("DEMO-9370", "demo-9370")
+        for tool, tool_input in (
+                ("Read", {"file_path": theirs + "/outcome.json"}),
+                ("Read", {"file_path": unclaimed + "/outcome.json"}),
+                ("Read", {"file_path": mine + "/../../../" + Path(theirs).parts[-3]
+                          + "/lessons/bundle/outcome.json"}),
+                # Claude Code trims a path before it reads it, the guard would place it in cwd
+                ("Read", {"file_path": " " + theirs + "/outcome.json"}),
+                ("Grep", {"pattern": "x", "path": str(Path(mine).parents[2])}),
+                # a search rooted at or above the archive reads every bundle in it
+                ("Grep", {"pattern": ".", "path": str(paths.runs_dir())}),
+                ("Grep", {"pattern": ".", "path": str(paths.home())}),
+                ("Grep", {"pattern": ".", "path": str(paths.runs_dir()),
+                          "glob": "_archive/**"}),
+                ("Grep", {"pattern": ".", "path": str(paths.runs_dir()).upper()}),
+                ("Glob", {"pattern": "_archive/*/lessons/bundle/*",
+                          "path": str(paths.runs_dir())}),
+                ("Glob", {"pattern": "*", "path": str(paths.home())}),
+                # R64: no root but the claimed bundle, the own run and the own scratch
+                ("Grep", {"pattern": "x"}),
+                ("Glob", {"pattern": "**/*.json"}),
+                ("Glob", {"pattern": "*", "path": lane["start"]}),
+                ("Grep", {"pattern": "x", "path": theirs}),
+                ("Glob", {"pattern": "*", "path": theirs}),
+                ("Grep", {"pattern": "x", "path": unclaimed}),
+                ("Glob", {"pattern": "**/*.json", "path": unclaimed}),
+                ("Grep", {"pattern": "x", "path": case_variant}),
+                ("Glob", {"pattern": "*", "path": case_variant}),
+                # a link in the lane's own scratch directory is placed where it leads
+                ("Grep", {"pattern": "x", "path": lane["scratch"] + "/link"}),
+                ("Glob", {"pattern": "*", "path": lane["scratch"] + "/link"}),
+                # ".. " is a name to the guard and a parent once Claude Code trims it
+                ("Grep", {"pattern": ".", "path": lane["run"] + "/.. "}),
+                ("Glob", {"pattern": "*", "path": lane["run"] + "/.. "}),
+                # Glob searches its path: another key naming the claimed bundle is not it
+                ("Glob", {"pattern": "*", "path": theirs, "file_path": mine})):
+            with self.subTest(tool=tool, tool_input=tool_input):
+                self.deny_reason(decide(tool, **tool_input))
+
+    def test_a_reflector_glob_pattern_is_relative_and_plain(self):
+        # rule: R-LANE-REFLECTOR-READS
+        # R64: a pattern of plain names, * and ** below the root. Braces, classes, extglobs,
+        # escapes and segments of dots and wildcards are refused whatever the root
+        lane = self.reflector_lane()
+        mine, decide = lane["mine"], lane["decide"]
+        for pattern in ("*", "**", "**/*.json", "lessons/*.md", "remarks/*.json",
+                        "outcome.json", "remarks/thread-?.json", "a+b/c_d-e.f"):
+            with self.subTest(pattern=pattern, allowed=True):
+                self.assertIsNone(decide("Glob", pattern=pattern, path=mine))
+        for glob in ("*.json", "remarks/*.json", "**/*.json"):
+            with self.subTest(tool="Grep", allowed=True, glob=glob):
+                self.assertIsNone(decide("Grep", pattern="x", path=mine, glob=glob))
+        # N4: the root goes in path, the pattern is relative, and the message says so
+        for pattern in (mine + "/**/*.json", str(Path(lane["theirs"]).parents[2]) + "/*/**",
+                        str(paths.runs_dir()) + "/\\_archive/*/lessons/bundle/*"):
+            with self.subTest(pattern=pattern, absolute=True):
+                reason = self.deny_reason(decide("Glob", pattern=pattern))
+                self.assertIn("pass the directory as path", reason)
+                self.assertIn("relative pattern", reason)
+        for pattern in ("{..,x}/**", "[.][.]/**", ".*/**", "..", "../x", "./*", ".", "*.*",
+                        "?", "**/..", "*.@(json)", "!(x)/**", "+(x)/**", "\\_archive/*",
+                        "a\\b", "{outcome,findings}.json", "[o]utcome.json", "~/x",
+                        "lessons/", "a//b", "", "a b", "*.json\n"):
+            with self.subTest(pattern=pattern):
+                self.deny_reason(decide("Glob", pattern=pattern, path=mine))
+        # a .. climbs from any root
+        for root in (mine, lane["run"], lane["scratch"], None):
+            tool_input = {"pattern": "../runs/_archive/**"}
+            if root is not None:
+                tool_input["path"] = root
+            with self.subTest(root=root):
+                self.deny_reason(decide("Glob", **tool_input))
+        # a Grep glob obeys the same allowlist, and a pattern that is no string is refused
+        for tool, tool_input in (("Grep", {"pattern": "x", "path": mine, "glob": "*.{json,md}"}),
+                                 ("Grep", {"pattern": "x", "path": mine, "glob": "../**"}),
+                                 ("Grep", {"pattern": "x", "path": mine, "glob": "*.@(json)"}),
+                                 ("Grep", {"pattern": "x", "path": mine, "glob": ["*.json"]}),
+                                 ("Glob", {"pattern": ["*"], "path": mine}),
+                                 ("Glob", {"path": mine})):
+            with self.subTest(tool=tool, tool_input=tool_input):
+                self.deny_reason(decide(tool, **tool_input))
+
+    def test_other_roles_search_as_before(self):
+        # rule: R-LANE-REFLECTOR-READS
+        # R64 holds ppl-reflector alone: another role's Grep and Glob are judged as before
+        lane = self.reflector_lane()
+        archive = str(paths.runs_dir() / "_archive")
+        for agent in ("ppl-verifier", "ppl-review-responder", "ppl-briefer", None):
+            for tool, tool_input in (("Glob", {"pattern": "../../runs/_archive/**"}),
+                                     ("Glob", {"pattern": archive + "/**/outcome.json"}),
+                                     ("Glob", {"pattern": "{..,x}/**", "path": lane["start"]}),
+                                     ("Glob", {"pattern": "*.@(json|md)",
+                                               "path": lane["theirs"]}),
+                                     ("Grep", {"pattern": "x"}),
+                                     ("Grep", {"pattern": "x", "path": lane["theirs"],
+                                               "glob": "*.{json,md}"})):
+                with self.subTest(agent=agent, tool=tool, tool_input=tool_input):
+                    self.assertIsNone(lane["decide"](tool, agent=agent, **tool_input))
+
+    def test_a_lane_records_only_its_own_run_or_a_marker_it_claimed(self):
+        # rule: R-OS-SANDBOX-ORCHESTRATOR-SHAPE
+        # R57: a lane's record names its own run or a marker it claimed with ppl lessons pending
+        self.build_run("DEMO-9343")
+        self.abandon("DEMO-9344")
+        fixtures.bind_lane("DEMO-9353", "/tmp/repo-9353", lane=1)
+        fixtures.bind_lane("DEMO-9354", "/tmp/repo-9354", lane=2)
+        fixtures.bind_lane("DEMO-9343", "/tmp/repo-9343", lane=3)
+        answer = Path(tmphome.mkdtemp(prefix="pplreflect-")) / "answer.json"
+
+        def record(lane, task):
+            answer.write_text(json.dumps({"task": task, "no_entry": True}), encoding="utf-8")
+            return self.in_lane(lane, "lessons", "record", "--task", task, "--file",
+                                str(answer))
+
+        # a pending marker no lane claimed, and another lane's run
+        for task in ("DEMO-9344", "DEMO-9343"):
+            code, out, err = record("DEMO-9353", task)
+            self.assertEqual(code, 2, out)
+            payload = json.loads(err)
+            self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+            self.assertIn("ppl lessons pending", payload["message"])
+        self.assertTrue(lessons.pending_path("DEMO-9344").is_file())
+        self.assertFalse(lessons.proposals_path("example-maven", "DEMO-9344").exists())
+        # claimed by the other lane: still not this one's
+        self.assertTrue(lessons.claim_pending("DEMO-9344", "DEMO-9354"))
+        code, _, err = record("DEMO-9353", "DEMO-9344")
+        self.assertEqual((code, json.loads(err)["error_code"]), (2, "SCHEMA_INVALID"))
+        code, out, err = record("DEMO-9354", "DEMO-9344")
+        self.assertEqual((code, out.strip()), (0, "recorded no entry for DEMO-9344"), err)
+        self.assertFalse(lessons.claimed_path("DEMO-9344", "DEMO-9354").exists())
+        self.assertTrue(lessons.proposals_path("example-maven", "DEMO-9344").is_file())
+        # a lane's own run is its own to record: this one only lacks its bundle
+        code, out, err = record("DEMO-9343", "DEMO-9343")
+        self.assertEqual(code, 2, out)
+        self.assertIn("run ppl lessons bundle first", json.loads(err)["message"])
 
 
 if __name__ == "__main__":

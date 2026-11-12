@@ -1,12 +1,12 @@
-# Single source of truth for role routing. Regenerate agents with: ppl harness apply <name>
-# Never edit the generated agent files by hand.
+# Single source of truth for role routing. ppl lane renders each lane's agents from it, and a
+# lane keeps a frozen copy, so a change here reaches the next lane ppl lane starts.
 
 [providers.claude-code-subagent]
 kind = "subagent"
 allow_source_upload = true
 
 # A tier names a provider and a model. Roles name tiers. Change a model here,
-# then run `ppl models verify` and `ppl harness apply <name>`.
+# then run `ppl models verify`.
 [tiers]
 heavy   = { provider = "claude-code-subagent", model = "fable" }
 good    = { provider = "claude-code-subagent", model = "opus" }

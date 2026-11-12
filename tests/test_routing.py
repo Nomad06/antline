@@ -1,11 +1,10 @@
-import io
 import json
 import os
 import shutil
 import sys
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 # tests/ is not a package, so the helper next to this file is imported
 # by path. It must be imported before PPL_HOME is chosen below.
@@ -13,9 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tmphome
 
 HOME = tmphome.mkdtemp(prefix="pplhome-")
-AGENTS_DIR = tmphome.mkdtemp(prefix="pplagents-")
 os.environ["PPL_HOME"] = HOME
-os.environ["PPL_AGENTS_DIR"] = AGENTS_DIR
 
 SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
 shutil.copy(SOURCE / "defaults" / "routing.example.toml", Path(HOME) / "routing.toml")
@@ -23,7 +20,7 @@ shutil.copy(SOURCE / "defaults" / "routing.example.toml", Path(HOME) / "routing.
 import fixtures
 fixtures.install_harness("example-maven")
 
-from ppl import cli, forges, harness, routing, trackers
+from ppl import forges, harness, lanes, paths, routing, trackers
 from ppl.errors import PplError
 
 
@@ -36,9 +33,7 @@ class TestRouting(unittest.TestCase):
     # is a good citizen under both `discover` and a single-module run.
     def setUp(self):
         self._saved_home = os.environ.get("PPL_HOME")
-        self._saved_agents = os.environ.get("PPL_AGENTS_DIR")
         os.environ["PPL_HOME"] = HOME
-        os.environ["PPL_AGENTS_DIR"] = AGENTS_DIR
         self.doc = harness.load("example-maven")
 
     def tearDown(self):
@@ -46,10 +41,70 @@ class TestRouting(unittest.TestCase):
             os.environ.pop("PPL_HOME", None)
         else:
             os.environ["PPL_HOME"] = self._saved_home
-        if self._saved_agents is None:
-            os.environ.pop("PPL_AGENTS_DIR", None)
-        else:
-            os.environ["PPL_AGENTS_DIR"] = self._saved_agents
+
+    def test_a_lane_reads_its_frozen_routing(self):
+        # D15: ppl lane copies routing.toml into the lane's start directory, and a call made in
+        # that lane (PPL_TASK) reads the copy, not the machine file as it changed since
+        task = "DEMO-8801"
+        machine = Path(HOME) / "routing.toml"
+        fixtures.bind_lane(task, "/tmp/repo-8801")
+        self.addCleanup(lanes.release, task)
+        frozen = lanes.start_dir(task) / "routing.toml"
+        frozen.write_text(machine.read_text(encoding="utf-8").replace(
+            'model = "sonnet"', 'model = "frozen-sonnet"'), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"PPL_TASK": task}):
+            self.assertEqual(paths.routing_file(), frozen)
+            self.assertEqual(routing.tiers()["average"]["model"], "frozen-sonnet")
+        for unbound in ("", "DEMO-8802"):
+            # no lane, or a PPL_TASK no registered lane holds: the machine file
+            with self.subTest(ppl_task=unbound), \
+                    mock.patch.dict(os.environ, {"PPL_TASK": unbound}):
+                self.assertEqual(paths.routing_file(), machine)
+                self.assertEqual(routing.tiers()["average"]["model"], "sonnet")
+        # a lane whose frozen copy is gone is told so, never handed the machine file
+        frozen.unlink()
+        with mock.patch.dict(os.environ, {"PPL_TASK": task}), \
+                self.assertRaises(PplError) as caught:
+            routing.load()
+        self.assertIn(str(frozen), caught.exception.message)
+
+    def test_an_unreadable_registry_is_refused_not_read_as_no_lane(self):
+        # D15: a lane's call never falls back to the machine's models because the registry
+        # could not be read
+        task = "DEMO-8803"
+        fixtures.bind_lane(task, "/tmp/repo-8803")
+        self.addCleanup(lanes.release, task)
+        saved = lanes.registry_path().read_bytes()
+        self.addCleanup(lanes.registry_path().write_bytes, saved)
+        lanes.registry_path().write_text("{not json", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"PPL_TASK": task}), \
+                self.assertRaises(PplError) as caught:
+            paths.routing_file()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("lanes.json", caught.exception.message)
+
+    def test_the_routing_writers_write_the_machine_file_from_a_lane(self):
+        # M7: setup, a preset and the studio write the machine's routing.toml, and never make
+        # or change a lane's frozen copy
+        from ppl import config
+        task = "DEMO-8804"
+        machine = Path(HOME) / "routing.toml"
+        saved = machine.read_bytes()
+        self.addCleanup(machine.write_bytes, saved)
+        fixtures.bind_lane(task, "/tmp/repo-8804")
+        self.addCleanup(lanes.release, task)
+        frozen = lanes.start_dir(task) / "routing.toml"
+        frozen.unlink()
+        machine.unlink()
+        with mock.patch.dict(os.environ, {"PPL_TASK": task}):
+            config.ensure()
+            self.assertTrue(machine.is_file())
+            self.assertFalse(frozen.exists())
+            frozen.write_bytes(saved)
+            routing.apply_preset("economy")
+            self.assertEqual(frozen.read_bytes(), saved)
+            from ppl.studio import files
+            self.assertEqual(files.resolve("routing"), machine)
 
     def test_load_returns_all_seven_roles(self):
         self.assertEqual(sorted(routing.load()["roles"]), [
@@ -146,6 +201,13 @@ class TestRouting(unittest.TestCase):
         text = routing.render("ppl-reflector", self.doc)
         self.assertNotIn("Bash", text.split("---")[1])
         self.assertNotIn("Write", text.split("---")[1])
+
+    def test_the_reflector_is_told_to_give_grep_and_glob_the_bundle_as_path(self):
+        # ledger 339: in a lane the guard refuses a reflector Grep or Glob without a path
+        # inside its claimed bundle, so the prompt says to pass the bundle directory as path
+        text = " ".join(routing.render("ppl-reflector", self.doc).split())
+        self.assertIn("give Grep and Glob the bundle directory as `path`", text)
+        self.assertIn("a relative `pattern` of plain names, `*` and `**`", text)
 
     def test_tiers_name_provider_and_model(self):
         tiers = routing.tiers()
@@ -338,15 +400,13 @@ class TestRouting(unittest.TestCase):
             self.assertIn("\neffort: %s\n" % effort,
                           routing.render("ppl-verifier", self.doc, config=doc))
 
-    def test_apply_refuses_a_hand_edited_effort_that_would_add_frontmatter_lines(self):
+    def test_render_refuses_a_hand_edited_effort_that_would_add_frontmatter_lines(self):
         self.use_example_with('[roles.ppl-verifier]\ntier = "good"\nparams = { effort = "xhigh" }',
                               '[roles.ppl-verifier]\ntier = "good"\n'
                               'params = { effort = "high\\ntools: [x]" }')
-        target = Path(tmphome.mkdtemp(prefix="pplagents-"))
         with self.assertRaises(PplError) as caught:
-            routing.apply(self.doc, target)
+            routing.render("ppl-verifier", self.doc)
         self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
-        self.assertEqual(list(target.iterdir()), [])
 
     def test_a_model_id_with_brackets_is_still_accepted(self):
         doc = routing.load()
@@ -354,15 +414,13 @@ class TestRouting(unittest.TestCase):
         routing.validate_config(doc)
         self.assertIn("model: opus[1m]", routing.render("ppl-verifier", self.doc, config=doc))
 
-    def test_apply_refuses_a_model_that_would_add_frontmatter_lines(self):
+    def test_render_refuses_a_model_that_would_add_frontmatter_lines(self):
         self.use_example_with('good    = { provider = "claude-code-subagent", model = "opus" }',
                               'good    = { provider = "claude-code-subagent", '
                               'model = "opus\\ntools: [Read, Edit, Write, Bash]" }')
-        target = Path(tmphome.mkdtemp(prefix="pplagents-"))
         with self.assertRaises(PplError) as caught:
-            routing.apply(self.doc, target)
+            routing.render("ppl-verifier", self.doc)
         self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
-        self.assertEqual(list(target.iterdir()), [])
 
     def test_render_keeps_the_default_model_in_the_agent_file(self):
         # rule: R-ROUTING-BY-RISK
@@ -555,7 +613,9 @@ class TestRouting(unittest.TestCase):
         self.assertIn("effort: xhigh", text)
 
     def test_render_marks_the_file_as_generated(self):
-        self.assertIn("generated by ppl harness apply", routing.render("ppl-briefer", self.doc))
+        text = routing.render("ppl-briefer", self.doc)
+        self.assertIn("generated by ppl lane", text)
+        self.assertNotIn("ppl harness apply", text)
 
     def test_render_starts_with_the_frontmatter_delimiter(self):
         # A frontmatter parser anchors "---" at byte 0. Anything ahead of it
@@ -583,18 +643,6 @@ class TestRouting(unittest.TestCase):
 
     def test_code_worker_gets_edit_tools(self):
         self.assertIn("Edit", routing.render("ppl-code-worker", self.doc).split("---")[1])
-
-    def test_apply_writes_seven_agent_files(self):
-        written = routing.apply(self.doc)
-        self.assertEqual(len(written), len(routing.REQUIRED_ROLES))
-        self.assertEqual(len(written), 7)
-        for path in written:
-            self.assertTrue(Path(path).exists())
-
-    def test_apply_is_idempotent(self):
-        first = [Path(path).read_text(encoding="utf-8") for path in routing.apply(self.doc)]
-        second = [Path(path).read_text(encoding="utf-8") for path in routing.apply(self.doc)]
-        self.assertEqual(first, second)
 
     def test_load_raises_on_malformed_toml(self):
         bad_home = tmphome.mkdtemp(prefix="pplhome-bad-toml-")
@@ -791,63 +839,6 @@ class TestNoRoleHoldsAJiraWriteTool(_PinnedEnv):
                                  "mcp__corp__a"])
 
 
-class TestRoutingApplyCli(unittest.TestCase):
-    """`ppl routing apply` renders for a harness: the one named by --harness, else
-    the active one, else it refuses."""
-
-    def setUp(self):
-        self._saved = {key: os.environ.get(key) for key in ("PPL_HOME", "PPL_AGENTS_DIR")}
-        self.home = tmphome.mkdtemp(prefix="pplhome-cli-")
-        self.agents = tmphome.mkdtemp(prefix="pplagents-cli-")
-        os.environ["PPL_HOME"] = self.home
-        os.environ["PPL_AGENTS_DIR"] = self.agents
-        shutil.copy(SOURCE / "defaults" / "routing.example.toml", Path(self.home) / "routing.toml")
-        fixtures.install_harness("example-maven")
-
-    def tearDown(self):
-        for key, value in self._saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-    def call(self, *args):
-        out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
-            code = cli.main(list(args))
-        return code, out.getvalue(), err.getvalue()
-
-    def test_apply_with_a_harness_flag_writes_seven_agent_files(self):
-        code, out, err = self.call("routing", "apply", "--harness", "example-maven")
-        self.assertEqual(code, 0, err)
-        self.assertEqual(len(out.strip().splitlines()), len(routing.REQUIRED_ROLES))
-        self.assertEqual(len(list(Path(self.agents).glob("ppl-*.md"))), len(routing.REQUIRED_ROLES))
-        worker = (Path(self.agents) / "ppl-code-worker.md").read_text(encoding="utf-8")
-        self.assertIn("## Project notes", worker)
-
-    def test_apply_without_a_harness_refuses(self):
-        code, out, err = self.call("routing", "apply")
-        self.assertEqual(code, 2)
-        self.assertEqual(json.loads(err)["error_code"], "HARNESS_NOT_APPLIED")
-        self.assertIn("--harness", json.loads(err)["message"])
-        self.assertEqual(list(Path(self.agents).glob("ppl-*.md")), [])
-
-    def test_apply_of_a_refused_doc_writes_no_agent_file(self):
-        # rule: R-JIRA-NO-ROLE-TOOL
-        doc = harness.load("example-maven")
-        doc["knowledge"]["extra_tools"] = ["mcp__atlassian__editJiraIssue"]
-        with self.assertRaises(PplError):
-            routing.apply(doc)
-        self.assertEqual(list(Path(self.agents).glob("ppl-*.md")), [])
-
-    def test_apply_falls_back_to_the_active_harness(self):
-        (Path(self.home) / "config.toml").write_text('[harness]\nactive = "example-maven"\n',
-                                                     encoding="utf-8")
-        code, out, err = self.call("routing", "apply")
-        self.assertEqual(code, 0, err)
-        self.assertEqual(len(list(Path(self.agents).glob("ppl-*.md"))), len(routing.REQUIRED_ROLES))
-
-
 if __name__ == "__main__":
     unittest.main()
 
@@ -878,32 +869,24 @@ class TestDispatchUnimplementedProviderKind(unittest.TestCase):
     in this module (unknown role, unknown provider, missing keys).
 
     Uses its own scratch PPL_HOME with a synthetic routing.toml naming an
-    unimplemented provider kind - never the tracked repo routing.toml, and
-    never `ppl routing apply`.
+    unimplemented provider kind - never the tracked repo routing.toml.
     """
 
     def setUp(self):
         self.home = tmphome.mkdtemp(prefix="pplhome-unimplemented-")
-        agents_dir = tmphome.mkdtemp(prefix="pplagents-unimplemented-")
         lines = ['[providers.some-http-api]', 'kind = "http"', ""]
         for name in routing.REQUIRED_ROLES:
             lines += ["[roles.%s]" % name, 'provider = "some-http-api"',
                      'model = "whatever"', ""]
         (Path(self.home) / "routing.toml").write_text("\n".join(lines), encoding="utf-8")
         self._saved_home = os.environ.get("PPL_HOME")
-        self._saved_agents = os.environ.get("PPL_AGENTS_DIR")
         os.environ["PPL_HOME"] = self.home
-        os.environ["PPL_AGENTS_DIR"] = agents_dir
 
     def tearDown(self):
         if self._saved_home is None:
             os.environ.pop("PPL_HOME", None)
         else:
             os.environ["PPL_HOME"] = self._saved_home
-        if self._saved_agents is None:
-            os.environ.pop("PPL_AGENTS_DIR", None)
-        else:
-            os.environ["PPL_AGENTS_DIR"] = self._saved_agents
 
     def test_unimplemented_provider_kind_is_schema_invalid_not_external_blocked(self):
         with self.assertRaises(PplError) as ctx:

@@ -24,18 +24,20 @@ Target maturity: L2 (verified pipeline) plus L3 recovery. Not L4.
 
 In scope for v1 (maps to book P0 + P1 + the review loop):
 
-- one sequential lane, one task at a time
+- up to the machine's `[lanes] max` tasks at once (3 by default), each in its own lane: a
+  Claude Code window that `ppl lane <link>` starts with the run's own worktree, hooks, agents,
+  skill and, on a GitHub harness, OS sandbox profile; a harness's own `[lanes] max` (1 by
+  default) caps how many of them run its project (5.4)
 - spec/task admission, brief compilation, isolated implementation, independent tests,
   deterministic gates, independent verification, MR creation
 - durable state, recovery after kill/restart, budgets, parking
 - reviewer-remark monitoring loop until approval
 - local admin panel: observe every run, pause, resume, stop, destroy (section 9)
-- `routing.toml` as the single source of model routing, with agent files generated from it,
+- `routing.toml` as the single source of model routing, with the agent definitions generated from it,
   and the provider-agnostic adapter contract frozen (section 10)
 
 Out of scope for v1 (book P2/P3, deferred):
 
-- parallel waves and multi-lane scheduling
 - dependency-matrix-driven planning across many tasks
 - mutation testing (Stryker-equivalent) and the critical-tier adversarial verifier
 - model eval flywheel and automated routing updates
@@ -55,7 +57,7 @@ These were decided by the owner and override any generic doctrine below.
 | Autonomous: reply to reviewer threads | yes |
 | Autonomous: resolve reviewer threads | NO. Only the remark author may resolve [R-MCP-RESOLVE-THREAD]. Globally denied by hook [R-MCP-RESOLVE-THREAD]. |
 | Autonomous: tracker writes | only after merge is observed, in plain English. No pre-merge tracker writes. |
-| Install location | code in a pipx venv or a git checkout, data under `~/.ppl`, the generated agents and skill in an isolated workspace's `.claude/`. Nothing is committed to the project repository. |
+| Install location | code in a pipx venv or a git checkout, data under `~/.ppl`, each lane's hooks, agents and skill in its own start directory `~/.ppl/lanes/<TASK-ID>/`. Nothing is committed to the project repository. |
 | Model routing | frontier on top, rails at the bottom (section 12) |
 | Panel `destroy` | always prompts. Owner picks local-only or full cleanup (close MR, delete remote branch) per run, with typed confirmation for the remote half. |
 | Panel spawning sessions | NO. The panel queues a resume request; it never starts a Claude session [R-PANEL-NO-SPAWN n/a]. |
@@ -84,10 +86,16 @@ human maintainer. The tracker update fires only if and when the pipeline observe
   ppl/                           the state machine package (the real controller)
     __main__.py cli.py           CLI entry point
     fsm.py store.py boundary.py budget.py control.py gitfacts.py routing.py run.py
-    config.py                    config.toml in the data root: setup state, workspace, active harness
+    config.py                    config.toml in the data root: setup state, the claude binary, the default
+                                 harness, the machine's lane limit
+    lanes.py                     the lane registry (lanes.json under a lock) and the hooks' binding (5.4)
+    lane_launch.py               `ppl lane`: start, resume, list and close a task window
+    lane_harness.py              the harness commit a lane runs, exported with git archive
+    lane_render.py               what a lane's session loads: settings, agents, skill plugin, MCP config
     setup.py                     `ppl setup`, the six-step onboarding wizard
     models.py                    tier models: `ppl models verify` probes and their record
-    harness.py                   harness load, validate, add, apply, and the run snapshot (5.6)
+    harness.py                   harness load, validate, add, apply (the default harness), the skill
+                                 render and the run snapshot (5.6)
     lessons.py                   a finished run's evidence bundle for ppl-reflector, and the owner's review of its lessons (6.13)
     tomlout.py                   the TOML writer for the files setup rewrites
     schema.py                    brief and verdict field/shape checks (Python, not JSON Schema files)
@@ -98,7 +106,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     panel/server.py              stdlib HTTP server, `ppl serve`
     panel/index.html             single-page dashboard
     studio/                      setup wizard, stack presets, md extraction, harness drafts
-    demo/                        `ppl demo`: sandbox.py (throwaway HOME, data root, workspace, gh stand-in),
+    demo/                        `ppl demo`: sandbox.py (throwaway HOME, data root, gh stand-in, a lane),
                                  sample.py (the sample repo and harness), script.py (the 24 steps)
     (no adapters/ package)       out of scope for v1 (section 2): a non-subagent role has no
                                   code path at all, `routing.dispatch` raises `SCHEMA_INVALID`
@@ -107,7 +115,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
       hooks/ppl_dispatch.py      SubagentStart dispatch counter (telemetry only, cannot block - see 12.1)
       hooks/ppl_usage.py         SubagentStop token recorder (telemetry only - see 12.1)
       skill/                     SKILL.md and references/ skeletons, rendered per harness
-      templates/ppl-*.md.body    the fixed body each generated agent file is rendered around
+      templates/ppl-*.md.body    the fixed body each generated agent definition is rendered around
       defaults/                  config.example.toml, routing.example.toml, harnesses/example-*
       rules.toml                 the rule matrix (5.5)
   tests/                         stdlib unittest suite
@@ -117,7 +125,20 @@ human maintainer. The tracker update fires only if and when the pipeline observe
   config.toml                    per-machine settings, written by ppl setup
   routing.toml                   single source of truth: tier -> provider/model, role -> tier/params
   models.json                    which models `ppl models verify` proved, and when
-  harnesses/<name>/              one installed harness: harness.toml, skill/, templates/
+  harnesses/<name>/              one installed harness, a git repository: harness.toml, skill/, templates/
+  lanes.json lanes.lock          the lane registry and its writers' lock (5.4)
+  lanes/<TASK-ID>/               a lane's start directory, the session's cwd, written by ppl lane only
+    harness/<name>/              the harness at the commit the lane runs, exported
+    settings.json                the three hooks, each ending in --task <TASK-ID>, and on a GitHub
+                                 harness the OS sandbox profile
+    agents.json                  the ppl-* agents, passed to claude as --agents
+    plugin/skills/pipeline/      the orchestrator skill, the plugin antline, invoked as /antline:pipeline <link>
+    mcp.json                     the MCP servers the harness names, copied from ~/.claude.json
+    routing.toml                 routing.toml frozen when the lane started
+    os_sandbox.json              the guard's facts for the profile (GitHub harness only)
+    lane.json                    the worktree, checkout, branch and harness ppl lane made
+  scratch/<TASK-ID>/             the run's scratch files (bodies, the reflector's answer)
+  lessons/                       pending reflection markers and each harness's proposals (6.13)
   runs/<TASK-ID>/                durable state for one task
     state.json                   written only by ppl
     harness.json                 the harness snapshot `ppl init --harness` froze (5.6)
@@ -135,16 +156,13 @@ human maintainer. The tracker update fires only if and when the pipeline observe
     parking.json                 (only when parked)
     lessons/bundle/              the evidence bundle ppl-reflector reads after the merge (6.13)
     log.jsonl                    append-only transition log
-<workspace>/.claude/             the isolated launch directory (default ~/ppl-workspace)
-  settings.local.json            the three hook registrations ppl setup writes
-  agents/ppl-*.md                generated by ppl harness apply
-  skills/pipeline/SKILL.md       orchestrator playbook, rendered by ppl harness apply, invoked as /pipeline <task>
-  skills/pipeline/references/    each stage's procedure, gate recipes, escalation matrix, prompts
+<repo.worktrees>/<repo>-<TASK-ID>/  the run's worktree on the branch <TASK-ID>-<slug>, made by ppl lane
 ```
 
 ### 5.2 Components
 
-**Orchestrator** - the main Claude Code session running the `pipeline` skill. Selects the
+**Orchestrator** - the main Claude Code session of a lane, running the `pipeline` skill of
+the plugin `ppl lane` rendered for it (`/antline:pipeline <link>`). Selects the
 stage, compiles context, dispatches roles, runs deterministic gates, requests transitions
 from `ppl`. It is the only *agent* allowed to perform external mutations (git push, MR
 create, MR note, tracker write). It cannot edit code [R-UNROLED-REPO-WRITE] and cannot write `state.json` directly
@@ -153,10 +171,11 @@ The one non-agent path to an external mutation is the panel's full-cleanup destr
 is an explicit operator action requiring typed confirmation and is executed by `ppl`, not by
 a model (section 9.3).
 
-**Role adapters** - `<workspace>/.claude/agents/ppl-*.md`, generated by `ppl harness apply`
-(or `ppl routing apply`) from `routing.toml` and the active harness. Each declares `name`,
-`description`, `tools`, `model`, `effort`, `maxTurns` and `permissionMode`. There is no
-`disallowedTools` key and no role-scoped `hooks` key in a generated file - a role's rights
+**Role adapters** - the `ppl-*` agents a lane's session gets as `--agents` JSON, kept in
+its start directory as `agents.json`, generated by `ppl lane` from the `routing.toml` it
+froze and the harness commit it exported. Each declares its `description`, `prompt`,
+`tools`, `model`, `effort`, `maxTurns` and `permissionMode`. There is no
+`disallowedTools` key and no role-scoped `hooks` key in a generated agent - a role's rights
 are the allow-list in `tools` plus the global `PreToolUse` guard, nothing else.
 `routing.toml` supplies only the model and its params. The base tool list and description
 come from `routing.BASE_TOOLS` in Python, and `routing.role_tools` adds only what the
@@ -226,8 +245,8 @@ tools, the three read tools, Bash, the forge adapters' denied tools, the tracker
 under every default prefix, the agent tools and WebFetch) must be a full regex match of some
 registered guard entry's matcher, the names left uncovered are reported per settings file as
 `uncovered` under a top-level `matcher` verdict of `ok` or `incomplete`, and `ppl init` refuses
-`SCHEMA_INVALID` to create a run while a confirmed registration leaves any of them uncovered,
-`--no-isolated` or not [R-GUARD-MATCHER]. That list holds the default tracker prefixes and the
+`SCHEMA_INVALID` to create a run while a confirmed registration leaves any of them uncovered
+[R-GUARD-MATCHER]. That list holds the default tracker prefixes and the
 default forge server names only, so an operator who keeps an explicit matcher and names a
 custom tracker prefix or `forge.mcp_server` in the harness covers those names by hand. The
 GitHub MCP server's issue writes are not on it: the tracker gate and the role ban match them
@@ -274,8 +293,8 @@ orchestrator's own stage gate [R-TRACKER-CLI-GATE]. A run started with `--no-os-
 Windows, keeps the old residual: the check reads the command's words, so those shapes are not
 seen, and the boundary that would close them is a GitHub credential the role sessions never
 hold [R-TRACKER-CLI-GATE]. The hook reads `agent_type` from the stdin
-payload (present when the hook fires inside a subagent), loads `runs/<active>/boundary.json`,
-and returns:
+payload (present when the hook fires inside a subagent), loads the `runs/<task>/boundary.json`
+of the run its `--task` names, and returns:
 
 ```json
 {
@@ -292,24 +311,27 @@ message. `<CODE>` is one of the codes in section 13 (`BOUNDARY_VIOLATION` for ev
 denial in this section, `OWNER_DECISION` for a pause/stop/destroy or a tracker write before
 `merge_watch` or before the merge is recorded).
 
-**What the hook is scoped by.** Five denials are global and are decided before any run is
-looked up (`ppl_guard.py`'s `decide()`, before `active_state()` is called): the denied forge
-tools and forge Bash commands, the repo landmines, the `runs/` write protection, a `ppl-*`
-role invoking a state-changing `ppl` CLI subcommand of its own, and a `ppl-*` role writing a
-tracker, through its CLI or a tracker MCP write tool - all in the table below
-[R-GUARD-GLOBAL-DENIALS] [R-TRACKER-CLI-NO-ROLE] [R-JIRA-NO-ROLE-TOOL]. They fire in every session and every directory, run or no run.
-Everything else belongs to the active run, and a tool call belongs to that run when any of
-three things is true: its `agent_type` is a `ppl-*` role, the path it is writing is inside
-`state["repo"]`, or the session's cwd is inside that repo (or, for the tracker gate and the
-operator pause specifically, the run is `isolated` and the session carries no `agent_type` at
-all - see below). The path test is the load-bearing one and the cwd test alone is not enough:
-a session's cwd is fixed when it launches, and stage 1 creates the worktree beside the
-orchestrator's session rather than under it, so a cage scoped only by cwd is inert for exactly
-the layout this design prescribes. A consequence, and an intended one (5.3): a write landing
-inside the run's repo from a session carrying no `agent_type` - the orchestrator itself - is
-denied `BOUNDARY_VIOLATION`, because only the two worker roles write the tree
-[R-UNROLED-REPO-WRITE]. A session writing paths outside that repo, with no `ppl-*` role, is
-not touched by any of this.
+**What the hook is scoped by.** Every hook command carries its lane's task as `--task <id>` on
+its own command line, which `ppl lane` renders into the lane's settings, so a hook knows its run
+from that, never from the payload or a pointer shared by every session [R-LANE-HOOK-BINDING].
+Five denials are global and are decided before the bound run is looked up (`ppl_guard.py`'s
+`decide()`, before `bound_state()` is called): the denied forge tools and forge Bash commands,
+the repo landmines, the `runs/` write protection, a `ppl-*` role invoking a state-changing `ppl`
+CLI subcommand of its own, and a `ppl-*` role writing a tracker, through its CLI or a tracker
+MCP write tool - all in the table below [R-GUARD-GLOBAL-DENIALS] [R-TRACKER-CLI-NO-ROLE]
+[R-JIRA-NO-ROLE-TOOL]. They fire in every session and every directory, lane or no lane. A
+session whose hooks carry no `--task` is in no lane: a `ppl-*` role there is denied every other
+call, and any other session meets the global denials alone [R-LANE-ROLE-OUTSIDE]. A `--task`
+that is malformed, or names a lane the registry does not hold, or a registry the hook cannot
+read, fails closed: a role is denied every call, and any other session keeps `Read`, `Glob` and
+`Grep` only [R-LANE-HOOK-BINDING]. In a lane session everything else belongs to its run,
+whatever the session's cwd: the hooks fire only in the window `ppl lane` started for that run,
+so neither the cwd nor the written path has to place the call. Below, and in the rule matrix,
+the active run is that bound run. A consequence, and an intended
+one (5.3): a write landing inside the run's repo from a session carrying no `agent_type` - the
+orchestrator itself - is denied `BOUNDARY_VIOLATION`, because only the two worker roles write
+the tree [R-UNROLED-REPO-WRITE]. A session writing paths outside that repo, with no `ppl-*`
+role, is not touched by any of this.
 
 Denies, in addition to per-role boundaries, each row naming the rule-matrix id that carries
 its deny test [R-DOC-RULE-IDS]. Not everything below is global - the "Scope" column says,
@@ -327,8 +349,8 @@ for each row, exactly what `ppl_guard.py` requires before it fires:
 | direct writes to the repo tree by any role whose provider is not a Claude Code subagent [R-APPLY-PATCH-BOUNDARY] | such a provider has no hooks at all to deny anything with; the guarantee is architectural (no direct write path exists for it), backed by `ppl apply-patch`'s separate diff validation (section 10.1) - `ppl_guard.py` makes no check of its own here | not a hook check |
 | tracker write tools, of every known tracker whatever tracker the run names, until the run is in `merge_watch` and the merge observed on the forge is recorded with `ppl merge observed` [R-JIRA-GATE] | owner rule: tracker writes only after merge | requires an active run; scoped as described above (the `isolated` broadening included) - **not** global, and not enforced at all when no run is active |
 | a Bash command that writes a tracker through its CLI - every CLI adapter's write check, today GitHub Issues through `gh` (an issue write verb, a `gh api` call that writes an issues route, a GraphQL issue mutation) - whatever tracker the run names, until the run is in `merge_watch` and the merge is recorded with `ppl merge observed` [R-TRACKER-CLI-GATE] | owner rule: tracker writes only after merge, through a CLI as through MCP | requires an active run; scoped like the tracker write tools above - **not** global |
-| a tracker write, when `agent_type` is one of the roles in `boundary.ROLE_RULES`, before or after the merge: a Bash command that writes a tracker through its CLI [R-TRACKER-CLI-NO-ROLE], or a call to a tracker MCP write tool of any known tracker, every adapter's defaults and the run's own prefixes [R-JIRA-NO-ROLE-TOOL] | the tracker is the orchestrator's, and a worker holding `Bash` could otherwise comment on or close the issue before anyone reviewed the change; issue reads and tracker read tools stay allowed | global, no run required - fires by `agent_type` alone, before `active_state()` is even looked up |
-| every state-changing `ppl` CLI subcommand, when `agent_type` is one of the roles in `boundary.ROLE_RULES` [R-GUARD-PPL-CLI-DENIED] | `ppl-code-worker` and `ppl-test-worker` both hold `Bash`, and none of the write checks above sees a `ppl <command>` invocation - it writes through ppl's own API, not a shell redirect or a tracked path, so a worker driving its own CLI could mark its own blocking finding fixed or open its own done gate. Read-only lookups (`ppl show`, with `--task <id>` and not a positional id, `ppl status`, `ppl doctor`, `ppl metrics`, `ppl findings list`, `ppl control get`, `ppl routing show`, `ppl approval check`, `ppl mr state`, `ppl review pending`) stay allowed | global, no run required - fires by `agent_type` alone, before `active_state()` is even looked up |
+| a tracker write, when `agent_type` is one of the roles in `boundary.ROLE_RULES`, before or after the merge: a Bash command that writes a tracker through its CLI [R-TRACKER-CLI-NO-ROLE], or a call to a tracker MCP write tool of any known tracker, every adapter's defaults and the run's own prefixes [R-JIRA-NO-ROLE-TOOL] | the tracker is the orchestrator's, and a worker holding `Bash` could otherwise comment on or close the issue before anyone reviewed the change; issue reads and tracker read tools stay allowed | global, no run required - fires by `agent_type` alone, before `bound_state()` is even looked up |
+| every state-changing `ppl` CLI subcommand, when `agent_type` is one of the roles in `boundary.ROLE_RULES` [R-GUARD-PPL-CLI-DENIED] | `ppl-code-worker` and `ppl-test-worker` both hold `Bash`, and none of the write checks above sees a `ppl <command>` invocation - it writes through ppl's own API, not a shell redirect or a tracked path, so a worker driving its own CLI could mark its own blocking finding fixed or open its own done gate. Read-only lookups (`ppl show`, with `--task <id>` and not a positional id, `ppl status`, `ppl doctor`, `ppl metrics`, `ppl findings list`, `ppl control get`, `ppl routing show`, `ppl approval check`, `ppl mr state`, `ppl review pending`) stay allowed | global, no run required - fires by `agent_type` alone, before `bound_state()` is even looked up |
 | a write-shaped Bash construct (a redirect - `>`, `>>`, `&>`, `>|`, glued to a word like `echo x>f` or spaced, a `cd`'s own redirect included - `tee`, `sed -i`, `cp`, `mv`, `dd`, `rm`, `touch`, `truncate`, `ln`, `install`, `rsync`, `git rm`/`git mv`/`git checkout <ref> -- <path>`/`git restore`; `patch`, `git apply` and the whole-tree git rewriters fail closed as unnameable) whose target resolves inside the active run's repo [R-GUARD-BASH-WRITE-BOUNDARY] | the structured write boundary (`is_role` / `hits_repo` / `boundary.check_path`) covers Edit/Write/MultiEdit/NotebookEdit only, and both workers hold Bash, so `ppl/_assets/hooks/ppl_guard.py:bash_write_boundary_deny` extracts the target out of every such construct and runs it through the same per-role decision `check_path` makes | active run, any writing role or an unroled session - fires whenever the resolved target lands inside the repo, whatever the session's cwd, mirroring R-UNROLED-REPO-WRITE's own "the target path is the honest question" |
 
 **How the `ppl`-CLI row reads a command.** Every occurrence of the word `ppl` in the command
@@ -385,11 +407,10 @@ off, nested ones too, each read by its basename when spelled by a path, while `s
 are not), and `patch`, `git apply` and the whole-tree rewriters
 (`merge`, `rebase`, `cherry-pick`, `pull`, `revert`, `clean`), whose paths come from a diff or
 a ref rather than the command line [R-GUARD-BASH-WRITE-BOUNDARY]. That fail-closed deny only
-fires when the command is otherwise pipeline-scoped - a `ppl-*` role, or a session whose cwd
-sits inside the run's repo - so an unrelated session running an ambiguous `sed -i` somewhere
-else on the machine is not denied merely because some other run happens to be active
-[R-GUARD-BASH-WRITE-BOUNDARY]. The unnameable shapes matter more than a redirect variant
-usually would: the done gate exempts test paths from its boundary check because the test
+fires in a lane session, where every call is the run's whatever its cwd, so a session in no
+lane running an ambiguous `sed -i` somewhere else on the machine is not denied merely because
+some lane is running [R-GUARD-BASH-WRITE-BOUNDARY]. The unnameable shapes matter more than a
+redirect variant usually would: the done gate exempts test paths from its boundary check because the test
 worker legitimately writes them, so nothing after the hook catches a code worker that reached a
 test source through a shape the hook did not know.
 
@@ -546,39 +567,40 @@ regardless the moment it runs them, so denying its reads would buy nothing struc
 Worktree isolation is used for change isolation, not as a security sandbox. Stated
 explicitly so nobody mistakes convenience for protection.
 
-**Per-lane resources (precondition for waves).** A worktree separates files and nothing
-else. It gives each lane its own working tree and its own `git status`, and that is the
-whole of what it gives: not a test database, not a port, not a temp directory, not a queue,
-not object storage. A typical project's local development environment makes the shared
-surface concrete: one database, one object store, one message broker, a fixed set of ports,
-all shared across every worktree on the machine, and integration tests that use
-Testcontainers bind host Docker resources the same way, against the same shared daemon. Two
-lanes of this pipeline running integration tests at the same time, in two worktrees, would
-collide on all of the above: the same schema, the same bucket names, the same broker, the
-same bound ports. No code in v1 addresses this, because v1 is one sequential lane (section 2)
-and there is nothing for it to address yet. It is written here as a precondition, not a
-feature: parallel waves (section 2, out of scope for v1) must not be turned on until per-lane
-resource separation exists for whichever of these a gate recipe actually touches, and nothing
-in this codebase enforces that precondition today [R-LANE-RESOURCE-ISOLATION n/a].
+**Per-lane resources.** A worktree separates files and nothing else. It gives each lane its
+own working tree and its own `git status`, and that is the whole of what it gives: not a test
+database, not a port, not a temp directory, not a queue, not object storage. A typical
+project's local development environment makes the shared surface concrete: one database, one
+object store, one message broker, a fixed set of ports, all shared across every worktree on
+the machine, and integration tests that use Testcontainers bind host Docker resources the same
+way, against the same shared daemon. Two lanes running integration tests at the same time, in
+two worktrees, would collide on all of the above: the same schema, the same bucket names, the
+same broker, the same bound ports. So the limit that matters is the harness's own:
+`harness.toml` `[lanes] max`, an integer from 1 to 9 and 1 when absent, is how many lanes of
+that harness run at once, beside the machine's `config.toml` `[lanes] max` (1 to 9, 3 when
+absent), and `ppl lane` refuses `BUSY` at either limit, naming the lanes that hold the slots,
+before it makes a branch, a worktree or a start directory [R-LANE-RESOURCE-ISOLATION]. A
+harness raises its limit only when its gates separate what they share: the lane number
+reaches its gate commands and `[env]` values as `<lane>` when `ppl lane` renders the skill
+(`PORT = "80<lane>"` gives lane 2 the port 802), and the session as `PPL_LANE`. No code
+checks that they do, and lanes of two harnesses share whatever their projects share
+[R-LANE-RESOURCE-ISOLATION].
 
-**The `isolated` flag.** Two of the checks above - the tracker-write gate (9.2) and the
-operator pause (9.2) - additionally fire for the unroled main session (the orchestrator,
-which carries no `agent_type`) whenever the active run's `isolated` field is true, regardless
-of cwd. `ppl init` writes this field; it defaults to true and can be turned off with
-`--no-isolated`. This is not something the hook can verify against reality - it is the
-operator's assertion that the guard hook is registered only in this run's own launch
-directory, so it does not fire in an unrelated session at all. Under that assumption,
-broadening these two checks to "this run is active" is safe: the documented workflow (6.3,
-Stage 1) creates the worktree beside the orchestrator's session rather than under it, so a
-cwd-only check does not catch that session at all, which is why both checks would be inert
-for it without this flag. `--no-isolated` restores the plain cwd check instead, for an
-operator who registered the hook more broadly (e.g. in global settings) and knows scoping by
-"run active" would reach their other projects.
+**A run belongs to its lane.** `ppl init` runs in the session `ppl lane` started for the task,
+which `PPL_TASK` or the cwd binds, and refuses outside it; the run takes the lane's worktree as
+its repo [R-LANE-INIT-INSIDE] and the harness the lane exported [R-INIT-HARNESS-APPLIED]. The
+`isolated` flag and the `runs/ACTIVE` pointer are gone: every call of a lane session is its
+run's, so the tracker-write gate (9.2) and the operator pause (9.2) reach the unroled main
+session (the orchestrator, which carries no `agent_type`) from any cwd, and a session in no
+lane meets neither [R-LANE-HOOK-BINDING]. A `ppl` command without `--task` takes its run from
+`PPL_TASK`, else from the lane whose start directory or worktree holds its cwd.
 
 **The `os_sandboxed` flag.** On a harness that reaches GitHub, `ppl init` also requires
 that this session runs inside Claude Code's OS sandbox with GitHub denied
-(`doctor.os_sandbox_facts()` reports `"on"`) and that the guard is registered in the
-workspace's local settings, and refuses with `SCHEMA_INVALID` naming the first failing fact
+(`doctor.os_sandbox_facts()` reports `"on"`), with the profile in the lane's `settings.json`
+equal to the one its `os_sandbox.json` records and nothing in a settings source the lane
+session loads undoing it, and that the guard is registered in the lane's `settings.json`
+alone, and refuses with `SCHEMA_INVALID` naming the first failing fact
 otherwise [R-OS-SANDBOX-INIT-REQUIRED]. `--no-os-sandbox` skips the check. The run records
 `os_sandboxed` true or false (false for a harness that does not need the profile), the card
 shows `OS sandbox: on|off` for a run whose frozen harness needs it, the panel row carries the
@@ -591,21 +613,27 @@ who may set it (`ppl/escape.py`), first and before any other check
 alone, before any file is read, run or no run [R-OS-SANDBOX-ROLE-NO-ESCAPE]. A call of any other
 tool whose input carries the flag is decided the same way, never passed as unflagged
 [R-OS-SANDBOX-ROLE-NO-ESCAPE]. While
-`PPL_HOME/os_sandbox.json` exists or a run is active, every flagged call is the pipeline's
+the session's guard facts exist (in a lane, the `os_sandbox.json` `ppl lane` rendered into its
+start directory) or the session is bound to a run, every flagged call is the pipeline's
 whatever its `cwd`, since a `cwd` and the run's recorded repo are both in a role's reach: any
 other subagent, or a call carrying an `agent_id`, is denied, and the unroled session always
 meets the shape check [R-OS-SANDBOX-ROLE-NO-ESCAPE] [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. With
 neither, a flagged call goes on to the guard's other checks. The unroled orchestrator leaves
 the sandbox only for one plain command, with no separator, redirect, subshell, group, glob,
 expansion, comment, newline or leading assignment outside single quotes and nothing zsh reads
-otherwise than a POSIX shell, whose `argv0` is spelled exactly as a binary `ppl harness
-apply` pinned in `PPL_HOME/os_sandbox.json`, in a shape from the guard's table
+otherwise than a POSIX shell, whose `argv0` is spelled exactly as a binary `ppl lane` pinned
+in the lane's `os_sandbox.json`, in a shape from the guard's table
 [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For gh that table holds `issue view` and `issue comment`,
 `pr create`, `pr view`, `pr checks` and `pr close`, `api user`, a review reply and `auth
 status`, each naming the harness's own repository, with any body file a plain file directly
 in the run's scratch directory [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For ppl it holds `tracker
-fetch --task` for the active run, `review fetch --pr <n>` and `doctor --forge`
-[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. For git (`ppl/escape_git.py`) every shape starts with
+fetch --task` for the active run, `review fetch --pr <n>`, `doctor --forge`, `lane close`,
+bare or naming the active run, and the two lessons shapes, which write `PPL_HOME/lessons`
+outside every lane's write scope: bare `lessons pending`, which claims the pending markers
+stamped with the lane's harness, and `lessons record --task <T> --file <scratch>/<lane
+task>/lessons-<T>.json`, where `T` is the lane's own run or one whose marker the lane claimed;
+nothing may set `PPL_TASK` or wrap `ppl` in front of either [R-OS-SANDBOX-ORCHESTRATOR-SHAPE].
+For git (`ppl/escape_git.py`) every shape starts with
 the fixed `-c` words of `escape_git.PINNED_CONFIG`, in this order and as its only `-c` words:
 `core.hooksPath=/dev/null`, `core.sshCommand=ssh`, an empty `credential.helper` and
 `core.askPass`, `protocol.ext.allow`, `protocol.file.allow` and `protocol.allow` `never`,
@@ -629,10 +657,11 @@ rule's residual says, until fetch and push run through a gitdir ppl owns.
 Before it lets one through the guard runs the pinned git on that repository, each call held
 to 0.2 s, and denies unless its local and worktree config set only keys that run nothing,
 with no include, and give the remote one url, the forge repo on github.com
-[R-OS-SANDBOX-GIT-CONFIG]. Both gh and ppl run only from a `cwd` that is the workspace or
-lies under it, which the profile write-denies, and outside every write-scope entry, so
-neither loads a repo a role wrote: being outside the write scope alone is not enough, since a
-temp directory is sandbox-writable and in no entry [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. An
+[R-OS-SANDBOX-GIT-CONFIG]. Both gh and ppl run only from a `cwd` that is the lane's start
+directory or lies under it, which the profile write-denies, and outside every write-scope
+entry, so neither loads a repo a role wrote: being outside the write scope alone is not
+enough, since a temp directory is sandbox-writable and in no entry
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. An
 allowed ppl command trusts no run file a role can write: `ppl tracker fetch` and `ppl review
 fetch` take their repository from `os_sandbox.json`, with no git run in the run's repo, and
 refuse a run snapshot that names another, and refuse with `EXTERNAL_BLOCKED` to write or append
@@ -643,10 +672,11 @@ as unresolved [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A command the check
 lets through still meets the tracker gate and the forge denials below it
 [R-OS-SANDBOX-ORCHESTRATOR-SHAPE] [R-TRACKER-CLI-GATE]. Where the guard cannot decide a
 flagged call it denies it: an internal error, a non-string `agent_type`, an unreadable
-`os_sandbox.json` or run state, or a missing `os_sandbox.json` while a run is active, the
-facts cases naming `ppl harness apply`, or, for a run whose harness snapshot needs no profile,
-telling the orchestrator to run the command without the flag [R-OS-SANDBOX-FAIL-CLOSED]. Run files are opened
-without blocking and read only when regular, so a FIFO a role leaves in `runs/` is refused
+`os_sandbox.json` or run state, a lane the registry cannot confirm, or a missing
+`os_sandbox.json` while a run is active, the facts cases saying that `ppl lane` renders the
+facts and naming the owner's restart of the lane, or, for a run whose harness snapshot needs
+no profile, telling the orchestrator to run the command without the flag
+[R-OS-SANDBOX-FAIL-CLOSED]. Run files are opened without blocking and read only when regular, so a FIFO a role leaves in `runs/` is refused
 rather than holding the hook past its timeout, which would deny nothing
 [R-OS-SANDBOX-FAIL-CLOSED]. The hook and `ppl/escape.py` also read no run file or facts file
 over 1 MiB (`store.HOOK_READ_LIMIT`), so a huge sparse file a role leaves there is refused
@@ -654,7 +684,7 @@ unread, and the role's GitHub MCP, WebFetch and edit-tool checks are decided bef
 file is read [R-OS-SANDBOX-FAIL-CLOSED] [R-OS-SANDBOX-PROTECTED-PATHS].
 
 **The edit allowlist.** Edit tools run outside the OS sandbox, so the profile does not confine
-them. While `PPL_HOME/os_sandbox.json` exists every session the guard sees is in scope, and an
+them. While the session's guard facts exist every session the guard sees is in scope, and an
 edit tool writes only inside the facts' `write_scope` and Claude Code's own `~/.claude/projects`
 and `~/.claude/plans`, and never under a `deny_write` entry even inside an allowed root
 (`ppl/escape_paths.py`) [R-OS-SANDBOX-PROTECTED-PATHS]. A path with leading or trailing
@@ -669,75 +699,45 @@ home directory or a protected path [R-OS-SANDBOX-PROTECTED-PATHS]. `ppl doctor` 
 settings file's write grant over a protected path, and any unix socket allowance, under
 `os_sandbox.undoing`. It also lists, as `foreign_bash_hooks`, every other `PreToolUse` hook
 whose matcher may pass Bash (a missing, empty or `*` matcher, one a search finds in `Bash`, and
-one that does not compile), from the user, project, local and managed settings and each
-enabled plugin's `hooks/hooks.json`, by the command's first word or script name, or the
+one that does not compile), from the settings sources the lane session loads (its
+`settings.json`, its start directory's `.claude/settings.local.json` and the managed settings)
+and each enabled plugin's `hooks/hooks.json`, by the command's first word or script name, or the
 interpreter alone for inline code, never its arguments: one that rewrites a
 call with `updatedInput` may keep or drop `dangerouslyDisableSandbox`, which is unverified, so
 `ppl init` warns on a GitHub run that they should be removed or disabled for pipeline sessions
 [R-OS-SANDBOX-INIT-REQUIRED]. Without the facts the allowlist stands aside and the older path
 rules apply. An MCP server runs outside the OS sandbox and is not
-checked here, so the pipeline workspace should register no file-writing one
-[R-OS-SANDBOX-PROTECTED-PATHS]. A role's call to a GitHub MCP tool is denied
+checked here, so a harness should name no file-writing one: `ppl lane` copies the servers
+the harness names from `~/.claude.json` into the lane's `mcp.json`, and the session loads
+those alone [R-OS-SANDBOX-PROTECTED-PATHS]. A role's call to a GitHub MCP tool is denied
 [R-FORGE-GH-MCP-NO-ROLE], and so is its WebFetch of a github.com URL [R-WEBFETCH-GITHUB-NO-ROLE].
 
-**Checked, not just trusted.** `ppl` cannot see how the guard hook is registered
-from inside `decide()` - that lives in a `.claude/settings*.json` file, not in run state -
-but it can be checked separately, on disk, before a run even starts
-[R-INIT-ISOLATION-CHECK]. `ppl doctor` and `ppl
-init --isolated` (the default) both call `doctor.inspect()`, which reads this directory's
-`.claude/settings.local.json` and `~/.claude/settings.json` for the guard hook's command and
-reports `"local"`, `"global"`, `"both"`, `"none"`, or `"unknown"` (a settings file exists but
-could not be read or parsed). The two files answer different halves of what
-`isolated=true` asserts - "the hook fires here" (needs a confirmed local yes) and "the hook
-does not fire elsewhere" (needs a confirmed global no) - so a confirmed local yes does not
-paper over an unreadable global file: that combination is `"unknown"`, not `"local"`,
-because the half isolation actually depends on was not confirmed. `ppl init --isolated`
-refuses with `SCHEMA_INVALID` on three combinations that are silently wrong
-[R-INIT-ISOLATION-CHECK]:
+**Where the guard is registered.** A lane's hooks come from the `settings.json` `ppl lane`
+renders into its start directory and carry that run on their own command line
+[R-LANE-HOOK-BINDING], and the payload's session identity stays unchecked
+[R-ISOLATION-SESSION-IDENTITY n/a]. The lane's session starts with `--setting-sources local`,
+which keeps the Claude home's `settings.json` and a project `settings.json` out of it, so in a
+lane `ppl doctor` reads the two settings sources the session does load: the lane's
+`settings.json` (`"local"`) and its start directory's `.claude/settings.local.json`
+(`"start_local"`), a file `ppl lane` does not write. It reports the guard there as `"local"`,
+`"start_local"`, `"both"`, `"none"`, or `"unknown"` (a settings file exists but could not be
+read or parsed), the second side's unreadable file making the whole `"unknown"`. Outside a lane
+`ppl doctor` checks the machine alone: the setup steps, the models, the default harness with
+its forge and tracker checks, and the Claude Code binary. `ppl init` refuses `SCHEMA_INVALID` a
+lane whose `settings.json` cannot be read, registers no guard or registers one whose command
+line does not end in `--task <the task>` [R-LANE-INIT-INSIDE], and reads the lane's two sources
+for the matcher [R-GUARD-MATCHER] and the hook's shape [R-DOCTOR-HOOK-SHAPE].
 
-- `"global"` - registered only globally. The tracker gate and the pause would reach every
-  session on the machine while `isolated=true` asserts the opposite.
-- `"both"` - registered locally *and* globally. The local registration is real, but the
-  global one still fires everywhere else, which is the same violation as `"global"` alone; a
-  deliberate migration in progress (global first, local added afterward) looks identical to
-  this on disk, and is refused the same way [R-INIT-ISOLATION-CHECK].
-- `"unknown"` - the registration could not be confirmed at all, most often because the global
-  side could not be read or parsed even though the local side is a confirmed yes. Treating
-  that as "fine" would be the exact bug this check exists to remove.
-
-`--no-isolated` is not refused by any of these, and neither is `"local"` or `"none"` - "none"
-is the openly documented unregistered state (README.md "Hooks"), not a mismatch between a flag
-and reality, and refusing it would block using `ppl` before the hook exists at all
-[R-INIT-ISOLATION-CHECK] [R-GUARD-NOT-ARMED n/a].
-
-**Residual, still not fixed.** The check is a file inspection, not a proof that the *session
-running this command* was itself launched from a directory whose `.claude/settings.local.json`
-carries the hook - an operator could register it locally in `~/ppl-workspace` and then run
-`ppl init --isolated` from a shell in that same directory while a *different* Claude Code
-session (launched elsewhere) is the one actually driving the pipeline; `ppl doctor` would
-report `"local"` and see no mismatch, and the isolated assumption would still be false for
-that other session. It is also a point-in-time check: nothing re-verifies registration for
-the lifetime of the run if the operator edits `~/.claude/settings.json` afterward.
-
-Two more blind spots: `PPL_CLAUDE_HOME` fully substitutes for `~/.claude` when set in the
-environment, which is a deliberate test seam (the suite uses it to stay out of the real
-settings) - but it means a stray value of that variable in a real invocation makes `ppl
-doctor` and `ppl init --isolated` inspect an unrelated, likely-empty directory and report
-`"none"`, seeing no mismatch that may in fact exist. And `doctor._has_guard` matches the
+Two blind spots of that report: `PPL_CLAUDE_HOME` fully substitutes for `~/.claude` when set
+in the environment, which is a deliberate test seam (the suite uses it to stay out of the real
+settings), so a stray value of that variable in a real invocation makes `ppl doctor` and `ppl
+lane` read an unrelated, likely-empty directory in place of `~/.claude` and the
+`~/.claude.json` beside it, where `ppl lane` then finds none of the harness's MCP servers.
+And `doctor._has_guard` matches the
 literal substring `ppl_guard.py` in a hook's `command`, so a different checkout's guard hook,
-at a different path on the same machine, reads as this one's.
-
-All four gaps above are known limitations, each recorded as a matrix row
-[R-ISOLATION-SESSION-IDENTITY n/a] [R-ISOLATION-POINT-IN-TIME n/a]
-[R-ISOLATION-CLAUDE-HOME n/a] [R-ISOLATION-GUARD-BASENAME n/a]. What is checked, not merely
-trusted: the hook being registered only globally (`"global"`), registered both locally and
-globally (`"both"`), and the registration being unreadable or unparseable at all (`"unknown"`,
-including a confirmed local yes next to an unreadable global file - see above) - all three
-refuse `ppl init --isolated` with `SCHEMA_INVALID`, and all are reported by `ppl doctor`
-together with the paths and, for `"unknown"`, the parse or read error [R-INIT-ISOLATION-CHECK].
-The write-boundary checks earlier in this section do not participate in the `isolated`
-broadening at all, checked or not: an unroled session's ordinary file write outside any run's
-repo is untouched whether or not the run is isolated.
+at a different path on the same machine, reads as this one's. Every call of a lane session is
+its run's, and still an unroled session's ordinary file write outside the run's repo is
+untouched [R-UNROLED-REPO-WRITE].
 
 ### 5.5 The rule matrix
 
@@ -831,15 +831,14 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 196 rows: 146 `blocking`, 21 `soft` and 29 `n/a`. Of the
-`n/a` rows, 19 are `GAP:` - a rule this design names and no code performs - and 10 are
-`PROPERTY:`. The gaps are the honest output of the matrix: the guard hook not being
-registered at all (README.md "Hooks"), the
-stage 6 preconditions being unchecked before the push, the four isolation-check blind spots of
-5.4, the harness gate recipes of section 11, the three blind spots the matrix has as GAP rows
-of its own, a foreign finding's owner not actually being notified (6.6a), per-lane resources
-(test databases, ports, temp directories, queues, object storage) having no isolation at all
-beyond the worktree's own files (5.4), the dollar budget being spent before a dispatch, whose
+As of this commit the table carries 205 rows: 159 `blocking`, 21 `soft` and 25 `n/a`. Of the
+`n/a` rows, 15 are `GAP:` - a rule this design names and no code performs - and 10 are
+`PROPERTY:`. The gaps are the honest output of the matrix: a lane session resumed by hand
+without the lane flags having no guard at all, the stage 6 preconditions being unchecked
+before the push, the session identity a lane's hooks leave unproven (5.4), the
+harness gate recipes of section 11, the three blind spots the matrix has as GAP rows
+of its own, a foreign finding's owner not actually being notified (6.6a), the dollar budget
+being spent before a dispatch, whose
 cost is known only after it, so the cap is checked at the next stage boundary instead (12.1),
 and six rules only prose or a convention holds: the content of a tracker write, the panel's
 own state writes, the studio's write surface, write/forbid disjointness at `ppl boundary set`,
@@ -907,14 +906,15 @@ reaches another harness only when the owner copies it by hand. A harness holds 1
 [R-MEMORY-CAP]. Cue and lesson are stored as the clean one-line text `memory.clean` returns, not
 as markdown, because lesson text is data and not instructions.
 
-`ppl harness apply` renders the active entries of a role as a "Lessons from earlier runs" section
+`ppl lane` renders the active entries of a role as a "Lessons from earlier runs" section
 after that role's project notes, and the orchestrator's as the same section at the end of the
 skill. Cue and lesson are cleaned again at render, so a hand-edited file puts no heading, comment
 or include marker into a prompt [R-MEMORY-TEXT-CLEANED]. `ppl init` freezes the entries active at
 that moment into `harness.json` as `memory`, so an entry accepted later is not in that run's
-snapshot [R-LESSONS-PAST-ONLY n/a]. The apply records the sha256 of the `memory.toml` bytes in
-`config.toml` `[harness] memory_sha256`, and `ppl init` refuses `SETUP_INCOMPLETE` while the file
-on disk has another digest [R-MEMORY-APPLIED]. A lesson is prompt text and grants nothing, the
+snapshot [R-LESSONS-PAST-ONLY n/a]. A lane renders its agents and skill, lessons included, from
+the harness commit `ppl lane` exported, and `ppl lane` refuses while the installed checkout has
+uncommitted changes, so a `memory.toml` edit reaches no run until it is committed
+[R-MEMORY-APPLIED]. A lesson is prompt text and grants nothing, the
 guard never reads it [R-MEMORY-NEVER-GRANTS n/a].
 
 `ppl harness validate [--json]` runs `harness.verify`, the check the studio runs on a draft or a
@@ -928,8 +928,8 @@ that neither `skill/gates.md` nor `skill/extra-gates.md` names outside a verbati
 command (example-maven's `<module>` is named in its `gates.md`, an echo of the command such as the
 studio's generated `gates.md` vouches for nothing), and a `templates/*.part` for a role that is not one of the seven
 [R-HARNESS-UNKNOWN-KEY]. Any other file under `skill/` or `templates/` is a warning, as is a
-`knowledge.skills` name found neither under the configured skills directory nor under
-`~/.claude/skills`, and a focused-tests command no `[[guard.shape]]` lets the test worker run.
+`knowledge.skills` name not found under `~/.claude/skills` (a plugin skill lives elsewhere), and
+a focused-tests command no `[[guard.shape]]` lets the test worker run.
 `harness.verify` and `ppl harness apply` refuse a rendered `SKILL.md`, a rendered skill file
 under `references/` or an agent file over its hard cap, three times the largest file of its kind
 the shipped examples rendered when the caps were measured (`harness.SKILL_MEASURED_BYTES`,
@@ -940,8 +940,12 @@ fragment that grows one past its cap is refused there [R-HARNESS-SIZE-CAP].
 skill small are tests: on both examples `tests/test_skill_contract.py` holds the rendered
 `SKILL.md` to at most 14,000 bytes and each stage reference to at most 10,000 bytes.
 
-`ppl harness apply <name>` renders the agent files and the orchestrator skill for that harness
-and records it as the active one. The skill is rendered from the `ppl/_assets/skill/` skeletons plus the
+`ppl lane` renders the agents and the orchestrator skill into the lane's start directory, from
+the harness commit it exported, so nothing is rendered ahead of a run. `ppl harness apply
+<name>` checks a harness, as `ppl harness validate` does and at its commit, and records it in
+`config.toml` `[harness] active` as the default harness, the one `ppl lane` runs when it is
+given no `--harness` and no installed harness's `[repo] path` holds the cwd; it writes nothing
+else. The skill is rendered from the `ppl/_assets/skill/` skeletons plus the
 forge and harness fragments, carries a generated notice, and the render refuses while any
 include marker is unresolved [R-SKILL-GENERATED]. The harness fragments are `skill/gates.md`,
 `skill/extra-gates.md`, `skill/baseline.md` and `skill/tracker-close.md`, the last one the
@@ -984,11 +988,11 @@ statuses without an instruction [R-FSM-STAGE-GRAPH] [R-FSM-LIFECYCLE].
 
 `ppl init` refuses `SETUP_INCOMPLETE` while
 `ppl setup` has not recorded the models step (waived by `--skip-model-check`), the harness step
-and the apply step as done, or when no `--harness` is passed [R-INIT-SETUP-COMPLETE]. A
+and the apply step as done [R-INIT-SETUP-COMPLETE]. A
 harness added and applied by hand does not count as done, and the refusal names the `ppl
-setup` step to run. It refuses `HARNESS_NOT_APPLIED` unless the harness it loads is
-the active one the agents and skill were rendered for [R-INIT-HARNESS-APPLIED], and refuses a
-task id that does not match the harness's `task.key_pattern` [R-INIT-TASK-KEY-PATTERN].
+setup` step to run. It loads the harness its lane exported, never the installed one, and
+refuses a `--harness` naming another [R-INIT-HARNESS-APPLIED], and refuses a task id that does
+not match the harness's `task.key_pattern` [R-INIT-TASK-KEY-PATTERN].
 
 `ppl init --harness` freezes the slice the cage enforces - `[task]`, `[tracker]`, `[forge]` and
 the `[[guard.shape]]` rows - into `runs/<task>/harness.json`, and the hook reads that snapshot,
@@ -1007,27 +1011,33 @@ forge, as an allowlist of the adapter's read shapes, and under GitLab every Bash
 is denied [R-REVIEW-RESPONDER-BASH-SHAPES].
 
 The hook's own failure modes are decided the same way. When `decide()` raises, the call is
-denied for any role in `boundary.ROLE_RULES` (all seven generated roles) and allowed for an
-unroled session, so a hook defect cannot lock
-the operator out of unrelated work [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A call that asks to
+denied for any role in `boundary.ROLE_RULES` (all seven generated roles)
+[R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. Outside a lane it is
+allowed for an unroled session, so a hook defect cannot lock the operator out of unrelated
+work; in a lane, whose hook commands carry `--task`, an unroled session keeps only Read, Glob
+and Grep [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. In a lane the guard also gives its decision a
+3.0 s deadline, inside the 5 s hook timeout after which Claude Code allows the call, and a
+decision that outruns it is refused the same way [R-GUARD-INTERNAL-ERROR-DENIES-ROLES]. A call that asks to
 run outside the OS sandbox is the exception: it is denied whoever makes it
 [R-OS-SANDBOX-FAIL-CLOSED]. A role's Bash command
 longer than 4096 characters is denied before any pattern runs, so a padded command cannot
-outlast the hook's timeout [R-GUARD-ROLE-COMMAND-LENGTH]. While a run is active, every deny the guard returns is
-also appended to the run's `log.jsonl` as a `deny` event with the role, the tool, the code and
+outlast the hook's timeout [R-GUARD-ROLE-COMMAND-LENGTH]. In a lane session, every deny the guard returns is
+also appended to the bound run's `log.jsonl` as a `deny` event with the role, the tool, the code and
 the first 200 characters of the target, best effort, so a failed append never changes the
 decision [R-GUARD-DENIAL-LOGGED]. The hook writes and flushes the decision before it appends,
 skips a `log.jsonl` that is there but is not a regular file (a FIFO would block the append
 until a reader appeared), and does not log the deny of the doctor's own probe below
 [R-GUARD-DENIAL-LOGGED]. Every hook needs Python 3.11, and
-`ppl setup claude` writes the interpreter that ran it into every hook entry. Under an older
+`ppl lane` writes the interpreter that runs it into every hook entry of the lane's `settings.json`. Under an older
 interpreter each hook reads the payload before importing anything from `ppl`, denies a call
-whose `agent_type` starts with `ppl-`, writes one stderr line naming the version it found and
+whose `agent_type` starts with `ppl-`, and the guard in a lane every other call but Read, Glob
+and Grep, writes one stderr line naming the version it found and
 exits 0, where it used to die on import and leave every call allowed [R-GUARD-PYTHON-FLOOR].
 `ppl doctor` runs every registered guard command once on an unroled Read of `/dev/null`,
 marked with the session_id `ppl-doctor-hook-probe`, and
-reports `hook_runs: false`, with the first stderr line and the remedy `ppl setup claude`, when
-one does not exit 0 with an empty stderr. Before it runs a guard command it asks that command's interpreter for its version and
+reports `hook_runs: false`, with the first stderr line and the remedy, the owner starting the
+lane again from a terminal outside it (`ppl destroy --scope local --task <id>`, then `ppl lane
+<link>`), when one does not exit 0 with an empty stderr. Before it runs a guard command it asks that command's interpreter for its version and
 reports one older than 3.11 the same way (past `env` and its options to the program it runs). Per settings file it also reports `dispatch_hook:
 registered|missing`, `usage_hook: registered|missing` and `hook_shape: ok|<problem>` for the guard,
 dispatch and usage entries, read from the file and not run: `type` must be `"command"`, a `timeout` must be there, the interpreter must
@@ -1039,10 +1049,11 @@ only the spends recorded by hand, or the usage hook is, since no tokens are then
 when a registered hook script is not under this install's `paths.root()/hooks` (a clone or an
 older install left behind keeps running its own copy) [R-DOCTOR-HOOK-SHAPE].
 
-For a GitHub forge or tracker, `ppl harness apply` also writes the OS sandbox profile into
-`<workspace>/.claude/settings.local.json`, whatever the hooks mode: a `sandbox` block that denies
-github.com and every subdomain to each sandboxed Bash command, the write scope, a denyWrite of
-the workspace, the pins' directories and every path the edit allowlist protects, a denyRead of
+For a GitHub forge or tracker, `ppl lane` also writes the OS sandbox profile into the lane's
+`settings.json`: a `sandbox` block that denies
+github.com and every subdomain to each sandboxed Bash command, the lane's write scope (5.7), a
+denyWrite of the lane's start directory, the pins' directories, every path the edit allowlist
+protects and the checkout's shared `.git` parts, a denyRead of
 gh's config, git's credential store, `.netrc` and `~/.ssh` (`[os_sandbox] allow_ssh_read = true`
 keeps `~/.ssh` readable for a build that needs ssh), and the `permissions.allow` entries for
 nine read-only commands on the pinned `gh`, `git` and `ppl` paths [R-OS-SANDBOX-NETWORK]. A
@@ -1053,16 +1064,128 @@ name the variable, not its value. Content a role
 writes, commits and scratch bodies, is published by the orchestrator unread, and the macOS
 keychain stays readable from the sandbox unless the live rehearsal shows otherwise
 [R-OS-SANDBOX-NETWORK]. It records the block and the entries it wrote, with the guard's facts
-(workspace, checkout, default branch, repositories, scratch root, pins, `write_scope`, the
-profile's `deny_write`), in `PPL_HOME/os_sandbox.json`.
-Once a profile exists, `ppl harness apply` and `ppl setup claude` run from a terminal, not from a
-pipeline session: the profile write-denies the workspace, ppl's config and harnesses, which they
-write [R-OS-SANDBOX-PROTECTED-PATHS]. Under the profile the rendered skill keeps the orchestrator's session in the workspace its gh
+(the start directory as the workspace, checkout, worktree, default branch, repositories,
+scratch root, pins, `write_scope`, the profile's `deny_write`), in the lane's `os_sandbox.json`.
+`ppl lane`, `ppl harness apply` and `ppl setup` run from a terminal outside every lane, not
+from a pipeline session: a lane's profile write-denies ppl's config, harnesses, the lane
+registry and the start directories, which they write [R-OS-SANDBOX-PROTECTED-PATHS]. Under the
+profile the rendered skill keeps the orchestrator's session in the start directory its gh
 and ppl calls run from: stage 1 runs git with `-C`, and each gate recipe changes into the
 worktree in a subshell, `(cd <worktree> && <gate>)`.
-A `sandbox` key in the settings file is ppl's only when it equals the recorded block. Any other one,
-and invalid JSON, is a `SETUP_INCOMPLETE` that leaves the file as it was [R-OS-SANDBOX-NETWORK]. A harness that no
-longer needs the profile has the block, the entries and the facts file removed on the next apply.
+The lane's `settings.json` is written whole when the lane starts, and a harness that needs no
+profile gets the three hooks alone and no facts file.
+
+### 5.7 Lanes
+
+A lane is one task's Claude Code window and what ppl made for it: a registry slot, a worktree
+on its own branch, and a start directory holding everything the session loads. Up to the
+machine's `config.toml` `[lanes] max` lanes run at once (1 to 9, 3 when absent), and up to a
+harness's own `harness.toml` `[lanes] max` of that harness (1 to 9, 1 when absent)
+[R-LANE-RESOURCE-ISOLATION]. The registry is `PPL_HOME/lanes.json`: per lane its number, task,
+harness and harness commit, the checkout, the worktree, the start directory, the session id
+and the claude process id. Its writers take `PPL_HOME/lanes.lock`, and the hooks read it
+without the lock, since every writer replaces the file whole.
+
+**Starting one.** `ppl lane <link or TASK-ID>`, run in a terminal:
+
+1. Ends with `OWNER_DECISION` while `runs/ACTIVE`, the pointer of the ppl before lanes, names a
+   run whose `state.json` exists and whose merge is not recorded, naming `ppl destroy --scope
+   local --task <id>`: a lane cannot finish that run, so it is finished before the upgrade, or
+   destroyed [R-LANE-LEGACY-RUN]. It ends with `BUDGET_EXHAUSTED` once the machine has spent
+   `[budgets] usd_max_per_day` since local midnight [R-BUDGET-USD-PER-DAY].
+2. Picks the harness: `--harness`, else the installed one whose `[repo] path` holds the cwd,
+   else the default one `ppl harness apply` recorded.
+3. Takes the harness's commit, origin's default branch after a fetch or the local `HEAD`
+   without an origin, and refuses `OWNER_DECISION` while the installed checkout has uncommitted
+   changes [R-MEMORY-APPLIED]. It exports that commit with `git archive` into a staging
+   directory and renders everything below from the export.
+4. Reads the task id from the link by the harness's `task.url_template`, or takes a bare id
+   that matches `task.key_pattern`.
+5. Claims the lowest free lane number, refusing `BUSY` at either limit
+   [R-LANE-RESOURCE-ISOLATION].
+6. Makes the branch `<TASK-ID>-<slug>` (`--slug`, `work` by default) and the worktree
+   `<repo.worktrees>/<repo name>-<TASK-ID>` from a fresh default branch, origin's after a fetch
+   or the local one, once the checkout's local config passes its check
+   [R-LANE-LAUNCH-GIT-CONFIG]. A branch or a worktree path that already exists ends the call
+   with `ILLEGAL_TRANSITION` naming the command that removes it, and so does a start directory
+   an earlier lane of the task left, so the undo never deletes work the call did not make
+   [R-LANE-LAUNCH-NO-CLOBBER].
+7. Moves the export into the start directory `PPL_HOME/lanes/<TASK-ID>/`, makes
+   `runs/<TASK-ID>`, `labels/<TASK-ID>` and `scratch/<TASK-ID>`, records the worktree, checkout, branch and harness
+   in `lane.json`, and renders `settings.json`, `agents.json`, the skill plugin, `mcp.json`,
+   the frozen `routing.toml` and, on a GitHub harness, `os_sandbox.json` (5.1, 5.6). The agents
+   JSON may be at most 122,880 bytes, under Linux's 131,072-byte limit on one argument, else
+   the call ends with `SCHEMA_INVALID` naming the largest role. `mcp.json` copies the servers
+   the harness names from the operator's `~/.claude.json` only (the user-scope entries, and the
+   local-scope entry of the checkout): the forge's server must be there, and one of the
+   tracker's prefixes; a server reachable only as a claude.ai connector is not in that file,
+   and the call ends with `SETUP_INCOMPLETE` saying to add it with `claude mcp add --scope
+   user`. A project's own `.mcp.json` and settings files are never copied into the lane, since
+   whoever commits to the project would otherwise choose what the session starts outside the
+   OS sandbox [R-LANE-PROJECT-MCP-NOT-COPIED].
+8. Runs claude in the start directory with the run's own flags and nothing else, adding
+   `PPL_LANE`, `PPL_TASK` and an absolute `PPL_HOME` to the environment it inherits:
+
+   ```
+   <claude binary> --session-id <uuid> --setting-sources local --settings <start>/settings.json
+     --agents <agents JSON> --plugin-dir <start>/plugin --strict-mcp-config
+     --mcp-config <start>/mcp.json --add-dir <worktree> --permission-mode acceptEdits
+     -n <TASK-ID> "/antline:pipeline <link>"
+   ```
+
+   `--no-exec` prints `{argv, env, cwd}` instead, `env` holding only what ppl adds. A failure
+   after the export, a missing claude binary included, undoes newest first exactly what the
+   call made (the slot, the start directory, the run directories, the worktree, the branch)
+   and names the cause.
+
+`--setting-sources local` keeps the Claude home's `settings.json` and a project's settings
+out of the session, so the operator's own hooks do not run there, and `--strict-mcp-config`
+keeps every MCP server but the lane's out. `acceptEdits` takes in edits under the session's
+cwd, so the start directory is protected whole [R-LANE-START-DIR-PROTECTED].
+
+**Around a running lane.** `ppl lane list [--json]` prints every lane, its stage, whether its
+window is open (the recorded claude process exists) and the `ppl lane resume <TASK-ID>` that
+reopens it; resume starts the session again with `--resume <uuid>` and the same files, no new
+slot and no new render. It refuses `SETUP_INCOMPLETE` first while a hook entry of the lane's
+`settings.json` names an interpreter or a script that is gone, or an interpreter older than
+3.11, since Claude Code allows every call whose hook cannot start, and `ppl doctor` in the lane
+lists the same under `lane_hooks` [R-GUARD-PYTHON-FLOOR]. A session resumed by hand with `claude --resume` and without the lane
+flags has no guard, no OS sandbox and no ppl agents [R-LANE-BARE-RESUME n/a]. A slot is freed
+by `ppl lane close`, which the stage-8 skill runs, or by `ppl destroy --scope local`. Close
+frees the slot only once `state.json` records the merge and no reflection marker of the run is
+pending, and keeps the start directory and the worktree for destroy; it trusts the recorded
+merge, which the lane's own sandbox can write, so a forged merge frees a slot early
+[R-LANE-RESOURCE-ISOLATION]. Local destroy removes the session's own cwd and worktree, so in a
+lane it is the owner's step, run in a terminal outside the lane, after the orchestrator has
+done the remote half of a full destroy; under the profile the session cannot run it, inside the
+sandbox or out [R-LANE-CROSS-WRITE] [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. It takes the worktree,
+checkout and branch from the registry entry, else from `lane.json`, never from `state.json`,
+which the lane's sandbox can write [R-LANE-CROSS-WRITE].
+
+**Between lanes.** A session bound to a lane writes no other lane's worktree and no project
+checkout outside its own worktree, and runs no `git worktree` but `list` [R-LANE-CROSS-WRITE];
+writes no lane's start directory, `PPL_HOME/lanes` or the registry
+[R-LANE-START-DIR-PROTECTED]; drives no other lane's run through `ppl` [R-LANE-CROSS-TASK]; and
+writes neither the checkout's shared `.git/config`, `.git/hooks` and `.git/info` nor another
+lane's git dir [R-LANE-SHARED-GIT-DIR]. The guard's Bash half of each is lexical. The boundary
+for a harness with the OS sandbox profile is the profile's write scope, which holds only the
+lane's own `runs/<TASK-ID>`, `scratch/<TASK-ID>` and `labels/<TASK-ID>`, of the checkout's
+`.git` only `objects`, `refs`, `logs` and the lane's own `worktrees/<id>`, its own worktree and
+the harness's `[os_sandbox] allow_write`: never the checkout's working tree, another lane's run
+or worktree, another task's labels, the run archive or the registry [R-LANE-CROSS-WRITE]. A harness with no profile
+has the guard alone. Under that scope a git that rewrites `.git/packed-refs` (deleting a packed
+branch, `git pack-refs`), gc and maintenance, git-lfs, submodules, rerere and any git config
+write fail in a lane, and automatic gc and maintenance fail quietly: the owner's live rehearsal
+is still to show how often a run needs one [R-LANE-CROSS-WRITE]. The shared `objects`, `refs`
+and `logs` stay writable to every lane on the checkout, so a lane's sandbox can still move
+another lane's branch, or delete or corrupt the object store and with it every lane's unpushed
+commits and the checkout's own history; a later plan gives each lane a clone that borrows the
+checkout's objects through alternates, which leaves the checkout's `.git` read-only to every
+lane [R-LANE-CROSS-WRITE]. The `ppl` commands a lane runs
+inside the sandbox write only its own run's files, `ppl label` its own task's labels, which
+`ppl lane` makes with the run's directories; `ppl lane close` and
+the two lessons commands leave it as pinned orchestrator shapes (5.4)
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE].
 
 ## 6. State machine
 
@@ -1146,17 +1269,35 @@ timed-out worker still carries what it had), not a gap in it.
 ppl --version                    # prints `antline <version>`
 ppl demo [--keep]                # one issue through the real CLI and guard, offline, in a throwaway
                                  # sandbox, with stand-ins for the agents and gh. --keep leaves it
-ppl setup [<step> ...]           # the onboarding wizard: paths, claude, models, harness, forge,
-                                 # apply - every step skippable and re-runnable
+ppl setup [<step> ...]           # the onboarding wizard: paths, claude (the Claude Code binary, and
+                                 # what an older ppl wrote into its workspace taken back), models,
+                                 # harness, forge, apply - every step skippable and re-runnable
 ppl harness validate|list|show|add|apply [<name>] [--source <directory or git url>] [--json]
-                                 # apply renders the agent files and the skill, sets the active one,
-                                 # validate --json prints {errors, warnings} as the studio shows them
+                                 # add installs a harness, a plain directory committed as a new git
+                                 # repository; apply checks it at its commit and makes it the default
+                                 # harness of ppl lane, rendering nothing; validate --json prints
+                                 # {errors, warnings} as the studio shows them
+ppl lane <link or TASK-ID> [--harness <name>] [--slug <slug>] [--no-exec]
+                                 # start a task window (5.7): claim a slot, export the harness at
+                                 # its commit, make the worktree on <TASK-ID>-<slug> (slug default
+                                 # work), render the start directory and exec claude there. The
+                                 # harness defaults to the installed one whose [repo] path holds
+                                 # the cwd, else the default one. --no-exec prints {argv, env, cwd}
+ppl lane resume <TASK-ID> [--no-exec]
+                                 # the lane's session again, with the flags it started with
+ppl lane list [--json]           # every lane: number, task, harness, stage, whether its window
+                                 # is open, and the resume command
+ppl lane close [<TASK-ID> | --task <TASK-ID>]
+                                 # frees the slot of a merged run whose reflection is not pending;
+                                 # the start directory and the worktree stay for ppl destroy
 ppl models verify|status         # probe the tier models, show what is verified and when
-ppl init <TASK_ID> --repo <worktree-path> --tracker-url <url> --harness <name> [--isolated | --no-isolated]
-         [--risk low|normal|high] [--skip-model-check]
-                                 # isolated defaults true - see 5.4 for what it gates. Refuses
-                                 # SETUP_INCOMPLETE until ppl setup finished models, harness and
-                                 # apply, and without --harness [R-INIT-SETUP-COMPLETE], and
+ppl init <TASK_ID> --tracker-url <url> [--harness <name>] [--repo <path>]
+         [--os-sandbox | --no-os-sandbox] [--risk low|normal|high] [--skip-model-check]
+                                 # runs only inside the task's lane [R-LANE-INIT-INSIDE]: the run
+                                 # takes the lane's worktree and the harness it exported, so a
+                                 # --repo or --harness naming another is refused SCHEMA_INVALID.
+                                 # Refuses SETUP_INCOMPLETE until ppl setup finished models,
+                                 # harness and apply [R-INIT-SETUP-COMPLETE], and
                                  # MODELS_UNVERIFIED while a routed model is unverified or stale,
                                  # unless --skip-model-check [R-INIT-MODELS-VERIFIED]
 ppl status                       # founder status card, human language
@@ -1222,39 +1363,46 @@ ppl lessons record --task <id> --file <json>
                                   # checks the reflector's answer against the run's bundle
                                   # and stores its proposals for the owner (6.13)
 ppl lessons pending              # one `<task> <bundle>` line per run destroyed with
-                                  # --reflect whose reflection is not recorded yet (6.13)
+                                  # --reflect whose reflection is not recorded yet; in a lane,
+                                  # those of the lane's harness, claimed for the lane (6.13)
 ppl lessons list|accept|reject|retire|edit [<id>] [--harness <name>] [--json]
                                   [--cue <text>] [--lesson <text>] [--reason <text>]
                                   # the owner's review of proposed lessons (6.13)
 
 ppl serve [--port 8787]          # admin panel, loopback only
-ppl control set <pause|resume|stop|destroy> [--scope local|full]
+ppl control set <pause|resume|stop|destroy> [--scope local|full] [--task <id>]
 ppl control get                  # what the panel has queued, if anything
-ppl destroy --scope <local|full> [--reflect --why "<line>"]
-                                  # local: worktree removed and run archived immediately.
+ppl destroy --scope <local|full> [--task <id>] [--reflect --why "<line>"]
+                                  # local: the worktree, the branch while nothing of it was
+                                  # pushed, the scratch directory, the lane's slot and start
+                                  # directory removed and the run archived, at once; in a lane,
+                                  # the owner's step in a terminal outside it (5.7).
                                   # full: remote_cleanup.json queued for the orchestrator,
                                   # local archive happens only after that half completes.
                                   # --reflect --why, local only: the run's lessons bundle
                                   # and a pending marker for its reflection (9.3)
 
-ppl routing apply [--harness <name>]
-                                 # regenerate the agent files from routing.toml and the harness,
-                                 # the active one by default
-ppl routing show                 # effective role -> provider/model/params
+ppl routing show [--role <r> [--risk <tier> | --task <id>]]
+                                 # routing.toml, or one role's model and params; in a lane the
+                                 # copy the lane froze when it started
+ppl routing preset economy|balanced|max
+                                 # a tier and an effort per role in routing.toml; a lane started
+                                 # later takes it
 ppl dispatch --role <r> --in <f> --out <f>    # run a role through its provider adapter
 ppl apply-patch --role <r> --diff <f> --generation <n>  # boundary-validated patch application
 
-ppl doctor [--task <TASK-ID>]    # reports where the guard hook is registered - local
-                                  # (.claude/settings.local.json), global (~/.claude/
-                                  # settings.json), both, none, or unknown (a settings file
-                                  # exists but could not be read or parsed - including a
-                                  # confirmed local yes next to an unreadable global file) -
-                                  # with the inspected paths, and whether that matches the
-                                  # given or active run's isolated flag (5.4). ppl init
-                                  # --isolated runs the same check and refuses SCHEMA_INVALID
-                                  # on three silent mismatches: registered only globally,
-                                  # registered both locally and globally (the global copy
-                                  # still fires everywhere), or registration unknown.
+ppl doctor [--task <TASK-ID>] [--forge]
+                                  # outside a lane: the setup steps, the models, the default
+                                  # harness with its forge and tracker checks, the claude binary
+                                  # and the GitHub token variables. In a lane
+                                  # (--task, else PPL_TASK, else the cwd) also where the guard is
+                                  # registered in the two settings sources the session loads -
+                                  # local (<start>/settings.json), start_local (<start>/.claude/
+                                  # settings.local.json), both, none or unknown (a file exists but
+                                  # could not be read or parsed) - with the inspected paths, the
+                                  # lane guard's task, the OS sandbox facts, the foreign Bash
+                                  # hooks, the MCP servers and whether the guard runs (5.4).
+                                  # --forge checks the forge and the tracker alone
 ```
 
 ### 6.4 Terminal transition rule
@@ -1403,9 +1551,12 @@ Task state (`state.json`):
   "stage": "verification",
   "risk": "normal",
   "model_check": "verified",
-  "harness": {"name": "example-maven", "path": "/home/dev/.ppl/harnesses/example-maven", "format": 1},
+  "harness": {"name": "example-maven", "path": "/home/dev/.ppl/lanes/DEMO-12345/harness/example-maven",
+              "format": 1},
   "repo": "/home/dev/src/project/.worktrees/project-DEMO-12345",
-  "isolated": true,
+  "os_sandboxed": false,
+  "lane": {"number": 1, "start_dir": "/home/dev/.ppl/lanes/DEMO-12345",
+           "session_id": "6f1c2a9e-0d3b-4c57-9a1e-2b8f4d7c3e10"},
   "branch": "DEMO-12345-short-slug",
   "base_sha": "base123",
   "candidate_sha": "abc123",
@@ -1586,7 +1737,7 @@ blocking finding's file rewritten to `[]` - still valid JSON, just the wrong sha
 from `open_blocking_on_own_diff` and open the done gate for free, and invalid JSON would crash
 the process. Both are the same refusal: `list_all`, `list_open` and
 `open_blocking_on_own_diff` all raise `SCHEMA_INVALID` when any finding file on disk cannot
-be read as a finding object, the same fail-closed treatment `ppl/_assets/hooks/ppl_guard.py:active_state`
+be read as a finding object, the same fail-closed treatment `ppl/_assets/hooks/ppl_guard.py:bound_state`
 already gives an unreadable `state.json` [R-FINDINGS-FAILS-CLOSED-ON-MALFORMED].
 
 ### 6.7 Authority order
@@ -1827,7 +1978,7 @@ the same thing, the same principle the rule matrix itself holds `n/a` rows to (5
   `[prices]` for an uncapped run that froze none, `ppl metrics` reads the live `[prices]`,
   and the trail reads the frozen prices, or the live ones for a run that froze none.
 - Tokens per accepted task and tokens by role need no prices, but they need the usage hook
-  (`ppl setup claude`) to have logged usage for an accepted run. Without one they are
+  (in every lane's `settings.json`) to have logged usage for an accepted run. Without one they are
   undefined and the reason says so, and a producer slice counts only the runs whose
   accepted `PASS` verdict has that producer, the attribution time to acceptance already
   uses [R-METRIC-SAMPLE-DEPENDENT-UNDEFINED].
@@ -1960,8 +2111,8 @@ arrive days later, and the reflector does not read labels. `ppl lessons bundle` 
 `ILLEGAL_TRANSITION` with nothing written in any stage other than `merge_watch`, a merged sha
 written into the state by hand included, and in `merge_watch` before the merge is recorded
 [R-LESSONS-BUNDLE-AFTER-MERGE]. It is refused `SETUP_INCOMPLETE`, naming the file and
-`ppl harness apply <name>`, while `ppl-reflector.md` is missing from the agents directory, as on
-an install that has not applied its harness since the role was added
+`ppl lane resume <task>`, while the lane's agents file `<start>/agents.json`, the agents its
+session was started with, names no `ppl-reflector`
 [R-LESSONS-BUNDLE-AFTER-MERGE]. The command changes no run state: it takes no `--generation`,
 does not call `control.enforce` and does not refresh the deadline, so a run the operator paused
 in `merge_watch` still gets its bundle. A stop parks the run, which leaves `merge_watch`.
@@ -2029,15 +2180,22 @@ characters once cleaned, an assessment of a memory id that `memory-in-effect.jso
 naming the first problem, with nothing written [R-LESSONS-EVIDENCE-RESOLVES]. A link among the
 bundle files, or a harness name in `memory-in-effect.json` that is not a plain directory name, is
 refused too, so a planted bundle cannot steer where the proposals are written
-[R-LESSONS-EVIDENCE-RESOLVES].
+[R-LESSONS-EVIDENCE-RESOLVES]. In a lane the harness comes from the lane's registry entry, not
+from the bundle, and a bundle naming another harness is refused `SCHEMA_INVALID`
+[R-OS-SANDBOX-ORCHESTRATOR-SHAPE].
 
 A record that passes writes `PPL_HOME/lessons/<harness>/proposals/<task>.json`, outside `runs/`:
 `{task, harness, recorded_at, no_entry, proposals, assessments}`, each proposal with its id
 `<task>.<n>` from 1, the cleaned cue and lesson, its evidence and `status: "pending"`. It leaves
 `memory.toml` as it was: only the owner's accept writes it. A
 second record for the same task is refused `ILLEGAL_TRANSITION` [R-LESSONS-EVIDENCE-RESOLVES]. A
-pending marker `PPL_HOME/lessons/pending/<task>.json`, `{task, bundle}`, names the bundle of a
-run that was destroyed before it was reflected on and wins over the run's own path. It must name
+pending marker `PPL_HOME/lessons/pending/<task>.json`, `{task, bundle, harness}`, names the
+bundle of a run that was destroyed before it was reflected on and wins over the run's own path; `ppl
+destroy` stamps it with the harness of the run's lane, from the registry entry or the lane's
+`lane.json`, never from the run's own files [R-OS-SANDBOX-ORCHESTRATOR-SHAPE]. A lane claims a
+marker stamped with its own harness by renaming it to `<task>.json.claimed-<lane task>`, so of
+two lanes the first rename wins and no lock is taken, and `ppl lane close` and `ppl destroy`
+hand a claim the lane did not record back to `<task>.json`. It must name
 a real directory under `runs/`, live or archived, else the record is refused [R-LESSONS-EVIDENCE-RESOLVES]. A successful record
 removes the marker, a `no_entry` one too. A refused one leaves it, except the `ILLEGAL_TRANSITION` of a task already
 recorded, which removes it, so a marker left for a recorded task does not outlive the next record [R-LESSONS-EVIDENCE-RESOLVES]. `record` is not one of the
@@ -2046,7 +2204,8 @@ goes back to the reflector once, and then the orchestrator reports it, since par
 over a missing lesson would cost more than the lesson [R-LESSONS-EVIDENCE-RESOLVES].
 
 **Review.** The owner decides each proposal with `ppl lessons list|accept|reject|retire|edit` on
-the active harness, or on `--harness <name>`, which must be an installed harness [R-LESSONS-OWNER-ACCEPTS].
+the default harness, or on `--harness <name>`, which must be an installed harness
+[R-LESSONS-OWNER-ACCEPTS].
 `list` prints the pending proposals and the active entries, or JSON with `--json`. A proposals file
 that does not read as one is left out and named, by `list` in a warning line on stderr and under
 `skipped` in its JSON, and by the studio's Lessons section in a notice, so the others still show. `accept <task>.<n>`
@@ -2065,34 +2224,45 @@ through the studio's `files.validate` and `files.save` with that read's hash: th
 the studio history, and a change made in between is refused `CHANGED_ON_DISK` with nothing written
 [R-LESSONS-OWNER-ACCEPTS]. The proposal is marked after the memory save. A mark that fails then leaves the
 lesson saved and the proposal pending, and accepting it again marks it without adding the lesson
-twice. No command applies the harness: each write prints `run ppl harness apply <name> to render it`.
-A pipeline role's Bash call of any of these commands is denied like every `ppl` call that is not
+twice. Each write prints that `memory.toml` is to be committed in the harness's repository,
+and pushed when it has an origin, since the next lane renders only what is committed there:
+until the harness merge-request flow is built, `accept`, `reject`, `retire`, `edit` and the
+studio's saves write the installed checkout itself, and `ppl lane` refuses that harness while
+the change is uncommitted [R-MEMORY-APPLIED]. A pipeline role's Bash call of any of these
+commands is denied like every `ppl` call that is not
 read-only [R-GUARD-PPL-CLI-DENIED].
 
 **The flow end to end.** The skill's `references/reflection.md` runs it. After the post-merge
 tracker note, the orchestrator runs `ppl lessons bundle --task <id>` and dispatches
 `ppl-reflector` with a prompt that names the bundle directory and the task id, and nothing from
-inside the bundle. It writes the answer to `<scratch>/<id>/lessons.json` and runs
-`ppl lessons record --task <id> --file <that file>`. An answer `record` turns down goes back to the reflector
+inside the bundle. It writes the answer to `<scratch>/<lane task>/lessons-<id>.json`, in the
+lane's own scratch directory, and runs
+`ppl lessons record --task <id> --file <that file>`, under the OS sandbox profile one of the
+two lessons shapes that leave it (5.4). An answer `record` turns down goes back to the reflector
 once with the message quoted, and a second one is reported to the operator: the run's work
-is done, so it is not parked. At the start of a session the orchestrator runs
+is done, so it is not parked. In stage 0, right after `ppl init`, the orchestrator runs
 `ppl lessons pending` and reflects on each task it lists, from the bundle path on that line:
-the runs destroyed with `--reflect` whose reflection is not recorded yet. Such a reflection runs
+the runs of the lane's harness destroyed with `--reflect` whose reflection is not recorded
+yet, each claimed for this lane. Such a reflection runs
 outside the run it reflects on, so the dispatch hook counts its `ppl-reflector` dispatch against
-whichever run is active at that moment, and the usage hook logs its tokens into that run's log,
-or neither is recorded when no run is active. Proposals then wait for the owner, who accepts, rejects, retires or edits them and
-runs `ppl harness apply <name>`. The orchestrator does not run those commands. Its session is
+the lane's own run, and the usage hook logs its tokens into that run's log. Proposals then
+wait for the owner, who accepts, rejects, retires or edits them and
+commits `memory.toml`. The orchestrator does not run those commands. Its session is
 not a role, so that is discipline there, as the residual of [R-LESSONS-OWNER-ACCEPTS] says.
-A run reads the lessons its snapshot froze at `ppl init` [R-MEMORY-APPLIED].
+A run reads the lessons of the harness commit its lane exported, frozen into its snapshot at
+`ppl init` [R-MEMORY-APPLIED].
 
 ## 7. Stage flow: task link to MR
 
-Entry: `/pipeline https://tracker.example/browse/DEMO-12345`
+Entry: `ppl lane https://tracker.example/browse/DEMO-12345` in a terminal. It makes the lane
+(5.7) and starts its Claude Code window, whose first prompt is
+`/antline:pipeline https://tracker.example/browse/DEMO-12345`.
 
 ### Stage 0 - admission
 
-Orchestrator runs `ppl init` first, which creates the run, then reads the tracker issue plus
-parent/epic and linked issues. A Jira tracker is read through the MCP read tools, plus any
+Orchestrator runs `ppl init` first, which creates the run on the lane's worktree, then `ppl
+lessons pending`, reflecting on each run it lists and claims for the lane (6.13), then reads
+the tracker issue plus parent/epic and linked issues. A Jira tracker is read through the MCP read tools, plus any
 linked spec page. A GitHub Issues tracker is read with `ppl tracker fetch --task <TASK-ID>`,
 which stores `issue.md` in the run and records the fetched revision. The text comes from
 the tracker adapter's `admission` fragment.
@@ -2119,8 +2289,10 @@ Record base SHA and baseline check results before touching anything: the harness
 (build, lint, unit and integration tests) and known failures. Without this, a pre-existing red test is
 indistinguishable from a regression, and the model will pick the convenient reading.
 
-Branch is created from the harness's `repo.default_branch`, in a dedicated worktree under
-`repo.worktrees`.
+The branch `<TASK-ID>-<slug>` and its worktree `<repo.worktrees>/<repo name>-<TASK-ID>` already
+exist: `ppl lane` made them from a fresh `repo.default_branch` (origin's after a fetch when the
+checkout has an origin, else the local one) before the session started, so stage 1 records the
+baseline in that worktree and makes no branch of its own.
 
 `base_sha` is write-once and must be an ancestor of HEAD. `ppl baseline record` refuses a
 second call (`ILLEGAL_TRANSITION`) [R-BASELINE-WRITE-ONCE] and refuses a base that HEAD
@@ -2307,8 +2479,9 @@ Per run, the panel shows:
 - open reviewer threads and their classification
 - live tail of `log.jsonl`
 
-Multiple runs are listed together; v1 executes one at a time, but a parked run and an
-active run coexist, and the panel is the place where that is visible.
+Multiple runs are listed together: up to the lane limits (5.4) run at once, each in its own
+lane, beside parked and finished ones, and the panel is the place where that is visible. The
+studio's Lanes page (9.6) lists the lanes themselves.
 
 ### 9.2 Control is cooperative
 
@@ -2340,8 +2513,8 @@ Two independent readers act on it:
   [R-OPERATOR-HALT-CLI]. Every path that moves a run forward or rewrites ledger/boundary/mr/budget
   state passes through one of the eleven, so a halt still lands at the next such call
 - the `PreToolUse` guard hook stats the control file on every tool call, so a pause lands
-  within one tool call rather than one stage; for the unroled main session specifically, it
-  does so under the `isolated` scoping described in 5.4
+  within one tool call rather than one stage, for every call of the run's lane session, the
+  unroled main session's included (5.4)
 
 This is the one carve-out to the "only `ppl` writes under `runs/`" rule: `control.json` is
 written by the panel or by `ppl control set`, and read by `ppl` and the hook. It is an
@@ -2358,9 +2531,14 @@ inbox, not authoritative state.
 
 Destroy always prompts and the owner picks the scope per run:
 
-- **local only** - stop the run, remove the worktree, archive the run directory under
-  `runs/_archive/`, and clear the active pointer. No outward mutation. The panel process
-  performs this itself, since it is ordinary local file work.
+- **local only** - stop the run, remove the worktree, the run's branch while nothing of it
+  was pushed and the scratch directory, archive the run directory under `runs/_archive/`,
+  and free the lane: its registry slot and its start directory go. No outward mutation. The
+  panel process performs this itself, since it is ordinary local file work, and so does
+  `ppl destroy --scope local` from a terminal outside the lane. The skill tells the lane's
+  own session to leave it to the owner, since it removes that session's cwd and worktree, and
+  under the OS sandbox profile the session cannot run it, inside the sandbox or out
+  [R-LANE-CROSS-WRITE] [R-OS-SANDBOX-ORCHESTRATOR-SHAPE].
 - **full cleanup** - additionally close the MR and delete the remote branch. This is an
   irreversible outward mutation, so it requires typed confirmation of the task ID in the
   dialog. The panel does not perform it: it writes `remote_cleanup.json` into the run and
@@ -2378,7 +2556,9 @@ escalated, the blocker of `parking.json` while it is parked or escalated and `nu
 (a resume leaves `parking.json` on disk), and the owner's line. A run whose merge
 `ppl merge observed` recorded gets `{ended: "merged", merged_sha}` instead, as
 `ppl lessons bundle` writes it, and the owner's line goes in the command's result. The archive
-keeps the bundle, and a pending marker `PPL_HOME/lessons/pending/<task>.json` names it. The next
+keeps the bundle, and a pending marker `PPL_HOME/lessons/pending/<task>.json` names it. When
+the run directory stays behind unarchived, the result says `"reflection": "left_behind"` with
+the reason and leaves no marker; the destroy run again once the directory moves leaves it. The next
 orchestrator session lists the markers with `ppl lessons pending` and reflects on each. A run
 whose proposals are already recorded is archived with no new bundle and no marker, and the
 result says `"reflection": "recorded"`: the bundle those proposals came from stays in the
@@ -2406,7 +2586,8 @@ there is no reason to SIGKILL a session that is holding a lease.
 `resume` command into `control.json`, which is the absence of a halt rather than a request
 for work: there is no `resume_requested` token anywhere in the code, and nothing consumes
 one. Either a live session's next `ppl` call simply stops being refused [R-OPERATOR-HALT-CLI],
-or the owner starts a session and `ppl recover` reconciles and continues. The reason is a
+or the owner starts the lane's session again with `ppl lane resume <TASK-ID>` and `ppl recover`
+reconciles and continues. The reason is a
 real constraint, not caution: a headless `claude -p` print session can advance a bounded
 stage, but it cannot durably hold the `ScheduleWakeup` review-monitor loop, which requires
 an interactive or main-loop session [R-PANEL-NO-SPAWN n/a]. A panel that claimed to resume anything would be
@@ -2444,13 +2625,21 @@ writes it, and only after the check ppl makes of it, `routing.validate_config` f
 and, for a harness file or a role's notes, `harness.verify` of the harness with that content
 laid in, any other file of the harness's `skill/` and `templates/` laid in by name.
 
-**Lessons.** The Agents page ends with a Lessons section for the active harness: the pending
+**Lessons.** The Agents page ends with a Lessons section for the default harness: the pending
 proposals of finished runs, each with its role, cue, lesson and evidence refs, and the entries of
 `memory.toml` grouped by role. Accept (the cue and the lesson editable first), reject (with a
 reason), retire and edit call the functions `ppl lessons` calls, so the studio writes memory only
 when the owner clicks [R-LESSONS-OWNER-ACCEPTS]. Each write answers with the line
-`run ppl harness apply <name> to render it`, which the page shows, and the page shows a short
-notice instead when no harness is active.
+saying to commit `memory.toml` in the harness's repository, which the page shows, since the
+next lane renders only what is committed there [R-MEMORY-APPLIED], and the page shows a short
+notice instead when no harness is the default.
+
+**Lanes.** A read-only page lists the lanes of `ppl lane list`: number, task, harness, the
+run's stage and last durable fact, whether the window is open, the run's spend and the
+`ppl lane resume` command, with the machine's lane limit and the day's spend against
+`usd_max_per_day`. It starts, resumes and closes nothing. The registry's session ids, pids and
+start directories stay out of the response, and a stage or outcome, which a lane's sandbox can
+write, is printed as text. An unreadable registry is shown as an error on the page.
 
 **Slow actions are jobs.** A model probe, the extraction or an apply runs in a worker
 thread: the route returns a job id and the page polls `/api/jobs/<id>`. One job of a kind runs
@@ -2515,8 +2704,10 @@ name>:<file>` with the file one of `harness.toml`, the four `skill/` fragments a
 `templates/<role>.part` overlays, and a history version by its timestamp. No studio file route
 reaches any other path [R-STUDIO-NO-RAW-PATHS]. The project path, the harness source and the
 playground's value and repo path that a request sends are read, never written
-[R-STUDIO-NO-RAW-PATHS]. The wizard's workspace directory is written: the claude step creates
-it and, for local hooks, registers them in it [R-STUDIO-WRITE-SURFACE n/a]. A save carries the
+[R-STUDIO-NO-RAW-PATHS]. The wizard's claude step writes the binary into `config.toml` and
+takes back what an older ppl wrote for the workspace `config.toml` names, matched by ppl's own
+markers: its hook entries, sandbox block and allow entries, the rendered pipeline skill and the
+`ppl-*` agent files, and `PPL_HOME/os_sandbox.json` [R-STUDIO-WRITE-SURFACE n/a]. A save carries the
 sha256 of the content the page loaded, and it is refused when the file changed since: every
 file of one save is checked before the first write [R-STUDIO-CHANGED-ON-DISK]. The replaced
 content goes to `~/.ppl/studio/history/<key>/`, with `:` and `/` in the key written as `__`,
@@ -2530,12 +2721,13 @@ routes, not by a check [R-STUDIO-WRITE-SURFACE n/a].
 
 **Agents page.** For each role, the base prompt (`ppl/_assets/templates/<role>.md.body`) is shown
 read-only beside the harness overlay and the agent file `routing.render` would produce from
-the active harness with the notes and routing as edited on the page. The blocking rows of the
+the default harness with the notes and routing as edited on the page. The blocking rows of the
 rule table whose scope covers the role are listed with them; the rows that act through the guard
-hook fire only once it is registered [R-GUARD-NOT-ARMED n/a].
+hook fire only in a lane session [R-LANE-HOOK-BINDING].
 
 **Playground.** One tool call goes through the real `ppl/_assets/hooks/ppl_guard.py` in a subprocess,
-against a fake active run built under a temporary data root: `harness.json` is the draft's
+bound by `--task` on its command line, as a lane's settings bind it, to a throwaway run in a
+throwaway lane built under a temporary data root: `harness.json` is the draft's
 snapshot and `boundary.json` a default boundary. The draft itself is written inside that
 temporary root, and the directory is deleted when the hook has answered
 [R-STUDIO-PLAYGROUND-SANDBOX n/a].
@@ -2550,9 +2742,9 @@ rule and chapter 1 gives the reason: models are components, the control plane is
 system. Two mechanisms make this real rather than aspirational.
 
 **Single source of routing truth.** `~/.ppl/routing.toml` describes every tier and every
-role. `ppl harness apply` (or `ppl routing apply`) generates the agent files' frontmatter from
-it and the active harness. Agent
-files become build artifacts, so there is exactly one place to change a model and no drift
+role. `ppl lane` generates the agents it passes a lane's session from the copy of it the lane
+freezes and the harness commit the lane runs. Agent
+definitions become build artifacts, so there is exactly one place to change a model and no drift
 between config and reality. This is built from day one even though v1 is entirely Claude,
 because retrofitting it later means rewriting every agent file.
 
@@ -2749,7 +2941,14 @@ Only the exit-code rule has code behind it, the rest are recipes rendered into t
   with `BUDGET_EXHAUSTED` once dollars spent reach `usd_max` [R-BUDGET-USD-CAP], and with
   `OWNER_DECISION`, naming the model and the `[prices."<model id>"]` table to add before a new
   run, while a recorded model has no price in the run's `prices`, since a cap that cannot be
-  computed is not a cap [R-BUDGET-USD-UNPRICED]. `ppl park` stays available. Like the dispatch cap
+  computed is not a cap [R-BUDGET-USD-UNPRICED]. `ppl park` stays available.
+  A second cap spans every run on the machine: `usd_max_per_day` in the same `[budgets]` table, zero
+  or absent meaning none, is the dollars every run, live or archived, spent since local midnight,
+  each priced with its own frozen prices. At or over it `ppl stage enter`, `ppl transition` and
+  `ppl lane` refuse with `BUDGET_EXHAUSTED`, naming the day cap and the day's spend and saying
+  it resets after local midnight or when the owner raises it. A model with no price, or a
+  state, log or price table of the checked run that cannot be used, is `OWNER_DECISION`, and
+  another run's fault, or `ppl lane`, skips and names it [R-BUDGET-USD-PER-DAY]. Like the dispatch cap
   the check comes after the fact: what a dispatch costs is known only once its role stops, so the
   dispatch that crosses the cap has already run when the next stage boundary refuses
   [R-BUDGET-USD-CAP] [R-BUDGET-USD-BEFORE-DISPATCH n/a].
@@ -2777,10 +2976,10 @@ a different model to finish the job.
 
 This table is the v1 content of `ppl/_assets/defaults/routing.example.toml`, which `ppl setup` copies to
 `~/.ppl/routing.toml`, the single source of truth. The operator picks the model each tier
-names, and the agent files are generated from it by `ppl harness apply` (section 10.1). The
+names, and each lane's agents are generated from it by `ppl lane` (section 10.1). The
 orchestrator is the operator's own session and is not routed. A role can carry a per-risk
 override, `by_risk = { high = "good" }`, applied for runs started with `ppl init --risk high`:
-the agent file keeps the default and `ppl routing show --role <role> --task <id>` prints the
+the agent keeps the default and `ppl routing show --role <role> --task <id>` prints the
 model the orchestrator passes at dispatch [R-ROUTING-BY-RISK]. `model` and `effort` are Claude
 Code subagent frontmatter keys, and `effort` accepts `low|medium|high|xhigh|max`. Routing is a
 profile, not part of the canonical workflow - changing a model is not supposed to require
@@ -2812,7 +3011,6 @@ Free text does not route. Closed dictionary:
 | `EXTERNAL_BLOCKED` | forge/tracker/CI unavailable or a dependency is blocked | park, retry on next tick |
 | `SETUP_INCOMPLETE` | `ppl setup` has not recorded a step `ppl init` needs [R-INIT-SETUP-COMPLETE] | run the named `ppl setup <step>`, no run exists yet |
 | `MODELS_UNVERIFIED` | a model the run would route to is unverified or stale [R-INIT-MODELS-VERIFIED] | `ppl models verify`, or `--skip-model-check` |
-| `HARNESS_NOT_APPLIED` | the harness `ppl init` loads is not the active one [R-INIT-HARNESS-APPLIED] | `ppl harness apply <name>` |
 | `HARNESS_INVALID` | a harness file fails validation | fix it, then `ppl harness validate <name>` |
 | `TIMED_OUT` | no `ppl` activity was recorded since the run's inactivity deadline (6.9) | `ppl recover`, inspect the stuck attempt, then resume or re-brief |
 | `VERIFICATION_UNAVAILABLE` | `ppl verdict record` parks the run [R-VERIFICATION-UNAVAILABLE-PARK]: the second consecutive INCONCLUSIVE/ERROR/CANCELLED/TIMEOUT verdict on the same `candidate_sha` (6.10) | inspect why the verifier keeps failing to reach a result on this sha, never just redispatch a third time |
@@ -2844,10 +3042,10 @@ The build is finished when all of these are demonstrably true:
    worktree, and denied both attempts with `BOUNDARY_VIOLATION`
    [R-ROLE-CODE-WORKER-TESTS] [R-ROLE-TEST-WORKER-MAIN]. This is a hook-level proof,
    not a live subagent dispatch: `cage_check.py` registers no hook, so the criterion is
-   exercised end to end only by a real run with the hooks registered (README.md "Hooks").
+   exercised end to end only by a real run in a lane `ppl lane` started (README.md "Hooks").
 3. `ppl-verifier` cannot modify the candidate [R-ROLE-READONLY-NO-WRITE]
    [R-ROLE-TOOLS-READONLY]. **Verified** the same way as criterion 2: the
-   role has no `Edit`/`Write`/`Bash` tool in its generated agent file at all
+   role has no `Edit`/`Write`/`Bash` tool in its generated agent at all
    (`routing.BASE_TOOLS["ppl-verifier"]` grants only `Read, Grep, Glob`, and
    `routing.role_tools` adds none), and `cage_check.py`
    additionally confirmed the guard hook denies a `Write` from `ppl-verifier` even if
@@ -2860,7 +3058,7 @@ The build is finished when all of these are demonstrably true:
 8. One real task has gone end to end: task link -> MR -> at least one reviewer remark
    handled -> approval. This needs a real tracker issue and a real human reviewer on a real
    merge request - the operator's to run, not something a coding session can fake without
-   invalidating the result - and it is a run under the cage only with the hooks registered
+   invalidating the result - and it is a run under the cage only in a lane `ppl lane` started
    (README.md "Hooks").
 9. The panel lists every run, and pause takes effect within one tool call. Stop produces a
    valid parking record. Destroy prompts for scope and a typed confirmation before it sends
@@ -2868,8 +3066,8 @@ The build is finished when all of these are demonstrably true:
    state is protected by R-DESTROY-REMOTE-QUEUED underneath it, not by the dialog alone.
 10. The panel's SIGTERM path refuses to signal when the recorded PID's start time does not
     match [R-PANEL-SIGTERM-PID].
-11. Changing a model is a one-line edit of a tier in `routing.toml`, then `ppl models verify`
-    and `ppl harness apply`; no agent file is edited by hand and no workflow step changes.
+11. Changing a model is a one-line edit of a tier in `routing.toml`, then `ppl models verify`;
+    the next lane takes it, no agent is edited by hand and no workflow step changes.
 12. A worker's output is applied through `ppl apply-patch`, and a patch touching a path
     outside the boundary is rejected there, independently of any hook
     [R-APPLY-PATCH-BOUNDARY]. **Unexercised in
@@ -2919,8 +3117,11 @@ The build is finished when all of these are demonstrably true:
   or a verifier on separate credentials. That is post-v1.
 - **Subscription window is the hard budget.** Long verification passes at xhigh effort can
   stall on rate limits. Parking on budget exhaustion is the designed response.
-- **v1 is one lane.** Throughput is one task at a time by design; independence must be
-  proven before parallelism is added.
+- **Lanes share the machine.** A worktree separates files and nothing else, so a harness runs
+  one lane at a time unless it raises its own `[lanes] max`, and nothing checks that its gates
+  then keep test databases, ports and queues apart; lanes of two harnesses share whatever their
+  projects share [R-LANE-RESOURCE-ISOLATION]. A running lane keeps the settings, agents,
+  skill, harness commit and routing it was started with: nothing renders them again in place.
 - **The panel cannot start work [R-PANEL-NO-SPAWN n/a].** It observes and it halts a run; it queues a resume. Beginning
   or continuing a run requires a Claude session, because the review-monitor loop needs an
   interactive or main-loop session to hold its wake-ups.
@@ -2934,8 +3135,11 @@ The build is finished when all of these are demonstrably true:
 
 - P2: separate adversarial verifier for critical tier, mutation testing on a schedule,
   per-role credentials
-- P3: dependency matrix and waves, multiple isolated lanes, model eval flywheel with
+- P3: dependency matrix and waves, model eval flywheel with
   recorded fixtures, routing updates driven by measured rework rates
+- lanes: an update command that moves a running lane to a newer ppl or harness commit, and
+  lessons and studio harness edits that reach the harness through its own merge requests;
+  until then the owner commits `memory.toml` and other harness edits by hand (5.6)
 - adapter implementations: `claude-api`, `openai-compatible`, `cli`. The contract in
   section 10.2 is frozen so these are additive.
 - panel: per-run cost and token charts, side-by-side routing-profile comparison, one-click

@@ -10,5 +10,5 @@ remove it and dispatch again, never reword the code to get past the check
 [R-TEST-WORKER-NO-DIFF n/a]. A paraphrase is not detected, so that part is on you
 **regardless of whether the hook is armed** [R-TEST-WORKER-NO-DIFF n/a]. All of these denials
 are, like the write boundary of the implementation half (`references/stage-3-implementation.md`),
-only live when `ppl doctor` reported the hook registered [R-GUARD-NOT-ARMED n/a]. Do not let
+only live when `ppl doctor` reported the hook registered [R-LANE-BARE-RESUME n/a]. Do not let
 one agent do both halves.

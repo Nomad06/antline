@@ -130,7 +130,9 @@ def check(name, doc, fragments, role, tool, value, boundary=None):
         if role != "operator":
             payload["agent_type"] = role
         try:
-            hook = subprocess.run([sys.executable, str(paths.root() / "hooks" / "ppl_guard.py")],
+            # bound to the throwaway run's lane by its command line, as a lane's settings render it
+            hook = subprocess.run([sys.executable, str(paths.root() / "hooks" / "ppl_guard.py"),
+                                   "--task", TASK],
                                   input=json.dumps(payload), capture_output=True, text=True,
                                   env=environment, timeout=TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:

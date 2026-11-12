@@ -52,8 +52,23 @@ def config_file():
     return home() / "config.toml"
 
 
-def routing_file():
+def machine_routing_file():
+    """The machine's routing.toml, which `ppl lane` freezes a copy of into each lane it starts."""
     return home() / "routing.toml"
+
+
+def routing_file():
+    """The routing.toml a call reads (D15): in a lane, the copy `ppl lane` froze into its start
+    directory, PPL_TASK naming a lane the registry holds; else the machine's. A registry that
+    cannot be read raises, so a lane's call never falls back to the machine's models."""
+    task = os.environ.get("PPL_TASK")
+    if task:
+        # imported here: lanes imports this module
+        from . import lanes
+        entry = lanes.entry(task)
+        if entry is not None:
+            return lanes.start_dir(task) / "routing.toml"
+    return machine_routing_file()
 
 
 def models_file():
@@ -79,5 +94,30 @@ def run_dir(task_id):
     return runs_dir() / check_task_id(task_id)
 
 
-def active_file():
+def label_dir(task_id):
+    """Where `ppl label` keeps the task's labels, PPL_HOME/labels/<task>, outside the run
+    directory so destroy never moves them, and the only part of labels a lane's sandbox
+    writes, which ppl lane makes before the session starts."""
+    return home() / "labels" / check_task_id(task_id)
+
+
+def pending_marker(task_id):
+    """The marker a run destroyed with reflection leaves while its reflection is not recorded:
+    PPL_HOME/lessons/pending/<task>.json."""
+    return home() / "lessons" / "pending" / ("%s.json" % task_id)
+
+
+CLAIMED = ".claimed-"
+
+
+def claimed_marker(task_id, by_task):
+    """That marker once the lane of `by_task` claimed it (D20): <task>.json.claimed-<by_task>."""
+    marker = pending_marker(task_id)
+    return marker.with_name(marker.name + CLAIMED + by_task)
+
+
+def legacy_active_file():
+    """The single-run pointer ppl init wrote before lanes. Nothing writes it now: only
+    `ppl lane` reads it, to refuse while it names a run from before lanes that is not finished
+    (D19)."""
     return runs_dir() / "ACTIVE"

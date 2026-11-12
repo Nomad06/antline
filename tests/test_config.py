@@ -96,18 +96,38 @@ class TestConfig(unittest.TestCase):
                 self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
                 self.assertIn("lessons.reflect", caught.exception.message)
 
+    def test_lanes_max_defaults_to_three(self):
+        self.assertEqual(config.lanes_max(), 3)
+        self.write("[lanes]\n")
+        self.assertEqual(config.lanes_max(), 3)
+        self.write("[lanes]\nmax = 9\n")
+        self.assertEqual(config.lanes_max(), 9)
+
+    def test_lanes_max_outside_one_to_nine_is_refused(self):
+        for value in ("0", "10", '"3"', "true"):
+            with self.subTest(value=value):
+                self.write("[lanes]\nmax = %s\n" % value)
+                with self.assertRaises(PplError) as caught:
+                    config.lanes_max()
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                self.assertIn("lanes.max", caught.exception.message)
+
+    def test_an_unknown_lanes_key_is_refused_naming_max(self):
+        self.write("[lanes]\nmaxx = 2\n")
+        with self.assertRaises(PplError) as caught:
+            config.lanes_max()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("unknown key maxx", caught.exception.message)
+        self.assertIn("the known key is max", caught.exception.message)
 
 
 class TestWrite(unittest.TestCase):
     def setUp(self):
         self._home = os.environ.get("PPL_HOME")
         os.environ["PPL_HOME"] = str(Path(tmphome.mkdtemp(prefix="pplhome-")) / "fresh")
-        self._skills = os.environ.pop("PPL_SKILLS_DIR", None)
 
     def tearDown(self):
         os.environ["PPL_HOME"] = self._home
-        if self._skills is not None:
-            os.environ["PPL_SKILLS_DIR"] = self._skills
 
     def test_set_active_harness_creates_the_file_and_reads_back(self):
         config.set_active_harness("example-maven")
@@ -118,11 +138,11 @@ class TestWrite(unittest.TestCase):
     def test_set_active_harness_keeps_every_other_setting(self):
         paths.home().mkdir(parents=True)
         paths.config_file().write_text(
-            '[harness]\nactive = "a"\nnote = "kept"\n\n[claude]\nskills_dir = "/x"\n',
+            '[harness]\nactive = "a"\nnote = "kept"\n\n[claude]\nbinary = "/x"\n',
             encoding="utf-8")
         config.set_active_harness("b")
         self.assertEqual(config.load(), {"harness": {"active": "b", "note": "kept"},
-                                         "claude": {"skills_dir": "/x"}})
+                                         "claude": {"binary": "/x"}})
 
     def test_set_active_harness_refuses_a_non_table_harness_entry(self):
         paths.home().mkdir(parents=True)
@@ -132,22 +152,19 @@ class TestWrite(unittest.TestCase):
         self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
         self.assertEqual(paths.config_file().read_text(encoding="utf-8"), 'harness = "a"\n')
 
-    def test_skills_dir_prefers_the_environment_then_config_then_the_default(self):
-        self.assertEqual(config.skills_dir(), Path.home() / ".claude" / "skills")
+    def test_remove_drops_the_named_keys_and_says_which_were_there(self):
         paths.home().mkdir(parents=True)
-        paths.config_file().write_text('[claude]\nskills_dir = "/from/config"\n', encoding="utf-8")
-        self.assertEqual(config.skills_dir(), Path("/from/config"))
-        os.environ["PPL_SKILLS_DIR"] = "/from/env"
-        try:
-            self.assertEqual(config.skills_dir(), Path("/from/env"))
-        finally:
-            del os.environ["PPL_SKILLS_DIR"]
+        paths.config_file().write_text('[claude]\nbinary = "c"\nworkspace = "/w"\n',
+                                       encoding="utf-8")
+        self.assertEqual(config.remove("claude", ["workspace", "hooks"]), ["workspace"])
+        self.assertEqual(config.load(), {"claude": {"binary": "c"}})
+        self.assertEqual(config.remove("claude", ["hooks"]), [])
 
-    def test_skills_dir_refuses_a_non_table_claude_entry(self):
+    def test_remove_refuses_a_non_table_entry(self):
         paths.home().mkdir(parents=True)
         paths.config_file().write_text('claude = "x"\n', encoding="utf-8")
         with self.assertRaises(PplError) as caught:
-            config.skills_dir()
+            config.remove("claude", ["workspace"])
         self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
 
 

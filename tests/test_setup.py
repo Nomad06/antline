@@ -3,6 +3,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -15,11 +16,11 @@ import tmphome
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_CLAUDE_HOME"] = tmphome.mkdtemp(prefix="pplclaudehome-")
 
+import fixtures
 from ppl import cli, config, harness, models, os_sandbox, paths, setup
 from ppl.errors import PplError
 
 SOURCE = Path(__file__).resolve().parents[1] / "ppl" / "_assets"
-_DIR_VARS = ("PPL_AGENTS_DIR", "PPL_SKILLS_DIR")
 
 
 def ok_probe(model, binary="claude", env=None):
@@ -34,13 +35,18 @@ def ok_forge(*args, **kwargs):
     return {"ok": True, "detail": "ok"}
 
 
+def run_cli(*argv):
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = cli.main(list(argv))
+    return code, out.getvalue(), err.getvalue()
+
+
 class SetupTestCase(unittest.TestCase):
     def setUp(self):
+        self.enterContext(fixtures.git_identity())
         self._home = os.environ.get("PPL_HOME")
         os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
-        # Another module sets these at import time, and the dirs are read
-        # environment first, so the apply step would render into its dirs.
-        self._dirs = {name: os.environ.pop(name, None) for name in _DIR_VARS}
         self.workspace = Path(tmphome.mkdtemp(prefix="pplws-"))
         self.repo_root = Path(tmphome.mkdtemp(prefix="pplrepo-"))
         self.lines = []
@@ -56,8 +62,7 @@ class SetupTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.answers = {
-            "claude_binary": "claude", "workspace": str(self.workspace), "hooks": "local",
-            "verify": "yes",
+            "claude_binary": "claude", "verify": "yes",
             "harness_from": "example-generic", "harness_name": "mine",
             "repo": str(self.repo_root / "repo"), "default_branch": "main",
             "task_url_template": "https://tracker.example/<TASK-ID>",
@@ -66,13 +71,10 @@ class SetupTestCase(unittest.TestCase):
 
     def tearDown(self):
         os.environ["PPL_HOME"] = self._home
-        for name, value in self._dirs.items():
-            if value is not None:
-                os.environ[name] = value
 
-    def settings(self):
-        path = self.workspace / ".claude" / "settings.local.json"
-        return json.loads(path.read_text(encoding="utf-8"))
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(paths.harness_dir("mine")), *args],
+                              capture_output=True, text=True, check=True).stdout
 
 
 class TestNonInteractive(SetupTestCase):
@@ -85,20 +87,14 @@ class TestNonInteractive(SetupTestCase):
         self.assertTrue(paths.routing_file().is_file())
         self.assertTrue(paths.models_file().is_file())
         doc = config.load()
-        self.assertEqual(doc["claude"]["workspace"], str(self.workspace))
-        self.assertEqual(doc["harness"]["active"], "mine")
-        self.assertNotIn("pending", doc["harness"])
+        self.assertEqual(doc["claude"], {"binary": "claude"})
+        self.assertEqual(doc["harness"], {"active": "mine"})
         self.assertEqual(sorted(doc["setup"]["done"]), sorted(setup.STEPS))
-        settings = self.settings()
-        commands = [h["command"] for e in settings["hooks"]["PreToolUse"] for h in e["hooks"]]
-        self.assertTrue(any("ppl_guard.py" in c for c in commands))
-        self.assertTrue(any("ppl_dispatch.py" in c for h in settings["hooks"]["SubagentStart"]
-                            for c in [x["command"] for x in h["hooks"]]))
-        self.assertTrue(any("ppl_usage.py" in c for h in settings["hooks"]["SubagentStop"]
-                            for c in [x["command"] for x in h["hooks"]]))
-        self.assertTrue((self.workspace / ".claude" / "skills" / "pipeline" / "SKILL.md").is_file())
-        self.assertTrue((self.workspace / ".claude" / "agents" / "ppl-code-worker.md").is_file())
-        from ppl import harness
+        self.assertEqual(list(self.workspace.iterdir()), [])
+        # the answers are in the import commit, so the harness is clean and apply took it
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertIn("harness mine at %s is the default for ppl lane"
+                      % self.git("rev-parse", "HEAD").strip(), self.lines)
         doc = harness.load("mine")
         self.assertEqual(doc["harness"]["name"], "mine")
         self.assertEqual(doc["task"]["key_pattern"], "^DEMO-[0-9]+$")
@@ -119,16 +115,6 @@ class TestNonInteractive(SetupTestCase):
         self.assertEqual(harness_toml.read_text(encoding="utf-8"), written)
         self.assertEqual(harness.list_names(), ["mine"])
         self.assertIn("harness mine is already installed and identical, kept", self.lines)
-        settings = self.settings()
-        guard_entries = [e for e in settings["hooks"]["PreToolUse"]
-                         if any("ppl_guard.py" in h["command"] for h in e["hooks"])]
-        self.assertEqual(len(guard_entries), 1)
-        dispatch_entries = [e for e in settings["hooks"]["SubagentStart"]
-                            if any("ppl_dispatch.py" in h["command"] for h in e["hooks"])]
-        self.assertEqual(len(dispatch_entries), 1)
-        usage_entries = [e for e in settings["hooks"]["SubagentStop"]
-                         if any("ppl_usage.py" in h["command"] for h in e["hooks"])]
-        self.assertEqual(len(usage_entries), 1)
         self.assertEqual(len(config.load()["setup"]["done"]), len(setup.STEPS))
         self.assertEqual(config.load()["harness"]["active"], "mine")
 
@@ -147,9 +133,32 @@ class TestNonInteractive(SetupTestCase):
         self.assertEqual(harness_toml.read_text(encoding="utf-8"), edited)
         self.assertFalse(paths.harness_dir("mine.replacing").exists())
         self.answers["harness_from"] = "mine"
+        # apply takes a committed harness only, so the owner commits the hand edit first
+        refused = setup.run(**kwargs)
+        self.assertEqual(refused["failed"], ["apply"])
+        self.assertIn("harness.toml", refused["reasons"]["apply"])
+        self.git("commit", "-q", "-am", "hand-added gate")
         third = setup.run(**kwargs)
-        self.assertEqual(third["done"], list(setup.STEPS))
+        self.assertEqual(third["done"], ["apply"])
         self.assertEqual(harness_toml.read_text(encoding="utf-8"), edited)
+
+    def test_an_apply_the_harness_repo_refuses_fails_the_step_not_the_wizard(self):
+        # R55: an in-place forge change dirties the installed harness repository, and the apply
+        # step after it reports the refusal as its reason instead of stopping the wizard
+        setup.run(answers=self.answers, non_interactive=True, probe=ok_probe,
+                  forge_check=ok_forge, emit=self.lines.append)
+        self.answers.update(forge="gitlab", gitlab_mcp_server="GitLab-MCP")
+        result = setup.run(steps=["forge", "apply"], answers=self.answers, non_interactive=True,
+                           forge_check=ok_forge, emit=self.lines.append)
+        self.assertEqual((result["done"], result["failed"]), (["forge"], ["apply"]))
+        self.assertIn("uncommitted changes", result["reasons"]["apply"])
+        self.assertIn("harness.toml", result["reasons"]["apply"])
+        self.assertNotIn("apply", config.steps_state()["done"])
+        code, out, err = run_cli("setup", "apply", "--non-interactive")
+        self.assertEqual(code, 2)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(json.loads(err)["error_code"], "SETUP_INCOMPLETE")
+        self.assertIn("apply: ", json.loads(err)["message"])
 
     def test_replace_harness_yes_replaces_a_differing_installed_harness(self):
         setup.run(answers=self.answers, non_interactive=True, probe=ok_probe,
@@ -193,14 +202,6 @@ class TestNonInteractive(SetupTestCase):
         setup.run(**kwargs)
         from ppl import harness
         self.assertEqual(harness.load("mine")["repo"]["default_branch"], "develop")
-
-    def test_missing_answer_is_setup_incomplete(self):
-        del self.answers["workspace"]
-        with self.assertRaises(PplError) as caught:
-            setup.run(answers=self.answers, non_interactive=True, probe=ok_probe,
-                      emit=self.lines.append)
-        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
-        self.assertIn("workspace", caught.exception.message)
 
     def test_missing_repo_answer_is_setup_incomplete(self):
         del self.answers["repo"]
@@ -250,12 +251,12 @@ class TestNonInteractive(SetupTestCase):
         self.assertEqual(config.steps_state(), {"done": {"models", "paths"}, "skipped": set()})
 
     def test_an_empty_answer_is_setup_incomplete(self):
-        self.answers["workspace"] = " "
+        self.answers["claude_binary"] = " "
         with self.assertRaises(PplError) as caught:
             setup.run(steps=["paths", "claude"], answers=self.answers, non_interactive=True,
                       emit=self.lines.append)
         self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
-        self.assertIn("workspace", caught.exception.message)
+        self.assertIn("claude_binary", caught.exception.message)
 
     def test_tier_answers_override_the_example_models(self):
         self.answers["tier.heavy"] = "custom-heavy"
@@ -303,21 +304,6 @@ class TestNonInteractive(SetupTestCase):
                   probe=ok_probe, emit=self.lines.append)
         self.assertEqual(paths.routing_file().read_text(encoding="utf-8"),
                          (SOURCE / "defaults" / "routing.example.toml").read_text(encoding="utf-8"))
-
-    def test_hooks_manual_prints_the_snippet_and_writes_nothing(self):
-        self.answers["hooks"] = "manual"
-        lines = []
-        setup.run(steps=["paths", "claude"], answers=self.answers, non_interactive=True,
-                  emit=lines.append)
-        self.assertFalse((self.workspace / ".claude" / "settings.local.json").exists())
-        self.assertTrue(any("ppl_guard.py" in line for line in lines))
-
-    def test_unknown_hooks_answer_is_setup_incomplete(self):
-        self.answers["hooks"] = "everywhere"
-        with self.assertRaises(PplError) as caught:
-            setup.run(steps=["paths", "claude"], answers=self.answers, non_interactive=True,
-                      emit=lambda line: None)
-        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
 
     def test_harness_warnings_are_printed(self):
         lines = []
@@ -516,30 +502,31 @@ class TestNonInteractive(SetupTestCase):
                   forge_check=ok_forge, emit=self.lines.append)
         self.assertEqual(harness.load("mine")["forge"], {"kind": "github"})
 
-    def test_a_workspace_that_cannot_be_created_fails_the_step_not_the_wizard(self):
-        blocker = self.workspace / "a-file"
-        blocker.write_text("x", encoding="utf-8")
-        self.answers["workspace"] = str(blocker / "ws")
+    @unittest.skipIf(os.name != "posix" or os.getuid() == 0,
+                     "a chmod-based unwritable directory needs a non-root POSIX user")
+    def test_an_old_workspace_file_that_cannot_be_removed_fails_the_step_not_the_wizard(self):
+        config.ensure()
+        config.update("claude", {"workspace": str(self.workspace)})
+        agents = self.workspace / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        from ppl import routing
+        (agents / "ppl-verifier.md").write_text("---\n%s\n---\n" % routing.GENERATED_NOTICE,
+                                                encoding="utf-8")
+        agents.chmod(0o500)
+        self.addCleanup(agents.chmod, 0o700)
         result = setup.run(steps=["paths", "claude", "models"], answers=self.answers,
                            non_interactive=True, probe=ok_probe, emit=self.lines.append)
         self.assertEqual(result["failed"], ["claude"])
         self.assertEqual(result["done"], ["paths", "models"])
-        expected = "cannot read or write %s" % (blocker / "ws")
+        expected = "cannot read or write %s" % (agents / "ppl-verifier.md")
         self.assertTrue(any(line.startswith(expected) for line in self.lines), self.lines)
+        self.assertEqual(config.load()["claude"]["workspace"], str(self.workspace))
 
     def test_forge_and_apply_without_a_harness_fail_and_the_wizard_goes_on(self):
         result = setup.run(answers=self.answers, non_interactive=True, probe=ok_probe,
                            forge_check=ok_forge, skip=["models", "harness"], emit=self.lines.append)
         self.assertEqual(result["failed"], ["forge", "apply"])
         self.assertIn("no harness configured, run `ppl setup harness` first", self.lines)
-
-    def test_a_bad_default_from_config_is_setup_incomplete(self):
-        config.update("claude", {"hooks": "bogus"})
-        with self.assertRaises(PplError) as caught:
-            setup.run(steps=["paths", "claude"], answers={"workspace": str(self.workspace)},
-                      non_interactive=True, emit=self.lines.append)
-        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
-        self.assertIn("default hooks='bogus'", caught.exception.message)
 
     def test_an_unknown_tier_answer_is_setup_incomplete(self):
         self.answers["tier.huge"] = "custom"
@@ -688,33 +675,12 @@ class TestTrackerStep(SetupTestCase):
         self.assertEqual(harness.load("mine")["tracker"]["kind"], "github-issues")
 
 
-class TestLocalSettings(SetupTestCase):
-    def test_own_entries_are_replaced_and_the_user_hooks_kept(self):
-        path = self.workspace / ".claude" / "settings.local.json"
-        path.parent.mkdir(parents=True)
-        user_hook = {"type": "command", "command": "echo mine"}
-        path.write_text(json.dumps({
-            "permissions": {"allow": ["Bash(ls)"]},
-            "hooks": {"PreToolUse": [
-                {"matcher": "Bash", "hooks": [user_hook]},
-                {"matcher": ".*", "hooks": [
-                    {"type": "command", "command": "python3 /old/hooks/ppl_guard.py"},
-                    dict(user_hook, command="echo shared")]},
-            ]}}), encoding="utf-8")
-        setup.write_local_settings(self.workspace, SOURCE)
-        setup.write_local_settings(self.workspace, SOURCE)
-        settings = self.settings()
-        self.assertEqual(settings["permissions"], {"allow": ["Bash(ls)"]})
-        commands = [h["command"] for e in settings["hooks"]["PreToolUse"] for h in e["hooks"]]
-        self.assertEqual(sum("ppl_guard.py" in c for c in commands), 1)
-        self.assertIn("echo mine", commands)
-        self.assertIn("echo shared", commands)
-        self.assertNotIn("python3 /old/hooks/ppl_guard.py", commands)
-        self.assertIn(str(SOURCE / "hooks" / "ppl_guard.py"), " ".join(commands))
+class TestHookEntries(unittest.TestCase):
+    """The hook entries a lane's settings.json carries (lane_render renders them)."""
 
     def test_hook_entries_pin_the_interpreter_that_ran_setup(self):
         # Bare python3 is whatever Claude Code's PATH finds, and an older one
-        # disarms the cage. The interpreter running setup is proven new enough.
+        # disarms the cage. The interpreter running ppl is proven new enough.
         interpreter = "/opt/my python/bin/python3.12"
         with mock.patch.object(sys, "executable", interpreter):
             entries = setup.hook_entries(SOURCE)
@@ -729,11 +695,6 @@ class TestLocalSettings(SetupTestCase):
                          "%s %s" % (shlex.quote(interpreter),
                                     shlex.quote(str(hooks_dir / "ppl_usage.py"))))
         self.assertEqual(sorted(entries), ["PreToolUse", "SubagentStart", "SubagentStop"])
-        setup.write_local_settings(self.workspace, SOURCE)
-        commands = [h["command"] for e in self.settings()["hooks"]["PreToolUse"]
-                    for h in e["hooks"]]
-        self.assertTrue(all(c.startswith(shlex.quote(sys.executable) + " ") for c in commands),
-                        commands)
 
     def test_setup_registers_the_usage_hook_on_subagentstop(self):
         entry = setup.hook_entries(SOURCE)["SubagentStop"]
@@ -742,110 +703,235 @@ class TestLocalSettings(SetupTestCase):
         self.assertTrue(entry["hooks"][0]["command"].endswith("ppl_usage.py"),
                         entry["hooks"][0]["command"])
         self.assertEqual(entry["hooks"][0]["type"], "command")
-        setup.write_local_settings(self.workspace, SOURCE)
-        setup.write_local_settings(self.workspace, SOURCE)
-        commands = [h["command"] for e in self.settings()["hooks"]["SubagentStop"]
-                    for h in e["hooks"]]
-        self.assertEqual(sum("ppl_usage.py" in c for c in commands), 1, commands)
 
-    def test_a_settings_file_of_the_wrong_shape_is_setup_incomplete(self):
-        path = self.workspace / ".claude" / "settings.local.json"
-        path.parent.mkdir(parents=True)
-        for text in ("{not json", "[]", '{"hooks": []}', '{"hooks": {"PreToolUse": {}}}',
-                     '{"hooks": {"PreToolUse": [5]}}'):
-            path.write_text(text, encoding="utf-8")
-            with self.assertRaises(PplError) as caught:
-                setup.write_local_settings(self.workspace, SOURCE)
-            self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE", text)
-            self.assertEqual(path.read_text(encoding="utf-8"), text)
+    def test_each_command_ends_in_the_lanes_task(self):
+        for event, entry in setup.hook_entries(SOURCE, "DEMO-1").items():
+            with self.subTest(event=event):
+                self.assertTrue(entry["hooks"][0]["command"].endswith(" --task DEMO-1"))
 
 
-class TestOsSandboxSettings(SetupTestCase):
+class TestOldWorkspaceCleanup(SetupTestCase):
+    """ppl setup claude takes back what an older ppl wrote into the workspace config.toml names
+    (D18), matched by ppl's own markers only, and retires the workspace keys."""
+
     SANDBOX = {"enabled": True, "network": {"deniedDomains": ["github.com"]}}
-    PROFILE = {"sandbox": SANDBOX, "allow": ["Bash(/opt/x/gh pr view *)", "Bash(/opt/x/gh auth status)"]}
+    ALLOW = ["Bash(/opt/x/gh pr view *)", "Bash(/opt/x/gh auth status)"]
 
-    def path(self):
-        return self.workspace / ".claude" / "settings.local.json"
+    def setUp(self):
+        super().setUp()
+        config.ensure()
+        self.claude = self.workspace / ".claude"
+        config.update("claude", {"binary": "claude", "workspace": str(self.workspace),
+                                 "hooks": "local", "agents_dir": str(self.claude / "agents"),
+                                 "skills_dir": str(self.claude / "skills")})
+        self.facts = paths.home() / os_sandbox.FACTS_FILE
+        self.facts.write_text(json.dumps({"version": 1, "workspace": str(self.workspace),
+                                          "written_sandbox": self.SANDBOX,
+                                          "written_allow": self.ALLOW}), encoding="utf-8")
 
-    def record(self, **extra):
-        (paths.home() / os_sandbox.FACTS_FILE).write_text(json.dumps(extra), encoding="utf-8")
-
-    def test_a_profile_is_written_with_the_allow_entries_and_the_hooks_kept(self):
-        setup.write_local_settings(self.workspace, SOURCE)
-        setup.write_os_sandbox_settings(self.workspace, self.PROFILE)
-        doc = self.settings()
-        self.assertEqual(doc["sandbox"], self.SANDBOX)
-        self.assertEqual(doc["permissions"]["allow"], self.PROFILE["allow"])
-        self.assertIn("PreToolUse", doc["hooks"])
-
-    def test_a_foreign_sandbox_key_refuses_and_leaves_the_file(self):
-        self.path().parent.mkdir(parents=True)
-        text = json.dumps({"sandbox": {"enabled": False}, "model": "x"})
-        self.path().write_text(text, encoding="utf-8")
-        before = self.path().read_bytes()
-        with self.assertRaises(PplError) as caught:
-            setup.write_os_sandbox_settings(self.workspace, self.PROFILE)
-        self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE")
-        self.assertIn("sandbox", caught.exception.message)
-        self.assertEqual(self.path().read_bytes(), before)
-
-    def test_a_hand_edited_ppl_block_is_foreign(self):
-        self.record(written_sandbox=self.SANDBOX)
-        self.path().parent.mkdir(parents=True)
-        self.path().write_text(json.dumps({"sandbox": dict(self.SANDBOX, enabled=False)}),
-                               encoding="utf-8")
-        before = self.path().read_bytes()
-        with self.assertRaises(PplError):
-            setup.write_os_sandbox_settings(self.workspace, self.PROFILE)
-        self.assertEqual(self.path().read_bytes(), before)
-
-    def test_the_recorded_block_is_replaced(self):
-        self.record(written_sandbox=self.SANDBOX)
-        self.path().parent.mkdir(parents=True)
-        self.path().write_text(json.dumps({"sandbox": self.SANDBOX}), encoding="utf-8")
-        newer = {"sandbox": {"enabled": True, "x": 1}, "allow": []}
-        setup.write_os_sandbox_settings(self.workspace, newer)
-        self.assertEqual(self.settings()["sandbox"], newer["sandbox"])
-
-    def test_invalid_json_refuses_and_leaves_the_file(self):
-        self.path().parent.mkdir(parents=True)
-        for text in ("{not json", "[]", '{"permissions": []}', '{"permissions": {"allow": 3}}'):
-            self.path().write_text(text, encoding="utf-8")
-            before = self.path().read_bytes()
-            with self.assertRaises(PplError) as caught:
-                setup.write_os_sandbox_settings(self.workspace, self.PROFILE)
-            self.assertEqual(caught.exception.code, "SETUP_INCOMPLETE", text)
-            self.assertEqual(self.path().read_bytes(), before)
-
-    def test_none_removes_the_block_and_the_recorded_entries_only(self):
-        self.record(written_sandbox=self.SANDBOX, written_allow=self.PROFILE["allow"])
-        self.path().parent.mkdir(parents=True)
-        self.path().write_text(json.dumps({
-            "sandbox": self.SANDBOX, "model": "x",
-            "permissions": {"allow": ["Bash(ls *)"] + self.PROFILE["allow"], "deny": ["Bash(rm *)"]}}),
+    def write_workspace(self, sandbox=None, skill_notice=True):
+        # the hook entries an older ppl setup claude wrote: no --task
+        old = setup.hook_entries(SOURCE)
+        foreign = {"type": "command", "command": "/usr/local/bin/my-hook.sh"}
+        doc = {"model": "opus",
+               "permissions": {"allow": ["Bash(ls *)"] + self.ALLOW, "deny": ["Bash(rm *)"]},
+               "sandbox": self.SANDBOX if sandbox is None else sandbox,
+               "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [foreign]},
+                                        {"matcher": ".*", "hooks": old["PreToolUse"]["hooks"]
+                                         + [dict(foreign, command="echo shared")]},
+                                        {"hooks": [dict(foreign, command="/opt/not_ppl_guard.py")]}],
+                         "SubagentStart": [old["SubagentStart"]],
+                         "SubagentStop": [old["SubagentStop"]]}}
+        path = self.claude / "settings.local.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        agents = self.claude / "agents"
+        agents.mkdir()
+        from ppl import routing
+        (agents / "ppl-code-worker.md").write_text(
+            "---\n%s\nname: ppl-code-worker\n---\nbody\n" % routing.LEGACY_GENERATED_NOTICE,
             encoding="utf-8")
-        setup.write_os_sandbox_settings(self.workspace, None)
-        doc = self.settings()
+        (agents / "ppl-verifier.md").write_text(
+            "---\n%s\nname: ppl-verifier\n---\nbody\n" % routing.GENERATED_NOTICE,
+            encoding="utf-8")
+        (agents / "ppl-mine.md").write_text("---\nname: ppl-mine\n---\nmy own agent\n",
+                                            encoding="utf-8")
+        (agents / "helper.md").write_text("---\nname: helper\n---\nmine\n", encoding="utf-8")
+        skill = self.claude / "skills" / "pipeline"
+        (skill / "references").mkdir(parents=True)
+        notice = harness.LEGACY_SKILL_NOTICE + "\n" if skill_notice else ""
+        (skill / "SKILL.md").write_text("---\nname: pipeline\n---\n%ssteps\n" % notice,
+                                        encoding="utf-8")
+        (skill / "references" / "gates.md").write_text("gates\n", encoding="utf-8")
+        (self.claude / "skills" / "team-kb").mkdir()
+        (self.claude / "skills" / "team-kb" / "SKILL.md").write_text("kb\n", encoding="utf-8")
+        return path
+
+    def run_claude(self):
+        return setup.run(steps=["claude"], answers={"claude_binary": "/opt/claude"},
+                         non_interactive=True, emit=self.lines.append)
+
+    def test_setup_claude_removes_only_ppl_owned_entries_from_the_old_workspace(self):
+        path = self.write_workspace()
+        result = self.run_claude()
+        self.assertEqual(result["done"], ["claude"])
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(doc["hooks"], {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command",
+                                           "command": "/usr/local/bin/my-hook.sh"}]},
+            {"matcher": ".*", "hooks": [{"type": "command", "command": "echo shared"}]},
+            {"hooks": [{"type": "command", "command": "/opt/not_ppl_guard.py"}]}]})
         self.assertNotIn("sandbox", doc)
         self.assertEqual(doc["permissions"], {"allow": ["Bash(ls *)"], "deny": ["Bash(rm *)"]})
-        self.assertEqual(doc["model"], "x")
+        self.assertEqual(doc["model"], "opus")
+        agents = self.claude / "agents"
+        self.assertEqual(sorted(p.name for p in agents.iterdir()), ["helper.md", "ppl-mine.md"])
+        self.assertFalse((self.claude / "skills" / "pipeline").exists())
+        self.assertTrue((self.claude / "skills" / "team-kb" / "SKILL.md").is_file())
+        self.assertFalse(self.facts.exists())
+        self.assertEqual(config.load()["claude"], {"binary": "/opt/claude"})
+        said = "\n".join(self.lines)
+        for removed in (str(path), str(agents / "ppl-code-worker.md"),
+                        str(agents / "ppl-verifier.md"),
+                        str(self.claude / "skills" / "pipeline"), str(self.facts),
+                        "ppl_guard.py", "ppl_dispatch.py", "ppl_usage.py", "sandbox",
+                        self.ALLOW[0], self.ALLOW[1]):
+            self.assertIn(removed, said)
+        for kept in ("ppl-mine.md", "helper.md", "team-kb", "my-hook.sh", "echo shared",
+                     "not_ppl_guard.py"):
+            self.assertNotIn(kept, said)
 
-    def test_none_without_a_file_creates_nothing(self):
-        setup.write_os_sandbox_settings(self.workspace, None)
-        self.assertFalse(self.path().exists())
+    def test_a_pipeline_skill_without_the_notice_and_an_edited_sandbox_block_stay(self):
+        edited = dict(self.SANDBOX, enabled=False)
+        path = self.write_workspace(sandbox=edited, skill_notice=False)
+        self.run_claude()
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(doc["sandbox"], edited)
+        self.assertTrue((self.claude / "skills" / "pipeline" / "SKILL.md").is_file())
+        self.assertTrue((self.claude / "skills" / "pipeline" / "references" / "gates.md").is_file())
+        self.assertFalse((self.claude / "agents" / "ppl-code-worker.md").exists())
+        self.assertEqual(config.load()["claude"], {"binary": "/opt/claude"})
 
-    def test_none_leaves_a_foreign_block_alone(self):
-        self.path().parent.mkdir(parents=True)
-        text = json.dumps({"sandbox": {"enabled": False}})
-        self.path().write_text(text, encoding="utf-8")
-        setup.write_os_sandbox_settings(self.workspace, None)
-        self.assertEqual(self.path().read_text(encoding="utf-8"), text)
+    def test_a_pre_lanes_run_still_in_flight_keeps_the_old_workspace(self):
+        # removing its hooks and its skill would disarm a pre-lanes run mid-flight
+        path = self.write_workspace()
+        before = path.read_bytes()
+        from ppl import run
+        run.init("OLD-1", "u", str(self.repo_root))
+        paths.legacy_active_file().write_text("OLD-1\n", encoding="utf-8")
+        result = self.run_claude()
+        self.assertEqual(result["done"], ["claude"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue((self.claude / "agents" / "ppl-code-worker.md").is_file())
+        self.assertTrue((self.claude / "skills" / "pipeline" / "SKILL.md").is_file())
+        self.assertTrue(self.facts.exists())
+        kept = config.load()["claude"]
+        self.assertEqual(kept["binary"], "/opt/claude")
+        self.assertEqual(kept["workspace"], str(self.workspace))
+        said = "\n".join(self.lines)
+        self.assertIn("OLD-1", said)
+        self.assertIn("ppl setup claude", said)
+
+    def test_an_unreadable_settings_file_fails_the_step_and_removes_nothing(self):
+        path = self.write_workspace()
+        path.write_text("// my settings\n{", encoding="utf-8")
+        result = self.run_claude()
+        self.assertEqual(result["failed"], ["claude"])
+        self.assertIn(str(path), result["reasons"]["claude"])
+        self.assertEqual(path.read_text(encoding="utf-8"), "// my settings\n{")
+        self.assertTrue((self.claude / "agents" / "ppl-code-worker.md").is_file())
+        self.assertTrue((self.claude / "skills" / "pipeline" / "SKILL.md").is_file())
+        self.assertTrue(self.facts.exists())
+        self.assertEqual(config.load()["claude"]["workspace"], str(self.workspace))
+
+    def test_a_linked_settings_file_is_left_as_it_is_and_reported(self):
+        path = self.write_workspace()
+        target = Path(tmphome.mkdtemp(prefix="ppldotfiles-")) / "settings.local.json"
+        path.rename(target)
+        path.symlink_to(target)
+        before = target.read_bytes()
+        result = self.run_claude()
+        self.assertEqual(result["done"], ["claude"])
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(os.readlink(path), str(target))
+        self.assertEqual(target.read_bytes(), before)
+        said = "\n".join(self.lines)
+        self.assertIn("left %s as it is" % path, said)
+        self.assertIn(str(target), said)
+        self.assertIn("ppl_guard.py", said)
+        self.assertFalse((self.claude / "agents" / "ppl-code-worker.md").exists())
+        # ledger 296: what was left keeps the workspace key and the facts, so a rerun finds
+        # the workspace and names what is left again
+        self.assertEqual(config.load()["claude"]["workspace"], str(self.workspace))
+        self.assertTrue(self.facts.exists())
+        self.lines.clear()
+        self.run_claude()
+        again = "\n".join(self.lines)
+        self.assertIn("left %s as it is" % path, again)
+        self.assertIn("ppl_guard.py", again)
+
+    def test_a_linked_agent_and_a_linked_pipeline_dir_stay_and_their_targets_too(self):
+        from ppl import routing
+        self.write_workspace()
+        elsewhere = Path(tmphome.mkdtemp(prefix="ppldotfiles-"))
+        agent = elsewhere / "ppl-briefer.md"
+        agent.write_text("---\n%s\nname: ppl-briefer\n---\n" % routing.LEGACY_GENERATED_NOTICE,
+                         encoding="utf-8")
+        (self.claude / "agents" / "ppl-briefer.md").symlink_to(agent)
+        skills = self.claude / "skills"
+        shutil.move(str(skills / "pipeline"), str(elsewhere / "pipeline"))
+        (skills / "pipeline").symlink_to(elsewhere / "pipeline")
+        self.run_claude()
+        self.assertTrue((self.claude / "agents" / "ppl-briefer.md").is_symlink())
+        self.assertTrue(agent.is_file())
+        self.assertTrue((skills / "pipeline").is_symlink())
+        self.assertTrue((elsewhere / "pipeline" / "SKILL.md").is_file())
+        self.assertTrue((elsewhere / "pipeline" / "references" / "gates.md").is_file())
+        self.assertFalse((self.claude / "agents" / "ppl-code-worker.md").exists())
+
+    def test_an_unreadable_legacy_pointer_keeps_the_old_workspace(self):
+        path = self.write_workspace()
+        before = path.read_bytes()
+        paths.runs_dir().mkdir(parents=True, exist_ok=True)
+        paths.legacy_active_file().mkdir()
+        result = self.run_claude()
+        self.assertEqual(result["done"], ["claude"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue((self.claude / "agents" / "ppl-code-worker.md").is_file())
+        self.assertTrue(self.facts.exists())
+        self.assertEqual(config.load()["claude"]["workspace"], str(self.workspace))
+        said = "\n".join(self.lines)
+        self.assertIn("runs/ACTIVE", said)
+        self.assertIn("ppl setup claude", said)
+
+    def test_with_no_old_workspace_the_step_records_the_binary_only(self):
+        doc = config.load()
+        doc["claude"] = {"binary": "claude"}
+        config.save(doc)
+        self.facts.unlink()
+        result = self.run_claude()
+        self.assertEqual(result["done"], ["claude"])
+        self.assertEqual(config.load()["claude"], {"binary": "/opt/claude"})
+        self.assertFalse(self.claude.exists())
+
+    def test_the_claude_step_asks_only_for_the_binary(self):
+        asked = []
+
+        def read(prompt):
+            asked.append(prompt)
+            return ""
+        setup.run(steps=["claude"], answers={}, non_interactive=False, read=read,
+                  emit=lambda line: None)
+        self.assertEqual(len(asked), 1, asked)
+        self.assertTrue(asked[0].startswith("claude: Claude Code binary"), asked[0])
+        self.assertNotIn("workspace", setup.ANSWER_KEYS)
+        self.assertNotIn("hooks", setup.ANSWER_KEYS)
 
 
 class TestInteractive(SetupTestCase):
     def test_enter_takes_defaults_s_skips_q_quits(self):
-        # paths asks nothing. claude: binary Enter, workspace typed, hooks Enter. models: s. harness: q.
-        script = iter(["", str(self.workspace), "", "s", "q"])
+        # paths asks nothing. claude: binary Enter. models: s. harness: q.
+        script = iter(["", "s", "q"])
         result = setup.run(answers={}, non_interactive=False, read=lambda prompt: next(script),
                            emit=lambda line: None, probe=ok_probe)
         self.assertEqual(result["done"], ["paths", "claude"])
@@ -854,8 +940,7 @@ class TestInteractive(SetupTestCase):
         state = config.steps_state()
         self.assertEqual(state["done"], {"paths", "claude"})
         self.assertEqual(state["skipped"], {"models"})
-        self.assertEqual(config.load()["claude"]["binary"], "claude")
-        self.assertEqual(config.load()["claude"]["hooks"], "local")
+        self.assertEqual(config.load()["claude"], {"binary": "claude"})
 
     def test_resume_starts_at_the_first_incomplete_step(self):
         config.ensure()
@@ -882,36 +967,12 @@ class TestInteractive(SetupTestCase):
         self.assertTrue(asked[0].startswith("harness: Source (example-generic, example-maven, "
                                             "an absolute directory, or a git URL) [example-generic]"), asked[0])
 
-    def test_the_hooks_prompt_carries_one_label(self):
-        asked = []
-
-        def read(prompt):
-            asked.append(prompt)
-            return str(self.workspace) if len(asked) == 2 else ""
-        setup.run(steps=["paths", "claude"], answers={}, non_interactive=False, read=read,
-                  emit=lambda line: None)
-        self.assertTrue(asked[2].startswith("claude: Register the hooks how? local (write the "
-                                            "workspace settings)"), asked[2])
-
     def test_end_of_input_quits(self):
         def read(prompt):
             raise EOFError()
         result = setup.run(answers={}, non_interactive=False, read=read, emit=lambda line: None)
         self.assertEqual(result["done"], ["paths"])
         self.assertTrue(result["quit"])
-
-    def test_a_rerun_offers_the_configured_workspace(self):
-        setup.run(steps=["paths", "claude"], answers=self.answers, non_interactive=True,
-                  emit=lambda line: None)
-        asked = []
-
-        def read(prompt):
-            asked.append(prompt)
-            return ""
-        setup.run(steps=["claude"], answers={}, non_interactive=False, read=read,
-                  emit=lambda line: None)
-        self.assertIn(str(self.workspace), asked[1])
-        self.assertEqual(config.load()["claude"]["workspace"], str(self.workspace))
 
 
 class TestConfigBookkeeping(SetupTestCase):
@@ -949,15 +1010,6 @@ class TestConfigBookkeeping(SetupTestCase):
             config.steps_state()
         self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
 
-    def test_agents_dir_prefers_the_environment_then_config_then_the_default(self):
-        self.assertEqual(config.agents_dir(), Path.home() / ".claude" / "agents")
-        config.update("claude", {"agents_dir": "/from/config"})
-        self.assertEqual(config.agents_dir(), Path("/from/config"))
-        with mock.patch.dict(os.environ, {"PPL_AGENTS_DIR": "/from/env"}):
-            self.assertEqual(config.agents_dir(), Path("/from/env"))
-            from ppl import routing
-            self.assertEqual(routing.agents_dir(), Path("/from/env"))
-
 
 class TestCli(SetupTestCase):
     def call(self, *argv):
@@ -994,24 +1046,8 @@ class TestCli(SetupTestCase):
         self.assertEqual(result["failed"], ["models"])
         self.assertFalse(paths.models_file().exists())
 
-    def test_an_unwritable_workspace_prints_the_result_then_refuses(self):
-        blocker = self.workspace / "a-file"
-        blocker.write_text("x", encoding="utf-8")
-        code, out, err = self.call("setup", "paths", "claude", "--non-interactive",
-                                   "--answer", "workspace=%s" % (blocker / "ws"))
-        self.assertEqual(code, 2)
-        self.assertNotIn("Traceback", err)
-        refusal = json.loads(err)
-        self.assertEqual(refusal["error_code"], "SETUP_INCOMPLETE")
-        self.assertIn("claude: cannot read or write %s" % (blocker / "ws"), refusal["message"])
-        result = json.loads(out.splitlines()[-1])
-        self.assertEqual(result["failed"], ["claude"])
-        self.assertIn("cannot read or write %s" % (blocker / "ws"), result["reasons"]["claude"])
-        self.assertIn("cannot read or write %s" % (blocker / "ws"), out)
-
     def test_skipping_the_harness_still_offers_forge_and_apply(self):
-        code, out, err = self.call("setup", "--non-interactive", "--skip", "models", "--skip", "harness",
-                                   "--answer", "workspace=%s" % self.workspace)
+        code, out, err = self.call("setup", "--non-interactive", "--skip", "models", "--skip", "harness")
         self.assertEqual(code, 2)
         result = json.loads(out.splitlines()[-1])
         self.assertEqual(result["done"], ["paths", "claude"])
@@ -1023,7 +1059,7 @@ class TestCli(SetupTestCase):
         self.assertIn("apply: no harness configured", refusal["message"])
 
     def test_a_second_run_with_identical_answers_exits_zero(self):
-        argv = ["setup", "--non-interactive", "--answer", "workspace=%s" % self.workspace,
+        argv = ["setup", "--non-interactive",
                 "--answer", "repo=%s" % (self.repo_root / "repo"), "--answer", "harness_name=mine"]
         with mock.patch.object(models, "probe", ok_probe), \
                 mock.patch.object(setup, "_default_forge_check", ok_forge):
@@ -1032,8 +1068,14 @@ class TestCli(SetupTestCase):
         self.assertEqual(first[0], 0, first[2])
         self.assertEqual(second[0], 0, second[2])
         self.assertEqual(json.loads(second[1].splitlines()[-1])["done"], list(setup.STEPS))
-        commands = [h["command"] for e in self.settings()["hooks"]["PreToolUse"] for h in e["hooks"]]
-        self.assertEqual(sum("ppl_guard.py" in c for c in commands), 1)
+
+    def test_a_retired_answer_key_is_schema_invalid(self):
+        for key in ("workspace", "hooks"):
+            with self.subTest(key=key):
+                code, _, err = self.call("setup", "paths", "--non-interactive",
+                                         "--answer", "%s=x" % key)
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
 
     def test_a_malformed_answer_is_schema_invalid(self):
         code, _, err = self.call("setup", "paths", "--non-interactive", "--answer", "novalue")

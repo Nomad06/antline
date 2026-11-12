@@ -16,12 +16,17 @@ import stringprep
 import unicodedata
 import urllib.parse
 
-from . import boundary, escape_git, escape_paths, paths, store
+from . import boundary, escape_git, escape_paths, lanes, paths, store
 # protected_paths is ppl.escape's as well, the name the brief and the rule rows give it.
 from .escape_paths import EDIT_TOOLS, FACTS_FILE, PIN_NAMES, protected_paths  # noqa: F401
 
 FLAG = "dangerouslyDisableSandbox"
-APPLY = "run `ppl harness apply`"
+def facts_hint(task_id=None):
+    """Where the guard facts a lane's calls are checked against come from: ppl lane renders
+    them into the lane's start directory (escape_paths.FACTS_FILE there) when the lane starts,
+    so rendering them again is the owner's step outside the lane."""
+    return ("ppl lane renders the guard facts into the lane's start directory PPL_HOME/lanes/%s "
+            "when it starts the lane: %s" % (task_id or "<task>", lanes.restart_hint(task_id)))
 
 # What the shell reads as more than one plain word, outside single quotes.
 _REFUSED = frozenset(";&|<>()`{}*?[$")
@@ -122,10 +127,13 @@ def _read_json(path):
         raise ValueError("%s cannot be read: %s" % (path, type(err).__name__))
 
 
-def load_facts(home):
-    """The parsed `home`/os_sandbox.json, None when it is absent. Raises ValueError when it
-    cannot be read or is of the wrong shape."""
-    path = os.path.join(str(home), FACTS_FILE)
+def load_facts(path):
+    """The parsed facts file at `path` (a lane's <start>/os_sandbox.json, or outside any lane
+    PPL_HOME/os_sandbox.json), None when it is absent or `path` is None. Raises ValueError when
+    it cannot be read or is of the wrong shape."""
+    if path is None:
+        return None
+    path = str(path)
     try:
         doc = _read_json(path)
     except FileNotFoundError:
@@ -152,15 +160,16 @@ def is_role(agent):
     return isinstance(agent, str) and bool(agent) and _is_role(agent)
 
 
-def edit_denial(payload, home, facts):
+def edit_denial(payload, home, facts, in_lane=False):
     """Why a pipeline session's Edit, Write, MultiEdit or NotebookEdit may not write its
     target, or None. Edit tools run outside the OS sandbox: escape_paths.target_denial says
-    why about each path key of the call, for roles and the orchestrator alike, and only while
-    `facts` is there: without an OS sandbox profile it stands aside, run or no run. Facts that
-    cannot be read are the guard's to refuse before this."""
+    why about each path key of the call, for roles and the orchestrator alike, while `facts`
+    is there. Without them, a session `in_lane` (its harness has no OS sandbox profile) is
+    held to the protected paths every session has (escape_paths.protected_denial), and one in
+    no lane is left alone. Facts that cannot be read are the guard's to refuse before this."""
     if not isinstance(payload, dict) or payload.get("tool_name") not in EDIT_TOOLS:
         return None
-    if facts is None:
+    if facts is None and not in_lane:
         return None
     agent = payload.get("agent_type")
     tool_input = payload.get("tool_input")
@@ -171,8 +180,12 @@ def edit_denial(payload, home, facts):
     try:
         for key in escape_paths.PATH_KEYS:
             if tool_input.get(key):
-                reason = escape_paths.target_denial(tool_input[key], payload.get("cwd"), home,
-                                                    facts, who, tool)
+                if facts is None:
+                    reason = escape_paths.protected_denial(tool_input[key], payload.get("cwd"),
+                                                           home, who, tool)
+                else:
+                    reason = escape_paths.target_denial(tool_input[key], payload.get("cwd"),
+                                                        home, facts, who, tool)
                 if reason:
                     return reason
     except (OSError, ValueError, TypeError, KeyError) as err:
@@ -280,16 +293,20 @@ def webfetch_github(tool_input):
     return any(_is_github_host(host) for host in hosts)
 
 
-def decide(payload, home, state):
+def decide(payload, facts_file, state, task=None):
     """None to let a flagged call go on to the guard's other checks, else (code, reason).
-    `state` is the guard's active_state, a callable answering (task_id, run state or None),
-    called only past the role checks so a ppl-* role is refused before any file is read. A
-    run state already read, or None, is taken as well.
+    `facts_file` is the path of the guard facts the session runs under (load_facts), read
+    only past the role checks and the binding. `state` is the guard's bound_state reader, a
+    callable answering (task_id, run state or None) for the run the hook's own command line
+    binds it to, and raising when that lane cannot be confirmed. It is called only past the
+    role checks so a ppl-* role is refused before any file is read. A run state already read,
+    or None, is taken as well. `task` is the task the hook's command line names, for the
+    refusal's remedy when that lane cannot be confirmed.
 
-    While the guard facts exist or a run is active, every flagged call is the pipeline's
-    whatever its cwd, since a cwd and the run's recorded repo are both in a role's reach: any
-    other subagent is denied and the unroled session meets the shape check. With neither, the
-    call goes on."""
+    While the guard facts exist or the session is bound to a run, every flagged call is the
+    pipeline's whatever its cwd, since a cwd and the run's recorded repo are both in a role's
+    reach: any other subagent is denied and the unroled session meets the shape check. With
+    neither, the call goes on."""
     agent = payload.get("agent_type")
     if agent is not None and not (isinstance(agent, str) and agent):
         return ("BOUNDARY_VIOLATION",
@@ -303,21 +320,24 @@ def decide(payload, home, state):
         try:
             task_id, run_state = state()
         except Exception as err:
-            # a run file that is no regular one or over the hook's cap: the call is still
-            # refused, with its reason, and never read as "no active run"
+            # a lane the registry cannot confirm, or a file that is no regular one or over
+            # the hook's cap: the call is still refused, with its reason, and never read as
+            # "no run"
             return ("OWNER_DECISION",
-                    "the active run's files cannot be read (%s), so a command outside the OS "
-                    "sandbox cannot be checked: remove or repair runs/ACTIVE and the run's "
-                    "state.json" % _short(getattr(err, "message", None) or type(err).__name__))
+                    "the run this session is bound to cannot be read (%s), so a command outside "
+                    "the OS sandbox cannot be checked: repair PPL_HOME/lanes.json or the run's "
+                    "state.json, or run ppl lane resume %s"
+                    % (_short(getattr(err, "message", None) or type(err).__name__),
+                       task or "<task>"))
     else:
         run_state = state if isinstance(state, dict) else None
         task_id = (run_state or {}).get("task_id")
     try:
-        facts = load_facts(home)
+        facts = load_facts(facts_file)
     except ValueError as err:
         return ("OWNER_DECISION",
                 "the guard's OS sandbox facts are unusable (%s), so a command outside the OS "
-                "sandbox cannot be checked: %s" % (err, APPLY))
+                "sandbox cannot be checked: %s" % (err, facts_hint(task_id)))
     if facts is None and not task_id:
         return None
     if facts is None:
@@ -325,10 +345,10 @@ def decide(payload, home, state):
             return ("OWNER_DECISION",
                     "run %s's harness has no OS sandbox profile, so its commands run without "
                     "dangerouslyDisableSandbox: run this one again without it. A GitHub "
-                    "harness gets its profile and pins from `ppl harness apply`" % task_id)
+                    "harness gets its profile and pins from `ppl lane`" % task_id)
         return ("OWNER_DECISION",
                 "%s is missing while run %s is active, so no gh, git or ppl is pinned for a "
-                "command outside the OS sandbox: %s" % (FACTS_FILE, task_id, APPLY))
+                "command outside the OS sandbox: %s" % (FACTS_FILE, task_id, facts_hint(task_id)))
     agent_id = payload.get("agent_id")
     if agent is not None or agent_id is not None:
         return ("BOUNDARY_VIOLATION",
@@ -446,8 +466,10 @@ def _task_id(run_state):
 def orchestrator_shape(argv, cwd, facts, state):
     """Why the orchestrator may not run `argv` outside the OS sandbox, or None. `state` is
     the active run's state, or None with no run."""
+    task_id = (state or {}).get("task_id") if isinstance(state, dict) else None
     if facts is None:
-        return "%s is missing, so no gh, git or ppl is pinned: %s" % (FACTS_FILE, APPLY)
+        return "%s is missing, so no gh, git or ppl is pinned: %s" % (FACTS_FILE,
+                                                                     facts_hint(task_id))
     if not argv:
         return "the command is empty"
     for name in PIN_NAMES:
@@ -456,7 +478,8 @@ def orchestrator_shape(argv, cwd, facts, state):
             continue
         if os.path.realpath(pin["path"]) != pin["realpath"]:
             return ("the pinned %s %s no longer resolves to %s, the binary the profile protects: "
-                    "%s" % (name, pin["path"], pin["realpath"], APPLY))
+                    "%s" % (name, pin["path"], pin["realpath"],
+                            facts_hint(facts.get("task") or task_id)))
         if name == "git":
             # -C names the repository, so the cwd plays no part
             return escape_git.git_shape(argv, facts, state)
@@ -465,7 +488,7 @@ def orchestrator_shape(argv, cwd, facts, state):
             return problem
         if name == "gh":
             return _gh_problem(argv[1:], facts, state)
-        return _ppl_problem(argv[1:], state)
+        return _ppl_problem(argv[1:], state, facts)
     return ("%s is not a pinned binary: only %s run outside the OS sandbox, spelled exactly"
             % (_short(argv[0]), ", ".join(facts["pins"][name]["path"] for name in PIN_NAMES)))
 
@@ -548,21 +571,21 @@ def _value_problem(kind, flag, value, facts, state):
 
 def _cwd_problem(name, cwd, facts):
     """gh, and ppl whose own gh and git calls inherit the cwd, never load a repo a role can
-    write, so they run only from the workspace or a directory under it, which the profile
-    write-denies, and never from inside a write scope entry. Being outside the write scope is
-    not enough: a temp directory is sandbox-writable and in no entry. The reason names the
-    workspace, the directory the skill runs them from."""
+    write, so they run only from the facts' workspace, the lane's start directory, or a
+    directory under it, which the profile write-denies, and never from inside a write scope
+    entry. Being outside the write scope is not enough: a temp directory is sandbox-writable
+    and in no entry. The reason names the start directory, where the skill runs them from."""
     if not (isinstance(cwd, str) and os.path.isabs(cwd)):
         return ("%s runs only from a known directory, and this call names no cwd: run it from "
-                "the workspace %s" % (name, facts["workspace"]))
+                "the lane's start directory %s" % (name, facts["workspace"]))
     if not _inside(cwd, facts["workspace"]):
-        return ("%s runs only from the workspace %s or a directory under it, which no "
-                "sandboxed command can write, and %s is not one: cd to the workspace and run "
-                "it from there" % (name, facts["workspace"], cwd))
+        return ("%s runs only from the lane's start directory %s or a directory under it, "
+                "which no sandboxed command can write, and %s is not one: cd to the start "
+                "directory and run it from there" % (name, facts["workspace"], cwd))
     for entry in facts["write_scope"]:
         if _inside(cwd, entry):
             return ("%s runs only from a directory no sandboxed command can write, and %s is "
-                    "inside %s: cd to the workspace %s and run it from there"
+                    "inside %s: cd to the lane's start directory %s and run it from there"
                     % (name, cwd, entry, facts["workspace"]))
     return None
 
@@ -616,7 +639,40 @@ def _gh_api_problem(args, facts, state):
     return _body_file_problem(flags["-F"][len("body=@"):], facts, state)
 
 
-def _ppl_problem(args, state):
+def _lessons_record_problem(args, facts, task_id):
+    """None for `--task <T> --file <scratch>/<lane task>/lessons-<T>.json` of a lane whose
+    own run is T or whose pending marker for T it claimed (R57), the file a plain file reached
+    through no link: a role can write the lane's scratch directory, so a link there could hand
+    ppl another file to record."""
+    usage = ("ppl lessons record takes exactly --task <id> --file %s/<the lane's task>/"
+             "lessons-<id>.json" % facts["scratch"])
+    if not task_id:
+        return "ppl lessons record runs outside the sandbox only in a lane, for its run"
+    operands, flags = _parse(args, {"--task": "task", "--file": "file"}, ())
+    if operands is None:
+        return "%s: %s" % (usage, flags)
+    if operands or set(flags) != {"--task", "--file"}:
+        return usage
+    target, value = flags["--task"], flags["--file"]
+    if not paths.TASK_ID_RE.fullmatch(target):
+        return "ppl lessons record --task %s is not a task id" % _short(target)
+    if target != task_id and not os.path.isfile(str(paths.claimed_marker(target, task_id))):
+        return ("ppl lessons record --task %s is neither lane %s's own run nor a run whose "
+                "pending marker it claimed with ppl lessons pending" % (target, task_id))
+    expected = os.path.join(facts["scratch"], task_id, "lessons-%s.json" % target)
+    if not os.path.isabs(value) or os.path.realpath(value) != expected:
+        return ("ppl lessons record --file %s is not %s, reached through no link"
+                % (_short(value), expected))
+    try:
+        info = os.lstat(expected)
+    except OSError:
+        return "ppl lessons record --file %s does not exist" % _short(value)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return "ppl lessons record --file %s is not a plain file with a single link" % _short(value)
+    return None
+
+
+def _ppl_problem(args, state, facts):
     task_id = _task_id(state)
     if args[:2] == ["tracker", "fetch"]:
         if task_id and args[2:] in (["--task", task_id], ["--task=" + task_id]):
@@ -631,5 +687,23 @@ def _ppl_problem(args, state):
         return "ppl review fetch takes only --pr <number>"
     if args == ["doctor", "--forge"]:
         return None
-    return ("ppl %s is not one of tracker fetch --task <id>, review fetch --pr <n> or "
-            "doctor --forge" % " ".join(_short(a) for a in args[:2]))
+    if args[:2] == ["lane", "close"]:
+        # it writes PPL_HOME/lanes.json, outside every write scope. Bare, ppl reads the task
+        # from the session's PPL_TASK
+        rest = args[2:]
+        if not rest or (task_id and rest in ([task_id], ["--task", task_id],
+                                             ["--task=" + task_id])):
+            return None
+        return "ppl lane close takes nothing, or the active run's id as <id> or --task <id>"
+    if args[:2] == ["lessons", "pending"]:
+        # it claims the lane's markers under PPL_HOME/lessons, outside every write scope (R57),
+        # for the lane PPL_TASK names
+        if task_id and not args[2:]:
+            return None
+        return "ppl lessons pending takes nothing, and runs outside the sandbox only in a lane"
+    if args[:2] == ["lessons", "record"]:
+        # it writes PPL_HOME/lessons, outside every write scope (R57)
+        return _lessons_record_problem(args[2:], facts, task_id)
+    return ("ppl %s is not one of tracker fetch --task <id>, review fetch --pr <n>, "
+            "doctor --forge, lane close, lessons pending or lessons record"
+            % " ".join(_short(a) for a in args[:2]))

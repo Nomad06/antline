@@ -430,8 +430,8 @@ def measures(directory):
     roles = usage.run_usage(directory)
     tokens = {role: metrics._counts_of(models) for role, models in sorted(roles.items())} or None
     if tokens is None:
-        reasons["tokens_by_role"] = ("no usage recorded - the usage hook (ppl setup claude) "
-                                     "records it")
+        reasons["tokens_by_role"] = ("no usage recorded - the usage hook of a lane ppl lane "
+                                     "starts records it")
     frozen = _frozen_prices(directory)
     try:
         usd, unpriced = usage.run_dollars(directory, price_table=frozen)

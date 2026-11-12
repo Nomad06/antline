@@ -30,7 +30,7 @@ a separate `findings` array (severity, evidence, affected_sha, affected_path, ow
 can name one) alongside the empty-by-contract verdict JSON. For each entry, before
 recording the verdict, run `ppl findings add --severity <blocking|important|minor>
 --evidence "<...>" --affected-sha <candidate_sha> --affected-path <path> [--owner <name>]
-[--fix-link <url>] --generation $GENERATION --from ppl-verifier` - your own generation, not
+[--fix-link <url>] --generation <GENERATION> --from ppl-verifier` - your own generation, not
 anything the verifier claims, since it holds no lease. `ppl findings add` decides the routing itself,
 from the real base-to-candidate diff, never from what is asked of it: a finding whose
 `--affected-path` is inside the candidate's own diff is `own_diff` (fixed now, as REWORK
@@ -46,7 +46,7 @@ actually fixed. That is why you list open findings before dispatch and hand them
 verifier: only add what it reports as genuinely new.
 
 Save the verifier's verdict to `<!-- include: harness/scratch -->/<TASK-ID>/verdict.json` and record it with
-`ppl verdict record <!-- include: harness/scratch -->/<TASK-ID>/verdict.json --generation $GENERATION --from ppl-verifier`.
+`ppl verdict record <!-- include: harness/scratch -->/<TASK-ID>/verdict.json --generation <GENERATION> --from ppl-verifier`.
 It refuses a verdict produced for a different SHA than the current head
 [R-DONE-SHA-BINDING].
 
