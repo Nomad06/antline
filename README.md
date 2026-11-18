@@ -128,9 +128,9 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `ppl/_assets/rules.toml` holds 205 rules, 159 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 207 rules, 160 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 3340 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 3353 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
@@ -307,7 +307,7 @@ another tab or a terminal since the page loaded it is refused [R-STUDIO-CHANGED-
 
 ## Hooks
 
-`ppl lane` writes three hooks into each lane's `settings.json`, in the lane's start directory
+`ppl lane` writes four hooks into each lane's `settings.json`, in the lane's start directory
 `~/.ppl/lanes/<TASK-ID>/`, and the lane's Claude Code session loads them with `--settings`.
 You register nothing by hand:
 
@@ -318,7 +318,13 @@ You register nothing by hand:
   "SubagentStart": [{"matcher": "", "hooks": [{"type": "command",
     "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_dispatch.py --task KEY-123", "timeout": 5}]}],
   "SubagentStop": [{"matcher": "", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_usage.py --task KEY-123", "timeout": 5}]}]}}
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_usage.py --task KEY-123", "timeout": 5}]}],
+  "Stop": [{"matcher": "", "hooks": [{"type": "command",
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_session.py --task KEY-123", "timeout": 5}]}],
+  "SessionEnd": [{"matcher": "", "hooks": [{"type": "command",
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_session.py --task KEY-123", "timeout": 5}]}],
+  "Notification": [{"matcher": "", "hooks": [{"type": "command",
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_session.py --task KEY-123", "timeout": 5}]}]}}
 ```
 
 The paths are the ones `ppl lane` finds for your install: under pipx the scripts sit in its
@@ -333,6 +339,15 @@ a lane runs ppl's hooks, the managed settings' and whatever its start directory'
 The guard is the cage, the dispatch hook counts role dispatches, and the usage hook
 records each role's and the orchestrator's tokens in the run's `log.jsonl` when a role
 stops, never refusing or delaying a dispatch [R-USAGE-HOOK-CANNOT-BLOCK].
+
+The session hook, `ppl_session.py` on `Stop`, `SessionEnd` and `Notification`, records why the
+orchestrator's session stopped as a `session` event in the run's `log.jsonl`: on `Stop` the
+number of background tasks still running and of session crons, on `SessionEnd` the reason, on
+`Notification` its type. It prints nothing and decides nothing, and a lane started before this
+version, whose `settings.json` holds the other three hooks alone, still resumes and records
+nothing until `ppl lane` renders its settings again [R-SESSION-HOOK-CANNOT-BLOCK]. A session
+event carries a kind and counts, never message text: the last assistant message and a
+notification's message are never logged [R-SESSION-EVENT-NO-TEXT].
 
 A dollar cap is opt-in: set `usd_max` under `[budgets]` in `~/.ppl/config.toml` and a price
 for each model under `[prices."<model id>"]`. `ppl init` copies the cap and the prices into

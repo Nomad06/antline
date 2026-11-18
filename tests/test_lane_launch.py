@@ -946,6 +946,33 @@ class TestResume(LaneCase):
                     hook["command"] = hook["command"].replace(old, new)
         path.write_text(json.dumps(settings), encoding="utf-8")
 
+    def test_a_lane_started_before_the_session_hook_still_resumes(self):
+        # rule: R-SESSION-HOOK-CANNOT-BLOCK
+        # a lane rendered by an older version holds the guard, dispatch and usage hooks
+        # only: the session hook is not required, so the lane keeps working
+        from ppl import doctor
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        path = lanes.start_dir(TASK) / "settings.json"
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        for event in ("Stop", "SessionEnd", "Notification"):
+            del settings["hooks"][event]
+        self.assertEqual(sorted(settings["hooks"]),
+                         ["PreToolUse", "SubagentStart", "SubagentStop"])
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        self.assertEqual(doctor.lane_hook_problems(lanes.start_dir(TASK)), [])
+        self.assertEqual(doctor.report(TASK)["lane_hooks"], [])
+        self.assertEqual(lane_launch.resume(TASK, exec_=False)["cwd"],
+                         str(lanes.start_dir(TASK)))
+        # a session entry that is there is checked like the others
+        settings["hooks"]["Stop"] = [{"matcher": "", "hooks": [{
+            "type": "command", "timeout": 5,
+            "command": "/nonexistent/bin/python3.12 %s --task %s"
+                       % (ROOT / "ppl" / "_assets" / "hooks" / "ppl_session.py", TASK)}]}]
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        problems = doctor.lane_hook_problems(lanes.start_dir(TASK))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("ppl_session.py", problems[0])
+
     def test_resume_refuses_hooks_that_cannot_run_the_cage(self):
         # rule: R-GUARD-PYTHON-FLOOR
         # M6: a pinned interpreter that vanished (a pipx venv whose base Python was removed)

@@ -358,7 +358,7 @@ class TestTheHookBinding(LaneCase):
                 self.assertIn("BOUNDARY_VIOLATION", decision["permissionDecisionReason"])
         start = {"hook_event_name": "SubagentStart", "agent_type": "ppl-code-worker",
                  "cwd": "/tmp"}
-        for hook in ("ppl_dispatch.py", "ppl_usage.py"):
+        for hook in ("ppl_dispatch.py", "ppl_usage.py", "ppl_session.py"):
             with self.subTest(hook=hook):
                 done = subprocess.run([sys.executable, "-c", shim, str(HOOKS / hook)]
                                       + argv(LANE_A), input=json.dumps(start),
@@ -373,7 +373,7 @@ class TestTheHookBinding(LaneCase):
         result = self.run_hook(FLOOR_PAYLOAD, env, [])
         self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn("ppl lane", self.deny_reason(result))
-        for hook in ("ppl_dispatch.py", "ppl_usage.py"):
+        for hook in ("ppl_dispatch.py", "ppl_usage.py", "ppl_session.py"):
             with self.subTest(hook=hook):
                 done = subprocess.run([sys.executable, str(HOOKS / hook)],
                                       input=json.dumps(FLOOR_PAYLOAD), capture_output=True,

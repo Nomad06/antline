@@ -114,6 +114,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
       hooks/ppl_guard.py         PreToolUse cage
       hooks/ppl_dispatch.py      SubagentStart dispatch counter (telemetry only, cannot block - see 12.1)
       hooks/ppl_usage.py         SubagentStop token recorder (telemetry only - see 12.1)
+      hooks/ppl_session.py       Stop, SessionEnd and Notification recorder (telemetry only - see 12.1)
       skill/                     SKILL.md and references/ skeletons, rendered per harness
       templates/ppl-*.md.body    the fixed body each generated agent definition is rendered around
       defaults/                  config.example.toml, routing.example.toml, harnesses/example-*
@@ -129,7 +130,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
   lanes.json lanes.lock          the lane registry and its writers' lock (5.4)
   lanes/<TASK-ID>/               a lane's start directory, the session's cwd, written by ppl lane only
     harness/<name>/              the harness at the commit the lane runs, exported
-    settings.json                the three hooks, each ending in --task <TASK-ID>, and on a GitHub
+    settings.json                the four hooks, each ending in --task <TASK-ID>, and on a GitHub
                                  harness the OS sandbox profile
     agents.json                  the ppl-* agents, passed to claude as --agents
     plugin/skills/pipeline/      the orchestrator skill, the plugin antline, invoked as /antline:pipeline <link>
@@ -200,6 +201,16 @@ engineering rather than prayer.
 
 **Hook engine** - `ppl_guard.py` on `PreToolUse`, which can deny; `ppl_dispatch.py` on
 `SubagentStart`, which cannot (12.1) and only counts [R-DISPATCH-HOOK-CANNOT-BLOCK]. Returns stable codes, not prose.
+Besides the guard's `deny` events, the hooks append to the bound run's `log.jsonl`:
+`ppl_dispatch.py` a `dispatch_start` event (`role`, `agent_id`) for each role it sees start,
+`ppl_usage.py` the `usage` events (12.1), and `ppl_session.py`, on `Stop`, `SessionEnd` and
+`Notification`, a `session` event with a `kind` of `stop` (`background`, the number of
+background tasks still running, and `crons`, the number of session crons, each null when the
+payload lacks it), `end` (`reason`) or `notification` (`type`). It prints nothing, decides
+nothing, and a lane whose `settings.json` predates it still resumes [R-SESSION-HOOK-CANNOT-BLOCK].
+A session event carries a kind and counts, never message text: a reason or a type is kept
+only as a plain word of up to 40 lowercase letters and underscores, else null, and the last
+assistant message and a notification's message are never logged [R-SESSION-EVENT-NO-TEXT].
 
 **Evidence store** - `runs/<TASK-ID>/evidence/<candidate_sha>/`. Every receipt is bound to
 the SHA it was produced on.
@@ -831,7 +842,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 205 rows: 159 `blocking`, 21 `soft` and 25 `n/a`. Of the
+As of this commit the table carries 207 rows: 160 `blocking`, 22 `soft` and 25 `n/a`. Of the
 `n/a` rows, 15 are `GAP:` - a rule this design names and no code performs - and 10 are
 `PROPERTY:`. The gaps are the honest output of the matrix: a lane session resumed by hand
 without the lane flags having no guard at all, the stage 6 preconditions being unchecked
@@ -1073,7 +1084,7 @@ profile the rendered skill keeps the orchestrator's session in the start directo
 and ppl calls run from: stage 1 runs git with `-C`, and each gate recipe changes into the
 worktree in a subshell, `(cd <worktree> && <gate>)`.
 The lane's `settings.json` is written whole when the lane starts, and a harness that needs no
-profile gets the three hooks alone and no facts file.
+profile gets the hooks alone and no facts file.
 
 ### 5.7 Lanes
 
@@ -2090,7 +2101,9 @@ owner reads a trail before publishing it.
 `MANIFEST.json` holds the task id, the base and head SHA, the antline version, the redactions
 applied, the skipped files, every other file with its sha256, and the run's measures:
 `wall_clock_seconds` (init to `done`, else to the last event), `tokens_by_role`, `usd`,
-`denials`, `rework_rounds` and `verdicts` (a count per outcome). `usd` is priced with the prices
+`denials`, `rework_rounds`, `verdicts` (a count per outcome) and `timing`, the whole report
+`ppl timing` prints for the run (wall clock, init to merge request, stages, dispatches, gates,
+idle gaps and its own `reasons`). `usd` is priced with the prices
 `ppl init` froze into the run, so a later export quotes the same number, and with the live
 `[prices]` only for a run that froze none. It is the priced usage alone: the manual `usd_used`
 (`ppl budget spend usd`), which the dollars spent on the status card include, is left out.
@@ -2136,7 +2149,7 @@ list or ledger is written as one:
 - `timeline.json`: the log's `init`, `stage_enter`, `lifecycle`, `park`, `budget`, `refusal`,
   `deny`, `usage`, `verdict`, `evidence`, `finding_add`, `finding_status`, `review_reply`,
   `merge_observed`, `recover` and `lease_bump` events, each with `n`, a `usage` event without
-  its per-model token counts.
+  its per-model token counts. The hooks' `dispatch_start` and `session` events stay out of it.
 - `threads.json`: the review ledger (6.6).
 - `memory-in-effect.json`: `{harness, entries}`, the lessons the run's snapshot froze at
   `ppl init` [R-LESSONS-PAST-ONLY n/a].

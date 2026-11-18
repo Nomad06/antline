@@ -3697,6 +3697,7 @@ class TestPythonFloor(unittest.TestCase):
         cases = (("ppl_guard.py", payload(None, "Read", {"file_path": "/dev/null"}, cwd="/tmp"), None),
                  ("ppl_dispatch.py", payload("ppl-code-worker", "Task", {}, cwd="/tmp"), None),
                  ("ppl_usage.py", payload("ppl-code-worker", "Task", {}, cwd="/tmp"), None),
+                 ("ppl_session.py", {"hook_event_name": "Stop", "cwd": "/tmp"}, None),
                  ("ppl_guard.py", payload("ppl-code-worker", "Bash", {"command": "git add -A"},
                                           cwd="/tmp"), "BOUNDARY_VIOLATION"))
         for hook, hook_payload, refusal in cases:
@@ -3737,6 +3738,7 @@ class TestHookBootstrap(unittest.TestCase):
                   "cwd": "/tmp"}
     ROLE_STOP = {"hook_event_name": "SubagentStop", "agent_type": "ppl-code-worker",
                  "agent_id": "a1", "cwd": "/tmp"}
+    SESSION_STOP = {"hook_event_name": "Stop", "background_tasks": [], "cwd": "/tmp"}
 
     def site_with_ppl(self):
         site = Path(tmphome.mkdtemp(prefix="pplsite-"))
@@ -3751,7 +3753,8 @@ class TestHookBootstrap(unittest.TestCase):
         env.update(extra)
         cases = (("ppl_guard.py", self.FORCE_PUSH, "BOUNDARY_VIOLATION"),
                  ("ppl_dispatch.py", self.ROLE_START, None),
-                 ("ppl_usage.py", self.ROLE_STOP, None))
+                 ("ppl_usage.py", self.ROLE_STOP, None),
+                 ("ppl_session.py", self.SESSION_STOP, None))
         for hook, hook_payload, refusal in cases:
             with self.subTest(hook=hook):
                 result = subprocess.run(

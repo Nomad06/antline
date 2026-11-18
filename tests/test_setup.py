@@ -694,7 +694,8 @@ class TestHookEntries(unittest.TestCase):
         self.assertEqual(entries["SubagentStop"]["hooks"][0]["command"],
                          "%s %s" % (shlex.quote(interpreter),
                                     shlex.quote(str(hooks_dir / "ppl_usage.py"))))
-        self.assertEqual(sorted(entries), ["PreToolUse", "SubagentStart", "SubagentStop"])
+        self.assertEqual(sorted(entries), ["Notification", "PreToolUse", "SessionEnd", "Stop",
+                                           "SubagentStart", "SubagentStop"])
 
     def test_setup_registers_the_usage_hook_on_subagentstop(self):
         entry = setup.hook_entries(SOURCE)["SubagentStop"]
@@ -703,6 +704,17 @@ class TestHookEntries(unittest.TestCase):
         self.assertTrue(entry["hooks"][0]["command"].endswith("ppl_usage.py"),
                         entry["hooks"][0]["command"])
         self.assertEqual(entry["hooks"][0]["type"], "command")
+
+    def test_setup_registers_the_session_hook_on_stop_sessionend_and_notification(self):
+        entries = setup.hook_entries(SOURCE, "DEMO-1")
+        for event in ("Stop", "SessionEnd", "Notification"):
+            with self.subTest(event=event):
+                entry = entries[event]
+                self.assertEqual(entry["matcher"], "")
+                self.assertEqual(len(entry["hooks"]), 1)
+                self.assertEqual(entry["hooks"][0]["type"], "command")
+                self.assertTrue(entry["hooks"][0]["command"].endswith(
+                    "ppl_session.py --task DEMO-1"), entry["hooks"][0]["command"])
 
     def test_each_command_ends_in_the_lanes_task(self):
         for event, entry in setup.hook_entries(SOURCE, "DEMO-1").items():
@@ -741,7 +753,9 @@ class TestOldWorkspaceCleanup(SetupTestCase):
                                          + [dict(foreign, command="echo shared")]},
                                         {"hooks": [dict(foreign, command="/opt/not_ppl_guard.py")]}],
                          "SubagentStart": [old["SubagentStart"]],
-                         "SubagentStop": [old["SubagentStop"]]}}
+                         "SubagentStop": [old["SubagentStop"]],
+                         "Stop": [old["Stop"]], "SessionEnd": [old["SessionEnd"]],
+                         "Notification": [old["Notification"]]}}
         path = self.claude / "settings.local.json"
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps(doc), encoding="utf-8")
@@ -794,7 +808,8 @@ class TestOldWorkspaceCleanup(SetupTestCase):
         for removed in (str(path), str(agents / "ppl-code-worker.md"),
                         str(agents / "ppl-verifier.md"),
                         str(self.claude / "skills" / "pipeline"), str(self.facts),
-                        "ppl_guard.py", "ppl_dispatch.py", "ppl_usage.py", "sandbox",
+                        "ppl_guard.py", "ppl_dispatch.py", "ppl_usage.py", "ppl_session.py",
+                        "sandbox",
                         self.ALLOW[0], self.ALLOW[1]):
             self.assertIn(removed, said)
         for kept in ("ppl-mine.md", "helper.md", "team-kb", "my-hook.sh", "echo shared",

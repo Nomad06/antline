@@ -46,8 +46,14 @@ from .errors import PplError
 GUARD_MARKER = "ppl_guard.py"
 DISPATCH_MARKER = "ppl_dispatch.py"
 USAGE_MARKER = "ppl_usage.py"
+SESSION_MARKER = "ppl_session.py"
 HOOK_EVENTS = (("PreToolUse", GUARD_MARKER), ("SubagentStart", DISPATCH_MARKER),
-               ("SubagentStop", USAGE_MARKER))
+               ("SubagentStop", USAGE_MARKER), ("Stop", SESSION_MARKER),
+               ("SessionEnd", SESSION_MARKER), ("Notification", SESSION_MARKER))
+# The hooks a lane cannot do without. A lane rendered before the session hook existed
+# holds the other three only, and it keeps working: the session hook records, it holds
+# nothing [R-SESSION-HOOK-CANNOT-BLOCK].
+REQUIRED_LANE_MARKERS = (GUARD_MARKER, DISPATCH_MARKER, USAGE_MARKER)
 _VERSION_PROBE = "import sys; print('%d.%d.%d' % sys.version_info[:3])"
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -391,7 +397,7 @@ def _interpreter_problem(command):
 
 
 def _shape_problems(doc, path):
-    """(marker, problem) for every guard, dispatch and usage hook in a parsed
+    """(marker, problem) for every guard, dispatch, usage and session hook in a parsed
     settings document that Claude Code would not run as a bounded command:
     read from the document only, never run."""
     problems = []
@@ -435,12 +441,14 @@ def _command_problems(command, marker):
 
 def lane_hook_problems(start_dir):
     """What keeps a ppl hook of the lane's settings.json in `start_dir` from running as the
-    cage, one line each, [] when nothing does: for the guard, dispatch and usage hooks, an
-    interpreter or script that does not exist (_command_problems), and an interpreter older
-    than the floor or not a Python (_interpreter_problem, which runs it once to ask). A
-    pinned interpreter that vanished makes the shell exit 127, a non-blocking error, so every
-    call is allowed. A settings.json that cannot be read, or that registers none of a hook,
-    counts too [R-GUARD-PYTHON-FLOOR]."""
+    cage, one line each, [] when nothing does: for the guard, dispatch, usage and session
+    hooks, an interpreter or script that does not exist (_command_problems), and an
+    interpreter older than the floor or not a Python (_interpreter_problem, which runs it
+    once to ask). A pinned interpreter that vanished makes the shell exit 127, a non-blocking
+    error, so every call is allowed. A settings.json that cannot be read, or that registers
+    none of the guard, dispatch or usage hook, counts too [R-GUARD-PYTHON-FLOOR]. A missing
+    session hook does not: a lane rendered before it existed keeps working
+    [R-SESSION-HOOK-CANNOT-BLOCK]."""
     from . import store
     path = Path(str(start_dir)) / "settings.json"
     try:
@@ -452,7 +460,7 @@ def lane_hook_problems(start_dir):
     problems, asked = [], {}
     for event, marker in HOOK_EVENTS:
         hooks = _hooks_of(doc, event, marker)
-        if not hooks:
+        if not hooks and marker in REQUIRED_LANE_MARKERS:
             problems.append("%s registers no %s hook" % (path, marker))
         for hook in hooks:
             command = str(hook.get("command", ""))
@@ -632,8 +640,8 @@ def _location(path):
 
     "dispatch_hook" and "usage_hook" are "registered" or "missing" for the
     SubagentStart dispatch hook and the SubagentStop usage hook, and
-    "hook_shape" is "ok" or the problems of the guard, dispatch and usage
-    entries (`_shape_problems`), None when the file holds none of them. All
+    "hook_shape" is "ok" or the problems of the guard, dispatch, usage and
+    session entries (`_shape_problems`), None when the file holds none of them. All
     three are None for a file that could not be read.
     """
     def result(state, detail=None, uncovered=None, dispatch_hook=None, usage_hook=None,
