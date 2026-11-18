@@ -743,6 +743,49 @@ class TestBaselineSuiteWhileBriefing(unittest.TestCase):
                           text, name)
 
 
+class TestDispatchPassesTheResolvedRouting(unittest.TestCase):
+    """A risk can change a role's model and its effort, and the agent file keeps the
+    defaults, so every reference that dispatches a role names `ppl routing show` for that role
+    and says to pass both values it prints."""
+
+    DISPATCHES = (("references/stage-2-briefing.md", "ppl-briefer"),
+                  ("references/stage-2-briefing.md", "ppl-brief-challenger"),
+                  ("references/stage-3-implementation.md", "ppl-code-worker"),
+                  ("references/stage-3-tests.md", "ppl-test-worker"),
+                  ("references/stage-5-verification.md", "ppl-verifier"))
+
+    def test_each_dispatching_reference_passes_the_model_and_the_effort_of_its_role(self):
+        # rule: R-ROUTING-BY-RISK
+        for name, files in RENDERED.items():
+            for path, role in self.DISPATCHES:
+                with self.subTest(skill=name, path=path, role=role):
+                    text = _flat(files[path])
+                    command = "`ppl routing show --role %s --task " % role
+                    self.assertIn(command, text)
+                    passage = text[text.index(command) - 120:text.index(command) + 120]
+                    self.assertIn("the `model` and the `effort`", passage)
+                    self.assertIn("[R-ROUTING-BY-RISK]", text)
+
+    def test_stage_2_states_the_risk_in_every_briefer_dispatch(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-2-briefing.md"])
+            self.assertIn("the one Stage 1 makes included", text, name)
+            self.assertIn('"The run\'s risk is <risk>."', text, name)
+            self.assertLess(text.index("If Stage 1 already entered briefing"),
+                            text.index("`ppl routing show --role ppl-briefer"), name)
+
+    def test_the_briefer_agent_keeps_a_low_risk_brief_to_the_acceptance_criteria(self):
+        fixtures.install_harness("example-maven", as_name="contract-briefer")
+        example = (Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "defaults"
+                   / "routing.example.toml").read_text(encoding="utf-8")
+        from ppl import routing
+        text = _flat(routing.render("ppl-briefer", harness.load("contract-briefer"),
+                                    config=routing.loads(example)))
+        self.assertIn("When the dispatch says the run's risk is low, read the files the task "
+                      "names and their direct callers, and keep the brief to what the "
+                      "acceptance criteria need.", text)
+
+
 SKILL_BUDGET_BYTES = 14000
 STAGE_REFERENCE_BUDGET_BYTES = 10000
 

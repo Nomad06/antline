@@ -130,7 +130,7 @@ the test writer tries to `cat` product code and the hook denies it
 - Independent tests by construction, not by a line in a prompt.
 - The limits that matter are code. `ppl/_assets/rules.toml` holds 209 rules, 160 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 3375 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 3392 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
@@ -515,7 +515,15 @@ it would route to is unverified or stale, `ppl models verify` fixes that, and
 After changing a tier, run `ppl models verify`; the next lane takes the new routing, and a
 running lane keeps the copy it froze when it started, which `ppl routing show` prints there.
 A role can carry `by_risk = { high = "good" }`, used for
-runs started with `ppl init --risk high` [R-ROUTING-BY-RISK].
+runs started with `ppl init --risk high` [R-ROUTING-BY-RISK], and `by_risk_effort = { low =
+"medium" }`, which lowers its effort for runs started with `ppl init --risk low`: a key is a
+risk (`low`, `normal`, `high`) and a value an effort (`low` to `max`), and anything else is
+refused [R-ROUTING-BY-RISK]. The agent file keeps the defaults, and the orchestrator passes the
+model and the effort `ppl routing show --role <role> --task <id>` prints at each dispatch. The
+presets lighten a low-risk run's briefer and two workers: economy sets their effort to medium,
+low and low, balanced to medium for all three, and max lowers the briefer to high effort and
+moves both workers to the `average` tier. In every preset the challenger, the verifier and the
+review responder keep their routing at every risk. When runs are slow, start from `ppl routing preset balanced`.
 
 ## Run a task
 

@@ -1037,8 +1037,11 @@ def cmd_routing(args):
         if risk is None and args.task:
             risk = run.load(args.task).get("risk")
         entry = routing.resolve(args.role, risk)
+        # model and effort are what the orchestrator passes at dispatch, the agent file keeps
+        # the defaults [R-ROUTING-BY-RISK]
+        params = routing.role_params(entry, args.role)
         print(json.dumps({"role": args.role, "risk": risk, "model": entry["model"],
-                          "params": entry.get("params", {})}, sort_keys=True))
+                          "effort": params.get("effort"), "params": params}, sort_keys=True))
     else:
         print(json.dumps(routing.load(), indent=2, sort_keys=True))
     return 0

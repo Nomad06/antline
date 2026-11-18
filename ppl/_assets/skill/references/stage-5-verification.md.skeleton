@@ -8,7 +8,9 @@ the diff, the tests, the gate receipts with their exit codes, and the `spec_revi
 not re-report a defect someone already recorded (see the dedupe note below) and so its
 verdict carries the current binding rather than one it invented (`ppl show --json` also
 carries the current value, if a rebrief happened since Stage 2 and you need to refetch it).
-Then dispatch `ppl-verifier`. It has no
+Then dispatch `ppl-verifier`, passing both the `model` and the `effort` that
+`ppl routing show --role ppl-verifier --task <task_id>` prints, since the agent file keeps the
+defaults [R-ROUTING-BY-RISK]. It has no
 shell and cannot run `ppl` or re-run anything itself, by design: a role with a shell and no
 write boundary could write anywhere, and every generated role is denied every state-changing
 `ppl` subcommand even where it does hold Bash (`ppl-code-worker`, `ppl-test-worker`) -

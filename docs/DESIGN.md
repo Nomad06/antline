@@ -2994,7 +2994,10 @@ names, and each lane's agents are generated from it by `ppl lane` (section 10.1)
 orchestrator is the operator's own session and is not routed. A role can carry a per-risk
 override, `by_risk = { high = "good" }`, applied for runs started with `ppl init --risk high`:
 the agent keeps the default and `ppl routing show --role <role> --task <id>` prints the
-model the orchestrator passes at dispatch [R-ROUTING-BY-RISK]. `model` and `effort` are Claude
+model the orchestrator passes at dispatch [R-ROUTING-BY-RISK]. A role can also carry
+`by_risk_effort`, a table of risk to effort; the example gives the briefer and both workers
+`by_risk_effort = { low = "medium" }`, and `ppl routing show` prints the effort to pass beside
+the model [R-ROUTING-BY-RISK]. `model` and `effort` are Claude
 Code subagent frontmatter keys, and `effort` accepts `low|medium|high|xhigh|max`. Routing is a
 profile, not part of the canonical workflow - changing a model is not supposed to require
 changing the lifecycle or the evidence contracts.

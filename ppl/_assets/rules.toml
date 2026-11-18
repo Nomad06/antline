@@ -1683,15 +1683,15 @@ residual = "GAP: orchestrator discipline with no check behind it. ppl records no
 
 [[rule]]
 id = "R-ROUTING-BY-RISK"
-statement = "routing.resolve applies the by_risk tier override of a role for the run's risk, mapping the tier to its model; ppl routing show --role --task prints the model the orchestrator passes at dispatch."
+statement = "routing.resolve applies the by_risk tier override and the by_risk_effort effort override of a role for the run's risk, each on its own, and refuses a by_risk_effort entry whose risk or effort is unknown; ppl routing show --role --task prints the model and the effort the orchestrator passes at dispatch."
 scope = "ppl CLI"
 event = "ppl routing show"
 enforcement = "soft"
 hook_or_check = "ppl/routing.py:resolve"
 deny_test = ""
-allow_test = "tests/test_routing.py::TestRouting::test_resolve_applies_the_risk_override"
+allow_test = "tests/test_routing.py::TestRouting::test_resolve_applies_the_risk_override, tests/test_routing.py::TestRouting::test_by_risk_effort_replaces_the_effort_for_that_risk_only, tests/test_routing.py::TestRouting::test_by_risk_and_by_risk_effort_apply_together, tests/test_routing.py::TestRouting::test_routing_show_prints_the_resolved_effort"
 owner = "orchestrator"
-residual = "the generated agent file keeps the default model; an orchestrator that dispatches by agent name without passing the resolved model runs the default"
+residual = "the generated agent file keeps the default model and effort; an orchestrator that dispatches by agent name without passing the resolved model and effort runs the defaults"
 
 [[rule]]
 id = "R-METRIC-OUTCOMPETED"

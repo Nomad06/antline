@@ -7,10 +7,11 @@ baseline command has no `baseline-<gate>.rc` file, run it now, as
 under a running baseline suite would contaminate it [R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a].
 
 `ppl stage enter implementation`, dispatch `ppl-code-worker` with the brief and its
-boundary. Pass the model `ppl routing show --role ppl-code-worker --task <TASK-ID>` prints:
-`routing.toml` routes a role to a stronger model for the run's risk tier (`ppl init --risk
-high`), and the generated agent file keeps the default, so the override only takes effect
-when you pass it at dispatch [R-ROUTING-BY-RISK]. It writes directly inside `allowed_write_paths`; the guard hook denies anything
+boundary. Pass that dispatch both the `model` and the `effort` that
+`ppl routing show --role ppl-code-worker --task <TASK-ID>` prints: `routing.toml` can give a
+role another model and another effort for the run's risk (`ppl init --risk`), and the
+generated agent file keeps the defaults, so the risk's values only take effect when you pass
+them at dispatch [R-ROUTING-BY-RISK]. It writes directly inside `allowed_write_paths`; the guard hook denies anything
 else [R-ROLE-CODE-WORKER-BOUNDARY] - **if `ppl doctor` reported the hook registered**
 (`local`, or an accepted `both`). If it reported `none` or `unknown`, nothing
 stops this worker from writing outside `allowed_write_paths` except the brief you dispatched

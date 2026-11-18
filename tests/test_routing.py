@@ -319,6 +319,88 @@ class TestRouting(unittest.TestCase):
             self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
             self.assertIn("by_risk must be a table", caught.exception.message)
 
+    def test_by_risk_effort_replaces_the_effort_for_that_risk_only(self):
+        # rule: R-ROUTING-BY-RISK
+        # the example routes ppl-briefer at good, effort high, by_risk_effort { low = "medium" }
+        self.assertEqual(routing.resolve("ppl-briefer", "low")["params"]["effort"], "medium")
+        self.assertEqual(routing.resolve("ppl-briefer", "low")["risk"], "low")
+        self.assertEqual(routing.resolve("ppl-briefer", "normal")["params"]["effort"], "high")
+        self.assertEqual(routing.resolve("ppl-briefer")["params"]["effort"], "high")
+        self.assertEqual(routing.resolve("ppl-briefer", "low")["model"],
+                         routing.tiers()["good"]["model"])
+        # the loaded document keeps the default effort, an entry is a copy
+        self.assertEqual(routing.load()["roles"]["ppl-briefer"]["params"]["effort"], "high")
+
+    def test_by_risk_and_by_risk_effort_apply_together(self):
+        # rule: R-ROUTING-BY-RISK
+        self.use_example_with('by_risk = { high = "good" }',
+                              'by_risk = { high = "good", low = "average" }')
+        entry = routing.resolve("ppl-code-worker", "low")
+        self.assertEqual((entry["tier"], entry["params"]["effort"]), ("average", "medium"))
+        entry = routing.resolve("ppl-code-worker", "high")
+        self.assertEqual((entry["tier"], entry["params"]["effort"]), ("good", "high"))
+
+    def test_a_frozen_copy_without_by_risk_effort_resolves_as_before(self):
+        # rule: R-ROUTING-BY-RISK
+        # a lane froze routing.toml before by_risk_effort existed
+        text = (SOURCE / "defaults" / "routing.example.toml").read_text(encoding="utf-8")
+        self.assertIn("by_risk_effort", text)
+        old = "\n".join(line for line in text.splitlines()
+                        if not line.startswith("by_risk_effort")) + "\n"
+        home = tmphome.mkdtemp(prefix="pplhome-")
+        Path(home, "routing.toml").write_text(old, encoding="utf-8")
+        os.environ["PPL_HOME"] = home
+        for risk in ("low", "normal", "high", None):
+            with self.subTest(risk=risk):
+                entry = routing.resolve("ppl-briefer", risk)
+                self.assertEqual(entry["params"], {"effort": "high"})
+                self.assertNotIn("risk", entry)
+        routing.validate_config(routing.load())
+
+    def test_an_unknown_effort_or_risk_in_by_risk_effort_is_refused(self):
+        # rule: R-ROUTING-BY-RISK
+        for bad, named in (('by_risk_effort = { low = "extreme" }', "extreme"),
+                           ('by_risk_effort = { tiny = "low" }', "tiny"),
+                           ('by_risk_effort = "low"', "must be a table")):
+            with self.subTest(bad=bad):
+                self.use_example_with('by_risk_effort = { low = "medium" }', bad)
+                calls = (lambda: routing.validate_config(routing.load()),
+                         lambda: routing.resolve("ppl-briefer", "low"),
+                         lambda: routing.resolve("ppl-briefer", "tiny"))
+                for call in calls:
+                    with self.assertRaises(PplError) as caught:
+                        call()
+                    self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                    self.assertIn("by_risk_effort", caught.exception.message)
+                    self.assertIn("ppl-briefer", caught.exception.message)
+                    self.assertIn(named, caught.exception.message)
+
+    def test_the_reflector_fallback_takes_no_by_risk_effort(self):
+        config = routing.loads(self._example_text())
+        self.assertIn("by_risk_effort", config["roles"]["ppl-briefer"])
+        self.assertNotIn("by_risk_effort", config["roles"]["ppl-reflector"])
+        self.assertEqual(routing.resolve("ppl-reflector", "low")["params"]["effort"], "high")
+
+    def test_routing_show_prints_the_resolved_effort(self):
+        # rule: R-ROUTING-BY-RISK
+        import io
+        from contextlib import redirect_stdout
+        from ppl import cli
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = cli.main(["routing", "show", "--role", "ppl-briefer", "--risk", "low"])
+        self.assertEqual(code, 0)
+        shown = json.loads(out.getvalue())
+        self.assertEqual(sorted(shown), ["effort", "model", "params", "risk", "role"])
+        self.assertEqual((shown["role"], shown["risk"], shown["effort"]),
+                         ("ppl-briefer", "low", "medium"))
+        self.assertEqual(shown["params"]["effort"], "medium")
+        self.assertEqual(shown["model"], routing.tiers()["good"]["model"])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["routing", "show", "--role", "ppl-verifier", "--risk", "low"])
+        self.assertEqual(json.loads(out.getvalue())["effort"], "xhigh")
+
     def test_a_non_table_params_is_schema_invalid_when_the_agent_file_is_rendered(self):
         self.use_example_with('[roles.ppl-verifier]\ntier = "good"\nparams = { effort = "xhigh" }',
                               '[roles.ppl-verifier]\ntier = "good"\nparams = "fast"')
