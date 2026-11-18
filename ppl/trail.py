@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import __version__, metrics, paths, store, trail_render, usage
+from . import __version__, metrics, paths, store, timing, trail_render, usage
 from .errors import PplError
 
 # Relative paths under runs/<task>, in a readable form. `<sha>` is hexadecimal,
@@ -460,6 +460,7 @@ def measures(directory):
         "rework_rounds": verdicts.get("REWORK", 0),
         "verdicts": dict(sorted(verdicts.items())),
         "reasons": reasons,
+        "timing": timing.report(events),
     }
 
 

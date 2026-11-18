@@ -1225,7 +1225,7 @@ event = "SubagentStart"
 enforcement = "soft"
 hook_or_check = "ppl/_assets/hooks/ppl_dispatch.py:on_start"
 deny_test = ""
-allow_test = "tests/test_dispatch_hook.py::TestDispatchHook::test_start_increments_the_dispatch_counter, tests/test_dispatch_hook.py::TestDispatchHook::test_start_denies_past_the_hard_cap, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_dispatched_from_beside_the_worktree_is_counted"
+allow_test = "tests/test_dispatch_hook.py::TestDispatchHook::test_start_increments_the_dispatch_counter, tests/test_dispatch_hook.py::TestDispatchHook::test_start_denies_past_the_hard_cap, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_dispatched_from_beside_the_worktree_is_counted, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_start_logs_a_dispatch_start_event, tests/test_dispatch_hook.py::TestDispatchHook::test_a_non_role_start_logs_nothing, tests/test_dispatch_hook.py::TestDispatchHook::test_a_log_that_cannot_be_appended_does_not_change_the_result"
 owner = "harness"
 residual = "the deny document the hook returns past the cap is never acted on by the harness; R-BUDGET-DISPATCH-CAP is the only real enforcement of that budget"
 
