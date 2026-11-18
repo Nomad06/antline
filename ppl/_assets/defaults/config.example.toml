@@ -60,7 +60,7 @@ usd_max = 0
 # notify_after_minutes = 15
 # silent_after_minutes = 60
 # review_notify_after_minutes = 45
-# keep_awake = false
+# keep_awake = false  # true: on macOS a lane's claude runs under caffeinate -i, so the Mac stays awake
 
 # A stall raises a desktop notification on this machine. Nothing leaves it unless command is
 # set: ppl then also runs that argv with the task id, the stage, the kind and the minutes

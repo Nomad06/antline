@@ -579,7 +579,7 @@ hook_or_check = "none"
 deny_test = ""
 allow_test = ""
 owner = "panel"
-residual = "GAP: nothing confines it. The panel imports ppl and runs in-process, so stop parks the run through run.park and destroy archives the whole run directory, both writing run state directly. The guard hook never sees these - they are not tool calls - and no check stands between the panel and ppl's full write surface, so what keeps panel writes narrow is only which functions handle_control happens to call"
+residual = "GAP: nothing confines it, and control.json is not its only write. The panel imports ppl and runs in-process, so stop parks the run through run.park and destroy archives the whole run directory, both writing run state directly, a hard stop appends a sigterm event to the run's log, and the stall ticker of ppl serve appends a stall event to a run's log for each stall it announces and starts the [notify] command and the desktop notifier as processes (R-STALL-REPORTS-ONLY). The guard hook never sees these - they are not tool calls - and no check stands between the panel and ppl's full write surface, so what keeps panel writes narrow is only which functions handle_control happens to call"
 
 [[rule]]
 id = "R-STUDIO-SESSION-TOKEN"
@@ -1225,7 +1225,7 @@ event = "SubagentStart"
 enforcement = "soft"
 hook_or_check = "ppl/_assets/hooks/ppl_dispatch.py:on_start"
 deny_test = ""
-allow_test = "tests/test_dispatch_hook.py::TestDispatchHook::test_start_increments_the_dispatch_counter, tests/test_dispatch_hook.py::TestDispatchHook::test_start_denies_past_the_hard_cap, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_dispatched_from_beside_the_worktree_is_counted, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_start_logs_a_dispatch_start_event, tests/test_dispatch_hook.py::TestDispatchHook::test_a_non_role_start_logs_nothing, tests/test_dispatch_hook.py::TestDispatchHook::test_a_log_that_cannot_be_appended_does_not_change_the_result"
+allow_test = "tests/test_dispatch_hook.py::TestDispatchHook::test_start_increments_the_dispatch_counter, tests/test_dispatch_hook.py::TestDispatchHook::test_start_denies_past_the_hard_cap, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_dispatched_from_beside_the_worktree_is_counted, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_start_logs_a_dispatch_start_event, tests/test_dispatch_hook.py::TestDispatchHook::test_a_non_role_start_logs_nothing, tests/test_dispatch_hook.py::TestDispatchHook::test_a_log_that_cannot_be_appended_does_not_change_the_result, tests/test_dispatch_hook.py::TestDispatchHook::test_a_refused_spend_still_logs_the_start"
 owner = "harness"
 residual = "the deny document the hook returns past the cap is never acted on by the harness; R-BUDGET-DISPATCH-CAP is the only real enforcement of that budget"
 
@@ -1251,7 +1251,7 @@ hook_or_check = "ppl/_assets/hooks/ppl_session.py:on_event, ppl/doctor.py:lane_h
 deny_test = ""
 allow_test = "tests/test_session_hook.py::TestSessionHook::test_a_stop_logs_the_running_background_count, tests/test_session_hook.py::TestSessionHook::test_an_unknown_event_and_a_hook_outside_a_lane_log_nothing, tests/test_session_hook.py::TestSessionHook::test_the_hook_never_prints_a_decision, tests/test_session_hook.py::TestSessionHook::test_an_old_interpreter_prints_nothing, tests/test_session_hook.py::TestSessionHook::test_a_fifo_log_is_skipped_without_blocking, tests/test_lane_launch.py::TestResume::test_a_lane_started_before_the_session_hook_still_resumes"
 owner = "harness"
-residual = "the hook records only where it is registered: a lane started before this version holds the guard, dispatch and usage hooks alone and records nothing until its settings are rendered again by ppl lane. It records only for a lane the registry confirms whose state.json exists, and a log.jsonl there but not a regular file (a FIFO) records nothing rather than block. Under a Python older than 3.11 it writes one stderr line and records nothing, since the floor the other hooks share (R-GUARD-PYTHON-FLOOR) prints a permissionDecision that a Stop hook must not. Notification did not fire in a headless probe, so its notification_type is taken from Claude Code's documentation"
+residual = "the hook records only where it is registered: a lane started before this version holds the guard, dispatch and usage hooks alone and records no session event for its whole lifetime, since ppl lane renders the settings of a new lane only. When the hook's script file is missing (the install moved, or a clone used as the install was switched to a commit from before this hook), Python exits 2, and 2 is the exit code with which a Stop hook holds the stop: a probe on Claude Code 2.1.322 on 2026-11-18 found the stop was not held in that case, while a Stop hook that exits 2 on purpose with its own stderr text did hold it, so a later Claude Code may behave differently, and ppl lane resume refuses a lane whose hook script is missing. It records only for a lane the registry confirms whose state.json exists, and a log.jsonl there but not a regular file (a FIFO) records nothing rather than block. Under a Python older than 3.11 it writes one stderr line and records nothing, since the floor the other hooks share (R-GUARD-PYTHON-FLOOR) prints a permissionDecision that a Stop hook must not. Notification did not fire in a headless probe, so its notification_type is taken from Claude Code's documentation"
 
 [[rule]]
 id = "R-SESSION-EVENT-NO-TEXT"
@@ -1688,7 +1688,7 @@ scope = "ppl CLI"
 event = "ppl routing show"
 enforcement = "soft"
 hook_or_check = "ppl/routing.py:resolve"
-deny_test = ""
+deny_test = "tests/test_routing.py::TestRouting::test_an_unknown_effort_or_risk_in_by_risk_effort_is_refused"
 allow_test = "tests/test_routing.py::TestRouting::test_resolve_applies_the_risk_override, tests/test_routing.py::TestRouting::test_by_risk_effort_replaces_the_effort_for_that_risk_only, tests/test_routing.py::TestRouting::test_by_risk_and_by_risk_effort_apply_together, tests/test_routing.py::TestRouting::test_routing_show_prints_the_resolved_effort"
 owner = "orchestrator"
 residual = "the generated agent file keeps the default model and effort; an orchestrator that dispatches by agent name without passing the resolved model and effort runs the defaults"
@@ -1819,7 +1819,7 @@ hook_or_check = "ppl/stall.py:scan, ppl/stall.py:announce, ppl/cli.py:_watchdog_
 deny_test = ""
 allow_test = "tests/test_stall.py::TestNeverChangesTheRun::test_scan_and_announce_leave_the_state_byte_identical"
 owner = "ppl"
-residual = "a report, not a guard: a stalled run stays as it is until the owner acts, and nothing runs the scan on its own except a caller that schedules it, ppl serve's ticker once a minute while the panel runs and no other. It reads the run's log, and a gate or another long step that logs nothing for longer than silent_after_minutes is reported as silent, a false alarm. A dispatch whose start the hook logged with an agent_id and whose stop it never logged hides every later stall of that run until a stop with nothing pending or a session end closes it. A run whose state, control file or log cannot be read, a FIFO among them, is skipped and not reported, and so is a run whose log.jsonl is over 16 MiB (stall.LOG_READ_LIMIT, checked by size before a byte is read, so a sparse log a role planted cannot hold the scan): such a run is not watched"
+residual = "a report, not a guard: a stalled run stays as it is until the owner acts, and nothing runs the scan on its own except a caller that schedules it, ppl serve's ticker once a minute while the panel runs and no other. It reads the run's log, and a gate or another long step that logs nothing for longer than silent_after_minutes is reported as silent, a false alarm. A dispatch whose start the hook logged with an agent_id and whose stop it never logged hides every later stall of that run until a stop with nothing pending or a session end closes it. A run whose state, control file or log cannot be read, a FIFO among them, is skipped and not reported, and so is a run whose log.jsonl is over 16 MiB (stall.LOG_READ_LIMIT, checked by size before a byte is read, so a sparse log a role planted cannot hold the scan): such a run is not watched. A role writes its run's log, so it can silence announcing: an event dated in the future keeps the newest event's age below every threshold, and a stall line it writes itself marks the stall as already announced"
 
 [[rule]]
 id = "R-DOC-RULE-IDS"

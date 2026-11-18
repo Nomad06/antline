@@ -345,8 +345,9 @@ The session hook, `ppl_session.py` on `Stop`, `SessionEnd` and `Notification`, r
 orchestrator's session stopped as a `session` event in the run's `log.jsonl`: on `Stop` the
 number of background tasks still running and of session crons, on `SessionEnd` the reason, on
 `Notification` its type. It prints nothing and decides nothing, and a lane started before this
-version, whose `settings.json` holds the other three hooks alone, still resumes and records
-nothing until `ppl lane` renders its settings again [R-SESSION-HOOK-CANNOT-BLOCK]. A session
+version, whose `settings.json` holds the other three hooks alone, still resumes but records no
+session event for its whole lifetime: `ppl lane` renders the settings of a new lane only
+[R-SESSION-HOOK-CANNOT-BLOCK]. A session
 event carries a kind and counts, never message text: the last assistant message and a
 notification's message are never logged [R-SESSION-EVENT-NO-TEXT].
 
@@ -602,8 +603,9 @@ session stopped working: `stopped` when the session's last turn ended with no ba
 task running or the session ended, `waiting` when it sits on a permission prompt, each once
 `notify_after_minutes` have passed, and `silent` when nothing at all was logged for
 `silent_after_minutes`. In the review stage only silence counts, after
-`review_notify_after_minutes`. A run that is paused, parked, escalated, closing or watching
-its merge request is left out, and so is a run while a role it dispatched is still working.
+`review_notify_after_minutes`. A run still in admission (status `planned`), paused, parked,
+escalated, closing or watching its merge request is left out, and so is a run whose control
+file is unusable and a run while a role it dispatched is still working.
 With `--notify` each new stall is logged once as a `stall` event in the run's log and raised
 as a desktop notification on this machine, through `osascript` on macOS or `notify-send`
 elsewhere. Detection only reports: it never parks a run or changes its state
