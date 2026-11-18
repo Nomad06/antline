@@ -1,7 +1,7 @@
 # Stage 4 - gates
 
-`ppl stage enter gates`. Run the gates from `references/gates.md` in order, cheapest first.
-Every gate writes its exit code to a file, and every result becomes a receipt recorded under
+`ppl stage enter gates`. Run the gates from `references/gates.md` in the order set out below:
+the fast section first, the full section last. Every gate writes its exit code to a file, and every result becomes a receipt recorded under
 the current candidate SHA with the check name from that file - use these names exactly,
 because two of them are load-bearing:
 
@@ -27,14 +27,29 @@ tests` and `references/stage-3-tests.md` when a test is at fault, and dispatch a
 there. A gate that fails outside the boundary is `BASELINE_FAILURE`: park it, escalate with provenance, and do not edit a test to
 make it green.
 
-Once the gates are green, run the simplification pass before verification: spend a dispatch
-and dispatch the `code-simplifier` agent inside `allowed_write_paths` (main sources only,
-tests stay as the test worker left them) with the brief's `name_contract`, asking for the
-smallest diff that keeps every contract name. If it changes anything, commit, which is a new
-candidate SHA, and run the gates again in full. File the receipt either way: `--check simplification --result pass`
-when it ran, `--result skip` with the reason in its log when there was nothing to simplify
-(a docs-only change, a diff already at the challenge's shape). `ppl transition done`
-refuses a head without that receipt [R-DONE-SIMPLIFICATION-RECEIPT].
+The order is fast gates, then the simplification pass, then the full gates, so the slow gates
+run once [R-GATES-SIMPLIFY-BEFORE-FULL n/a]:
+
+1. Run the fast gates (the section under `# fast gates`) and the secret scan on the candidate
+   SHA and file their receipts.
+2. Once they are green, run the simplification pass: spend a dispatch and dispatch the
+   `code-simplifier` agent inside `allowed_write_paths` (main sources only, tests stay as the
+   test worker left them) with the brief's `name_contract`, asking for the smallest diff that
+   keeps every contract name. If it changes anything, commit. File the receipt either way:
+   `--check simplification --result pass` when it ran, `--result skip` with the reason in its
+   log when there was nothing to simplify (a docs-only change, a diff already at the
+   challenge's shape). `ppl transition done` refuses a head without that receipt
+   [R-DONE-SIMPLIFICATION-RECEIPT].
+3. If the pass committed, that commit is a new candidate SHA: run the fast gates and the
+   secret scan again on it and file their receipts under it.
+4. Then run the full gates (the section under `# full gates`) once, on the SHA that goes to
+   verification.
+
+Dispatch the simplifier on the run's first candidate, always. On a later candidate (a rework
+after a verdict or a review remark) dispatch it only when the rework added a main-source file
+or the finding or remark is about complexity. Otherwise file `--check simplification --result
+skip` with the reason "rework of an already simplified candidate" in its log and go straight
+from the fast gates to the full gates.
 
 A new commit means a new candidate SHA, and every receipt and verdict is filed under the SHA
 that produced it - a receipt from the previous SHA proves nothing about this one. After any

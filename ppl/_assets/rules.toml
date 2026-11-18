@@ -1658,6 +1658,18 @@ owner = "ppl"
 residual = "skip is honoured on the record alone; nothing checks that the reason in its log is true"
 
 [[rule]]
+id = "R-GATES-SIMPLIFY-BEFORE-FULL"
+statement = "In the gates stage the orchestrator runs the fast gates and the secret scan, then the simplification pass, then the fast gates and the secret scan again only if the pass committed, then the full gates once, on the SHA that goes to verification; on a rework candidate it dispatches the simplifier only when the rework added a main-source file or the finding or remark is about complexity."
+scope = "orchestrator, gates stage"
+event = "the orchestrator ordering the gate recipes and the simplification pass"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "PROPERTY: orchestrator discipline with no check behind it. The order saves time and holds nothing safe: every receipt is filed under the SHA that produced it, so a run that keeps the old order, full gates before the pass and again after it, closes the same way, only slower"
+
+[[rule]]
 id = "R-ROUTING-BY-RISK"
 statement = "routing.resolve applies the by_risk tier override of a role for the run's risk, mapping the tier to its model; ppl routing show --role --task prints the model the orchestrator passes at dispatch."
 scope = "ppl CLI"

@@ -5,9 +5,8 @@ Every gate writes its exit code to a file, then gets a receipt under its own che
 `secret-scan`. Get those two names wrong and the run blocks at the very end with no
 obvious cause - use the names below verbatim, they are not placeholders.
 
-A piped command returns the exit code of the pipe tail, and a red build has been read as
-green that way before - that is why every step below writes `$?` to a file immediately,
-instead of trusting a scrollback read.
+A pipe returns its tail's exit code, and a red build has been read as green that way, so
+every step below writes `$?` to a file at once instead of trusting scrollback.
 
 Every path below is spelled out literally, on purpose. The guard hook fails closed on a
 redirect whose target it cannot resolve, and a `$VAR/...` or `$(...)` target is exactly
@@ -20,13 +19,13 @@ directory per task, `<!-- include: harness/scratch -->/<TASK-ID>`, written into 
 Bash call. `tests/test_guard.py` feeds this whole block, placeholders substituted, through
 the hook - a change here that the hook would refuse fails the suite.
 
-No call below passes `--producer`, on purpose: when it is left out, `ppl evidence add` fills it
-with `{"provider": "claude-code-subagent", "model":
-"unknown", "params_hash": ""}`. Pass `--producer '<json object>'` only if you need to record
-something more specific than that default - it is a free-form object, not schema-checked
-beyond "is a JSON object".
+No call below passes `--producer`: left out, `ppl evidence add` fills in
+`{"provider": "claude-code-subagent", "model": "unknown", "params_hash": ""}`. Pass
+`--producer '<json object>'` only to record something more specific, any JSON object.
 
 <!-- include: harness/gates -->
+
+Fast gates come first: the simplification pass runs before the full gates, so those run once.
 
 ```bash
 <!-- include: harness/gate-recipes -->

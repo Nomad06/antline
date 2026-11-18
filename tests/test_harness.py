@@ -165,6 +165,78 @@ class TestLoadAndValidate(HarnessTestCase):
             self.assertEqual(caught.exception.code, "HARNESS_INVALID", bad)
             self.assertIn("gate[1].name", caught.exception.message, bad)
 
+    def test_a_gate_phase_defaults_to_full_and_focused_tests_is_fast(self):
+        self.assertEqual(harness.gate_phase({"name": "regression", "command": "x"}), "full")
+        self.assertEqual(harness.gate_phase({"name": "focused-tests", "command": "x"}), "fast")
+        self.assertEqual(harness.gate_phase({"name": "lint", "command": "x", "phase": "fast"}),
+                         "fast")
+        self.assertEqual(harness.gate_phase({"name": "lint", "command": "x", "phase": "full"}),
+                         "full")
+
+    def test_a_gate_phase_is_accepted(self):
+        name = self.mutate("example-generic", 'command = "make lint"',
+                           'command = "make lint"\nphase = "fast"')
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
+    def test_an_unknown_phase_is_refused(self):
+        for bad in ('"quick"', '"Fast"', "1"):
+            name = self.mutate("example-generic", 'command = "make lint"',
+                               'command = "make lint"\nphase = %s' % bad)
+            with self.assertRaises(PplError) as caught:
+                harness.load(name)
+            self.assertEqual(caught.exception.code, "HARNESS_INVALID", bad)
+            self.assertIn("gate[1].phase must be fast or full", caught.exception.message, bad)
+
+    def test_focused_tests_marked_full_is_refused(self):
+        name = self.mutate("example-generic", 'command = "make test TEST=<test_class>"',
+                           'command = "make test TEST=<test_class>"\nphase = "full"')
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("gate[2].phase", caught.exception.message)
+        self.assertIn("focused-tests", caught.exception.message)
+
+    def test_focused_tests_marked_fast_is_accepted(self):
+        name = self.mutate("example-generic", 'command = "make test TEST=<test_class>"',
+                           'command = "make test TEST=<test_class>"\nphase = "fast"')
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
+    def gates_doc(self, gates):
+        fixtures.install_harness("example-generic")
+        doc = harness.load("example-generic")
+        doc["gate"] = gates
+        return doc
+
+    def test_the_recipes_put_fast_gates_before_full_ones(self):
+        doc = self.gates_doc([
+            {"name": "regression", "command": "make regression"},
+            {"name": "lint", "command": "make lint", "phase": "fast"},
+            {"name": "focused-tests", "command": "make test TEST=<test_class>"},
+            {"name": "integration", "command": "make integration", "phase": "full"},
+        ])
+        text = harness._gate_recipes(doc)
+        self.assertLess(text.index("# lint"), text.index("# regression"))
+        self.assertLess(text.index("# focused-tests"), text.index("# regression"))
+        self.assertLess(text.index("# lint"), text.index("# focused-tests"))
+        self.assertLess(text.index("# regression"), text.index("# integration"))
+        self.assertLess(text.index("# fast gates"), text.index("# full gates"))
+        self.assertIn("# fast gates: run these, then the simplification pass\n", text)
+        self.assertIn("# full gates: run once, on the SHA that goes to verification\n", text)
+        self.assertLess(text.index("# fast gates"), text.index("# lint"))
+        self.assertLess(text.index("# focused-tests"), text.index("# full gates"))
+        self.assertLess(text.index("# full gates"), text.index("# regression"))
+
+    def test_a_harness_with_only_fast_gates_has_no_full_section(self):
+        doc = self.gates_doc([{"name": "focused-tests", "command": "make test TEST=<test_class>"}])
+        text = harness._gate_recipes(doc)
+        self.assertIn("# fast gates", text)
+        self.assertNotIn("# full gates", text)
+
+    def test_a_harness_with_no_gate_renders_no_section(self):
+        text = harness._gate_recipes(self.gates_doc([]))
+        self.assertNotIn("# fast gates", text)
+        self.assertNotIn("# full gates", text)
+
     def test_env_key_that_is_not_a_shell_identifier_is_refused(self):
         for bad in ('"JAVA HOME"', '"1JAVA"', '"A-B"', '"A;B"'):
             name = self.mutate("example-maven", "JAVA_HOME = ", "%s = " % bad)

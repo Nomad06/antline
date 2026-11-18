@@ -128,9 +128,9 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `ppl/_assets/rules.toml` holds 207 rules, 160 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 208 rules, 160 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 3354 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 3362 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
@@ -481,6 +481,13 @@ tracker once the merge is observed, by default a short comment saying what was
 done and how to check it). In a fragment, `<default-branch>` is replaced with
 `repo.default_branch` when the skill is rendered, while `<worktree>`, `<TASK-ID>`,
 `<SHA>` and `<GENERATION>` are left for the orchestrator to fill in at run time.
+
+A `[[gate]]` row holds `name`, `command` and an optional `phase`, `"fast"` or `"full"`:
+`full` when absent, and the `focused-tests` gate is always fast. The rendered recipes list
+the fast gates first. The orchestrator runs them and the secret scan, then the simplification
+pass, and then the full gates once, on the SHA that goes to verification
+[R-GATES-SIMPLIFY-BEFORE-FULL n/a]. Mark a gate fast when it is quick and catches what a
+simplification could break, such as a build or a lint, and leave long test suites full.
 
 A harness or routing change reaches the next lane `ppl lane` starts, which renders the
 agents and the skill from the harness commit and `routing.toml` as they are then; a running
