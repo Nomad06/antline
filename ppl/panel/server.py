@@ -1,13 +1,15 @@
 import json
 import os
 import signal
+import sys
+import threading
 import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import control, findings, lessons, paths, run, status, store
+from .. import config, control, findings, lessons, paths, run, stall, status, store
 from ..errors import PplError
 from . import api_static, routes, session
 from .router import Raw
@@ -18,6 +20,9 @@ ROUTES = routes.build()
 STATUS_BY_CODE = {"SESSION_REQUIRED": 403, "NOT_FOUND": 404, "BUSY": 409, "CHANGED_ON_DISK": 409}
 # The largest request body the panel reads, in bytes.
 MAX_BODY = 4 * 1024 * 1024
+# The last line stall_tick wrote to stderr, so a broken [stall] or [notify] table is said once
+# and not every minute. A clean tick clears it.
+_last_tick_error = None
 
 
 def _needs_you(state, command):
@@ -35,6 +40,22 @@ def _needs_you(state, command):
     if state["stage"] in ("escalation", "parking"):
         return "escalated"
     return ""
+
+
+def _stall_text(stall_found):
+    """The needs_you text of a stall stall.scan found: its minutes and its kind."""
+    return "idle %d min (%s)" % (stall_found["minutes"], stall_found["kind"])
+
+
+def _stalls_by_task():
+    """One stall.scan() for the whole run list, by task id. The capped, non-blocking read of
+    each sandbox-writable log lives in stall.py and is not repeated here. A broken [stall]
+    table leaves every row without a stall rather than blanking the panel: the ticker says
+    what is wrong on stderr."""
+    try:
+        return {item["task_id"]: item for item in stall.scan()}
+    except Exception:
+        return {}
 
 
 def _error_row(task_id, exc):
@@ -63,6 +84,7 @@ def list_runs():
     root = paths.runs_dir()
     if not root.is_dir():
         return rows
+    stalls = _stalls_by_task()
     for folder in sorted(root.iterdir()):
         # runs/_archive holds destroyed runs one directory deeper: skip it
         # explicitly instead of relying only on the state.json probe below.
@@ -84,6 +106,9 @@ def list_runs():
                 raise PplError("SCHEMA_INVALID",
                                "state.json for %s is not a JSON object" % folder.name)
             command = control.read(state["task_id"])
+            needs_you = _needs_you(state, command)
+            if not needs_you and state["task_id"] in stalls:
+                needs_you = _stall_text(stalls[state["task_id"]])
             rows.append({
                 "task_id": state["task_id"],
                 "tracker_url": state.get("tracker_url"),
@@ -97,7 +122,7 @@ def list_runs():
                 "candidate_sha": state.get("candidate_sha"),
                 "next_safe_action": state.get("next_safe_action"),
                 "control": (command or {}).get("command"),
-                "needs_you": _needs_you(state, command),
+                "needs_you": needs_you,
                 # A count only, not the finding bodies themselves - a triage
                 # signal for the fleet-wide row. run_detail below carries the
                 # full list for the one run an operator opens.
@@ -392,7 +417,41 @@ class Handler(BaseHTTPRequestHandler):
         return self._dispatch("PUT", parsed, body)
 
 
-def serve(port=8787, open_browser=False, fragment=""):
+def stall_tick():
+    """One stall check of every run, as `ppl watchdog stalls --notify` makes it: the stalls
+    newly announced, each logged once and raised on this machine [R-STALL-REPORTS-ONLY]. It
+    never raises, since it runs on the panel's ticker thread: whatever goes wrong is one line on
+    stderr and the result is []. [stall] and [notify] are read first, as the CLI does, so a
+    broken table is said rather than leaving the panel to announce through no channel, and is
+    said once until a clean tick, not every minute."""
+    global _last_tick_error
+    try:
+        config.stall_settings()
+        config.notify_command()
+        found = stall.announce(stall.scan())
+    except Exception as exc:
+        line = "stall check: %s" % (getattr(exc, "message", None) or exc)
+        line = " ".join(line.split())
+        if line != _last_tick_error:
+            _last_tick_error = line
+            sys.stderr.write(line + "\n")
+            sys.stderr.flush()
+        return []
+    _last_tick_error = None
+    return found
+
+
+def _tick_until(stop, interval):
+    """Call stall_tick every `interval` seconds until `stop` is set. The first tick waits one
+    interval, and each tick reads every log afresh: nothing is kept between ticks."""
+    while not stop.wait(interval):
+        stall_tick()
+
+
+def serve(port=8787, open_browser=False, fragment="", stall_interval=60):
+    """Serve the studio on loopback until ctrl-c. While it runs a daemon thread checks every run
+    for a stall each `stall_interval` seconds, and 0 or None starts no thread. The thread stops
+    when serve returns."""
     if isinstance(port, bool) or not isinstance(port, int) or not (0 < port < 65536):
         raise PplError("SCHEMA_INVALID",
                        "port must be an integer between 1 and 65535, got: %r" % (port,))
@@ -402,9 +461,14 @@ def serve(port=8787, open_browser=False, fragment=""):
     print("antline studio on %s  (loopback only, ctrl-c to stop)" % link)
     if open_browser:
         webbrowser.open(link)
+    stop = threading.Event()
+    if stall_interval:
+        threading.Thread(target=_tick_until, args=(stop, stall_interval),
+                         name="ppl-stall-ticker", daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("studio stopped")
     finally:
+        stop.set()
         httpd.server_close()

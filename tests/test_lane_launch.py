@@ -1007,6 +1007,96 @@ class TestResume(LaneCase):
                          str(lanes.start_dir(TASK)))
 
 
+class TestKeepAwake(LaneCase):
+    """[stall] keep_awake puts `caffeinate -i` in front of the claude launch line on macOS."""
+
+    def keep_awake(self):
+        config.update("stall", {"keep_awake": True})
+
+    def on_macos(self):
+        """keep_awake_prefix as it answers on a Mac with caffeinate, whatever runs the suite."""
+        original = lane_launch.keep_awake_prefix
+        return mock.patch.object(lane_launch, "keep_awake_prefix",
+                                 lambda: original("darwin", lambda name: "/usr/bin/caffeinate"))
+
+    def test_keep_awake_prefixes_caffeinate_on_macos(self):
+        self.keep_awake()
+        self.assertEqual(lane_launch.keep_awake_prefix("darwin", lambda name: "/usr/bin/caffeinate"),
+                         ["caffeinate", "-i"])
+        self.assertEqual(lane_launch.keep_awake_prefix("linux", lambda name: "/usr/bin/caffeinate"),
+                         [])
+        self.assertEqual(lane_launch.keep_awake_prefix("darwin", lambda name: None), [])
+
+    def test_keep_awake_is_off_by_default(self):
+        self.assertEqual(lane_launch.keep_awake_prefix("darwin", lambda name: "/usr/bin/caffeinate"),
+                         [])
+
+    def test_a_broken_stall_table_refuses_the_start_before_anything_is_made(self):
+        config.update("stall", {"keep_awake": "yes"})
+        refusal(self, "SCHEMA_INVALID", lane_launch.start, LINK, harness_name=HARNESS,
+                exec_=False)
+        self.assert_nothing_made()
+
+    def test_start_returns_the_prefixed_argv(self):
+        self.keep_awake()
+        with self.on_macos():
+            started = lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertEqual(started["argv"][:2], ["caffeinate", "-i"])
+        self.assertEqual(started["argv"][2:], self.launch_line(lanes.entry(TASK)))
+
+    def test_resume_returns_the_prefixed_argv(self):
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.keep_awake()
+        with self.on_macos():
+            resumed = lane_launch.resume(TASK, exec_=False)
+        self.assertEqual(resumed["argv"][:2], ["caffeinate", "-i"])
+        self.assertEqual(resumed["argv"][2:], self.launch_line(lanes.entry(TASK), resume=True))
+
+    def test_start_without_keep_awake_returns_the_bare_argv(self):
+        with self.on_macos():
+            started = lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertEqual(started["argv"], self.launch_line(lanes.entry(TASK)))
+
+    def fake_caffeinate(self):
+        """(a PATH with a caffeinate first that records its words and execs the rest, as the
+        real one runs its utility, the file it records them in)."""
+        fake = self.base / "fakebin" / "caffeinate"
+        marker = self.base / "caffeinate.ran"
+        fake.parent.mkdir()
+        fake.write_text('#!/bin/sh\necho "$@" > %s\nshift\nexec "$@"\n' % marker,
+                        encoding="utf-8")
+        fake.chmod(0o755)
+        return "%s:%s" % (fake.parent, os.environ.get("PATH", "")), marker
+
+    @unittest.skipUnless(sys.platform == "darwin", "keep_awake is macOS only")
+    def test_resume_execs_claude_under_caffeinate(self):
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.keep_awake()
+        path, marker = self.fake_caffeinate()
+        done = self.ppl("lane", "resume", TASK, PATH=path)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(marker.read_text(encoding="utf-8").startswith("-i %s --resume "
+                                                                      % self.stub))
+        claude = self.stub_call()
+        self.assertEqual(claude["argv"], self.launch_line(lanes.entry(TASK), resume=True)[1:])
+        self.assertEqual((claude["env"]["PPL_TASK"], claude["cwd"]),
+                         (TASK, os.path.realpath(lanes.entry(TASK)["start_dir"])))
+
+    @unittest.skipUnless(sys.platform == "darwin", "keep_awake is macOS only")
+    def test_a_missing_claude_binary_is_named_under_caffeinate(self):
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        before = lanes.entry(TASK)["pid"]
+        self.configure(str(self.base / "bin" / "gone"))
+        self.keep_awake()
+        path, marker = self.fake_caffeinate()
+        done = self.ppl("lane", "resume", TASK, PATH=path)
+        self.assertFalse(marker.exists())
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("SETUP_INCOMPLETE", done.stderr)
+        self.assertIn(str(self.base / "bin" / "gone"), done.stderr)
+        self.assertEqual(lanes.entry(TASK)["pid"], before)
+
+
 class TestList(LaneCase):
     def test_list_shows_resume_lines_and_whether_the_window_is_alive(self):
         for lane, task in enumerate(("KEY-1", "KEY-2", "KEY-3"), 1):

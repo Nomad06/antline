@@ -130,7 +130,7 @@ the test writer tries to `cat` product code and the hook denies it
 - Independent tests by construction, not by a line in a prompt.
 - The limits that matter are code. `ppl/_assets/rules.toml` holds 211 rules, 161 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 3447 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 3467 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
@@ -604,6 +604,13 @@ elsewhere. Detection only reports: it never parks a run or changes its state
 `silent_after_minutes` is reported as `silent`, a false alarm. A run whose state or log
 is unreadable, or whose `log.jsonl` is over 16 MiB, is skipped and so is not watched.
 
+While `ppl serve` runs, the panel makes the same check every minute and announces each new
+stall as `--notify` does, with the same report-only limit [R-STALL-REPORTS-ONLY]. On the run
+list a stalled run's needs-you column reads `idle <minutes> min (<kind>)`, unless the run
+already needs you for another reason, which is shown instead. A broken `[stall]` or `[notify]`
+table is printed once on the terminal running `ppl serve`, and no stall is announced until
+it is fixed.
+
 Set the thresholds in `~/.ppl/config.toml`, shown here with their defaults:
 
 ```toml
@@ -622,6 +629,11 @@ the machine unless you set `command`, and then ppl runs it with the task id, the
 kind and the minutes appended. A notification carries those four values and no other text,
 and a value that is not a task id, a stage, a kind or a number sends nothing
 [R-STALL-NOTIFY-NO-TEXT].
+
+`keep_awake = true` keeps a Mac awake while a lane's window is open: `ppl lane` and
+`ppl lane resume` start claude through `caffeinate -i`, which holds off idle sleep until
+claude exits. It has no effect on other systems or when `caffeinate` is not on PATH, and a
+closed lid still sleeps the machine.
 
 ## Sandbox
 
