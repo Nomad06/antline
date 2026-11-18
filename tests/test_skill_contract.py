@@ -788,6 +788,11 @@ class TestDispatchPassesTheResolvedRouting(unittest.TestCase):
 
 SKILL_BUDGET_BYTES = 14000
 STAGE_REFERENCE_BUDGET_BYTES = 10000
+# What the budgets are measured on: the skill with the data root at a fixed stand-in, so the
+# answer does not depend on how long this machine's temp path is.
+MEASURED = {name: fixtures.skill_files(name, nominal=True) for name in EXAMPLES}
+MEASURED["github-issues"] = fixtures.skill_files("example-generic", tables=fixtures.GITHUB_ISSUES,
+                                                 nominal=True)
 
 
 class TestStageReferences(unittest.TestCase):
@@ -799,17 +804,23 @@ class TestStageReferences(unittest.TestCase):
         return sorted(path for path in files if path.startswith("references/stage-"))
 
     def test_the_rendered_skill_md_stays_within_its_budget(self):
-        for name, files in RENDERED.items():
+        for name, files in MEASURED.items():
             size = len(files["SKILL.md"].encode("utf-8"))
             self.assertLessEqual(size, SKILL_BUDGET_BYTES, "%s SKILL.md is %d bytes" % (name, size))
 
     def test_each_stage_reference_stays_within_its_budget(self):
-        for name, files in RENDERED.items():
+        for name, files in MEASURED.items():
             self.assertTrue(self.stage_files(files), "%s renders no stage reference" % name)
             for path in self.stage_files(files):
                 size = len(files[path].encode("utf-8"))
                 self.assertLessEqual(size, STAGE_REFERENCE_BUDGET_BYTES,
                                      "%s %s is %d bytes" % (name, path, size))
+
+    def test_the_budgets_are_measured_with_the_data_root_at_its_stand_in(self):
+        for name, files in MEASURED.items():
+            self.assertIn(fixtures.NOMINAL_HOME + "/", files["references/gates.md"], name)
+            for path, text in files.items():
+                self.assertNotIn("pplrender-", text, "%s %s" % (name, path))
 
     def test_the_stage_references_rendered_are_the_ones_ppl_names(self):
         for name, files in RENDERED.items():
@@ -1161,7 +1172,7 @@ class TestGithubSkillText(unittest.TestCase):
                 for name in ("gh", "git", "ppl")}
         for name, tables in (("example-maven", None), ("example-generic", None),
                              ("example-generic", fixtures.GITHUB_ISSUES)):
-            files = fixtures.skill_files(name, tables=tables, pins=pins)
+            files = fixtures.skill_files(name, tables=tables, pins=pins, nominal=True)
             size = len(files["SKILL.md"].encode("utf-8"))
             self.assertLessEqual(size, SKILL_BUDGET_BYTES, "%s SKILL.md %d" % (name, size))
             for path, text in sorted(files.items()):

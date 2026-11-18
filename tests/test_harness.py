@@ -484,7 +484,7 @@ class TestVerify(HarnessTestCase):
         for name in ("example-generic", "example-maven"):
             fixtures.install_harness(name)
             doc = harness.load(name)
-            rendered = harness.render_skill(doc, pins=PINS)
+            rendered = fixtures.at_nominal_home(harness.render_skill(doc, pins=PINS), paths.home())
             largest_skill = max(largest_skill, len(rendered["SKILL.md"].encode("utf-8")))
             largest_reference = max(largest_reference, *(len(text.encode("utf-8"))
                                                          for path, text in rendered.items()
