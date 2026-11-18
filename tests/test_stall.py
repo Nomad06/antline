@@ -2,7 +2,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -91,24 +90,24 @@ class TestStallCheck(unittest.TestCase):
         self.assertEqual(found["since"], at(16))
 
     def test_a_stop_with_nothing_pending_closes_an_unpaired_dispatch(self):
-        events = [ev(100, "dispatch_start", role="ppl-implementer", agent_id="a1"),
+        events = [ev(100, "dispatch_start", role="ppl-code-worker", agent_id="a1"),
                   ev(16, "session", kind="stop", background=0, crons=0)]
         self.assertEqual(self.check(events)["kind"], "stopped")
 
     def test_a_session_end_closes_an_unpaired_dispatch(self):
-        events = [ev(100, "dispatch_start", role="ppl-implementer", agent_id="a1"),
+        events = [ev(100, "dispatch_start", role="ppl-code-worker", agent_id="a1"),
                   ev(16, "session", kind="end", reason="other")]
         self.assertEqual(self.check(events)["kind"], "stopped")
 
     def test_a_stop_with_a_background_task_keeps_a_dispatch_in_flight(self):
-        events = [ev(300, "dispatch_start", role="ppl-implementer", agent_id="a1"),
+        events = [ev(300, "dispatch_start", role="ppl-code-worker", agent_id="a1"),
                   ev(200, "session", kind="stop", background=1, crons=0)]
         self.assertIsNone(self.check(events))
 
     def test_a_start_without_an_agent_id_is_never_in_flight(self):
         for agent in (None, ""):
             with self.subTest(agent_id=agent):
-                events = [ev(100, "dispatch_start", role="ppl-implementer", agent_id=agent)]
+                events = [ev(100, "dispatch_start", role="ppl-code-worker", agent_id=agent)]
                 self.assertEqual(self.check(events)["kind"], "silent")
 
     def test_a_session_end_is_stopped(self):
@@ -123,19 +122,19 @@ class TestStallCheck(unittest.TestCase):
         self.assertEqual((found["kind"], found["minutes"]), ("silent", 60))
 
     def test_a_dispatch_in_flight_is_never_a_stall(self):
-        events = [ev(300, "dispatch_start", role="ppl-implementer", agent_id="a1")]
+        events = [ev(300, "dispatch_start", role="ppl-code-worker", agent_id="a1")]
         self.assertIsNone(self.check(events))
 
     def test_a_finished_dispatch_does_not_hide_a_stall(self):
-        events = [ev(100, "dispatch_start", role="ppl-implementer", agent_id="a1"),
-                  ev(50, "usage", role="ppl-implementer", agent_id="a1"),
+        events = [ev(100, "dispatch_start", role="ppl-code-worker", agent_id="a1"),
+                  ev(50, "usage", role="ppl-code-worker", agent_id="a1"),
                   ev(16, "session", kind="stop", background=0, crons=0)]
         self.assertEqual(self.check(events)["kind"], "stopped")
 
     def test_a_usage_for_another_agent_leaves_a_dispatch_in_flight(self):
-        events = [ev(300, "dispatch_start", role="ppl-implementer", agent_id="a1"),
-                  ev(200, "dispatch_start", role="ppl-tester", agent_id="a2"),
-                  ev(100, "usage", role="ppl-tester", agent_id="a2")]
+        events = [ev(300, "dispatch_start", role="ppl-code-worker", agent_id="a1"),
+                  ev(200, "dispatch_start", role="ppl-test-worker", agent_id="a2"),
+                  ev(100, "usage", role="ppl-test-worker", agent_id="a2")]
         self.assertIsNone(self.check(events))
 
     def test_review_is_watched_by_silence_only(self):
@@ -414,43 +413,61 @@ class TestScan(FreshHome):
         os.mkfifo(str(target))
         self.assertEqual([item["task_id"] for item in stall.scan(now)], ["DEMO-735"])
 
+    # The over-limit tests run at a limit of a few KB and plant one byte more than it, so a
+    # regressed cap fails here instead of reading a huge file, and no filesystem has to
+    # support sparse files for the suite to stay quick.
+    SMALL_LIMIT = 4096
+
+    def plant_over_limit(self, task_id):
+        log = paths.run_dir(task_id) / "log.jsonl"
+        with open(str(log), "ab") as handle:
+            handle.write(b" " * (self.SMALL_LIMIT + 1 - log.stat().st_size))
+        self.assertEqual(log.stat().st_size, self.SMALL_LIMIT + 1)
+        return log
+
+    def read_spy(self, reads):
+        real = store.read_regular_text
+
+        def spy(path, limit=None):
+            if limit is None:
+                raise AssertionError("%s read with no limit" % path)
+            reads.append((Path(path).parent.name, Path(path).name, limit))
+            return real(path, limit)
+        return spy
+
+    def test_the_log_read_limit_is_16_mib(self):
+        self.assertEqual(stall.LOG_READ_LIMIT, 16 * 1024 * 1024)
+
     def test_a_log_over_the_limit_is_skipped_unread_and_the_other_run_is_reported(self):
         now = datetime.now(timezone.utc)
         old = [ev(16, "session", now=now, kind="stop", background=0, crons=0)]
         make_run("DEMO-741", events=old)
         make_run("DEMO-742", events=old)
-        huge = paths.run_dir("DEMO-741") / "log.jsonl"
-        # sparse, so it costs no disk: only the size is over the limit
-        os.truncate(str(huge), 64 * 1024 ** 3)
+        self.plant_over_limit("DEMO-741")
         reads = []
-        real = store.read_regular_text
-
-        def spy(path, limit=None):
-            reads.append((Path(path).parent.name, Path(path).name, limit))
-            return real(path, limit)
-
-        started = time.monotonic()
-        with mock.patch.object(store, "read_regular_text", spy):
+        with mock.patch.object(stall, "LOG_READ_LIMIT", self.SMALL_LIMIT), \
+                mock.patch.object(store, "read_regular_text", self.read_spy(reads)):
             found = stall.scan(now)
             self.assertEqual([item["task_id"] for item in found], ["DEMO-742"])
             stall.announce(found, FakeNotifier())
-        self.assertLess(time.monotonic() - started, 5)
         logs = [read for read in reads if read[1] == "log.jsonl"]
         self.assertTrue(logs)
-        self.assertEqual({read[2] for read in logs}, {stall.LOG_READ_LIMIT})
-        self.assertEqual(stall.LOG_READ_LIMIT, 16 * 1024 * 1024)
-        self.assertEqual(os.stat(str(huge)).st_size, 64 * 1024 ** 3)
+        self.assertEqual({read[2] for read in logs}, {self.SMALL_LIMIT})
 
     def test_announce_skips_a_stall_whose_log_grew_over_the_limit(self):
         now = datetime.now(timezone.utc)
         make_run("DEMO-743", events=[ev(16, "session", now=now, kind="stop", background=0,
                                         crons=0)])
-        found = stall.scan(now)
-        self.assertEqual(len(found), 1)
-        os.truncate(str(paths.run_dir("DEMO-743") / "log.jsonl"), 64 * 1024 ** 3)
-        notifier = FakeNotifier()
-        self.assertEqual(stall.announce(found, notifier), [])
+        reads = []
+        with mock.patch.object(stall, "LOG_READ_LIMIT", self.SMALL_LIMIT), \
+                mock.patch.object(store, "read_regular_text", self.read_spy(reads)):
+            found = stall.scan(now)
+            self.assertEqual(len(found), 1)
+            self.plant_over_limit("DEMO-743")
+            notifier = FakeNotifier()
+            self.assertEqual(stall.announce(found, notifier), [])
         self.assertEqual(notifier.calls, [])
+        self.assertTrue([read for read in reads if read[1] == "log.jsonl"])
 
     def test_a_fifo_log_is_skipped_without_blocking(self):
         now = datetime.now(timezone.utc)
