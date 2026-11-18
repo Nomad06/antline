@@ -14,7 +14,7 @@ import tmphome
 
 os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplhome-")
 
-from ppl import cli, run, timing
+from ppl import cli, run, store, timing
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -79,9 +79,97 @@ class TestTimingReport(unittest.TestCase):
         self.assertEqual(gates["focused-tests"], {"runs": 1, "wait_seconds": 60.0})
         self.assertEqual(gates["regression"], {"runs": 2, "wait_seconds": 1680.0})
 
-    def test_a_gate_after_an_idle_gap_waits_zero(self):
+    def test_a_gate_whose_every_receipt_followed_an_idle_gap_has_no_wait(self):
         events = [ev(0, "init"), ev(500, "evidence", check="regression")]
-        self.assertEqual(timing.report(events)["gates"]["regression"], {"runs": 1, "wait_seconds": 0.0})
+        report = timing.report(events)
+        self.assertEqual(report["gates"]["regression"], {"runs": 1, "wait_seconds": None})
+        self.assertIn("1 gate receipt", report["reasons"]["gates"])
+        self.assertRegex(timing.text(report), r"\nregression +1  -\n")
+
+    def test_a_receipt_after_an_idle_gap_adds_nothing_to_a_timed_gate(self):
+        events = [ev(0, "init"), ev(2, "evidence", check="regression"),
+                  ev(500, "evidence", check="regression"), ev(510, "evidence", check="lint")]
+        report = timing.report(events)
+        self.assertEqual(report["gates"]["regression"], {"runs": 2, "wait_seconds": 120.0})
+        self.assertEqual(report["gates"]["lint"], {"runs": 1, "wait_seconds": 600.0})
+        self.assertIn("1 gate receipt", report["reasons"]["gates"])
+
+    def test_every_gate_timed_gives_no_gates_reason(self):
+        events = [ev(0, "init"), ev(2, "evidence", check="regression")]
+        self.assertNotIn("gates", timing.report(events)["reasons"])
+
+    def test_a_list_role_is_left_out_of_the_dispatch_table(self):
+        events = [ev(0, "init"), ev(1, "dispatch_start", role=["ppl-briefer"], agent_id="a1"),
+                  ev(2, "dispatch_start", role="ppl-briefer", agent_id="a2"),
+                  ev(3, "usage", agent_id="a2")]
+        report = timing.report(events)
+        self.assertEqual(report["dispatches"],
+                         {"ppl-briefer": {"count": 1, "seconds": 60.0, "longest_seconds": 60.0}})
+        timing.as_json(report)
+
+    def test_a_list_agent_id_is_treated_as_absent(self):
+        events = [ev(0, "init"), ev(1, "dispatch_start", role="ppl-briefer", agent_id=["a1"]),
+                  ev(2, "usage", agent_id=["a1"])]
+        self.assertEqual(timing.report(events)["dispatches"]["ppl-briefer"],
+                         {"count": 1, "seconds": None, "longest_seconds": None})
+
+    def test_a_dict_agent_id_on_usage_is_treated_as_absent(self):
+        events = [ev(0, "init"), ev(1, "dispatch_start", role="ppl-briefer", agent_id="a1"),
+                  ev(2, "usage", agent_id={"id": "a1"}), ev(3, "usage", agent_id="a1")]
+        self.assertEqual(timing.report(events)["dispatches"]["ppl-briefer"],
+                         {"count": 1, "seconds": 120.0, "longest_seconds": 120.0})
+
+    def test_an_integer_role_beside_a_string_one_keeps_the_json_sortable(self):
+        events = [ev(0, "init"), ev(1, "dispatch_start", role=7, agent_id="a1"),
+                  ev(2, "dispatch_start", role="ppl-verifier", agent_id="a2")]
+        report = timing.report(events)
+        self.assertEqual(list(report["dispatches"]), ["ppl-verifier"])
+        self.assertEqual(list(json.loads(timing.as_json(report))["dispatches"]), ["ppl-verifier"])
+
+    def test_an_out_of_order_line_books_no_negative_seconds(self):
+        events = [ev(0, "init"), ev(1, "stage_enter", to="gates"), ev(30, "evidence", check="lint"),
+                  ev(10, "evidence", check="regression"), ev(12, "stage_enter", to="verification")]
+        report = timing.report(events)
+        self.assertEqual(report["stages"]["gates"]["seconds"], 29 * 60 + 2 * 60)
+        self.assertEqual(report["stages"]["gates"]["idle_seconds"], 0.0)
+        self.assertEqual(report["gates"]["regression"], {"runs": 1, "wait_seconds": 0.0})
+        self.assertEqual(report["idle_gaps"], [])
+
+    def test_a_negative_wall_clock_is_null_with_a_reason(self):
+        events = [ev(0, "init"), ev(5, "mr", iid=1), ev(-1440, "control")]
+        report = timing.report(events)
+        self.assertIsNone(report["wall_clock_seconds"])
+        self.assertIn("out of order", report["reasons"]["wall_clock_seconds"])
+        self.assertEqual(report["init_to_mr_seconds"], 300.0)
+
+    def test_a_negative_init_to_mr_is_null_with_a_reason(self):
+        events = [ev(0, "init"), ev(-5, "mr", iid=1), ev(3, "control")]
+        report = timing.report(events)
+        self.assertIsNone(report["init_to_mr_seconds"])
+        self.assertIn("out of order", report["reasons"]["init_to_mr_seconds"])
+        self.assertEqual(report["wall_clock_seconds"], 180.0)
+
+    def test_a_notification_gap_is_named_by_its_type(self):
+        events = [ev(0, "init"), ev(1, "session", kind="notification", type="permission_prompt"),
+                  ev(200, "session", kind="notification", type="idle_prompt"),
+                  ev(400, "session", kind="notification", type="Not A Word"),
+                  ev(600, "control")]
+        gaps = timing.report(events)["idle_gaps"]
+        self.assertEqual([(gap["after"], gap["ended_by"]) for gap in gaps], [
+            ("session:notification:permission_prompt", "session:notification:idle_prompt"),
+            ("session:notification:idle_prompt", "session:notification"),
+            ("session:notification", "control")])
+
+    def test_the_text_escapes_a_planted_name(self):
+        events = [ev(0, "init"), ev(1, "stage_enter", to="gat\x1b[2Jes"),
+                  ev(2, "evidence", check="lint\x1b[31m"),
+                  ev(3, "dispatch_start", role="ppl-\u0100\x07", agent_id="a1")]
+        out = timing.text(timing.report(events))
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\x07", out)
+        self.assertIn("lint\\x1b[31m", out)
+        self.assertIn("gat\\x1b[2Jes", out)
+        self.assertIn("ppl-\\u0100\\x07", out)
 
     def test_init_to_mr_and_its_missing_reason(self):
         with_mr = [ev(0, "init"), ev(102, "mr", iid=1)]
@@ -126,6 +214,14 @@ class TestTimingCli(unittest.TestCase):
         self.assertEqual(sorted(json.loads(out)), sorted([
             "wall_clock_seconds", "init_to_mr_seconds", "stages", "dispatches", "gates",
             "idle_gaps", "reasons"]))
+
+    def test_a_role_written_list_role_does_not_stop_the_report(self):
+        run.init("DEMO-7703", "https://j/DEMO-7703", "/tmp/repo")
+        store.append_log("DEMO-7703", {"event": "dispatch_start", "role": ["x"],
+                                       "agent_id": {"a": 1}})
+        code, out, _ = call("timing", "--task", "DEMO-7703", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["dispatches"], {})
 
     def test_unknown_task_exits_2(self):
         code, _, _ = call("timing", "--task", "DEMO-7702")
