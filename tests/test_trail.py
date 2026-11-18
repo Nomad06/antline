@@ -353,6 +353,28 @@ class TestTrailExport(unittest.TestCase):
         self.assertIn("usd", measures["reasons"])
         self.assertIn("tokens_by_role", measures["reasons"])
 
+    def write_log(self, task, events):
+        lines = "".join(json.dumps(e) + "\n" for e in events)
+        (paths.run_dir(task) / "log.jsonl").write_text(lines, encoding="utf-8")
+
+    def test_the_measures_carry_the_timing_report(self):
+        task = "GH-501"
+        run.init(task, "https://github.com/acme/shop/issues/501", self.repo)
+        self.write_log(task, [
+            {"event": "init", "at": "2026-11-01T10:00:00+00:00"},
+            {"event": "stage_enter", "to": "implement", "at": "2026-11-01T10:01:00+00:00"},
+            {"event": "mr", "at": "2026-11-01T10:05:00+00:00"}])
+        timing = trail.measures(trail.find_run(task))["timing"]
+        self.assertEqual(timing["init_to_mr_seconds"], 300.0)
+
+    def test_a_run_with_an_empty_log_has_null_timing(self):
+        task = "GH-502"
+        run.init(task, "https://github.com/acme/shop/issues/502", self.repo)
+        self.write_log(task, [])
+        timing = trail.measures(trail.find_run(task))["timing"]
+        self.assertIsNone(timing["wall_clock_seconds"])
+        self.assertIn("wall_clock_seconds", timing["reasons"])
+
     def test_a_deny_target_cut_inside_the_home_path_is_redacted(self):
         # rule: R-TRAIL-REDACTED
         target = cut_target("cat ", self.home[:-3])

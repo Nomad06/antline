@@ -1,7 +1,9 @@
 # Review monitor loop
 
-Started with `/loop` in dynamic mode. The loop schedules its own next wake-up: 1200 to 1800
-seconds while idle, tighter while a CI pipeline is running. Every tick is stateless and
+Started with `/loop` in dynamic mode. The loop schedules its own next wake-up: 300 seconds
+for 30 minutes after the pull request is opened, after a reply is posted, or after a fix is
+pushed, judged from the times GitHub shows for them; 1200 to 1800 seconds otherwise; tighter
+while a CI pipeline is running. Every tick is stateless and
 reads durable state plus live GitHub, not chat history.
 
 Before the first tick: run `<!-- include: os/gh --> api user --jq .login` once and run
@@ -42,7 +44,9 @@ Each tick, in this order:
    input to one - do not re-derive "which threads need a reply" by reading the discussions
    yourself. Parse the JSON array on the command's last stdout line (the human-readable
    count above it is not the contract, same rule as `ppl approval check`) and dispatch every
-   thread it names to `ppl-review-responder`. The array already excludes resolved threads,
+   thread it names to `ppl-review-responder`, passing both the `model` and the `effort` that
+   `ppl routing show --role ppl-review-responder --task <TASK-ID>` prints, since the agent
+   file keeps the defaults [R-ROUTING-BY-RISK]. The array already excludes resolved threads,
    the pipeline's own notes, and threads whose newest note matches what was last recorded
    for this SHA - which is what lets a reviewer's follow-up on an already-answered thread -
    "no, that is not what I meant" - reach the responder again on the same SHA, instead of
@@ -69,7 +73,7 @@ Each tick, in this order:
    lands on it.
 7. **Do not resolve the thread** - only the person who wrote the remark may resolve it
    [R-FORGE-GH-NO-APPROVE-MERGE].
-8. Red CI on the candidate: classify against the baseline first. A pre-existing failure is
+8. Red CI on the candidate: classify against the baseline first (the `baseline-*` logs). A pre-existing failure is
    `BASELINE_FAILURE`, a new one is rework, through `ppl stage enter implementation`
    (`references/stage-3-implementation.md`), or `ppl stage enter tests`
    (`references/stage-3-tests.md`) when a test is at fault. Do not just run it again.
@@ -77,5 +81,5 @@ Each tick, in this order:
    <!-- include: sequence/close-out -->, then tell the owner. `ppl approval check` must
    read `current` before you go on.
 
-Wake-up discipline: do not poll for work the harness will notify you about. Use a long
-fallback interval and let notifications do the fast path.
+Wake-up discipline: do not poll for work the harness will notify you about. Outside the
+30-minute window above, use a long fallback interval and let notifications do the fast path.

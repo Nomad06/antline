@@ -25,6 +25,7 @@ TIER_PREFIX = "tier."
 EXAMPLE_HARNESSES = ("example-generic", "example-maven")
 DISPATCH_MARKER = doctor.DISPATCH_MARKER
 USAGE_MARKER = doctor.USAGE_MARKER
+SESSION_MARKER = doctor.SESSION_MARKER
 _HOOK_TIMEOUT_SECONDS = 5
 _YES, _NO = ("yes", "y"), ("no", "n")
 _SKIP, _QUIT = "s", "q"
@@ -112,8 +113,9 @@ class Prompter:
 
 
 def hook_entries(code_root, task_id=None):
-    """The PreToolUse guard entry, the SubagentStart dispatch entry and the
-    SubagentStop usage entry, each on an absolute path into the assets
+    """The PreToolUse guard entry, the SubagentStart dispatch entry, the
+    SubagentStop usage entry and the Stop, SessionEnd and Notification session
+    entries, each on an absolute path into the assets
     directory of the installed package or the clone, run by the interpreter
     running this setup. With `task_id` each command ends in ` --task <id>`, the run a lane's
     hooks belong to. Bare python3 is whatever the PATH Claude Code spawns
@@ -128,11 +130,15 @@ def hook_entries(code_root, task_id=None):
                 "hooks": [{"type": "command", "command": command, "timeout": _HOOK_TIMEOUT_SECONDS}]}
     return {"PreToolUse": entry(doctor.RECOMMENDED_MATCHER, doctor.GUARD_MARKER),
             "SubagentStart": entry("", DISPATCH_MARKER),
-            "SubagentStop": entry("", USAGE_MARKER)}
+            "SubagentStop": entry("", USAGE_MARKER),
+            "Stop": entry("", SESSION_MARKER),
+            "SessionEnd": entry("", SESSION_MARKER),
+            "Notification": entry("", SESSION_MARKER)}
 
 
 _MARKERS = {"PreToolUse": doctor.GUARD_MARKER, "SubagentStart": DISPATCH_MARKER,
-            "SubagentStop": USAGE_MARKER}
+            "SubagentStop": USAGE_MARKER, "Stop": SESSION_MARKER,
+            "SessionEnd": SESSION_MARKER, "Notification": SESSION_MARKER}
 
 
 def _is_ours(hook, marker):
@@ -172,7 +178,7 @@ def _recorded_facts():
 
 
 def _without_ppl_hooks(hooks):
-    """`hooks` with every guard, dispatch and usage hook taken out, matched by ppl's script
+    """`hooks` with every guard, dispatch, usage and session hook taken out, matched by ppl's script
     names, an entry left empty dropped, and what was taken out."""
     removed = []
     for event, marker in _MARKERS.items():

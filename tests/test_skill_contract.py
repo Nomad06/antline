@@ -635,8 +635,226 @@ class TestReworkReentersStageThree(unittest.TestCase):
                         action.index("ppl stage enter implementation"))
 
 
+class TestSimplificationBeforeFullGates(unittest.TestCase):
+    """The simplification pass sits between the fast gates and the full gates. It is
+    dispatched on every candidate, as before the order changed, and skipped only when there is
+    nothing to simplify: the new order moves the pass and adds no dispatch."""
+
+    def step(self, files):
+        text = _flat(files["references/stage-4-gates.md"])
+        return text[text.index("2. "):text.index("3. ")]
+
+    def test_the_pass_is_dispatched_on_every_candidate(self):
+        for name, files in RENDERED.items():
+            step = self.step(files)
+            self.assertIn("run the simplification pass on every candidate", step, name)
+            self.assertIn("when there was nothing to simplify (a docs-only change, a diff "
+                          "already at the challenge's shape)", step, name)
+            text = _flat(files["references/stage-4-gates.md"])
+            self.assertNotIn("no simplification pass has run", text, name)
+            self.assertNotIn("already simplified", text, name)
+            self.assertNotIn("first candidate", text, name)
+
+    def test_the_receipt_of_a_pass_that_committed_is_filed_under_the_new_sha(self):
+        for name, files in RENDERED.items():
+            self.assertIn("When the pass committed, file the receipt under the new SHA, the one "
+                          "that goes to verification", self.step(files), name)
+
+    def test_the_rule_keeps_the_pass_on_every_candidate(self):
+        statement = next(row["statement"] for row in rules.load()
+                         if row["id"] == "R-GATES-SIMPLIFY-BEFORE-FULL")
+        self.assertIn("on every candidate", statement)
+        self.assertNotIn("already simplified", statement)
+
+    def test_the_stage_map_puts_the_pass_before_the_full_gates(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["SKILL.md"])
+            line = text[text.index("**Stage 4 - gates**"):text.index("**Stage 5 - verification**")]
+            self.assertLess(line.index("fast gates"), line.index("simplification pass"), name)
+            self.assertLess(line.index("simplification pass"), line.index("full gates"), name)
+
+    def test_no_rendered_file_says_gates_run_again_in_full(self):
+        for name, files in RENDERED.items():
+            for path, text in files.items():
+                self.assertNotIn("run again in full", _flat(text), "%s %s" % (name, path))
+                self.assertNotIn("Stage 4 in full", _flat(text), "%s %s" % (name, path))
+            self.assertIn("every gate, fast and full, runs again",
+                          _flat(files["references/stage-4-gates.md"]), name)
+
+
+class TestGateRecipeOrder(unittest.TestCase):
+    """Stage 4 runs the secret scan with the fast gates, so its recipe sits where the fast
+    section ends, and the shipped examples mark their cheap gates fast, so a rendered example
+    runs them before the simplification pass, as the README advises."""
+
+    FAST = {"example-maven": ("focused-tests", "install", "checkstyle"),
+            "example-generic": ("build", "lint", "focused-tests")}
+
+    def test_the_secret_scan_recipe_sits_between_the_fast_and_the_full_gates(self):
+        for name, files in RENDERED.items():
+            text = files["references/gates.md"]
+            scan = text.index("--check secret-scan")
+            self.assertLess(text.index("# fast gates"), scan, name)
+            self.assertLess(scan, text.index("# full gates"), name)
+
+    def test_the_examples_run_their_cheap_gates_fast_and_their_suites_full(self):
+        for name, fast in self.FAST.items():
+            text = RENDERED[name]["references/gates.md"]
+            full = text.index("# full gates")
+            for gate in fast:
+                self.assertLess(text.index("\n# %s\n" % gate), full, "%s %s" % (name, gate))
+            self.assertGreater(text.index("\n# integration-tests\n"), full, name)
+
+
+class TestBaselineSuiteWhileBriefing(unittest.TestCase):
+    """The base SHA is recorded and the briefer dispatched before the baseline suite runs, so
+    the suite and the briefer overlap, and implementation waits for the last baseline exit code:
+    a code worker writing into the tree under a running suite would contaminate it."""
+
+    def test_stage_1_records_the_base_sha_then_briefs_while_the_baseline_suite_runs(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-1-baseline.md"])
+            self.assertLess(text.index("ppl baseline record"),
+                            text.index("ppl stage enter briefing"), name)
+            self.assertLess(text.index("ppl stage enter briefing"),
+                            text.index("while the briefer works"), name)
+            self.assertNotIn("run_in_background", text, name)
+
+    def test_stage_1_runs_the_baseline_suite_after_a_dispatch_that_returns_late(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-1-baseline.md"])
+            self.assertIn("returns only when the briefer is done", text, name)
+
+    def test_stage_1_writes_the_baseline_suite_to_files_stage_4_never_writes(self):
+        # stage 4 overwrites the gate .log and .rc files with candidate runs, so the baseline
+        # run keeps its own and files no receipt
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-1-baseline.md"])
+            self.assertIn("with `baseline-` put before its `.log` and `.rc` file names", text, name)
+            self.assertIn("without its `ppl evidence add` line", text, name)
+            self.assertIn("are the `baseline-*.log` and `baseline-*.rc` files", text, name)
+            self.assertIn("do not run `ppl baseline record` again", text, name)
+            self.assertIn("written its `baseline-*.rc` file "
+                          "[R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a]", text, name)
+            self.assertNotIn("are the gate `.log`", text, name)
+
+    def test_the_baseline_document_holds_the_base_sha_and_the_note_naming_the_files(self):
+        # stage 1 says not to add the base revision's results to baseline.json, so the
+        # reference describing that document must not list them as its content
+        for name, files in RENDERED.items():
+            text = _flat(files["references/baseline.md"])
+            row = text[text.index("| anything else"):text.index("| No - `ppl baseline record`")]
+            self.assertIn("the note naming the `baseline-*.log` and `baseline-*.rc` files", row,
+                          name)
+            self.assertIn("live in those files", row, name)
+            self.assertNotIn("Record before touching anything", text, name)
+            self.assertNotIn("Record what was true before you touched anything", text, name)
+
+    def test_a_base_failure_is_judged_against_the_baseline_files(self):
+        for name, files in RENDERED.items():
+            self.assertIn("A failure present at the base SHA (its `baseline-*.log`)",
+                          _flat(files["references/gates.md"]), name)
+            self.assertIn("classify against the baseline first (the `baseline-*` logs)",
+                          _flat(files["references/review-loop.md"]), name)
+
+    def test_stage_2_does_not_enter_or_dispatch_twice(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-2-briefing.md"])
+            condition = text.index("If Stage 1 already entered briefing and dispatched `ppl-briefer`")
+            self.assertLess(condition, text.index("Otherwise `ppl stage enter briefing`"), name)
+            self.assertLess(condition, text.index("ppl stage enter briefing"), name)
+
+    def test_stage_2_lets_implementation_start_only_after_the_baseline_suite(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-2-briefing.md"])
+            self.assertIn("the Stage 1 baseline suite has also finished "
+                          "[R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a]", text, name)
+
+    def test_stage_3_waits_for_the_baseline_suite(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-3-implementation.md"])
+            self.assertIn("baseline suite", text, name)
+            self.assertLess(text.index("[R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a]"),
+                            text.index("dispatch `ppl-code-worker`"), name)
+
+    def test_stage_3_waits_only_on_the_first_entry_and_on_the_rc_files(self):
+        # a rework re-entry must not rerun a baseline command on a candidate tree, and a
+        # command killed mid-run has no rc file
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-3-implementation.md"])
+            self.assertIn("the run's first `ppl stage enter implementation`", text, name)
+            self.assertIn("has written its `baseline-<gate>.rc` file", text, name)
+            self.assertIn("If a baseline command has no `baseline-<gate>.rc` file, run it now",
+                          text, name)
+
+    def test_the_review_loop_wakes_faster_right_after_activity(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/review-loop.md"])
+            self.assertIn("300 seconds", text, name)
+            self.assertIn("30 minutes", text, name)
+            self.assertIn("1200 to 1800", text, name)
+            self.assertIn("Outside the 30-minute window above, use a long fallback interval",
+                          text, name)
+
+
+class TestDispatchPassesTheResolvedRouting(unittest.TestCase):
+    """A risk can change a role's model and its effort, and the agent file keeps the
+    defaults, so every reference that dispatches a role names `ppl routing show` for that role
+    and says to pass both values it prints."""
+
+    DISPATCHES = (("references/stage-2-briefing.md", "ppl-briefer"),
+                  ("references/stage-2-briefing.md", "ppl-brief-challenger"),
+                  ("references/stage-3-implementation.md", "ppl-code-worker"),
+                  ("references/stage-3-tests.md", "ppl-test-worker"),
+                  ("references/stage-5-verification.md", "ppl-verifier"),
+                  ("references/review-loop.md", "ppl-review-responder"),
+                  ("references/reflection.md", "ppl-reflector"))
+
+    def test_each_dispatching_reference_passes_the_model_and_the_effort_of_its_role(self):
+        # rule: R-ROUTING-BY-RISK
+        for name, files in RENDERED.items():
+            for path, role in self.DISPATCHES:
+                with self.subTest(skill=name, path=path, role=role):
+                    text = _flat(files[path])
+                    command = "`ppl routing show --role %s --task " % role
+                    self.assertIn(command, text)
+                    passage = text[text.index(command) - 120:text.index(command) + 120]
+                    self.assertIn("the `model` and the `effort`", passage)
+                    self.assertIn("[R-ROUTING-BY-RISK]", text)
+
+    def test_the_verification_rework_path_passes_the_model_and_the_effort(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-5-verification.md"])
+            self.assertNotIn("the model to pass", text, name)
+            self.assertIn("the model and the effort to pass", text, name)
+
+    def test_stage_2_states_the_risk_in_every_briefer_dispatch(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-2-briefing.md"])
+            self.assertIn("the one Stage 1 makes included", text, name)
+            self.assertIn('"The run\'s risk is <risk>."', text, name)
+            self.assertLess(text.index("If Stage 1 already entered briefing"),
+                            text.index("`ppl routing show --role ppl-briefer"), name)
+
+    def test_the_briefer_agent_keeps_a_low_risk_brief_to_the_acceptance_criteria(self):
+        fixtures.install_harness("example-maven", as_name="contract-briefer")
+        example = (Path(__file__).resolve().parents[1] / "ppl" / "_assets" / "defaults"
+                   / "routing.example.toml").read_text(encoding="utf-8")
+        from ppl import routing
+        text = _flat(routing.render("ppl-briefer", harness.load("contract-briefer"),
+                                    config=routing.loads(example)))
+        self.assertIn("When the dispatch says the run's risk is low, read the files the task "
+                      "names and their direct callers, and keep the brief to what the "
+                      "acceptance criteria need.", text)
+
+
 SKILL_BUDGET_BYTES = 14000
 STAGE_REFERENCE_BUDGET_BYTES = 10000
+# What the budgets are measured on: the skill with the data root at a fixed stand-in, so the
+# answer does not depend on how long this machine's temp path is.
+MEASURED = {name: fixtures.skill_files(name, nominal=True) for name in EXAMPLES}
+MEASURED["github-issues"] = fixtures.skill_files("example-generic", tables=fixtures.GITHUB_ISSUES,
+                                                 nominal=True)
 
 
 class TestStageReferences(unittest.TestCase):
@@ -648,17 +866,23 @@ class TestStageReferences(unittest.TestCase):
         return sorted(path for path in files if path.startswith("references/stage-"))
 
     def test_the_rendered_skill_md_stays_within_its_budget(self):
-        for name, files in RENDERED.items():
+        for name, files in MEASURED.items():
             size = len(files["SKILL.md"].encode("utf-8"))
             self.assertLessEqual(size, SKILL_BUDGET_BYTES, "%s SKILL.md is %d bytes" % (name, size))
 
     def test_each_stage_reference_stays_within_its_budget(self):
-        for name, files in RENDERED.items():
+        for name, files in MEASURED.items():
             self.assertTrue(self.stage_files(files), "%s renders no stage reference" % name)
             for path in self.stage_files(files):
                 size = len(files[path].encode("utf-8"))
                 self.assertLessEqual(size, STAGE_REFERENCE_BUDGET_BYTES,
                                      "%s %s is %d bytes" % (name, path, size))
+
+    def test_the_budgets_are_measured_with_the_data_root_at_its_stand_in(self):
+        for name, files in MEASURED.items():
+            self.assertIn(fixtures.NOMINAL_HOME + "/", files["references/gates.md"], name)
+            for path, text in files.items():
+                self.assertNotIn("pplrender-", text, "%s %s" % (name, path))
 
     def test_the_stage_references_rendered_are_the_ones_ppl_names(self):
         for name, files in RENDERED.items():
@@ -1010,7 +1234,7 @@ class TestGithubSkillText(unittest.TestCase):
                 for name in ("gh", "git", "ppl")}
         for name, tables in (("example-maven", None), ("example-generic", None),
                              ("example-generic", fixtures.GITHUB_ISSUES)):
-            files = fixtures.skill_files(name, tables=tables, pins=pins)
+            files = fixtures.skill_files(name, tables=tables, pins=pins, nominal=True)
             size = len(files["SKILL.md"].encode("utf-8"))
             self.assertLessEqual(size, SKILL_BUDGET_BYTES, "%s SKILL.md %d" % (name, size))
             for path, text in sorted(files.items()):

@@ -218,6 +218,27 @@ class TestStart(LaneCase):
         self.assertIsNone(entry["pid"])
         self.assertFalse(self.stub_out.exists())
 
+    def test_the_risk_flag_reaches_the_registry_entry(self):
+        code, _, err = call("lane", LINK, "--harness", HARNESS, "--risk", "low", "--no-exec")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(lanes.entry(TASK)["risk"], "low")
+
+    def test_a_lane_started_without_the_risk_flag_records_none(self):
+        code, _, err = call("lane", LINK, "--harness", HARNESS, "--no-exec")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("risk", lanes.entry(TASK))
+
+    def test_a_risk_that_is_not_a_tier_is_refused_by_the_parser(self):
+        code, _, err = call("lane", LINK, "--harness", HARNESS, "--risk", "tiny", "--no-exec")
+        self.assertEqual(code, 2)
+        self.assertIn("--risk", err)
+        self.assertIsNone(lanes.entry(TASK))
+
+    def test_only_the_start_form_takes_the_risk_flag(self):
+        code, _, err = call("lane", "resume", TASK, "--risk", "low", "--no-exec")
+        self.assertEqual(code, 2)
+        self.assertIn("--risk", json.loads(err)["message"])
+
     def spend_today(self, usd, per_day):
         """A finished run that spent `usd` today, and the day cap `per_day` in config.toml."""
         config.update("budgets", {"usd_max_per_day": per_day})
@@ -932,6 +953,12 @@ class TestResume(LaneCase):
         self.assertEqual(after[0]["pid"], claude["pid"])
         self.assertEqual(dict(after[0], pid=None), dict(before, pid=None))
 
+    def test_resume_keeps_the_recorded_risk(self):
+        lane_launch.start(LINK, harness_name=HARNESS, risk="low", exec_=False)
+        code, _, err = call("lane", "resume", TASK, "--no-exec")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(lanes.entry(TASK)["risk"], "low")
+
     def test_resume_without_a_lane_is_refused(self):
         message = refusal(self, "SCHEMA_INVALID", lane_launch.resume, TASK, exec_=False)
         self.assertIn("ppl lane list", message)
@@ -945,6 +972,33 @@ class TestResume(LaneCase):
                 for hook in entry["hooks"]:
                     hook["command"] = hook["command"].replace(old, new)
         path.write_text(json.dumps(settings), encoding="utf-8")
+
+    def test_a_lane_started_before_the_session_hook_still_resumes(self):
+        # rule: R-SESSION-HOOK-CANNOT-BLOCK
+        # a lane rendered by an older version holds the guard, dispatch and usage hooks
+        # only: the session hook is not required, so the lane keeps working
+        from ppl import doctor
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        path = lanes.start_dir(TASK) / "settings.json"
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        for event in ("Stop", "SessionEnd", "Notification"):
+            del settings["hooks"][event]
+        self.assertEqual(sorted(settings["hooks"]),
+                         ["PreToolUse", "SubagentStart", "SubagentStop"])
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        self.assertEqual(doctor.lane_hook_problems(lanes.start_dir(TASK)), [])
+        self.assertEqual(doctor.report(TASK)["lane_hooks"], [])
+        self.assertEqual(lane_launch.resume(TASK, exec_=False)["cwd"],
+                         str(lanes.start_dir(TASK)))
+        # a session entry that is there is checked like the others
+        settings["hooks"]["Stop"] = [{"matcher": "", "hooks": [{
+            "type": "command", "timeout": 5,
+            "command": "/nonexistent/bin/python3.12 %s --task %s"
+                       % (ROOT / "ppl" / "_assets" / "hooks" / "ppl_session.py", TASK)}]}]
+        path.write_text(json.dumps(settings), encoding="utf-8")
+        problems = doctor.lane_hook_problems(lanes.start_dir(TASK))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("ppl_session.py", problems[0])
 
     def test_resume_refuses_hooks_that_cannot_run_the_cage(self):
         # rule: R-GUARD-PYTHON-FLOOR
@@ -978,6 +1032,109 @@ class TestResume(LaneCase):
         self.assertEqual(doctor.report(TASK)["lane_hooks"], [])
         self.assertEqual(lane_launch.resume(TASK, exec_=False)["cwd"],
                          str(lanes.start_dir(TASK)))
+
+
+class TestKeepAwake(LaneCase):
+    """[stall] keep_awake puts `caffeinate -i` in front of the claude launch line on macOS."""
+
+    def keep_awake(self):
+        config.update("stall", {"keep_awake": True})
+
+    def on_macos(self):
+        """keep_awake_prefix as it answers on a Mac with caffeinate, whatever runs the suite."""
+        original = lane_launch.keep_awake_prefix
+        return mock.patch.object(lane_launch, "keep_awake_prefix",
+                                 lambda: original("darwin", lambda name: "/usr/bin/caffeinate"))
+
+    def test_keep_awake_prefixes_caffeinate_on_macos(self):
+        self.keep_awake()
+        self.assertEqual(lane_launch.keep_awake_prefix("darwin", lambda name: "/usr/bin/caffeinate"),
+                         ["caffeinate", "-i"])
+        self.assertEqual(lane_launch.keep_awake_prefix("linux", lambda name: "/usr/bin/caffeinate"),
+                         [])
+        self.assertEqual(lane_launch.keep_awake_prefix("darwin", lambda name: None), [])
+
+    def test_keep_awake_is_off_by_default(self):
+        self.assertEqual(lane_launch.keep_awake_prefix("darwin", lambda name: "/usr/bin/caffeinate"),
+                         [])
+
+    def test_a_broken_stall_table_refuses_the_start_before_anything_is_made(self):
+        config.update("stall", {"keep_awake": "yes"})
+        refusal(self, "SCHEMA_INVALID", lane_launch.start, LINK, harness_name=HARNESS,
+                exec_=False)
+        self.assert_nothing_made()
+
+    def test_start_returns_the_prefixed_argv(self):
+        self.keep_awake()
+        with self.on_macos():
+            started = lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertEqual(started["argv"][:2], ["caffeinate", "-i"])
+        self.assertEqual(started["argv"][2:], self.launch_line(lanes.entry(TASK)))
+
+    def test_resume_returns_the_prefixed_argv(self):
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.keep_awake()
+        with self.on_macos():
+            resumed = lane_launch.resume(TASK, exec_=False)
+        self.assertEqual(resumed["argv"][:2], ["caffeinate", "-i"])
+        self.assertEqual(resumed["argv"][2:], self.launch_line(lanes.entry(TASK), resume=True))
+
+    def test_start_without_keep_awake_returns_the_bare_argv(self):
+        with self.on_macos():
+            started = lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertEqual(started["argv"], self.launch_line(lanes.entry(TASK)))
+
+    def fake_caffeinate(self):
+        """(a PATH with a caffeinate first that records its words and execs the rest, as the
+        real one runs its utility, the file it records them in)."""
+        fake = self.base / "fakebin" / "caffeinate"
+        marker = self.base / "caffeinate.ran"
+        fake.parent.mkdir()
+        fake.write_text('#!/bin/sh\necho "$@" > %s\nshift\nexec "$@"\n' % marker,
+                        encoding="utf-8")
+        fake.chmod(0o755)
+        return "%s:%s" % (fake.parent, os.environ.get("PATH", "")), marker
+
+    @unittest.skipUnless(sys.platform == "darwin", "keep_awake is macOS only")
+    def test_resume_execs_claude_under_caffeinate(self):
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.keep_awake()
+        path, marker = self.fake_caffeinate()
+        done = self.ppl("lane", "resume", TASK, PATH=path)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(marker.read_text(encoding="utf-8").startswith("-i %s --resume "
+                                                                      % self.stub))
+        claude = self.stub_call()
+        self.assertEqual(claude["argv"], self.launch_line(lanes.entry(TASK), resume=True)[1:])
+        self.assertEqual((claude["env"]["PPL_TASK"], claude["cwd"]),
+                         (TASK, os.path.realpath(lanes.entry(TASK)["start_dir"])))
+
+    @unittest.skipUnless(sys.platform == "darwin", "keep_awake is macOS only")
+    def test_a_missing_claude_binary_is_named_under_caffeinate(self):
+        lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        before = lanes.entry(TASK)["pid"]
+        self.configure(str(self.base / "bin" / "gone"))
+        self.keep_awake()
+        path, marker = self.fake_caffeinate()
+        done = self.ppl("lane", "resume", TASK, PATH=path)
+        self.assertFalse(marker.exists())
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("SETUP_INCOMPLETE", done.stderr)
+        self.assertIn(str(self.base / "bin" / "gone"), done.stderr)
+        self.assertEqual(lanes.entry(TASK)["pid"], before)
+
+
+    def test_a_prefix_that_fails_to_exec_is_named_not_the_claude_binary(self):
+        start = Path(tmphome.mkdtemp(prefix="pplstart-"))
+        gone = str(self.base / "nowhere" / "caffeinate")
+        previous = os.getcwd()
+        message = refusal(self, "SETUP_INCOMPLETE", lane_launch._exec, [sys.executable], {},
+                          start, [gone, "-i"])
+        self.assertIn(gone, message)
+        self.assertIn("keep_awake", message)
+        self.assertNotIn("ppl setup claude", message)
+        self.assertNotIn(sys.executable, message)
+        self.assertEqual(os.getcwd(), previous)
 
 
 class TestList(LaneCase):

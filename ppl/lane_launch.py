@@ -87,6 +87,20 @@ def _binary():
     return value
 
 
+def keep_awake_prefix(platform=sys.platform, which=shutil.which):
+    """`caffeinate -i` when [stall] keep_awake is true on macOS with caffeinate on PATH, else
+    []. Put in front of the claude launch line, it holds the machine out of idle sleep while
+    the lane's window is open: caffeinate holds its sleep assertion for as long as claude runs.
+    On the macOS this was built on, claude keeps the pid ppl recorded in the lane registry and a
+    forked caffeinate holds the assertion on its behalf. A closed lid still sleeps. A broken
+    [stall] table raises SCHEMA_INVALID."""
+    if not config.stall_settings()["keep_awake"]:
+        return []
+    if platform != "darwin" or not which("caffeinate"):
+        return []
+    return ["caffeinate", "-i"]
+
+
 def _lane_env(entry):
     """What ppl sets on top of the environment the claude process inherits. PPL_HOME is made
     absolute, since claude starts in the lane's start directory."""
@@ -325,30 +339,51 @@ def _undo(steps, error):
         sys.stderr.write("warning: %s\n" % note)
 
 
-def _exec(argv, extra, start):
-    """Replace this process with claude in `start`. Returns only by raising: SETUP_INCOMPLETE
-    naming the binary, with the cwd put back."""
+def _binary_problem(binary, error):
+    return PplError("SETUP_INCOMPLETE", "could not run the claude binary %s ([claude] binary in "
+                    "%s): %s. Set it with ppl setup claude." % (binary, paths.config_file(), error))
+
+
+def _prefix_problem(word, error):
+    return PplError("SETUP_INCOMPLETE", "could not run %s, which [stall] keep_awake in %s puts "
+                    "in front of claude: %s. Set keep_awake = false there, or put %s back on "
+                    "PATH." % (word, paths.config_file(), error, os.path.basename(word)))
+
+
+def _exec(argv, extra, start, prefix=()):
+    """Replace this process with claude in `start`, behind `prefix` (keep_awake_prefix) when it
+    is not empty. Returns only by raising: SETUP_INCOMPLETE naming the word that failed to exec,
+    the prefix's own first word when it is the prefix that failed, with the cwd put back. Behind
+    a prefix the exec runs caffeinate, which would fail on its own later and past every undo, so
+    the binary is looked up on the launch PATH first and refused the same way."""
     env = dict(os.environ, **extra)
     previous = os.getcwd()
     sys.stdout.flush()
     sys.stderr.flush()
     os.chdir(str(start))
     try:
-        os.execvpe(argv[0], argv, env)
+        if prefix and not shutil.which(argv[0], path=env.get("PATH")):
+            raise _binary_problem(argv[0], "no such executable file")
+        line = list(prefix) + list(argv)
+        os.execvpe(line[0], line, env)
     except OSError as exc:
-        raise PplError("SETUP_INCOMPLETE", "could not run the claude binary %s ([claude] binary "
-                       "in %s): %s. Set it with ppl setup claude."
-                       % (argv[0], paths.config_file(), exc.strerror or exc))
+        if prefix:
+            raise _prefix_problem(prefix[0], exc.strerror or exc)
+        raise _binary_problem(argv[0], exc.strerror or exc)
     finally:
         os.chdir(previous)
 
 
-def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
+def start(link, harness_name=None, slug="work", cwd=None, exec_=True, risk=None):
     """Start the lane for the task `link` names and exec claude in its start directory. With
     exec_=False return {"argv", "env", "cwd"} instead: the launch line, what ppl adds to the
-    inherited environment, and the directory to run it in."""
+    inherited environment, and the directory to run it in. `risk` is recorded in the lane's
+    registry entry, where `ppl init` takes it: the stage 0 text runs `ppl init` with no
+    `--risk`, so the lane is where an admission decision of low or high risk reaches the run."""
     if not (isinstance(slug, str) and _SLUG.fullmatch(slug)):
         raise PplError("SCHEMA_INVALID", "--slug %r must be 1 to 40 of a-z, 0-9 and '-'" % (slug,))
+    if risk is not None and risk not in run.RISK_TIERS:
+        raise PplError("SCHEMA_INVALID", "--risk must be one of %s" % ", ".join(run.RISK_TIERS))
     # once, before any path is made: claude starts in the start directory, so a relative
     # PPL_HOME would leave a relative start directory in the registry and the launch line
     home = os.environ.get("PPL_HOME")
@@ -362,6 +397,7 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
         raise PplError(*problem)
     name = _resolve_harness(harness_name, cwd)
     binary = _binary()
+    prefix = keep_awake_prefix()
     # the machine's routing.toml by its own path: PPL_TASK of a lane this is run from would
     # otherwise hand it that lane's frozen copy (D15)
     routing_config = routing.load(path=paths.machine_routing_file())
@@ -376,7 +412,7 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
         mcp = lane_render.mcp_source(project_dir=checkout)
         session_id = str(uuid.uuid4())
         entry = lanes.claim(task_id, name, sha, checkout, worktree, session_id,
-                            harness.lanes_max(doc), config.lanes_max())
+                            harness.lanes_max(doc), config.lanes_max(), risk=risk)
         undo.append(("release lane %s" % entry["lane"], lambda: lanes.release(task_id)))
         # after the claim, so a task whose lane still runs is told that instead
         start_dir = lanes.start_dir(task_id)
@@ -405,9 +441,9 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
                            files["agents_json"])
         extra = _lane_env(entry)
         if not exec_:
-            return {"argv": argv, "env": extra, "cwd": str(start_dir)}
+            return {"argv": prefix + argv, "env": extra, "cwd": str(start_dir)}
         lanes.set_pid(task_id, os.getpid())
-        _exec(argv, extra, start_dir)
+        _exec(argv, extra, start_dir, prefix)
     except BaseException as error:
         _undo(undo, error)
         raise
@@ -445,12 +481,13 @@ def resume(task_id, exec_=True):
                        % (path, task_id))
     argv = claude_argv(_binary(), entry["session_id"], start_dir, entry["worktree"], task_id,
                        None, agents_json, resume=True)
+    prefix = keep_awake_prefix()
     extra = _lane_env(entry)
     if not exec_:
-        return {"argv": argv, "env": extra, "cwd": str(start_dir)}
+        return {"argv": prefix + argv, "env": extra, "cwd": str(start_dir)}
     lanes.set_pid(task_id, os.getpid())
     try:
-        _exec(argv, extra, start_dir)
+        _exec(argv, extra, start_dir, prefix)
     except PplError:
         lanes.set_pid(task_id, entry.get("pid"))
         raise

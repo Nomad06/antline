@@ -34,6 +34,12 @@ _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # verdict.REQUIRED_CHECKS names it, the done gate wants a pass receipt for it.
 FOCUSED_TESTS_GATE = "focused-tests"
 TEST_CLASS_PLACEHOLDER = "<test_class>"
+# A fast gate runs before the simplification pass and again on the SHA it commits, a full gate
+# runs once, on the SHA that goes to verification. focused-tests is always fast: it is the one
+# test the task names, and the pass must not start on a red one.
+GATE_PHASES = ("fast", "full")
+_FAST_HEADER = "# fast gates: run these, then the simplification pass"
+_FULL_HEADER = "# full gates: run once, on the SHA that goes to verification"
 # The lane number, put in place of this marker when a lane's skill is rendered (the number is
 # known then), in the gate commands and [env] values. Rendered without a lane it stays as written.
 LANE_PLACEHOLDER = "<lane>"
@@ -64,7 +70,7 @@ KNOWN_KEYS = {
     "knowledge": ("skills", "extra_tools"),
     "lanes": ("max",),
     "env": None,
-    "gate": ("name", "command"),
+    "gate": ("name", "command", "phase"),
     "guard": ("shape",),
     "guard.shape": ("argv0", "env_prefix", "required_flags", "one_goal_of", "free_args"),
 }
@@ -401,6 +407,12 @@ def validate(doc, source):
                   "'-' only), it names the gate's log and rc files" % (index, gate["name"]))
         if not _text(gate.get("command")):
             _fail(source, "gate[%d].command is required" % index)
+        if "phase" in gate and gate["phase"] not in GATE_PHASES:
+            _fail(source, "gate[%d].phase must be fast or full, %r is neither"
+                  % (index, gate["phase"]))
+        if gate["name"] == FOCUSED_TESTS_GATE and gate.get("phase") == "full":
+            _fail(source, "gate[%d].phase is full, but %s is always a fast gate: the simplification "
+                  "pass starts only on a green focused test" % (index, FOCUSED_TESTS_GATE))
     _check_gate_commands(doc, gates, source)
     _check_test_sources(doc, source)
     _check_os_sandbox(doc, source)
@@ -629,25 +641,48 @@ _UNKNOWN_REPO = "<owner/name>"
 _UNKNOWN_WORKSPACE = "<workspace>"
 
 
-def _gate_recipes(doc, lane=None):
-    """The harness gates in their log-and-rc shape. Under the OS sandbox profile the
-    orchestrator's session stays in the workspace its gh and ppl calls run from, so each gate
-    changes into the worktree in a subshell, which leaves the session where it is."""
+def gate_phase(gate):
+    """fast or full: the gate's phase key, full when absent, and always fast for focused-tests,
+    so a harness written before the key existed keeps the focused test ahead of the
+    simplification pass and every other gate after it."""
+    if gate["name"] == FOCUSED_TESTS_GATE:
+        return "fast"
+    return gate.get("phase", "full")
+
+
+def _gate_recipes(doc, lane=None, phases=("fast", "full")):
+    """The harness gates in their log-and-rc shape, the fast ones first under their own comment
+    line and the full ones after under theirs, each section in document order and left out with
+    its line when it has no gate: the simplification pass runs between the two, so the slow
+    gates run once. `phases` renders one section alone, so the skill can put the secret scan,
+    which stage 4 runs with the fast gates, where the fast section ends: the scratch directory
+    and the SHA lines come with the fast section, which runs first. Under the OS sandbox
+    profile the orchestrator's session stays in the workspace its gh and ppl calls run from,
+    so each gate changes into the worktree in a subshell, which leaves the session where it
+    is."""
     env = " ".join("%s=%s" % (key, shlex.quote(_lane_filled(value, lane)))
                    for key, value in sorted((doc.get("env") or {}).items()))
     run_dir = "%s/<TASK-ID>" % os_sandbox.scratch_root()
-    lines = ["mkdir -p %s" % run_dir, "git -C <worktree> rev-parse HEAD", ""]
+    lines = ["mkdir -p %s" % run_dir, "git -C <worktree> rev-parse HEAD", ""] \
+        if "fast" in phases else []
     in_worktree = os_sandbox.needed(doc)
-    for gate in doc.get("gate") or []:
-        name = gate["name"]
-        command = ("%s %s" % (env, _lane_filled(gate["command"], lane))).strip()
-        if in_worktree:
-            command = "(cd <worktree> && %s)" % command
-        lines.append("# %s" % name)
-        fill = {"command": command, "dir": run_dir, "name": name}
-        lines.append(_RC_IDIOM % fill)
-        lines.append(_EVIDENCE % fill)
-        lines.append("")
+    gates = doc.get("gate") or []
+    for phase, header in (("fast", _FAST_HEADER), ("full", _FULL_HEADER)):
+        if phase not in phases:
+            continue
+        section = [gate for gate in gates if gate_phase(gate) == phase]
+        if section:
+            lines.append(header)
+        for gate in section:
+            name = gate["name"]
+            command = ("%s %s" % (env, _lane_filled(gate["command"], lane))).strip()
+            if in_worktree:
+                command = "(cd <worktree> && %s)" % command
+            lines.append("# %s" % name)
+            fill = {"command": command, "dir": run_dir, "name": name}
+            lines.append(_RC_IDIOM % fill)
+            lines.append(_EVIDENCE % fill)
+            lines.append("")
     return "\n".join(lines).rstrip()
 
 
@@ -767,7 +802,8 @@ def _values(doc, pins=None, workspace=None, lane=None):
         ("harness", "gates"): _fragment_file(doc, "gates", lane),
         # One line: the baseline sentence also fills a table cell.
         ("harness", "baseline"): " ".join(_fragment_file(doc, "baseline", lane).split()) or _DEFAULT_BASELINE,
-        ("harness", "gate-recipes"): _gate_recipes(doc, lane),
+        ("harness", "fast-gate-recipes"): _gate_recipes(doc, lane, ("fast",)),
+        ("harness", "full-gate-recipes"): _gate_recipes(doc, lane, ("full",)),
         # Project-specific recipe steps with their evidence lines, spliced in
         # as written. A marker inside the fragment is refused, not resolved.
         ("harness", "extra-gates"): _fragment_file(doc, "extra-gates", lane),

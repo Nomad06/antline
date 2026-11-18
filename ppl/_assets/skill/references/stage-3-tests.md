@@ -1,7 +1,9 @@
 # Stage 3 - tests
 
 `ppl stage enter tests`, dispatch `ppl-test-worker` with the acceptance criteria, the
-described behaviour, the corner cases and the brief's interfaces only. Do not pass it the diff
+described behaviour, the corner cases and the brief's interfaces only. Pass that dispatch both
+the `model` and the `effort` that `ppl routing show --role ppl-test-worker --task <TASK-ID>`
+prints, since the agent file keeps the defaults [R-ROUTING-BY-RISK]. Do not pass it the diff
 or describe how the code works. The guard hook denies its own Read, Grep, Glob and Bash reads
 of main sources inside the repo [R-TEST-WORKER-READ-TOOLS] [R-TEST-WORKER-BASH-READS], and it
 denies your dispatch when the prompt carries patch syntax or two or more lines the

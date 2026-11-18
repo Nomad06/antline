@@ -35,7 +35,7 @@ if not _PPL_FILE or not Path(_PPL_FILE).resolve().is_relative_to(_PACKAGE_PARENT
     sys.stderr.write("ppl_dispatch: imported ppl from %s, not the one beside this hook in %s\n"
                      % (_PPL_FILE, _PACKAGE_PARENT))
 
-from ppl import boundary, budget, lanes, run
+from ppl import boundary, budget, lanes, run, store
 from ppl.errors import PplError
 
 
@@ -91,14 +91,25 @@ def on_start(payload, argv=()):
     # loops. Note: the increment is not atomic against concurrent SubagentStart events of
     # one lane, which dispatches its roles one at a time. ppl budget refusing the next
     # transition is the real guarantee.
+    denial = None
     try:
         budget.spend(task_id, "dispatch", 1)
     except PplError as err:
-        return {"hookSpecificOutput": {
+        denial = {"hookSpecificOutput": {
             "hookEventName": "SubagentStart",
             "permissionDecision": "deny",
             "permissionDecisionReason": "%s %s" % (err.code, err.message)}}
-    return None
+    # The start is logged whether or not the spend was refused, because SubagentStart
+    # cannot stop the dispatch and the timing report counts what happened. Best effort:
+    # a log that cannot be written changes nothing about the hook's answer.
+    agent_id = payload.get("agent_id")
+    try:
+        store.append_log(task_id, {
+            "event": "dispatch_start", "role": agent,
+            "agent_id": agent_id if isinstance(agent_id, str) and agent_id else None})
+    except Exception as err:
+        sys.stderr.write("ppl_dispatch: could not log the dispatch start: %s\n" % err)
+    return denial
 
 
 def main():

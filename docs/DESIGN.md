@@ -114,6 +114,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
       hooks/ppl_guard.py         PreToolUse cage
       hooks/ppl_dispatch.py      SubagentStart dispatch counter (telemetry only, cannot block - see 12.1)
       hooks/ppl_usage.py         SubagentStop token recorder (telemetry only - see 12.1)
+      hooks/ppl_session.py       Stop, SessionEnd and Notification recorder (telemetry only - see "Hook engine" in 5.2)
       skill/                     SKILL.md and references/ skeletons, rendered per harness
       templates/ppl-*.md.body    the fixed body each generated agent definition is rendered around
       defaults/                  config.example.toml, routing.example.toml, harnesses/example-*
@@ -129,7 +130,7 @@ human maintainer. The tracker update fires only if and when the pipeline observe
   lanes.json lanes.lock          the lane registry and its writers' lock (5.4)
   lanes/<TASK-ID>/               a lane's start directory, the session's cwd, written by ppl lane only
     harness/<name>/              the harness at the commit the lane runs, exported
-    settings.json                the three hooks, each ending in --task <TASK-ID>, and on a GitHub
+    settings.json                the four hooks, each ending in --task <TASK-ID>, and on a GitHub
                                  harness the OS sandbox profile
     agents.json                  the ppl-* agents, passed to claude as --agents
     plugin/skills/pipeline/      the orchestrator skill, the plugin antline, invoked as /antline:pipeline <link>
@@ -191,8 +192,9 @@ provider-agnostic contract that lets a role move to a non-Claude model without t
 workflow.
 
 **Admin panel** - a loopback-only web app (`ppl serve`) that observes every run and issues
-pause, resume, stop and destroy through a control file. It reads state and writes only
-`control.json`. Section 9.
+pause, resume, stop and destroy through a control file. It reads state and writes
+`control.json`, and its stall ticker appends a `stall` event to a run's log for each stall it
+announces and starts the notifier processes (6.9a). Section 9.
 
 **State machine (`ppl/`)** - owns lifecycle, leases, budgets, evidence binding, parking
 and recovery. Refuses illegal transitions [R-FSM-STAGE-GRAPH]. This is the component that makes the pipeline
@@ -200,6 +202,16 @@ engineering rather than prayer.
 
 **Hook engine** - `ppl_guard.py` on `PreToolUse`, which can deny; `ppl_dispatch.py` on
 `SubagentStart`, which cannot (12.1) and only counts [R-DISPATCH-HOOK-CANNOT-BLOCK]. Returns stable codes, not prose.
+Besides the guard's `deny` events, the hooks append to the bound run's `log.jsonl`:
+`ppl_dispatch.py` a `dispatch_start` event (`role`, `agent_id`) for each role it sees start,
+`ppl_usage.py` the `usage` events (12.1), and `ppl_session.py`, on `Stop`, `SessionEnd` and
+`Notification`, a `session` event with a `kind` of `stop` (`background`, the number of
+background tasks still running, and `crons`, the number of session crons, each null when the
+payload lacks it), `end` (`reason`) or `notification` (`type`). It prints nothing, decides
+nothing, and a lane whose `settings.json` predates it still resumes [R-SESSION-HOOK-CANNOT-BLOCK].
+A session event carries a kind and counts, never message text: a reason or a type is kept
+only as a plain word of up to 40 lowercase letters and underscores, else null, and the last
+assistant message and a notification's message are never logged [R-SESSION-EVENT-NO-TEXT].
 
 **Evidence store** - `runs/<TASK-ID>/evidence/<candidate_sha>/`. Every receipt is bound to
 the SHA it was produced on.
@@ -831,8 +843,8 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 205 rows: 159 `blocking`, 21 `soft` and 25 `n/a`. Of the
-`n/a` rows, 15 are `GAP:` - a rule this design names and no code performs - and 10 are
+As of this commit the table carries 211 rows: 161 `blocking`, 23 `soft` and 27 `n/a`. Of the
+`n/a` rows, 16 are `GAP:` - a rule this design names and no code performs - and 11 are
 `PROPERTY:`. The gaps are the honest output of the matrix: a lane session resumed by hand
 without the lane flags having no guard at all, the stage 6 preconditions being unchecked
 before the push, the session identity a lane's hooks leave unproven (5.4), the
@@ -840,10 +852,10 @@ harness gate recipes of section 11, the three blind spots the matrix has as GAP 
 of its own, a foreign finding's owner not actually being notified (6.6a), the dollar budget
 being spent before a dispatch, whose
 cost is known only after it, so the cap is checked at the next stage boundary instead (12.1),
-and six rules only prose or a convention holds: the content of a tracker write, the panel's
+and seven rules only prose or a convention holds: the content of a tracker write, the panel's
 own state writes, the studio's write surface, write/forbid disjointness at `ppl boundary set`,
-the briefer returning `SPEC_GAP` instead of inventing, and the keys inside a provider's
-`params`.
+the briefer returning `SPEC_GAP` instead of inventing, the baseline suite finishing before
+implementation starts, and the keys inside a provider's `params`.
 These counts are read back out of `ppl/_assets/rules.toml` by the suite, so this paragraph cannot drift
 from the table it describes [R-DOC-RULE-IDS].
 
@@ -1073,7 +1085,7 @@ profile the rendered skill keeps the orchestrator's session in the start directo
 and ppl calls run from: stage 1 runs git with `-C`, and each gate recipe changes into the
 worktree in a subshell, `(cd <worktree> && <gate>)`.
 The lane's `settings.json` is written whole when the lane starts, and a harness that needs no
-profile gets the three hooks alone and no facts file.
+profile gets the hooks alone and no facts file.
 
 ### 5.7 Lanes
 
@@ -1132,6 +1144,11 @@ without the lock, since every writer replaces the file whole.
      --mcp-config <start>/mcp.json --add-dir <worktree> --permission-mode acceptEdits
      -n <TASK-ID> "/antline:pipeline <link>"
    ```
+
+   With `[stall] keep_awake = true` on macOS the line is run under `caffeinate -i`, which keeps
+   the machine from idle sleep until claude exits, and so is the line of `ppl lane resume`.
+   `--risk <tier>` records the run's risk tier in the lane's registry entry for `ppl init` to
+   take (12.3).
 
    `--no-exec` prints `{argv, env, cwd}` instead, `env` holding only what ppl adds. A failure
    after the export, a missing claude binary included, undoes newest first exactly what the
@@ -1851,6 +1868,28 @@ something notices [R-WATCHDOG-DEADLINE] - without being a deadline guarantee. A 
 nothing in a hook-driven, session-scoped harness can run code while no session is dispatching
 a tool call [R-WATCHDOG-NO-LIVE-TIMER n/a].
 
+### 6.9a Stall detection
+
+The watchdog above parks a run whose deadline passed; it says nothing while a session sits
+idle well inside that window, and in one measured run the orchestrator's session sat idle for
+hours in three gaps until the owner pressed resume. Stall detection (`ppl/stall.py`) finds
+that case from the run's log alone: the `session` events of `ppl_session.py` say why the
+session stopped, and `dispatch_start` and `usage` say when a role is still working. A run in
+progress is `stopped` when its newest event is a stop with no background task running or a
+session end, `waiting` when it is a permission prompt, each once `notify_after_minutes` have
+passed, and `silent` when nothing was logged for `silent_after_minutes`; in the review stage,
+silence alone counts, after `review_notify_after_minutes`. A run not `in_progress`, one in a
+waiting stage (parking, escalation, closure, merge watch), one whose control file halts it or
+is unusable, and one with a role still working are left out.
+
+`ppl watchdog stalls` prints the stalls as JSON, and with `--notify` logs each new one once as
+a `stall` event and raises a desktop notification; `ppl serve` makes the same check once a
+minute (9.1). The thresholds and `keep_awake` live in `config.toml`'s `[stall]` table, and
+`[notify] command`, unset by default, is the one way a stall leaves the machine: it is run
+with the task id, the stage, the kind and the minutes and nothing else
+[R-STALL-NOTIFY-NO-TEXT]. Detection reports and changes nothing else: it never parks a run,
+bumps its lease, refreshes its deadline or writes its `state.json` [R-STALL-REPORTS-ONLY].
+
 ### 6.10 Verdict outcomes
 
 `schema.VERDICT_OUTCOMES` is the closed set a verdict's `verdict` field may hold: `PASS`,
@@ -2090,7 +2129,9 @@ owner reads a trail before publishing it.
 `MANIFEST.json` holds the task id, the base and head SHA, the antline version, the redactions
 applied, the skipped files, every other file with its sha256, and the run's measures:
 `wall_clock_seconds` (init to `done`, else to the last event), `tokens_by_role`, `usd`,
-`denials`, `rework_rounds` and `verdicts` (a count per outcome). `usd` is priced with the prices
+`denials`, `rework_rounds`, `verdicts` (a count per outcome) and `timing`, the whole report
+`ppl timing` prints for the run (wall clock, init to merge request, stages, dispatches, gates,
+idle gaps and its own `reasons`). `usd` is priced with the prices
 `ppl init` froze into the run, so a later export quotes the same number, and with the live
 `[prices]` only for a run that froze none. It is the priced usage alone: the manual `usd_used`
 (`ppl budget spend usd`), which the dollars spent on the status card include, is left out.
@@ -2136,7 +2177,7 @@ list or ledger is written as one:
 - `timeline.json`: the log's `init`, `stage_enter`, `lifecycle`, `park`, `budget`, `refusal`,
   `deny`, `usage`, `verdict`, `evidence`, `finding_add`, `finding_status`, `review_reply`,
   `merge_observed`, `recover` and `lease_bump` events, each with `n`, a `usage` event without
-  its per-model token counts.
+  its per-model token counts. The hooks' `dispatch_start` and `session` events stay out of it.
 - `threads.json`: the review ledger (6.6).
 - `memory-in-effect.json`: `{harness, entries}`, the lessons the run's snapshot froze at
   `ppl init` [R-LESSONS-PAST-ONLY n/a].
@@ -2285,9 +2326,16 @@ way" by a worker.
 
 ### Stage 1 - baseline
 
-Record base SHA and baseline check results before touching anything: the harness's gates
-(build, lint, unit and integration tests) and known failures. Without this, a pre-existing red test is
-indistinguishable from a regression, and the model will pick the convenient reading.
+Record the base SHA before touching anything: `ppl baseline record` stores a `baseline.json`
+holding `base_sha` and a note naming the baseline suite's files. Then the orchestrator enters
+briefing and dispatches the briefer, and while the briefer works runs the baseline suite: the
+gate recipes that cover the harness's baseline list, each writing `baseline-<gate>.log` and
+`baseline-<gate>.rc` and filing no receipt. What the base revision builds and which of its
+tests fail live in those files. The first `ppl stage enter implementation` waits until every
+baseline command has written its `.rc` file, since a code worker writing into the tree under a
+running suite would contaminate it [R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a]. Without a
+baseline, a pre-existing red test is indistinguishable from a regression, and the model will
+pick the convenient reading.
 
 The branch `<TASK-ID>-<slug>` and its worktree `<repo.worktrees>/<repo name>-<TASK-ID>` already
 exist: `ppl lane` made them from a fresh `repo.default_branch` (origin's after a fetch when the
@@ -2357,13 +2405,20 @@ Test quality gate before the tests count as evidence:
 
 ### Stage 4 - deterministic gates
 
-Run by the orchestrator with no model judgement involved. Ordered cheapest first:
+Run by the orchestrator with no model judgement involved, in this order
+[R-GATES-SIMPLIFY-BEFORE-FULL n/a]:
 
-1. structural: compile, lint, no forbidden diff, boundary check
-2. focused behavioral: tests of the changed module, acceptance examples, negative cases
-3. integration evidence: full module suite, delta compared against baseline
+1. the fast gates and the secret scan on the candidate SHA
+2. the simplification pass, dispatched on every candidate, whose `simplification` receipt is a
+   `skip` when there is nothing to simplify and is filed under the SHA that goes to
+   verification
+3. when the pass committed, the fast gates and the secret scan again on the new SHA
+4. the full gates once, on the SHA that goes to verification, each failure judged against the
+   baseline files
 
-The commands are the harness's `[[gate]]` recipes (section 11).
+The commands are the harness's `[[gate]]` recipes (section 11), the fast ones first. A gate's
+`phase` is `fast` or `full` (`full` when absent, `focused-tests` always fast): a quick gate a
+simplification could break, such as a build or a lint, is fast, and a long test suite is full.
 
 Every gate writes a receipt bound to the candidate SHA. Gate failure inside the boundary
 routes to bounded rework. Gate failure outside the boundary is `BASELINE_FAILURE` and gets
@@ -2412,7 +2467,8 @@ No tracker write happens here.
 ## 8. Review monitor
 
 Runs as `/loop` in dynamic mode: the pipeline schedules its own wake-ups
-(`ScheduleWakeup`, 1200-1800s when idle, tighter while a CI pipeline is running). Each tick
+(`ScheduleWakeup`, 300s for 30 minutes after the MR is opened, a reply is posted or a fix is
+pushed, 1200-1800s otherwise, tighter while a CI pipeline is running). Each tick
 is stateless and reads `state.json` plus live forge facts. It survives session restarts
 because all state is durable.
 
@@ -2483,12 +2539,19 @@ Multiple runs are listed together: up to the lane limits (5.4) run at once, each
 lane, beside parked and finished ones, and the panel is the place where that is visible. The
 studio's Lanes page (9.6) lists the lanes themselves.
 
+While `ppl serve` runs, a ticker makes the stall check of 6.9a once a minute and announces each
+new stall, and a stalled run's "needs you" column reads `idle <minutes> min (<kind>)` unless
+the run already needs the owner for another reason [R-STALL-REPORTS-ONLY].
+
 ### 9.2 Control is cooperative
 
 The panel takes no lifecycle decision of its own: it writes `runs/<TASK-ID>/control.json`
 and lets `ppl` and the hook act on it. For `stop` and `destroy` the panel process does write run state - `stop` parks the run
 through `run.park` and `destroy` archives the whole run directory - so "the panel only ever
-writes control.json" is true of `pause` and `resume` only [R-PANEL-STATE-WRITE n/a].
+writes control.json" is true of `pause` and `resume` only [R-PANEL-STATE-WRITE n/a]. The
+stall ticker of `ppl serve` also appends a `stall` event to a run's log for each stall it
+announces and starts the notifier processes (6.9a), and decides nothing about the run
+[R-STALL-REPORTS-ONLY].
 
 ```json
 {"command": "pause", "requested_at": "2026-08-31T12:00:00Z", "requested_by": "panel", "nonce": "..."}
@@ -2880,7 +2943,9 @@ Generic doctrine is worthless without the local landmines encoded, and those bel
 project, not to this pipeline. They are declared in the harness: the `[env]` table (variables
 every build command needs, rendered into the worker overlays), the `[[gate]]` table (the named
 build recipes rendered into the skill's gates reference, `focused-tests` among them) and the
-`[[guard.shape]]` table (the build shapes the test worker's Bash may run, 5.6). See the example
+`[[guard.shape]]` table (the build shapes the test worker's Bash may run, 5.6). A gate's
+optional `phase` puts it in the fast section, run before the simplification pass, or the full
+one, run once after it (stage 4). See the example
 harnesses in `ppl/_assets/defaults/harnesses/`. What a Maven monorepo harness typically encodes:
 
 | Gate | Rule |
@@ -2980,12 +3045,20 @@ names, and each lane's agents are generated from it by `ppl lane` (section 10.1)
 orchestrator is the operator's own session and is not routed. A role can carry a per-risk
 override, `by_risk = { high = "good" }`, applied for runs started with `ppl init --risk high`:
 the agent keeps the default and `ppl routing show --role <role> --task <id>` prints the
-model the orchestrator passes at dispatch [R-ROUTING-BY-RISK]. `model` and `effort` are Claude
+model the orchestrator passes at dispatch [R-ROUTING-BY-RISK]. A role can also carry
+`by_risk_effort`, a table of risk to effort; the example gives the briefer and both workers
+`by_risk_effort = { low = "medium" }`, and `ppl routing show` prints the effort to pass beside
+the model [R-ROUTING-BY-RISK]. `model` and `effort` are Claude
 Code subagent frontmatter keys, and `effort` accepts `low|medium|high|xhigh|max`. Routing is a
 profile, not part of the canonical workflow - changing a model is not supposed to require
 changing the lifecycle or the evidence contracts.
 
 ### 12.3 Risk tiers
+
+A run's tier is one of `low`, `normal` and `high` (`run.RISK_TIERS`) and is set at admission,
+when the lane starts: `ppl lane <link> --risk <tier>` records it in the lane's registry entry,
+`ppl init` with no `--risk` of its own takes it, and a run started without it is `normal`.
+Nothing sets `low` on its own. The routing of 12.2 reads the tier.
 
 Two tiers only, per the author's correction to the book's four:
 

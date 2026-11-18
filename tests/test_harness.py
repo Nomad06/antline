@@ -165,6 +165,78 @@ class TestLoadAndValidate(HarnessTestCase):
             self.assertEqual(caught.exception.code, "HARNESS_INVALID", bad)
             self.assertIn("gate[1].name", caught.exception.message, bad)
 
+    def test_a_gate_phase_defaults_to_full_and_focused_tests_is_fast(self):
+        self.assertEqual(harness.gate_phase({"name": "regression", "command": "x"}), "full")
+        self.assertEqual(harness.gate_phase({"name": "focused-tests", "command": "x"}), "fast")
+        self.assertEqual(harness.gate_phase({"name": "lint", "command": "x", "phase": "fast"}),
+                         "fast")
+        self.assertEqual(harness.gate_phase({"name": "lint", "command": "x", "phase": "full"}),
+                         "full")
+
+    def test_a_gate_phase_is_accepted(self):
+        name = self.mutate("example-generic", 'command = "make integration"',
+                           'command = "make integration"\nphase = "full"')
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
+    def test_an_unknown_phase_is_refused(self):
+        for bad in ('"quick"', '"Fast"', "1"):
+            name = self.mutate("example-generic", 'command = "make integration"',
+                               'command = "make integration"\nphase = %s' % bad)
+            with self.assertRaises(PplError) as caught:
+                harness.load(name)
+            self.assertEqual(caught.exception.code, "HARNESS_INVALID", bad)
+            self.assertIn("gate[3].phase must be fast or full", caught.exception.message, bad)
+
+    def test_focused_tests_marked_full_is_refused(self):
+        name = self.mutate("example-generic", 'command = "make test TEST=<test_class>"',
+                           'command = "make test TEST=<test_class>"\nphase = "full"')
+        with self.assertRaises(PplError) as caught:
+            harness.load(name)
+        self.assertEqual(caught.exception.code, "HARNESS_INVALID")
+        self.assertIn("gate[2].phase", caught.exception.message)
+        self.assertIn("focused-tests", caught.exception.message)
+
+    def test_focused_tests_marked_fast_is_accepted(self):
+        name = self.mutate("example-generic", 'command = "make test TEST=<test_class>"',
+                           'command = "make test TEST=<test_class>"\nphase = "fast"')
+        self.assertEqual(harness.validate(harness.load(name), name), [])
+
+    def gates_doc(self, gates):
+        fixtures.install_harness("example-generic")
+        doc = harness.load("example-generic")
+        doc["gate"] = gates
+        return doc
+
+    def test_the_recipes_put_fast_gates_before_full_ones(self):
+        doc = self.gates_doc([
+            {"name": "regression", "command": "make regression"},
+            {"name": "lint", "command": "make lint", "phase": "fast"},
+            {"name": "focused-tests", "command": "make test TEST=<test_class>"},
+            {"name": "integration", "command": "make integration", "phase": "full"},
+        ])
+        text = harness._gate_recipes(doc)
+        self.assertLess(text.index("# lint"), text.index("# regression"))
+        self.assertLess(text.index("# focused-tests"), text.index("# regression"))
+        self.assertLess(text.index("# lint"), text.index("# focused-tests"))
+        self.assertLess(text.index("# regression"), text.index("# integration"))
+        self.assertLess(text.index("# fast gates"), text.index("# full gates"))
+        self.assertIn("# fast gates: run these, then the simplification pass\n", text)
+        self.assertIn("# full gates: run once, on the SHA that goes to verification\n", text)
+        self.assertLess(text.index("# fast gates"), text.index("# lint"))
+        self.assertLess(text.index("# focused-tests"), text.index("# full gates"))
+        self.assertLess(text.index("# full gates"), text.index("# regression"))
+
+    def test_a_harness_with_only_fast_gates_has_no_full_section(self):
+        doc = self.gates_doc([{"name": "focused-tests", "command": "make test TEST=<test_class>"}])
+        text = harness._gate_recipes(doc)
+        self.assertIn("# fast gates", text)
+        self.assertNotIn("# full gates", text)
+
+    def test_a_harness_with_no_gate_renders_no_section(self):
+        text = harness._gate_recipes(self.gates_doc([]))
+        self.assertNotIn("# fast gates", text)
+        self.assertNotIn("# full gates", text)
+
     def test_env_key_that_is_not_a_shell_identifier_is_refused(self):
         for bad in ('"JAVA HOME"', '"1JAVA"', '"A-B"', '"A;B"'):
             name = self.mutate("example-maven", "JAVA_HOME = ", "%s = " % bad)
@@ -412,7 +484,7 @@ class TestVerify(HarnessTestCase):
         for name in ("example-generic", "example-maven"):
             fixtures.install_harness(name)
             doc = harness.load(name)
-            rendered = harness.render_skill(doc, pins=PINS)
+            rendered = fixtures.at_nominal_home(harness.render_skill(doc, pins=PINS), paths.home())
             largest_skill = max(largest_skill, len(rendered["SKILL.md"].encode("utf-8")))
             largest_reference = max(largest_reference, *(len(text.encode("utf-8"))
                                                          for path, text in rendered.items()
@@ -1647,8 +1719,8 @@ class TestRenderSkill(HarnessTestCase):
         for relative, text in rendered.items():
             self.assertNotIn("<default-branch>", text, relative)
         self.assertIn("origin/trunk...HEAD | grep -E 'src/test/", rendered["references/gates.md"])
-        for relative in ("references/gates.md", "references/baseline.md",
-                         "references/stage-1-baseline.md", "references/stage-8-after-merge.md"):
+        for relative in ("references/gates.md", "references/stage-1-baseline.md",
+                         "references/stage-8-after-merge.md"):
             self.assertIn("branch trunk here", rendered[relative], relative)
 
     def test_rendered_skill_carries_the_notice_and_the_forge_text(self):
@@ -1697,8 +1769,9 @@ class TestRenderSkill(HarnessTestCase):
         self.assertIn("ppl evidence add --check test-lint", maven)
         self.assertIn("git -C <worktree> diff --name-only origin/master...HEAD | "
                       "grep -E 'src/test/.*\\.java$'", maven)
+        # the secret scan runs with the fast gates, so its recipe ends the fast section
+        self.assertLess(maven.index("--check secret-scan"), maven.index("--check integration-tests"))
         self.assertLess(maven.index("--check integration-tests"), maven.index("--check test-lint"))
-        self.assertLess(maven.index("--check test-lint"), maven.index("--check secret-scan"))
         self.assertNotIn("test-lint", generic)
         self.assertNotIn("src/test/", generic)
         for gates in (maven, generic):
@@ -1774,10 +1847,10 @@ class TestRenderSkill(HarnessTestCase):
         for relative, text in rendered.items():
             self.assertNotIn("--harness example-maven", text, relative)
 
-    def test_the_baseline_fragment_stays_on_its_table_row(self):
+    def test_the_baseline_documents_other_fields_stay_on_one_table_row(self):
         baseline = self.render("example-maven")["references/baseline.md"]
         row = next(line for line in baseline.splitlines() if line.startswith("| anything else"))
-        self.assertIn("the names of tests that already fail on the base revision", row)
+        self.assertIn("`baseline-*.log` and `baseline-*.rc` files", row)
         self.assertIn("| No - ", row)
 
     def test_knowledge_skills_are_named(self):

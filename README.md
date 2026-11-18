@@ -128,12 +128,18 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `ppl/_assets/rules.toml` holds 205 rules, 159 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 211 rules, 161 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 3318 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 3497 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
+- `ppl timing --task <id>` reports where one run's time went: wall clock, init to merge request,
+  time per stage, per dispatched role and per gate, and the idle gaps (a pause longer than
+  `--idle-minutes`, 45 by default, is idle rather than work). A gate's figure is the wait before
+  its receipt, which includes the orchestrator's own time; a receipt that followed an idle gap is
+  not timed, so a gate whose every receipt did has no wait. A figure the log lacks prints as
+  `-` with a reason. `--json` prints the same report as JSON.
 - `ppl trail export --task <id> --out <dir>` writes one run as a static trail to publish: its
   documents from an allowlist, paths and people redacted (URLs on request), and a `MANIFEST.json`
   with hashes, wall-clock, tokens per role, denials and rework rounds. It refuses a trail that
@@ -302,7 +308,7 @@ another tab or a terminal since the page loaded it is refused [R-STUDIO-CHANGED-
 
 ## Hooks
 
-`ppl lane` writes three hooks into each lane's `settings.json`, in the lane's start directory
+`ppl lane` writes four hooks into each lane's `settings.json`, in the lane's start directory
 `~/.ppl/lanes/<TASK-ID>/`, and the lane's Claude Code session loads them with `--settings`.
 You register nothing by hand:
 
@@ -313,7 +319,13 @@ You register nothing by hand:
   "SubagentStart": [{"matcher": "", "hooks": [{"type": "command",
     "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_dispatch.py --task KEY-123", "timeout": 5}]}],
   "SubagentStop": [{"matcher": "", "hooks": [{"type": "command",
-    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_usage.py --task KEY-123", "timeout": 5}]}]}}
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_usage.py --task KEY-123", "timeout": 5}]}],
+  "Stop": [{"matcher": "", "hooks": [{"type": "command",
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_session.py --task KEY-123", "timeout": 5}]}],
+  "SessionEnd": [{"matcher": "", "hooks": [{"type": "command",
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_session.py --task KEY-123", "timeout": 5}]}],
+  "Notification": [{"matcher": "", "hooks": [{"type": "command",
+    "command": "/path/to/python3.11 /path/to/site-packages/ppl/_assets/hooks/ppl_session.py --task KEY-123", "timeout": 5}]}]}}
 ```
 
 The paths are the ones `ppl lane` finds for your install: under pipx the scripts sit in its
@@ -328,6 +340,16 @@ a lane runs ppl's hooks, the managed settings' and whatever its start directory'
 The guard is the cage, the dispatch hook counts role dispatches, and the usage hook
 records each role's and the orchestrator's tokens in the run's `log.jsonl` when a role
 stops, never refusing or delaying a dispatch [R-USAGE-HOOK-CANNOT-BLOCK].
+
+The session hook, `ppl_session.py` on `Stop`, `SessionEnd` and `Notification`, records why the
+orchestrator's session stopped as a `session` event in the run's `log.jsonl`: on `Stop` the
+number of background tasks still running and of session crons, on `SessionEnd` the reason, on
+`Notification` its type. It prints nothing and decides nothing, and a lane started before this
+version, whose `settings.json` holds the other three hooks alone, still resumes but records no
+session event for its whole lifetime: `ppl lane` renders the settings of a new lane only
+[R-SESSION-HOOK-CANNOT-BLOCK]. A session
+event carries a kind and counts, never message text: the last assistant message and a
+notification's message are never logged [R-SESSION-EVENT-NO-TEXT].
 
 A dollar cap is opt-in: set `usd_max` under `[budgets]` in `~/.ppl/config.toml` and a price
 for each model under `[prices."<model id>"]`. `ppl init` copies the cap and the prices into
@@ -462,6 +484,13 @@ done and how to check it). In a fragment, `<default-branch>` is replaced with
 `repo.default_branch` when the skill is rendered, while `<worktree>`, `<TASK-ID>`,
 `<SHA>` and `<GENERATION>` are left for the orchestrator to fill in at run time.
 
+A `[[gate]]` row holds `name`, `command` and an optional `phase`, `"fast"` or `"full"`:
+`full` when absent, and the `focused-tests` gate is always fast. The rendered recipes list
+the fast gates first. The orchestrator runs them and the secret scan, then the simplification
+pass, and then the full gates once, on the SHA that goes to verification
+[R-GATES-SIMPLIFY-BEFORE-FULL n/a]. Mark a gate fast when it is quick and catches what a
+simplification could break, such as a build or a lint, and leave long test suites full.
+
 A harness or routing change reaches the next lane `ppl lane` starts, which renders the
 agents and the skill from the harness commit and `routing.toml` as they are then; a running
 lane keeps what it started with. Commit a harness change in its repository, and push it when
@@ -488,7 +517,20 @@ it would route to is unverified or stale, `ppl models verify` fixes that, and
 After changing a tier, run `ppl models verify`; the next lane takes the new routing, and a
 running lane keeps the copy it froze when it started, which `ppl routing show` prints there.
 A role can carry `by_risk = { high = "good" }`, used for
-runs started with `ppl init --risk high` [R-ROUTING-BY-RISK].
+runs started with `ppl init --risk high` [R-ROUTING-BY-RISK], and `by_risk_effort = { low =
+"medium" }`, which lowers its effort for runs started with `ppl init --risk low`: a key is a
+risk (`low`, `normal`, `high`) and a value an effort (`low` to `max`), and anything else is
+refused [R-ROUTING-BY-RISK]. The agent file keeps the defaults, and the orchestrator passes the
+model and the effort `ppl routing show --role <role> --task <id>` prints at each dispatch. The
+presets lighten a low-risk run's briefer and two workers: economy sets their effort to medium,
+low and low, balanced to medium for all three, and max lowers the briefer to high effort and
+moves both workers to the `average` tier. In every preset the challenger, the verifier and the
+review responder keep their routing at every risk. When runs are slow, start from `ppl routing preset balanced`.
+A run's risk is chosen when its lane starts: `ppl lane <link> --risk low` starts a low-risk run
+(`--risk high` a high-risk one), and a run started without the flag is `normal`, since the
+orchestrator runs `ppl init` with no `--risk` of its own. An install made before this version
+gets the low-risk preset entries only when a preset is applied again (`ppl routing preset
+<name>`), and until then new runs are stamped `custom`.
 
 ## Run a task
 
@@ -504,7 +546,8 @@ takes it from there: `ppl init`, the stages of `docs/DESIGN.md` section 7, and a
 until the MR is approved. A halt is a parked run with a code and a question, see the skill's
 `references/escalation.md`. Without `--harness <name>` the harness is the installed one whose
 `[repo] path` holds the current directory, else the default one, and `--slug <slug>` names the
-branch `KEY-123-<slug>`.
+branch `KEY-123-<slug>`. `--risk low` (or `high`) is how a run of that risk is started, see
+[Models](#models), and a run started without it is `normal`.
 
 ```bash
 ppl lane list                 # every lane: task, harness, stage, window open or closed
@@ -547,10 +590,59 @@ ppl serve --open     # the studio on http://127.0.0.1:8787, the run list at /run
 ppl recover --task KEY-123   # always safe, always first after a restart
 ppl doctor           # setup, models, forge, tracker; in a lane its hooks, sandbox, MCP servers
 ppl control set pause|resume|stop --task KEY-123
+ppl watchdog stalls [--notify]   # every run whose session stopped working, as JSON
 ```
 
 In a lane's own window every `ppl` command takes its run from the lane, so `--task` can be
 left out there.
+
+### Stalls
+
+`ppl watchdog stalls` reads each run's log and lists, as JSON, every run in progress whose
+session stopped working: `stopped` when the session's last turn ended with no background
+task running or the session ended, `waiting` when it sits on a permission prompt, each once
+`notify_after_minutes` have passed, and `silent` when nothing at all was logged for
+`silent_after_minutes`. In the review stage only silence counts, after
+`review_notify_after_minutes`. A run still in admission (status `planned`), paused, parked,
+escalated, closing or watching its merge request is left out, and so is a run whose control
+file is unusable and a run while a role it dispatched is still working.
+With `--notify` each new stall is logged once as a `stall` event in the run's log and raised
+as a desktop notification on this machine, through `osascript` on macOS or `notify-send`
+elsewhere. Detection only reports: it never parks a run or changes its state
+[R-STALL-REPORTS-ONLY]. A gate or another long step that logs nothing for longer than
+`silent_after_minutes` is reported as `silent`, a false alarm. A run whose state or log
+is unreadable, or whose `log.jsonl` is over 16 MiB, is skipped and so is not watched.
+
+While `ppl serve` runs, the panel makes the same check every minute and announces each new
+stall as `--notify` does, with the same report-only limit [R-STALL-REPORTS-ONLY]. On the run
+list a stalled run's needs-you column reads `idle <minutes> min (<kind>)`, unless the run
+already needs you for another reason, which is shown instead. A broken `[stall]` or `[notify]`
+table is printed once on the terminal running `ppl serve`, and no stall is announced until
+it is fixed.
+
+Set the thresholds in `~/.ppl/config.toml`, shown here with their defaults:
+
+```toml
+[stall]
+notify_after_minutes = 15
+silent_after_minutes = 60
+review_notify_after_minutes = 45
+keep_awake = false
+
+[notify]
+command = ["/usr/local/bin/my-stall-hook"]
+```
+
+Each minutes value is an integer from 1 to 1440. `[notify]` has no default: nothing leaves
+the machine unless you set `command`, and then ppl runs it with the task id, the stage, the
+kind and the minutes appended. A notification carries those four values and no other text,
+and a value that is not a task id, a stage, a kind or a number sends nothing
+[R-STALL-NOTIFY-NO-TEXT].
+
+`keep_awake = true` keeps a Mac awake while a lane's window is open: `ppl lane` and
+`ppl lane resume` start claude through `caffeinate -i`, which holds off idle sleep until
+claude exits. It has no effect on other systems or when `caffeinate` is not on PATH, and a
+closed lid still sleeps the machine.
 
 ## Sandbox
 

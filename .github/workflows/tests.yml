@@ -20,8 +20,9 @@ jobs:
           PPL_REQUIRE_PACKAGING: "1"
       - run: python tools/cage_check.py
   python-floor:
-    # The interpreter floor under Python 3.9: every hook denies a role and exits 0,
-    # bin/ppl names the version it found. The suite itself needs 3.11 and does
+    # The interpreter floor under Python 3.9: the guard, dispatch and usage hooks deny a
+    # role and exit 0, the session hook prints nothing and exits 0, bin/ppl names the
+    # version it found. The suite itself needs 3.11 and does
     # not run here. Pinned to 24.04: setup-python has no 3.9 build for the
     # Ubuntu 26.04 image that ubuntu-latest moved to in October 2026.
     runs-on: ubuntu-24.04
@@ -30,7 +31,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.9"
-      - name: every hook denies a role and exits 0
+      - name: the guard, dispatch and usage hooks deny a role and exit 0
         shell: bash
         run: |
           export PPL_HOME="$RUNNER_TEMP/ppl-home"
@@ -46,6 +47,19 @@ jobs:
             grep -q 'needs 3.11 or newer' <<< "$out"
             grep -q 'older than the 3.11' stderr.txt
           done
+      - name: the session hook prints nothing and exits 0
+        shell: bash
+        run: |
+          export PPL_HOME="$RUNNER_TEMP/ppl-home"
+          payload='{"hook_event_name": "Stop", "background_tasks": [], "session_crons": []}'
+          status=0
+          out=$(printf '%s' "$payload" | python3 ppl/_assets/hooks/ppl_session.py --task DEMO-1 2> stderr.txt) || status=$?
+          echo "ppl_session exit=$status stdout=$out"
+          cat stderr.txt
+          test "$status" -eq 0
+          test -z "$out"
+          test "$(wc -l < stderr.txt)" -eq 1
+          grep -q 'ppl_session: Python 3\.9\..* is older than the 3.11' stderr.txt
       - name: bin/ppl names the version it found and exits 2
         shell: bash
         run: |

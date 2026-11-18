@@ -40,6 +40,8 @@ Rules:
 - name_contract must not be empty. If the task is too small to need one (e.g. a single
   well-known symbol with no new names), still name that one symbol - "no new names" is
   itself worth stating, not the same as an empty document.
+- When the dispatch says the run's risk is low, read the files the task names and their
+  direct callers, and keep the brief to what the acceptance criteria need.
 - Locate contracts yourself with Read, Grep and Glob directly against the repository. You
   cannot spawn subagents - there is no context-explorer or any other agent available to you
   here - so if the contract is not findable by reading the tree yourself, it is not

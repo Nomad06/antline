@@ -299,7 +299,7 @@ residual = "the unroled orchestrator session keeps the quadratic tail of the lex
 
 [[rule]]
 id = "R-GUARD-PYTHON-FLOOR"
-statement = "Under a Python older than 3.11 every hook reads the payload before importing anything from ppl, deny a call whose agent_type starts with ppl- (a superset of boundary.ROLE_RULES, so the cage fails closed), write one stderr line naming the version found and the 3.11 floor, and exit 0; outside a lane an unroled session is allowed, and when the guard's command line carries --task, a lane session, an unroled call is denied every tool but Read, Glob and Grep, an unreadable payload included. ppl lane resume refuses SETUP_INCOMPLETE before it starts the session while a guard, dispatch or usage hook entry of the lane's settings.json names an interpreter or a script that does not exist, or an interpreter older than 3.11 or no Python, since a hook whose interpreter is gone exits 127, which Claude Code reads as a non-blocking error and allows; ppl doctor in a lane lists the same under lane_hooks."
+statement = "Under a Python older than 3.11 the guard, dispatch and usage hooks read the payload before importing anything from ppl, deny a call whose agent_type starts with ppl- (a superset of boundary.ROLE_RULES, so the cage fails closed), write one stderr line naming the version found and the 3.11 floor, and exit 0; outside a lane an unroled session is allowed, and when the guard's command line carries --task, a lane session, an unroled call is denied every tool but Read, Glob and Grep, an unreadable payload included. ppl lane resume refuses SETUP_INCOMPLETE before it starts the session while a hook entry of the lane's settings.json (the guard, dispatch and usage entries, and a session entry when the file has one) names an interpreter or a script that does not exist, or an interpreter older than 3.11 or no Python, since a hook whose interpreter is gone exits 127, which Claude Code reads as a non-blocking error and allows; ppl doctor in a lane lists the same under lane_hooks."
 scope = "every hook call, under an interpreter older than 3.11"
 event = "PreToolUse, SubagentStart and SubagentStop, before the ppl imports"
 enforcement = "blocking"
@@ -307,7 +307,7 @@ hook_or_check = "ppl/_assets/hooks/ppl_python_floor.py:refuse_old_python, ppl/do
 deny_test = "tests/test_lane_launch.py::TestResume::test_resume_refuses_hooks_that_cannot_run_the_cage, tests/test_guard.py::TestPythonFloor::test_an_old_python_denies_a_role_and_names_the_version, tests/test_guard.py::TestPythonFloor::test_an_old_python_in_a_lane_leaves_an_unroled_session_only_its_reads, tests/test_guard.py::TestPythonFloor::test_the_guard_in_a_lane_under_the_system_python_leaves_only_reads, tests/test_guard.py::TestPythonFloor::test_every_generated_role_and_any_other_ppl_name_is_denied, tests/test_guard.py::TestPythonFloor::test_the_hooks_deny_a_role_under_the_system_python, tests/test_guard.py::TestPythonFloor::test_the_hooks_start_with_their_own_directory_off_sys_path"
 allow_test = "tests/test_guard.py::TestPythonFloor::test_a_supported_python_passes_through_untouched, tests/test_guard.py::TestPythonFloor::test_an_old_python_lets_an_unroled_session_through_with_the_message, tests/test_guard.py::TestPythonFloor::test_an_unroled_session_under_the_system_python_is_allowed"
 owner = "guard-hook"
-residual = "the floor runs only if the file parses and the floor module imports: each hook appends its own directory to sys.path, so PYTHONSAFEPATH, -P and -I do not hide it, and every hook and ppl/_assets/hooks/ppl_python_floor.py are kept to Python 3.9 syntax, and the subprocess test proves that on a machine with an older python3 at /usr/bin/python3 and skips elsewhere, and CI's python-floor job runs every hook and bin/ppl under Python 3.9 on every push. SubagentStart cannot block (R-DISPATCH-HOOK-CANNOT-BLOCK), so the dispatch hook's deny is informational, and the usage hook's deny is no SubagentStop decision either (R-USAGE-HOOK-CANNOT-BLOCK); only the guard is handed its command line, so the dispatch and usage hooks deny a ppl- role alone in a lane too. In a lane an old interpreter stalls every call but Read, Glob and Grep until the owner starts the lane under 3.11 or newer. ppl lane pins the interpreter that runs it in the lane's hook entries, so the floor fires for a hand-written or stale entry; ppl doctor's hook_runs runs each registered guard command once and reports false when it does not exit 0 cleanly"
+residual = "the floor runs only if the file parses and the floor module imports: each hook appends its own directory to sys.path, so PYTHONSAFEPATH, -P and -I do not hide it, and every hook and ppl/_assets/hooks/ppl_python_floor.py are kept to Python 3.9 syntax, and the subprocess test proves that on a machine with an older python3 at /usr/bin/python3 and skips elsewhere, and CI's python-floor job runs, under Python 3.9 on every push, the guard, dispatch and usage hooks, asserting each denies a ppl- role and exits 0, the session hook with --task and a Stop payload, asserting it exits 0 with an empty stdout and one stderr line naming the old interpreter, and bin/ppl. The session hook's 3.9 syntax is also held on every machine by tests/test_session_hook.py::TestSessionHook::test_the_hook_parses_on_python_3_9, which parses it with ast feature_version (3, 9). SubagentStart cannot block (R-DISPATCH-HOOK-CANNOT-BLOCK), so the dispatch hook's deny is informational, and the usage hook's deny is no SubagentStop decision either (R-USAGE-HOOK-CANNOT-BLOCK); only the guard is handed its command line, so the dispatch and usage hooks deny a ppl- role alone in a lane too. In a lane an old interpreter stalls every call but Read, Glob and Grep until the owner starts the lane under 3.11 or newer. ppl lane pins the interpreter that runs it in the lane's hook entries, so the floor fires for a hand-written or stale entry; ppl doctor's hook_runs runs each registered guard command once and reports false when it does not exit 0 cleanly. The session hook (Stop, SessionEnd, Notification) does not call this floor, since a Stop hook prints nothing: under an older interpreter it writes one stderr line and records nothing (R-SESSION-HOOK-CANNOT-BLOCK)"
 
 [[rule]]
 id = "R-RUNS-WRITE-PROTECTION"
@@ -579,7 +579,7 @@ hook_or_check = "none"
 deny_test = ""
 allow_test = ""
 owner = "panel"
-residual = "GAP: nothing confines it. The panel imports ppl and runs in-process, so stop parks the run through run.park and destroy archives the whole run directory, both writing run state directly. The guard hook never sees these - they are not tool calls - and no check stands between the panel and ppl's full write surface, so what keeps panel writes narrow is only which functions handle_control happens to call"
+residual = "GAP: nothing confines it, and control.json is not its only write. The panel imports ppl and runs in-process, so stop parks the run through run.park and destroy archives the whole run directory, both writing run state directly, a hard stop appends a sigterm event to the run's log, and the stall ticker of ppl serve appends a stall event to a run's log for each stall it announces and starts the [notify] command and the desktop notifier as processes (R-STALL-REPORTS-ONLY). The guard hook never sees these - they are not tool calls - and no check stands between the panel and ppl's full write surface, so what keeps panel writes narrow is only which functions handle_control happens to call"
 
 [[rule]]
 id = "R-STUDIO-SESSION-TOKEN"
@@ -1225,7 +1225,7 @@ event = "SubagentStart"
 enforcement = "soft"
 hook_or_check = "ppl/_assets/hooks/ppl_dispatch.py:on_start"
 deny_test = ""
-allow_test = "tests/test_dispatch_hook.py::TestDispatchHook::test_start_increments_the_dispatch_counter, tests/test_dispatch_hook.py::TestDispatchHook::test_start_denies_past_the_hard_cap, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_dispatched_from_beside_the_worktree_is_counted"
+allow_test = "tests/test_dispatch_hook.py::TestDispatchHook::test_start_increments_the_dispatch_counter, tests/test_dispatch_hook.py::TestDispatchHook::test_start_denies_past_the_hard_cap, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_dispatched_from_beside_the_worktree_is_counted, tests/test_dispatch_hook.py::TestDispatchHook::test_a_role_start_logs_a_dispatch_start_event, tests/test_dispatch_hook.py::TestDispatchHook::test_a_non_role_start_logs_nothing, tests/test_dispatch_hook.py::TestDispatchHook::test_a_log_that_cannot_be_appended_does_not_change_the_result, tests/test_dispatch_hook.py::TestDispatchHook::test_a_refused_spend_still_logs_the_start"
 owner = "harness"
 residual = "the deny document the hook returns past the cap is never acted on by the harness; R-BUDGET-DISPATCH-CAP is the only real enforcement of that budget"
 
@@ -1240,6 +1240,30 @@ deny_test = ""
 allow_test = "tests/test_usage_hook.py::TestUsageHook::test_a_role_stop_logs_its_cumulative_usage, tests/test_usage_hook.py::TestUsageHook::test_a_non_role_agent_is_ignored, tests/test_usage_hook.py::TestUsageHook::test_no_active_run_is_ignored, tests/test_usage_hook.py::TestUsageHook::test_a_missing_transcript_logs_an_error_event_and_prints_nothing, tests/test_usage_hook.py::TestUsageHook::test_an_oversized_transcript_logs_transcript_too_large, tests/test_usage_hook.py::TestUsageHook::test_the_orchestrator_counts_only_lines_since_the_run_began, tests/test_usage_hook.py::TestUsageHook::test_a_second_stop_adds_only_new_orchestrator_lines, tests/test_usage_hook.py::TestUsageHook::test_the_same_agent_stopping_twice_is_counted_at_its_newest_totals, tests/test_usage_hook.py::TestUsageHook::test_the_hook_never_prints_a_decision, tests/test_usage_hook.py::TestUsageHook::test_the_floor_names_subagentstop, tests/test_usage_hook.py::TestUsageHook::test_a_fifo_log_is_skipped_without_blocking, tests/test_usage_hook.py::TestUsageHook::test_a_role_read_past_the_deadline_logs_deadline_and_keeps_the_orchestrator_offset"
 owner = "harness"
 residual = "the transcript is Claude Code's own format, not a contract: a drift in it is a schema_unknown error event and that role's tokens go unrecorded. Orchestrator turns after the last refresh are not counted, so whatever the orchestrator does after the last role stops (the merge watch) is missing. The hook records only when it is registered: ppl doctor reports usage_hook per settings file and ppl init warns when a guard is registered without it. A role read past the 2 s budget is a deadline error event while the orchestrator's offset stays where its read stopped, a log.jsonl or usage.json there but not a regular file (a FIFO) records nothing rather than block, an orchestrator transcript that vanished is named on stderr and never logged, and two roles stopping at once may both log the same orchestrator totals, which aggregation counts once since it keeps the newest event per agent_id"
+
+[[rule]]
+id = "R-SESSION-HOOK-CANNOT-BLOCK"
+statement = "Stop, SessionEnd and Notification are recorded, never decided: the session hook appends a session event to the bound run's log, prints nothing on stdout, exits 0, and holds nothing a lane needs, so ppl lane resume and ppl doctor accept a lane without it."
+scope = "active run, session with no agent_type"
+event = "Stop, SessionEnd, Notification"
+enforcement = "soft"
+hook_or_check = "ppl/_assets/hooks/ppl_session.py:on_event, ppl/doctor.py:lane_hook_problems"
+deny_test = ""
+allow_test = "tests/test_session_hook.py::TestSessionHook::test_a_stop_logs_the_running_background_count, tests/test_session_hook.py::TestSessionHook::test_an_unknown_event_and_a_hook_outside_a_lane_log_nothing, tests/test_session_hook.py::TestSessionHook::test_the_hook_never_prints_a_decision, tests/test_session_hook.py::TestSessionHook::test_an_old_interpreter_prints_nothing, tests/test_session_hook.py::TestSessionHook::test_a_fifo_log_is_skipped_without_blocking, tests/test_lane_launch.py::TestResume::test_a_lane_started_before_the_session_hook_still_resumes"
+owner = "harness"
+residual = "the hook records only where it is registered: a lane started before this version holds the guard, dispatch and usage hooks alone and records no session event for its whole lifetime, since ppl lane renders the settings of a new lane only. When the hook's script file is missing (the install moved, or a clone used as the install was switched to a commit from before this hook), Python exits 2, and 2 is the exit code with which a Stop hook holds the stop: a probe on Claude Code 2.1.322 on 2026-11-18 found the stop was not held in that case, while a Stop hook that exits 2 on purpose with its own stderr text did hold it, so a later Claude Code may behave differently, and ppl lane resume refuses a lane whose hook script is missing. It records only for a lane the registry confirms whose state.json exists, and a log.jsonl there but not a regular file (a FIFO) records nothing rather than block. Under a Python older than 3.11 it writes one stderr line and records nothing, since the floor the other hooks share (R-GUARD-PYTHON-FLOOR) prints a permissionDecision that a Stop hook must not. Notification did not fire in a headless probe, so its notification_type is taken from Claude Code's documentation"
+
+[[rule]]
+id = "R-SESSION-EVENT-NO-TEXT"
+statement = "A session event carries a kind and counts, never message text: a Stop records the number of running background tasks and of session crons, a SessionEnd its reason and a Notification its notification_type, each kept only as a plain word of up to 40 lowercase letters and underscores, and last_assistant_message, message and every other payload field are never logged."
+scope = "active run, session with no agent_type"
+event = "Stop, SessionEnd, Notification"
+enforcement = "blocking"
+hook_or_check = "ppl/_assets/hooks/ppl_session.py:_event, ppl/_assets/hooks/ppl_session.py:_plain"
+deny_test = "tests/test_session_hook.py::TestSessionHook::test_the_last_message_is_never_logged"
+allow_test = "tests/test_session_hook.py::TestSessionHook::test_a_session_end_logs_a_plain_reason_only, tests/test_session_hook.py::TestSessionHook::test_a_notification_logs_its_type_and_not_its_message, tests/test_session_hook.py::TestSessionHook::test_a_stop_logs_the_running_background_count"
+owner = "harness"
+residual = "a reason or a type outside the plain-word shape is logged as null, so a new value Claude Code introduces in another shape reads as unknown"
 
 [[rule]]
 id = "R-EGRESS-SOURCE-UPLOAD"
@@ -1634,16 +1658,40 @@ owner = "ppl"
 residual = "skip is honoured on the record alone; nothing checks that the reason in its log is true"
 
 [[rule]]
+id = "R-GATES-SIMPLIFY-BEFORE-FULL"
+statement = "In the gates stage the orchestrator runs the fast gates and the secret scan, then the simplification pass, then the fast gates and the secret scan again only if the pass committed, then the full gates once, on the SHA that goes to verification; it dispatches the simplifier on every candidate, files a skip receipt only when there is nothing to simplify, and files the receipt of a pass that committed under the new SHA."
+scope = "orchestrator, gates stage"
+event = "the orchestrator ordering the gate recipes and the simplification pass"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "PROPERTY: orchestrator discipline with no check behind it. The order saves time and holds nothing safe: every receipt is filed under the SHA that produced it, so a run that keeps the old order, full gates before the pass and again after it, closes the same way, only slower"
+
+[[rule]]
+id = "R-BASELINE-SUITE-BEFORE-IMPLEMENTATION"
+statement = "The baseline suite runs after ppl baseline record and ppl stage enter briefing, while the briefer works, and the orchestrator does not run the run's first ppl stage enter implementation until every baseline command has written its baseline-<gate>.rc exit-code file, because a code worker writing into the tree under a running baseline suite would contaminate it."
+scope = "orchestrator, baseline and briefing stages"
+event = "the orchestrator entering implementation for the first time in a run"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "GAP: orchestrator discipline with no check behind it. ppl records no baseline suite and the stage graph lets briefing move to implementation whatever the scratch directory holds, so an orchestrator that enters implementation early gets a baseline taken on a tree the code worker is already changing, and nothing reports it"
+
+[[rule]]
 id = "R-ROUTING-BY-RISK"
-statement = "routing.resolve applies the by_risk tier override of a role for the run's risk, mapping the tier to its model; ppl routing show --role --task prints the model the orchestrator passes at dispatch."
+statement = "routing.resolve applies the by_risk tier override and the by_risk_effort effort override of a role for the run's risk, each on its own, and refuses a by_risk_effort entry whose risk or effort is unknown; ppl routing show --role --task prints the model and the effort the orchestrator passes at dispatch."
 scope = "ppl CLI"
 event = "ppl routing show"
 enforcement = "soft"
 hook_or_check = "ppl/routing.py:resolve"
-deny_test = ""
-allow_test = "tests/test_routing.py::TestRouting::test_resolve_applies_the_risk_override"
+deny_test = "tests/test_routing.py::TestRouting::test_an_unknown_effort_or_risk_in_by_risk_effort_is_refused"
+allow_test = "tests/test_routing.py::TestRouting::test_resolve_applies_the_risk_override, tests/test_routing.py::TestRouting::test_by_risk_effort_replaces_the_effort_for_that_risk_only, tests/test_routing.py::TestRouting::test_by_risk_and_by_risk_effort_apply_together, tests/test_routing.py::TestRouting::test_routing_show_prints_the_resolved_effort"
 owner = "orchestrator"
-residual = "the generated agent file keeps the default model; an orchestrator that dispatches by agent name without passing the resolved model runs the default"
+residual = "the generated agent file keeps the default model and effort; an orchestrator that dispatches by agent name without passing the resolved model and effort runs the defaults"
 
 [[rule]]
 id = "R-METRIC-OUTCOMPETED"
@@ -1748,6 +1796,30 @@ deny_test = ""
 allow_test = ""
 owner = "repository-owner"
 residual = "PROPERTY: a hook-driven, session-scoped harness has no process that can run code while no session is dispatching a tool call, so no caller exists to fire the check during exactly that kind of hang. From stage mr onward the review loop's own scheduled wake-up (DESIGN 8) is that caller and does fire during a hang; before mr there is no scheduled caller at all - this is a structural limit of the architecture, not something left unbuilt."
+
+[[rule]]
+id = "R-STALL-NOTIFY-NO-TEXT"
+statement = "A stall notification carries the task id, the stage, the kind and the minutes, and nothing else: the desktop notification's body is built from those four values alone, the [notify] command gets exactly those four appended, and a stall whose task id fails the task id pattern, whose stage is not a pipeline stage, whose kind is not stopped, waiting or silent, or whose minutes are not an integer sends nothing on any channel."
+scope = "ppl CLI"
+event = "stall.notify, for each stall stall.announce logs"
+enforcement = "blocking"
+hook_or_check = "ppl/stall.py:notify, ppl/stall.py:_sendable, ppl/stall.py:message"
+deny_test = "tests/test_stall.py::TestNotify::test_a_value_that_is_not_a_task_id_a_stage_or_a_kind_sends_nothing"
+allow_test = "tests/test_stall.py::TestNotify::test_the_body_holds_no_text_beyond_the_four_values, tests/test_stall.py::TestNotify::test_the_desktop_notification_on_darwin, tests/test_stall.py::TestNotify::test_the_configured_command_gets_the_four_values"
+owner = "ppl"
+residual = "the four values are read from the run's log and state, which sandboxed roles can write, so a role can choose which valid task id, stage, kind and minutes a notification shows, only not other text. Nothing leaves the machine unless [notify] command is set, and what that command does with the four values is the owner's. The AppleScript literal escapes backslash and double quote although the validated values hold neither"
+
+[[rule]]
+id = "R-STALL-REPORTS-ONLY"
+statement = "Stall detection only reports: ppl watchdog stalls, the panel's stall ticker and the stall module read each run's state, control file and log, and never park a run, bump its lease generation, refresh its deadline or write its state.json. The one write is a stall event appended to the run's log when --notify or the panel's ticker announces a stall."
+scope = "ppl CLI, the panel"
+event = "ppl watchdog stalls, stall.scan, stall.announce, the ppl serve stall ticker"
+enforcement = "soft"
+hook_or_check = "ppl/stall.py:scan, ppl/stall.py:announce, ppl/cli.py:_watchdog_stalls, ppl/panel/server.py:stall_tick"
+deny_test = ""
+allow_test = "tests/test_stall.py::TestNeverChangesTheRun::test_scan_and_announce_leave_the_state_byte_identical"
+owner = "ppl"
+residual = "a report, not a guard: a stalled run stays as it is until the owner acts, and nothing runs the scan on its own except a caller that schedules it, ppl serve's ticker once a minute while the panel runs and no other. It reads the run's log, and a gate or another long step that logs nothing for longer than silent_after_minutes is reported as silent, a false alarm. A dispatch whose start the hook logged with an agent_id and whose stop it never logged hides every later stall of that run until a stop with nothing pending or a session end closes it. A run whose state, control file or log cannot be read, a FIFO among them, is skipped and not reported, and so is a run whose log.jsonl is over 16 MiB (stall.LOG_READ_LIMIT, checked by size before a byte is read, so a sparse log a role planted cannot hold the scan): such a run is not watched. A role writes its run's log, so it can silence announcing: an event dated in the future keeps the newest event's age below every threshold, and a stall line it writes itself marks the stall as already announced"
 
 [[rule]]
 id = "R-DOC-RULE-IDS"
@@ -2363,7 +2435,7 @@ residual = "the orchestrator's own session is not a role, so the skill's rule ne
 
 [[rule]]
 id = "R-DOCTOR-HOOK-SHAPE"
-statement = "ppl doctor reports per settings file dispatch_hook and usage_hook (registered or missing) and hook_shape (ok or the problems of the guard, dispatch and usage entries, read from the file and never run: type not command, no timeout, an interpreter that is not an absolute path to an executable file, a hook script that is not an absolute path to a file). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook or the SubagentStop usage hook is not, or has such a problem, and when a registered hook script is not under this install's assets hooks directory. The interpreter version is asked only where ppl doctor already runs the guard (hook_runs), which reports one older than Python 3.11."
+statement = "ppl doctor reports per settings file dispatch_hook and usage_hook (registered or missing) and hook_shape (ok or the problems of the guard, dispatch, usage and session entries, read from the file and never run: type not command, no timeout, an interpreter that is not an absolute path to an executable file, a hook script that is not an absolute path to a file). ppl init refuses SCHEMA_INVALID while a guard entry has such a problem, and warns when a guard is registered and the SubagentStart dispatch hook or the SubagentStop usage hook is not, or has such a problem, and when a registered hook script is not under this install's assets hooks directory. The interpreter version is asked only where ppl doctor already runs the guard (hook_runs), which reports one older than Python 3.11."
 scope = "hook registration"
 event = "ppl doctor, ppl init"
 enforcement = "blocking"

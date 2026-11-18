@@ -358,6 +358,34 @@ class TestAgentsApi(AgentsTestCase):
         self.assertEqual(status, 200)
         self.assertNotIn("ppl-reflector", tomllib.loads(files.read("routing")["text"])["roles"])
 
+    def test_an_agents_page_save_keeps_by_risk_effort(self):
+        # the page edits by_risk for high only and sends the whole document back
+        status, data, _ = panel_client.call("GET", "/api/agents")
+        self.assertEqual(status, 200)
+        doc = data["routing"]
+        doc["roles"]["ppl-test-worker"]["by_risk_effort"] = {"low": "low", "high": "xhigh"}
+        doc["roles"]["ppl-verifier"]["params"]["effort"] = "high"
+        status, _, _ = panel_client.call("PUT", "/api/routing",
+                                         body={"config": doc, "hash": data["routing_hash"]})
+        self.assertEqual(status, 200)
+        saved = tomllib.loads(files.read("routing")["text"])["roles"]
+        self.assertEqual(saved["ppl-test-worker"]["by_risk_effort"], {"low": "low", "high": "xhigh"})
+        self.assertEqual(saved["ppl-briefer"]["by_risk_effort"],
+                         data["routing"]["roles"]["ppl-briefer"]["by_risk_effort"])
+        _, again, _ = panel_client.call("GET", "/api/agents")
+        self.assertEqual(again["routing"], doc)
+
+    def test_saving_routing_with_an_unknown_by_risk_effort_is_refused(self):
+        before = files.read("routing")
+        doc = routing.load()
+        doc["roles"]["ppl-briefer"]["by_risk_effort"] = {"low": "turbo"}
+        status, payload, _ = panel_client.call("PUT", "/api/routing",
+                                               body={"config": doc, "hash": before["hash"]})
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error_code"], "SCHEMA_INVALID")
+        self.assertIn("by_risk_effort", payload["message"])
+        self.assertEqual(files.read("routing"), before)
+
     def test_saving_routing_validates_and_writes(self):
         doc = routing.load()
         doc["roles"]["ppl-briefer"]["params"]["effort"] = "low"

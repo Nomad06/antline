@@ -120,6 +120,85 @@ class TestConfig(unittest.TestCase):
         self.assertIn("unknown key maxx", caught.exception.message)
         self.assertIn("the known key is max", caught.exception.message)
 
+    def test_stall_settings_default(self):
+        expected = {"notify_after_minutes": 15, "silent_after_minutes": 60,
+                    "review_notify_after_minutes": 45, "keep_awake": False}
+        self.assertEqual(config.stall_settings(), expected)
+        self.write("[stall]\n")
+        self.assertEqual(config.stall_settings(), expected)
+        self.write("[stall]\nnotify_after_minutes = 1\nsilent_after_minutes = 1440\n"
+                   "keep_awake = true\n")
+        self.assertEqual(config.stall_settings(), dict(expected, notify_after_minutes=1,
+                                                       silent_after_minutes=1440,
+                                                       keep_awake=True))
+
+    def test_an_unknown_stall_key_is_refused(self):
+        self.write("[stall]\nnotify_after = 5\n")
+        with self.assertRaises(PplError) as caught:
+            config.stall_settings()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("unknown key notify_after", caught.exception.message)
+        self.assertIn("notify_after_minutes", caught.exception.message)
+
+    def test_a_stall_minutes_value_outside_one_to_1440_or_not_an_integer_is_refused(self):
+        for key in config.STALL_KEYS[:3]:
+            for value in ("0", "1441", "true", '"15"', "15.0"):
+                with self.subTest(key=key, value=value):
+                    self.write("[stall]\n%s = %s\n" % (key, value))
+                    with self.assertRaises(PplError) as caught:
+                        config.stall_settings()
+                    self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                    self.assertIn("stall.%s" % key, caught.exception.message)
+
+    def test_keep_awake_must_be_a_boolean(self):
+        for value in ("1", '"yes"'):
+            with self.subTest(value=value):
+                self.write("[stall]\nkeep_awake = %s\n" % value)
+                with self.assertRaises(PplError) as caught:
+                    config.stall_settings()
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                self.assertIn("stall.keep_awake", caught.exception.message)
+
+    def test_notify_command_is_none_when_absent(self):
+        self.assertIsNone(config.notify_command())
+        self.write("[notify]\n")
+        self.assertIsNone(config.notify_command())
+        self.write('[notify]\ncommand = ["/opt/hook", "-q"]\n')
+        self.assertEqual(config.notify_command(), ["/opt/hook", "-q"])
+
+    def test_a_notify_command_that_is_not_a_list_of_words_is_refused(self):
+        for value in ('"x"', "[]", '[""]', "[1]", '["x", 2]'):
+            with self.subTest(value=value):
+                self.write("[notify]\ncommand = %s\n" % value)
+                with self.assertRaises(PplError) as caught:
+                    config.notify_command()
+                self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+                self.assertIn("notify.command", caught.exception.message)
+
+    def test_an_unknown_notify_key_is_refused(self):
+        self.write('[notify]\ncmd = ["x"]\n')
+        with self.assertRaises(PplError) as caught:
+            config.notify_command()
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertIn("unknown key cmd", caught.exception.message)
+
+    def test_the_example_tables_uncommented_are_accepted(self):
+        # The example ships [stall] and [notify] commented out. With the leading "# " taken
+        # off, what it shows must be what config accepts.
+        example = (paths.defaults_dir() / "config.example.toml").read_text(encoding="utf-8")
+        lines, keep = [], False
+        for line in example.splitlines():
+            bare = line[2:] if line.startswith("# ") else line
+            if bare.startswith("["):
+                keep = bare in ("[stall]", "[notify]")
+            if keep and line.startswith("# ") and (bare.startswith("[") or " = " in bare):
+                lines.append(bare)
+        self.assertIn("[stall]", lines)
+        self.assertIn("[notify]", lines)
+        self.write("\n".join(lines) + "\n")
+        self.assertEqual(sorted(config.stall_settings()), sorted(config.STALL_KEYS))
+        self.assertIsInstance(config.notify_command(), list)
+
 
 class TestWrite(unittest.TestCase):
     def setUp(self):

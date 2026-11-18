@@ -229,6 +229,67 @@ class TestPresets(panel_client.StudioTestCase):
         self.assertEqual(paths.routing_file().read_text(encoding="utf-8"), tomlout.dumps(document))
         self.assertFalse((paths.home() / "studio").exists())
 
+    LOW_RISK = {
+        # preset: {role: (by_risk.low, by_risk_effort.low)}
+        "economy": {"ppl-briefer": (None, "medium"), "ppl-code-worker": (None, "low"),
+                    "ppl-test-worker": (None, "low")},
+        "balanced": {"ppl-briefer": (None, "medium"), "ppl-code-worker": (None, "medium"),
+                     "ppl-test-worker": (None, "medium")},
+        "max": {"ppl-briefer": (None, "high"), "ppl-code-worker": ("average", None),
+                "ppl-test-worker": ("average", None)},
+    }
+
+    def test_each_preset_writes_its_low_risk_entries(self):
+        # rule: R-ROUTING-BY-RISK
+        for name, rows in self.LOW_RISK.items():
+            document = routing.preset_document(name)
+            for role in routing.REQUIRED_ROLES:
+                if role == "ppl-reflector":
+                    continue
+                with self.subTest(preset=name, role=role):
+                    entry = document["roles"][role]
+                    tier, effort = rows.get(role, (None, None))
+                    self.assertEqual((entry.get("by_risk") or {}).get("low"), tier)
+                    self.assertEqual((entry.get("by_risk_effort") or {}).get("low"), effort)
+            self.assertEqual(presets.matching(document), name)
+
+    def test_the_high_risk_entries_stay(self):
+        self.assertEqual(routing.preset_document("balanced")["roles"]["ppl-code-worker"]["by_risk"],
+                         {"high": "good"})
+        self.assertEqual(routing.preset_document("max")["roles"]["ppl-code-worker"]["by_risk"],
+                         {"high": "heavy", "low": "average"})
+
+    def test_no_preset_gives_the_challenger_the_verifier_or_the_responder_a_low_risk_entry(self):
+        for name in presets.PRESETS:
+            document = routing.preset_document(name)
+            for role in ("ppl-brief-challenger", "ppl-verifier", "ppl-review-responder"):
+                with self.subTest(preset=name, role=role):
+                    entry = document["roles"][role]
+                    self.assertNotIn("low", entry.get("by_risk") or {})
+                    self.assertNotIn("by_risk_effort", entry)
+            self.assertNotIn("ppl-reflector", document["roles"])
+
+    def test_every_preset_low_risk_effort_is_a_known_level(self):
+        for name, roles in presets.PRESETS.items():
+            for role, spec in roles.items():
+                for risk, effort in spec.get("by_risk_effort", {}).items():
+                    self.assertIn(risk, ("low", "normal", "high"), (name, role))
+                    self.assertIn(effort, routing.EFFORT_LEVELS, (name, role))
+
+    def test_a_routing_whose_by_risk_effort_differs_matches_no_preset(self):
+        document = routing.preset_document("balanced")
+        document["roles"]["ppl-briefer"]["by_risk_effort"] = {"low": "low"}
+        self.assertIsNone(presets.matching(document))
+        del document["roles"]["ppl-briefer"]["by_risk_effort"]
+        self.assertIsNone(presets.matching(document))
+
+    def test_a_preset_drops_a_by_risk_effort_it_does_not_name(self):
+        doc = routing.load()
+        doc["roles"]["ppl-verifier"]["by_risk_effort"] = {"low": "low"}
+        self.write_routing(doc)
+        routing.apply_preset("balanced")
+        self.assertNotIn("by_risk_effort", routing.load()["roles"]["ppl-verifier"])
+
     def test_summary_names_the_model_each_role_resolves_to(self):
         rows = {row["role"]: row for row in routing.summary()}
         tiers = routing.tiers(routing.load())

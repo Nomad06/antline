@@ -8,7 +8,9 @@ the diff, the tests, the gate receipts with their exit codes, and the `spec_revi
 not re-report a defect someone already recorded (see the dedupe note below) and so its
 verdict carries the current binding rather than one it invented (`ppl show --json` also
 carries the current value, if a rebrief happened since Stage 2 and you need to refetch it).
-Then dispatch `ppl-verifier`. It has no
+Then dispatch `ppl-verifier`, passing both the `model` and the `effort` that
+`ppl routing show --role ppl-verifier --task <task_id>` prints, since the agent file keeps the
+defaults [R-ROUTING-BY-RISK]. It has no
 shell and cannot run `ppl` or re-run anything itself, by design: a role with a shell and no
 write boundary could write anywhere, and every generated role is denied every state-changing
 `ppl` subcommand even where it does hold Bash (`ppl-code-worker`, `ppl-test-worker`) -
@@ -61,10 +63,10 @@ telling you to pick one from its stated finding. Route all eight:
 - **REWORK** - `ppl budget spend retry` first. This is the only place the retry budget is
   ever spent, so skipping it makes the three-cycle limit below unenforced prose, not a real
   limit. Then re-enter Stage 3 with `ppl stage enter implementation` and read
-  `references/stage-3-implementation.md`, the model to pass and the boundary review included,
-  or `ppl stage enter tests` and `references/stage-3-tests.md` when the finding is the
-  tests'. Dispatch a fresh worker with the finding there, which produces a new SHA and
-  restarts Stage 4 in full. If `ppl budget spend retry` itself exits 2 with
+  `references/stage-3-implementation.md`, the model and the effort to pass and the boundary
+  review included, or `ppl stage enter tests` and `references/stage-3-tests.md` when the
+  finding is the tests'. Dispatch a fresh worker with the finding there, which produces a new SHA and
+  restarts all of Stage 4. If `ppl budget spend retry` itself exits 2 with
   `BUDGET_EXHAUSTED`, stop rework immediately and park; do not dispatch the worker it was
   gating. Three rework cycles is the limit either way; past that the problem has changed
   class and needs a re-brief, a re-plan, or the owner.

@@ -7,8 +7,8 @@ import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
                harness, lane_launch, lanes, lessons, metrics, models, os_sandbox, paths, recover,
-               refusals, review, routing, run, schema, setup, status, store, trackers, trail,
-               usage, verdict, watchdog)
+               refusals, review, routing, run, schema, setup, stall, status, store, timing,
+               trackers, trail, usage, verdict, watchdog)
 from .errors import PplError, role_output
 from .forges import github_fetch
 
@@ -180,6 +180,21 @@ def _init_lane(args):
     return entry
 
 
+def _init_risk(args, entry):
+    """The run's risk tier: `ppl init --risk` when given, else the tier `ppl lane --risk`
+    recorded in the lane's entry, else normal. The stage 0 text runs `ppl init` with no
+    `--risk`, so the lane is where a low or high risk reaches a run started the documented
+    way. A recorded tier that is not one is refused, not read as normal."""
+    if args.risk is not None:
+        return args.risk
+    risk = entry.get("risk", "normal")
+    if risk not in run.RISK_TIERS:
+        raise PplError("SCHEMA_INVALID", "lane %s records risk %r, which is not one of %s: start "
+                       "the lane again with ppl lane <link> --risk <tier>"
+                       % (args.task_id, risk, ", ".join(run.RISK_TIERS)))
+    return risk
+
+
 def _lane_harness(args, entry):
     """The harness the lane exported into its start directory, loaded: never the installed one,
     which may have moved on since the lane started [R-INIT-HARNESS-APPLIED]."""
@@ -227,10 +242,11 @@ def cmd_init(args):
     problem = doctor.setup_problem(state, args.skip_model_check)
     if problem:
         raise PplError("SETUP_INCOMPLETE", problem)
+    risk = _init_risk(args, entry)
     if args.skip_model_check:
         model_check = "skipped"
     else:
-        models.require_verified(args.risk)
+        models.require_verified(risk)
         model_check = "verified"
     doc = _lane_harness(args, entry)
     os_sandboxed = False
@@ -248,7 +264,7 @@ def cmd_init(args):
     snapshot = harness.snapshot(doc)
     lane = {"number": entry.get("lane"), "start_dir": entry.get("start_dir"),
             "session_id": entry.get("session_id")}
-    state = run.init(args.task_id, args.tracker_url, repo, risk=args.risk,
+    state = run.init(args.task_id, args.tracker_url, repo, risk=risk,
                      model_check=model_check, harness=harness_record,
                      os_sandboxed=os_sandboxed, lane=lane)
     store.write_json(paths.run_dir(args.task_id) / "harness.json", snapshot)
@@ -986,7 +1002,28 @@ def cmd_recover(args):
     return 0
 
 
+def _watchdog_stalls(args):
+    """Every run that stopped working, as JSON. It reports and changes no run: it reads
+    control.read, never control.enforce or watchdog.check, which park. --notify logs each new
+    stall once and raises it on this machine."""
+    if args.task:
+        raise PplError("SCHEMA_INVALID",
+                       "ppl watchdog stalls scans every run and takes no --task")
+    if args.notify:
+        # read first, so a broken [notify] table is an error here and not a silent notifier
+        config.notify_command()
+        found = stall.announce(stall.scan())
+    else:
+        found = stall.scan()
+    print(json.dumps(found, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_watchdog(args):
+    if args.action == "stalls":
+        return _watchdog_stalls(args)
+    if args.notify:
+        raise PplError("SCHEMA_INVALID", "--notify belongs to ppl watchdog stalls, not check")
     task_id = resolve_task(args)
     result = watchdog.check(task_id)
     if result["timed_out"]:
@@ -1037,8 +1074,11 @@ def cmd_routing(args):
         if risk is None and args.task:
             risk = run.load(args.task).get("risk")
         entry = routing.resolve(args.role, risk)
+        # model and effort are what the orchestrator passes at dispatch, the agent file keeps
+        # the defaults [R-ROUTING-BY-RISK]
+        params = routing.role_params(entry, args.role)
         print(json.dumps({"role": args.role, "risk": risk, "model": entry["model"],
-                          "params": entry.get("params", {})}, sort_keys=True))
+                          "effort": params.get("effort"), "params": params}, sort_keys=True))
     else:
         print(json.dumps(routing.load(), indent=2, sort_keys=True))
     return 0
@@ -1211,6 +1251,24 @@ def cmd_metrics(args):
     return 0
 
 
+def positive_int(text):
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError("%r is not a positive integer" % text)
+    return value
+
+
+def cmd_timing(args):
+    task_id = resolve_task(args)
+    run.load(task_id)
+    rep = timing.report(store.read_log(task_id), idle_gap_seconds=args.idle_minutes * 60)
+    print(timing.as_json(rep) if args.json else timing.text(rep))
+    return 0
+
+
 def cmd_trail(args):
     # A reference run is normally archived by the time it is published, so the
     # task is named explicitly and nothing here touches the run.
@@ -1368,9 +1426,9 @@ def _lane_close_task(args):
 # The flags each form of ppl lane takes, as argparse names them. Any other one given is
 # refused, never ignored: close --no-exec used to close the lane.
 _LANE_FLAGS = {"list": ("json",), "resume": ("no_exec",), "close": ("task",),
-               "start": ("harness", "slug", "no_exec")}
-_LANE_FLAG_NAMES = {"harness": "--harness", "slug": "--slug", "no_exec": "--no-exec",
-                    "task": "--task", "json": "--json"}
+               "start": ("harness", "slug", "risk", "no_exec")}
+_LANE_FLAG_NAMES = {"harness": "--harness", "slug": "--slug", "risk": "--risk",
+                    "no_exec": "--no-exec", "task": "--task", "json": "--json"}
 
 
 def _lane_flags(args):
@@ -1407,7 +1465,7 @@ def cmd_lane(args):
                            "second" % args.rest)
         result = lane_launch.start(args.target, harness_name=args.harness,
                                    slug="work" if args.slug is None else args.slug,
-                                   exec_=not args.no_exec)
+                                   exec_=not args.no_exec, risk=args.risk)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -1441,7 +1499,7 @@ COMMANDS = {
     "dispatch": cmd_dispatch, "harness": cmd_harness,
     "apply-patch": cmd_apply_patch, "destroy": cmd_destroy,
     "mr": cmd_mr, "merge": cmd_merge, "review": cmd_review, "doctor": cmd_doctor,
-    "watchdog": cmd_watchdog, "metrics": cmd_metrics, "label": cmd_label,
+    "watchdog": cmd_watchdog, "metrics": cmd_metrics, "timing": cmd_timing, "label": cmd_label,
     "setup": cmd_setup, "tracker": cmd_tracker, "trail": cmd_trail, "lessons": cmd_lessons,
     "lane": cmd_lane,
 }
@@ -1487,8 +1545,9 @@ def build_parser():
     # operator's per-run opt-out, and the run records it.
     p.add_argument("--os-sandbox", action=argparse.BooleanOptionalAction, default=True)
     # The risk tier routes the code worker to a stronger model on high-risk
-    # tasks (routing.toml by_risk) - see routing.resolve.
-    p.add_argument("--risk", choices=list(run.RISK_TIERS), default="normal")
+    # tasks (routing.toml by_risk) - see routing.resolve. Left out, the run takes the tier its
+    # lane recorded (ppl lane --risk), else normal.
+    p.add_argument("--risk", choices=list(run.RISK_TIERS))
     p.add_argument("--skip-model-check", action="store_true")
     p.add_argument("--harness")
 
@@ -1642,8 +1701,10 @@ def build_parser():
     p.add_argument("--task")
 
     p = sub.add_parser("watchdog")
-    p.add_argument("action", choices=["check"])
+    p.add_argument("action", choices=["check", "stalls"])
     p.add_argument("--task")
+    p.add_argument("--notify", action="store_true",
+                   help="with stalls: log each new stall once and raise a notification")
 
     p = sub.add_parser("serve")
     p.add_argument("--port", type=int, default=8787)
@@ -1725,6 +1786,11 @@ def build_parser():
     p = sub.add_parser("metrics")
     p.add_argument("--text", action="store_true")
 
+    p = sub.add_parser("timing")
+    p.add_argument("--task")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--idle-minutes", type=positive_int, default=45)
+
     p = sub.add_parser("trail")
     p.add_argument("action", choices=["export"])
     p.add_argument("--task", required=True)
@@ -1744,6 +1810,9 @@ def build_parser():
     p.add_argument("--harness", help="the installed harness (default: the one whose [repo] path "
                                      "holds the cwd, else the default harness)")
     p.add_argument("--slug", help="the branch is <TASK-ID>-<slug> (default: work)")
+    p.add_argument("--risk", choices=list(run.RISK_TIERS),
+                   help="the run's risk tier, which ppl init in this lane takes (left out, the "
+                        "run is normal)")
     p.add_argument("--no-exec", action="store_true",
                    help="print {argv, env, cwd} as JSON instead of starting claude")
     p.add_argument("--task", help="close: the task whose lane to free (default: PPL_TASK, else "

@@ -16,10 +16,13 @@ light   = { provider = "claude-code-subagent", model = "haiku" }
 [roles.ppl-briefer]
 tier = "good"
 params = { effort = "high" }
+# A low-risk task (ppl init --risk low) gets a lighter effort. Like by_risk, the agent
+# file keeps the default and the orchestrator passes the effort ppl routing show prints.
+by_risk_effort = { low = "medium" }
 
 # ppl-reflector (the read-only role that proposes lessons after a merge) has no table here:
 # a routing.toml that has none routes it as a copy of the ppl-briefer table
-# without by_risk. Add the table to give it its own tier or effort.
+# without by_risk and by_risk_effort. Add the table to give it its own tier or effort.
 
 [roles.ppl-brief-challenger]
 tier = "good"
@@ -29,13 +32,16 @@ params = { effort = "xhigh" }
 tier = "average"
 params = { effort = "high" }
 # A high-risk task (ppl init --risk high) gets the stronger tier for the
-# implementation. The agent file keeps the default, the orchestrator passes
-# the resolved model at dispatch (ppl routing show --role ppl-code-worker --task X).
+# implementation, a low-risk one a lighter effort. The agent file keeps the defaults,
+# the orchestrator passes the resolved model and effort at dispatch
+# (ppl routing show --role ppl-code-worker --task X).
 by_risk = { high = "good" }
+by_risk_effort = { low = "medium" }
 
 [roles.ppl-test-worker]
 tier = "average"
 params = { effort = "high" }
+by_risk_effort = { low = "medium" }
 
 [roles.ppl-verifier]
 tier = "good"

@@ -75,16 +75,34 @@ def render_skill_to(directory, name="example-maven"):
     return Path(directory) / "pipeline"
 
 
-def skill_files(name="example-maven", fragments=None, tables=None, pins=None):
+# The data root a size test measures the rendered skill at. The throwaway home's path
+# depends on TMPDIR, and the skill names the data root a few dozen times, so a size measured
+# at the real temp path would pass on one machine and fail on another with a longer one.
+NOMINAL_HOME = "/home/user/.ppl"
+
+
+def at_nominal_home(files, home):
+    """`files` with every occurrence of the data root `home` written as NOMINAL_HOME."""
+    spellings = sorted({str(home), os.path.realpath(home)}, key=len, reverse=True)
+    out = {}
+    for path, text in files.items():
+        for spelling in spellings:
+            text = text.replace(spelling, NOMINAL_HOME)
+        out[path] = text
+    return out
+
+
+def skill_files(name="example-maven", fragments=None, tables=None, pins=None, nominal=False):
     """relative path -> text of every file of the skill rendered for an example harness,
     nothing written. `fragments` maps a forge fragment name to the text rendered in its
     place, so a drift can be seeded where the real text comes from. `tables` replaces
     whole tables of the harness, installed under `name` itself in the throwaway home.
-    `pins` stands in for the binaries found on PATH, FAKE_PINS by default."""
+    `pins` stands in for the binaries found on PATH, FAKE_PINS by default. `nominal`
+    writes the throwaway home as NOMINAL_HOME, for a test that measures the text."""
     from unittest import mock
     from ppl import forges, harness, os_sandbox
     saved = os.environ.get("PPL_HOME")
-    os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplrender-")
+    home = os.environ["PPL_HOME"] = tmphome.mkdtemp(prefix="pplrender-")
     try:
         if tables:
             install_variant(name, name, **tables)
@@ -97,7 +115,8 @@ def skill_files(name="example-maven", fragments=None, tables=None, pins=None):
         with mock.patch.object(module, "fragment",
                                lambda part: seeded[part] if part in seeded else real(part)), \
                 mock.patch.object(os_sandbox, "pins", lambda which=None: pins or FAKE_PINS):
-            return harness.render_skill(doc)
+            files = harness.render_skill(doc)
+        return at_nominal_home(files, home) if nominal else files
     finally:
         if saved is None:
             os.environ.pop("PPL_HOME", None)
@@ -156,13 +175,15 @@ def lane_settings(task_id):
 
 
 def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
-              session_id="00000000-0000-4000-8000-000000000001", branch=None, settings=True):
+              session_id="00000000-0000-4000-8000-000000000001", branch=None, settings=True,
+              risk=None):
     """Register a lane for `task_id` and create its start directory, as `ppl lane` leaves them.
     The entry is written directly with the given lane number, and the start directory gets the
     lane's record lane.json (its worktree, checkout and `branch`) and, with `settings`, its
     settings.json (lane_settings). An installed harness is copied to <start>/harness/<harness>,
     what `ppl lane` exports, and the machine's routing.toml to <start>/routing.toml, the copy
-    `ppl lane` freezes (D15). Returns the entry."""
+    `ppl lane` freezes (D15). `risk` is recorded as `ppl lane --risk` records it, and left
+    out as a lane started without the flag, or before it existed, leaves it. Returns the entry."""
     from ppl import lanes, store
     start = lanes.start_dir(task_id)
     start.mkdir(parents=True, exist_ok=True)
@@ -182,6 +203,8 @@ def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
     record = {"lane": lane, "task": task_id, "harness": harness, "harness_sha": "0" * 40,
               "repo": str(repo), "worktree": str(worktree or repo), "start_dir": str(start),
               "session_id": session_id, "pid": None, "started": store.now()}
+    if risk is not None:
+        record["risk"] = risk
     kept = [item for item in lanes.read() if item.get("task") != task_id]
     store.write_json(lanes.registry_path(), {"version": 1, "lanes": kept + [record]})
     return record

@@ -5,7 +5,8 @@ import os
 import subprocess
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -22,7 +23,8 @@ import panel_client
 HOME = tmphome.mkdtemp(prefix="pplhome-")
 os.environ["PPL_HOME"] = HOME
 
-from ppl import control, findings, lanes, paths, run, status as status_mod, store, usage as usage_mod
+from ppl import (control, findings, lanes, paths, run, stall, status as status_mod, store,
+                 usage as usage_mod)
 from ppl.errors import PplError
 from ppl.panel import server, session
 
@@ -702,6 +704,142 @@ class TestPanelRowOsSandbox(unittest.TestCase):
         row = [r for r in server.list_runs() if r["task_id"] == task][0]
         self.assertIs(row["os_sandboxed"], True)
         self.assertIsNone(server._error_row("X-1", ValueError("bad"))["os_sandboxed"])
+
+
+class TestPanelStall(unittest.TestCase):
+    """The panel's run row names a stall, and serve's ticker announces one every minute."""
+
+    def setUp(self):
+        saved = os.environ.get("PPL_HOME")
+        os.environ["PPL_HOME"] = HOME
+        self.addCleanup(lambda: os.environ.__setitem__("PPL_HOME", saved) if saved
+                        else os.environ.pop("PPL_HOME", None))
+        self.enterContext(mock.patch.object(server, "_last_tick_error", None))
+        self.task = "DEMO-%d" % next(COUNTER)
+        run.init(self.task, "https://j/x", "/tmp/repo")
+
+    def stalled(self, minutes=16):
+        """The run in stage gates, in progress, its newest event a session stop `minutes` old."""
+        state = run.load(self.task)
+        state["status"], state["stage"] = "in_progress", "gates"
+        run.save(state)
+        at = (datetime.now(timezone.utc) - timedelta(minutes=minutes, seconds=5)).isoformat()
+        with open(paths.run_dir(self.task) / "log.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"event": "session", "kind": "stop", "at": at}) + "\n")
+
+    def row(self):
+        return [r for r in server.list_runs() if r["task_id"] == self.task][0]
+
+    def test_a_stalled_run_says_so_in_needs_you(self):
+        self.stalled()
+        self.assertEqual(self.row()["needs_you"], "idle 16 min (stopped)")
+
+    def test_a_run_that_has_not_stalled_needs_nothing(self):
+        self.stalled(minutes=3)
+        self.assertEqual(self.row()["needs_you"], "")
+
+    def test_another_reason_wins_over_the_stall(self):
+        self.stalled()
+        control.set_command(self.task, "pause", None, by="cli")
+        found = [{"task_id": self.task, "stage": "gates", "kind": "stopped",
+                  "since": store.now(), "minutes": 16}]
+        with mock.patch.object(stall, "scan", return_value=found):
+            self.assertEqual(self.row()["needs_you"], "operator pause")
+
+    def test_the_rows_read_every_log_through_one_scan(self):
+        self.stalled()
+        with mock.patch.object(stall, "scan", wraps=stall.scan) as scan:
+            server.list_runs()
+        scan.assert_called_once_with()
+
+    def test_a_broken_stall_table_leaves_the_rows_without_a_stall(self):
+        self.stalled()
+        with mock.patch.object(stall, "scan", side_effect=PplError("SCHEMA_INVALID", "bad")):
+            row = self.row()
+        self.assertEqual((row["needs_you"], row["stage"]), ("", "gates"))
+
+    def test_the_tick_announces_a_stall_once(self):
+        self.stalled()
+        # other tests of this class leave stalled runs in the shared home: look at this one
+        with mock.patch.object(stall, "notify") as notify:
+            first = [s for s in server.stall_tick() if s["task_id"] == self.task]
+            second = [s for s in server.stall_tick() if s["task_id"] == self.task]
+        self.assertEqual([(s["kind"], s["minutes"]) for s in first], [("stopped", 16)])
+        self.assertEqual(second, [])
+        self.assertEqual([c.args for c in notify.call_args_list
+                          if c.args[0]["task_id"] == self.task], [(first[0],)])
+        stalls = [e for e in store.read_log(self.task) if e["event"] == "stall"]
+        self.assertEqual(len(stalls), 1)
+
+    def test_the_tick_announces_and_survives_an_error(self):
+        err = io.StringIO()
+        with mock.patch.object(stall, "scan", side_effect=RuntimeError("boom")), \
+                redirect_stderr(err):
+            self.assertEqual(server.stall_tick(), [])
+        self.assertEqual(err.getvalue().count("\n"), 1)
+        self.assertIn("boom", err.getvalue())
+
+    def test_a_broken_notify_table_is_said_once_and_announces_nothing(self):
+        self.stalled()
+        err = io.StringIO()
+        broken = PplError("SCHEMA_INVALID", "notify.command must be a list")
+        with mock.patch.object(server.config, "notify_command", side_effect=broken), \
+                mock.patch.object(stall, "notify") as notify, redirect_stderr(err):
+            self.assertEqual(server.stall_tick(), [])
+            self.assertEqual(server.stall_tick(), [])
+        notify.assert_not_called()
+        self.assertEqual(err.getvalue().count("\n"), 1)
+        self.assertIn("notify.command must be a list", err.getvalue())
+        self.assertEqual([e for e in store.read_log(self.task) if e["event"] == "stall"], [])
+
+    def test_a_broken_stall_table_is_said_again_after_a_clean_tick(self):
+        err = io.StringIO()
+        broken = PplError("SCHEMA_INVALID", "stall.keep_awake must be true or false")
+        with mock.patch.object(stall, "notify"), redirect_stderr(err):
+            with mock.patch.object(server.config, "stall_settings", side_effect=broken):
+                server.stall_tick()
+            server.stall_tick()
+            with mock.patch.object(server.config, "stall_settings", side_effect=broken):
+                server.stall_tick()
+        self.assertEqual(err.getvalue().count("keep_awake"), 2)
+
+    def test_serve_starts_no_ticker_at_interval_zero(self):
+        for interval in (0, None):
+            with mock.patch.dict(session._state), \
+                    mock.patch.object(server, "ThreadingHTTPServer"), \
+                    mock.patch.object(server.threading, "Thread") as thread, \
+                    redirect_stdout(io.StringIO()):
+                server.serve(8799, stall_interval=interval)
+            thread.assert_not_called()
+
+    def test_serve_starts_one_daemon_ticker_and_stops_it_on_return(self):
+        with mock.patch.dict(session._state), \
+                mock.patch.object(server, "ThreadingHTTPServer"), \
+                mock.patch.object(server.threading, "Thread", wraps=server.threading.Thread) \
+                as thread, mock.patch.object(server, "stall_tick") as tick, \
+                redirect_stdout(io.StringIO()):
+            server.serve(8799, stall_interval=60)
+            thread.assert_called_once()
+            self.assertTrue(thread.call_args.kwargs["daemon"])
+            for item in server.threading.enumerate():
+                if item.name == "ppl-stall-ticker":
+                    item.join(5)
+                    self.assertFalse(item.is_alive())
+        tick.assert_not_called()
+
+    def test_the_ticker_ticks_every_interval_until_stopped(self):
+        stop = server.threading.Event()
+        calls = []
+
+        def tick():
+            calls.append(1)
+            if len(calls) == 3:
+                stop.set()
+            return []
+
+        with mock.patch.object(server, "stall_tick", side_effect=tick):
+            server._tick_until(stop, 0.01)
+        self.assertEqual(len(calls), 3)
 
 
 if __name__ == "__main__":

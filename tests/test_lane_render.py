@@ -73,7 +73,8 @@ class TestSettings(LaneRenderCase):
     def test_every_hook_command_carries_the_task(self):
         doc, start = self.lane()
         settings = json.loads(self.render(doc, start)["settings"].read_text(encoding="utf-8"))
-        self.assertEqual(set(settings["hooks"]), {"PreToolUse", "SubagentStart", "SubagentStop"})
+        self.assertEqual(set(settings["hooks"]), {"PreToolUse", "SubagentStart", "SubagentStop",
+                                                  "Stop", "SessionEnd", "Notification"})
         for event, entries in settings["hooks"].items():
             for entry in entries:
                 for hook in entry["hooks"]:

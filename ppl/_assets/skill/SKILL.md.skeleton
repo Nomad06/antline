@@ -120,8 +120,8 @@ the reference of the stage `ppl show --json` reports.
 - **Stage 3 - implementation and tests** (`implementation`, then `tests`):
   `references/stage-3-implementation.md` dispatches `ppl-code-worker`, then
   `references/stage-3-tests.md` dispatches `ppl-test-worker`, a different agent.
-- **Stage 4 - gates** (`gates`): `references/stage-4-gates.md`. The gates in order, a receipt
-  for each, then the simplification pass.
+- **Stage 4 - gates** (`gates`): `references/stage-4-gates.md`. The fast gates and the
+  secret scan, the simplification pass, then the full gates once, a receipt for each.
 - **Stage 5 - verification** (`verification`): `references/stage-5-verification.md`.
   `ppl-verifier` reports, you record its findings and then its verdict, and route the verdict.
 - **Stage 6 - <!-- include: vocab/noun -->** (`mr`): `references/stage-6-mr.md`. Push the

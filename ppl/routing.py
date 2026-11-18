@@ -22,7 +22,8 @@ REQUIRED_ROLES = ("ppl-briefer", "ppl-brief-challenger", "ppl-code-worker",
                   "ppl-test-worker", "ppl-verifier", "ppl-review-responder", "ppl-reflector")
 
 # A routing.toml without [roles.ppl-reflector] routes it as a copy of this role's entry
-# without by_risk: the same tier and effort, so no model not already verified for the install.
+# without by_risk and by_risk_effort: the same tier and effort, so no model not already
+# verified for the install.
 REFLECTOR_FALLBACK = "ppl-briefer"
 
 # The roles a memory.toml entry may name: the pipeline's agents and the orchestrator.
@@ -123,13 +124,15 @@ def loads(text, unfilled=False):
 
 def _fill_reflector(config):
     """Give a routing document without [roles.ppl-reflector] a copy of the briefer's
-    entry minus by_risk. The briefer's own entry is not touched, and a document
-    without a briefer gets nothing filled."""
+    entry minus by_risk and by_risk_effort: a low-risk brief is lighter, a reflection is
+    not. The briefer's own entry is not touched, and a document without a briefer gets
+    nothing filled."""
     roles = config.get("roles")
     if (isinstance(roles, dict) and "ppl-reflector" not in roles
             and isinstance(roles.get(REFLECTOR_FALLBACK), dict)):
         entry = copy.deepcopy(roles[REFLECTOR_FALLBACK])
         entry.pop("by_risk", None)
+        entry.pop("by_risk_effort", None)
         roles["ppl-reflector"] = entry
     return config
 
@@ -227,6 +230,25 @@ def _by_risk_tier(config, role_name, level, tier):
     return table[tier]
 
 
+def _by_risk_effort(config, role_name):
+    """The by_risk_effort table of a role, empty when it has none. Every key is a risk
+    `ppl init --risk` accepts and every value an effort Claude Code accepts, checked whole
+    whatever risk is asked for, so a typo is refused before the run that would use it."""
+    from . import run  # run imports routing
+    overrides = config["roles"][role_name].get("by_risk_effort", {})
+    if not isinstance(overrides, dict):
+        raise PplError("SCHEMA_INVALID",
+                       "role %r by_risk_effort must be a table of risk = effort" % role_name)
+    for level, effort in overrides.items():
+        if level not in run.RISK_TIERS:
+            raise PplError("SCHEMA_INVALID", "role %r by_risk_effort names unknown risk %r "
+                           "(risks: %s)" % (role_name, level, ", ".join(run.RISK_TIERS)))
+        if not isinstance(effort, str) or effort not in EFFORT_LEVELS:
+            raise PplError("SCHEMA_INVALID", "role %r by_risk_effort.%s effort %r is not one of %s"
+                           % (role_name, level, effort, ", ".join(EFFORT_LEVELS)))
+    return overrides
+
+
 def role(name, config=None):
     config = config if config is not None else load()
     entry, provider = _entry_and_provider(config, name)
@@ -236,12 +258,15 @@ def role(name, config=None):
 
 def resolve(name, risk=None):
     """The role entry with the run's risk applied: `by_risk` maps a risk level
-    to a tier that replaces the role's default tier for that risk only. apply()
-    keeps writing the default into the agent file, the orchestrator passes the
-    resolved model at dispatch [R-ROUTING-BY-RISK]."""
+    to a tier that replaces the role's default tier for that risk only, and
+    `by_risk_effort` maps one to an effort that replaces the default effort, each
+    on its own. The agent file keeps the defaults, the orchestrator passes the
+    resolved model and effort at dispatch [R-ROUTING-BY-RISK]. A frozen routing.toml
+    older than by_risk_effort has no such table and resolves as it always did."""
     config = load()
-    entry = role(name)
+    entry = role(name, config)
     overrides = _by_risk(config, name)
+    efforts = _by_risk_effort(config, name)
     if risk is not None and risk in overrides:
         tier = overrides[risk]
         target = _by_risk_tier(config, name, risk, tier)
@@ -249,6 +274,10 @@ def resolve(name, risk=None):
         entry["provider"] = target["provider"]
         entry["model"] = target["model"]
         entry["provider_config"] = config["providers"][target["provider"]]
+        entry["risk"] = risk
+    if risk is not None and risk in efforts:
+        # a new table: the loaded document keeps its default effort
+        entry["params"] = dict(role_params(entry, name), effort=efforts[risk])
         entry["risk"] = risk
     return entry
 
@@ -291,7 +320,8 @@ def _effort(entry, role_name):
 def validate_config(config):
     """Refuse a routing document ppl cannot route with: a missing role, an
     unknown tier or provider, a by_risk tier that is not declared, params that
-    are not a table, or an effort Claude Code does not accept."""
+    are not a table, an effort Claude Code does not accept, or a by_risk_effort
+    entry whose risk or effort is unknown."""
     config = _fill_reflector(copy.deepcopy(config))  # never the caller's dict
     missing = [r for r in REQUIRED_ROLES if r not in (config.get("roles") or {})]
     if missing:
@@ -301,12 +331,13 @@ def validate_config(config):
         _entry_and_provider(config, name)
         for level, tier in _by_risk(config, name).items():
             _by_risk_tier(config, name, level, tier)
+        _by_risk_effort(config, name)
         _effort(config["roles"][name], name)
 
 
 def preset_document(name):
-    """routing.toml with every role's tier, effort and by_risk rewritten from a
-    preset, nothing written. A provider and model a role pinned itself are
+    """routing.toml with every role's tier, effort, by_risk and by_risk_effort rewritten
+    from a preset, nothing written. A provider and model a role pinned itself are
     replaced by its tier. The tiers, the providers and every param but effort
     stay."""
     from . import presets
@@ -326,10 +357,11 @@ def preset_document(name):
         entry.pop("model", None)
         entry["tier"] = spec["tier"]
         entry["params"] = dict(role_params(entry, role_name), effort=spec["effort"])
-        if spec.get("by_risk"):
-            entry["by_risk"] = dict(spec["by_risk"])
-        else:
-            entry.pop("by_risk", None)
+        for key in ("by_risk", "by_risk_effort"):
+            if spec.get(key):
+                entry[key] = dict(spec[key])
+            else:
+                entry.pop(key, None)
     validate_config(config)
     return config
 

@@ -238,9 +238,11 @@ def _listing(items):
                      for item in items)
 
 
-def claim(task_id, harness, harness_sha, repo, worktree, session_id, harness_max, machine_max):
+def claim(task_id, harness, harness_sha, repo, worktree, session_id, harness_max, machine_max,
+          risk=None):
     """Reserve the lowest free lane for `task_id`. ILLEGAL_TRANSITION when the task already has
-    one, BUSY when the machine or the harness is at its limit."""
+    one, BUSY when the machine or the harness is at its limit. `risk`, the tier `ppl lane --risk`
+    was given, is recorded for `ppl init` to take, and a lane started without it records none."""
     with _locked():
         lanes = read()
         if any(item.get("task") == task_id for item in lanes):
@@ -258,6 +260,8 @@ def claim(task_id, harness, harness_sha, repo, worktree, session_id, harness_max
                   "harness_sha": harness_sha, "repo": str(repo), "worktree": str(worktree),
                   "start_dir": str(start_dir(task_id)), "session_id": session_id,
                   "pid": None, "started": store.now()}
+        if risk is not None:
+            record["risk"] = risk
         _write(lanes + [record])
         return record
 
