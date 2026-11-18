@@ -2210,6 +2210,27 @@ class TestWatchdog(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("not timed out", out)
 
+    def test_watchdog_stalls_prints_a_json_list(self):
+        code, out, err = call("watchdog", "stalls")
+        self.assertEqual(code, 0, err)
+        self.assertIsInstance(json.loads(out), list)
+
+    def test_watchdog_stalls_notify_announces_through_stall_notify(self):
+        from ppl import stall
+        found = [{"task_id": "DEMO-957", "stage": "gates", "kind": "stopped",
+                  "since": "2026-11-12T11:44:00+00:00", "minutes": 16}]
+        with mock.patch.object(stall, "scan", return_value=found), \
+                mock.patch.object(stall, "announce", return_value=found) as announce:
+            code, out, err = call("watchdog", "stalls", "--notify")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), found)
+        announce.assert_called_once_with(found)
+
+    def test_watchdog_stalls_takes_no_task(self):
+        code, _, err = call("watchdog", "stalls", "--task", "DEMO-958")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error_code"], "SCHEMA_INVALID")
+
     def test_watchdog_check_parks_and_reports_timed_out(self):
         # rule: R-WATCHDOG-DEADLINE
         init_in_lane("DEMO-955", "--tracker-url", "u", "--repo", "/tmp/repo",

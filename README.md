@@ -128,9 +128,9 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `ppl/_assets/rules.toml` holds 209 rules, 160 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 211 rules, 161 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 3392 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 3445 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
@@ -582,10 +582,45 @@ ppl serve --open     # the studio on http://127.0.0.1:8787, the run list at /run
 ppl recover --task KEY-123   # always safe, always first after a restart
 ppl doctor           # setup, models, forge, tracker; in a lane its hooks, sandbox, MCP servers
 ppl control set pause|resume|stop --task KEY-123
+ppl watchdog stalls [--notify]   # every run whose session stopped working, as JSON
 ```
 
 In a lane's own window every `ppl` command takes its run from the lane, so `--task` can be
 left out there.
+
+### Stalls
+
+`ppl watchdog stalls` reads each run's log and lists, as JSON, every run in progress whose
+session stopped working: `stopped` when the session's last turn ended with no background
+task running or the session ended, `waiting` when it sits on a permission prompt, each once
+`notify_after_minutes` have passed, and `silent` when nothing at all was logged for
+`silent_after_minutes`. In the review stage only silence counts, after
+`review_notify_after_minutes`. A run that is paused, parked, escalated, closing or watching
+its merge request is left out, and so is a run while a role it dispatched is still working.
+With `--notify` each new stall is logged once as a `stall` event in the run's log and raised
+as a desktop notification on this machine, through `osascript` on macOS or `notify-send`
+elsewhere. Detection only reports: it never parks a run or changes its state
+[R-STALL-REPORTS-ONLY]. A gate or another long step that logs nothing for longer than
+`silent_after_minutes` is reported as `silent`, a false alarm.
+
+Set the thresholds in `~/.ppl/config.toml`, shown here with their defaults:
+
+```toml
+[stall]
+notify_after_minutes = 15
+silent_after_minutes = 60
+review_notify_after_minutes = 45
+keep_awake = false
+
+[notify]
+command = ["/usr/local/bin/my-stall-hook"]
+```
+
+Each minutes value is an integer from 1 to 1440. `[notify]` has no default: nothing leaves
+the machine unless you set `command`, and then ppl runs it with the task id, the stage, the
+kind and the minutes appended. A notification carries those four values and no other text,
+and a value that is not a task id, a stage, a kind or a number sends nothing
+[R-STALL-NOTIFY-NO-TEXT].
 
 ## Sandbox
 

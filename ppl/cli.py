@@ -7,8 +7,8 @@ import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
                harness, lane_launch, lanes, lessons, metrics, models, os_sandbox, paths, recover,
-               refusals, review, routing, run, schema, setup, status, store, timing, trackers, trail,
-               usage, verdict, watchdog)
+               refusals, review, routing, run, schema, setup, stall, status, store, timing,
+               trackers, trail, usage, verdict, watchdog)
 from .errors import PplError, role_output
 from .forges import github_fetch
 
@@ -986,7 +986,28 @@ def cmd_recover(args):
     return 0
 
 
+def _watchdog_stalls(args):
+    """Every run that stopped working, as JSON. It reports and changes no run: it reads
+    control.read, never control.enforce or watchdog.check, which park. --notify logs each new
+    stall once and raises it on this machine."""
+    if args.task:
+        raise PplError("SCHEMA_INVALID",
+                       "ppl watchdog stalls scans every run and takes no --task")
+    if args.notify:
+        # read first, so a broken [notify] table is an error here and not a silent notifier
+        config.notify_command()
+        found = stall.announce(stall.scan())
+    else:
+        found = stall.scan()
+    print(json.dumps(found, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_watchdog(args):
+    if args.action == "stalls":
+        return _watchdog_stalls(args)
+    if args.notify:
+        raise PplError("SCHEMA_INVALID", "--notify belongs to ppl watchdog stalls, not check")
     task_id = resolve_task(args)
     result = watchdog.check(task_id)
     if result["timed_out"]:
@@ -1663,8 +1684,10 @@ def build_parser():
     p.add_argument("--task")
 
     p = sub.add_parser("watchdog")
-    p.add_argument("action", choices=["check"])
+    p.add_argument("action", choices=["check", "stalls"])
     p.add_argument("--task")
+    p.add_argument("--notify", action="store_true",
+                   help="with stalls: log each new stall once and raise a notification")
 
     p = sub.add_parser("serve")
     p.add_argument("--port", type=int, default=8787)

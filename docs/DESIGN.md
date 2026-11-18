@@ -842,7 +842,7 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 209 rows: 160 `blocking`, 22 `soft` and 27 `n/a`. Of the
+As of this commit the table carries 211 rows: 161 `blocking`, 23 `soft` and 27 `n/a`. Of the
 `n/a` rows, 16 are `GAP:` - a rule this design names and no code performs - and 11 are
 `PROPERTY:`. The gaps are the honest output of the matrix: a lane session resumed by hand
 without the lane flags having no guard at all, the stage 6 preconditions being unchecked

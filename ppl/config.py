@@ -130,6 +130,63 @@ def lanes_max():
     return value
 
 
+STALL_KEYS = ("notify_after_minutes", "silent_after_minutes", "review_notify_after_minutes",
+              "keep_awake")
+STALL_DEFAULTS = {"notify_after_minutes": 15, "silent_after_minutes": 60,
+                  "review_notify_after_minutes": 45, "keep_awake": False}
+
+
+def stall_settings():
+    """[stall], the thresholds stall detection reads: every key of STALL_KEYS, defaults
+    where absent. Each minutes value is an integer from 1 to 1440 and keep_awake a boolean.
+    An unknown key, a bool or a string for a number is refused, the [budgets] pattern: a
+    misspelt threshold must not leave detection on a default the owner believes changed."""
+    table = _section(load(), "stall")
+    unknown = sorted(key for key in table if key not in STALL_KEYS)
+    if unknown:
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: [stall] has the unknown key %s, the known keys are %s"
+                       % (paths.config_file(), ", ".join(unknown), ", ".join(STALL_KEYS)))
+    settings = dict(STALL_DEFAULTS)
+    settings.update(table)
+    for key in STALL_KEYS[:3]:
+        value = settings[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 1440:
+            raise PplError("SCHEMA_INVALID",
+                           "config.toml at %s: stall.%s must be an integer from 1 to 1440"
+                           % (paths.config_file(), key))
+    if not isinstance(settings["keep_awake"], bool):
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: stall.keep_awake must be true or false"
+                       % paths.config_file())
+    return settings
+
+
+NOTIFY_KEYS = ("command",)
+
+
+def notify_command():
+    """[notify] command, the argv a stall notification also runs, with the task id, the stage,
+    the kind and the minutes appended. None when absent: nothing leaves the machine unless the
+    owner names a command here. It must be a non-empty list of non-empty strings, and an
+    unknown key is refused, so a misspelt table cannot silently send nothing."""
+    table = _section(load(), "notify")
+    unknown = sorted(key for key in table if key not in NOTIFY_KEYS)
+    if unknown:
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: [notify] has the unknown key %s, the known key is %s"
+                       % (paths.config_file(), ", ".join(unknown), ", ".join(NOTIFY_KEYS)))
+    command = table.get("command")
+    if command is None:
+        return None
+    if (not isinstance(command, list) or not command
+            or not all(isinstance(word, str) and word for word in command)):
+        raise PplError("SCHEMA_INVALID",
+                       "config.toml at %s: notify.command must be a non-empty list of "
+                       "non-empty strings" % paths.config_file())
+    return list(command)
+
+
 def set_active_harness(name):
     """[harness] active, the harness `ppl lane` runs when it is given none. A memory_sha256
     an older `ppl harness apply` recorded beside it is dropped: nothing reads it."""

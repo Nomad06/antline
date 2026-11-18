@@ -49,3 +49,21 @@ usd_max = 0
 # is the only key here, ppl refuses any other.
 # [lessons]
 # reflect = false
+
+# Stall detection: ppl watchdog stalls reports a run in progress whose session stopped, waits
+# on a permission prompt, or has logged nothing for a while. It only reports: it never parks
+# a run or changes it. notify_after_minutes applies to a stop and a permission prompt,
+# silent_after_minutes to silence alone, review_notify_after_minutes to the review stage.
+# Each is an integer from 1 to 1440, keep_awake is true or false, and any other key is
+# refused. The values below are the defaults.
+# [stall]
+# notify_after_minutes = 15
+# silent_after_minutes = 60
+# review_notify_after_minutes = 45
+# keep_awake = false
+
+# A stall raises a desktop notification on this machine. Nothing leaves it unless command is
+# set: ppl then also runs that argv with the task id, the stage, the kind and the minutes
+# appended, and nothing else. command is a non-empty list of non-empty strings.
+# [notify]
+# command = ["/usr/local/bin/my-stall-hook"]
