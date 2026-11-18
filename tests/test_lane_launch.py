@@ -1124,6 +1124,19 @@ class TestKeepAwake(LaneCase):
         self.assertEqual(lanes.entry(TASK)["pid"], before)
 
 
+    def test_a_prefix_that_fails_to_exec_is_named_not_the_claude_binary(self):
+        start = Path(tmphome.mkdtemp(prefix="pplstart-"))
+        gone = str(self.base / "nowhere" / "caffeinate")
+        previous = os.getcwd()
+        message = refusal(self, "SETUP_INCOMPLETE", lane_launch._exec, [sys.executable], {},
+                          start, [gone, "-i"])
+        self.assertIn(gone, message)
+        self.assertIn("keep_awake", message)
+        self.assertNotIn("ppl setup claude", message)
+        self.assertNotIn(sys.executable, message)
+        self.assertEqual(os.getcwd(), previous)
+
+
 class TestList(LaneCase):
     def test_list_shows_resume_lines_and_whether_the_window_is_alive(self):
         for lane, task in enumerate(("KEY-1", "KEY-2", "KEY-3"), 1):

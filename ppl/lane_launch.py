@@ -344,11 +344,18 @@ def _binary_problem(binary, error):
                     "%s): %s. Set it with ppl setup claude." % (binary, paths.config_file(), error))
 
 
+def _prefix_problem(word, error):
+    return PplError("SETUP_INCOMPLETE", "could not run %s, which [stall] keep_awake in %s puts "
+                    "in front of claude: %s. Set keep_awake = false there, or put %s back on "
+                    "PATH." % (word, paths.config_file(), error, os.path.basename(word)))
+
+
 def _exec(argv, extra, start, prefix=()):
     """Replace this process with claude in `start`, behind `prefix` (keep_awake_prefix) when it
-    is not empty. Returns only by raising: SETUP_INCOMPLETE naming the binary, with the cwd put
-    back. Behind a prefix the exec runs caffeinate, which would fail on its own later and past
-    every undo, so the binary is looked up on the launch PATH first and refused the same way."""
+    is not empty. Returns only by raising: SETUP_INCOMPLETE naming the word that failed to exec,
+    the prefix's own first word when it is the prefix that failed, with the cwd put back. Behind
+    a prefix the exec runs caffeinate, which would fail on its own later and past every undo, so
+    the binary is looked up on the launch PATH first and refused the same way."""
     env = dict(os.environ, **extra)
     previous = os.getcwd()
     sys.stdout.flush()
@@ -360,6 +367,8 @@ def _exec(argv, extra, start, prefix=()):
         line = list(prefix) + list(argv)
         os.execvpe(line[0], line, env)
     except OSError as exc:
+        if prefix:
+            raise _prefix_problem(prefix[0], exc.strerror or exc)
         raise _binary_problem(argv[0], exc.strerror or exc)
     finally:
         os.chdir(previous)
