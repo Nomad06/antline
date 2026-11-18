@@ -1,3 +1,4 @@
+import ast
 import io
 import json
 import os
@@ -182,6 +183,14 @@ class TestSessionHook(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
         self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
         self.assertIn(version, result.stderr)
+
+    def test_the_hook_parses_on_python_3_9(self):
+        # rule: R-GUARD-PYTHON-FLOOR
+        # The silent floor runs only if the file parses on the old interpreter, and the
+        # subprocess branch above skips where /usr/bin/python3 is 3.11 or newer. This holds
+        # the syntax everywhere, and CI's python-floor job runs the file under 3.9.
+        source = (HOOKS / "ppl_session.py").read_text(encoding="utf-8")
+        ast.parse(source, feature_version=(3, 9))
 
     def test_a_fifo_log_is_skipped_without_blocking(self):
         # rule: R-SESSION-HOOK-CANNOT-BLOCK
