@@ -787,6 +787,33 @@ class TestCheckoutGit(LaneCase):
                 self.assert_nothing_made()
         self.assertFalse(marker.exists())
 
+    def test_branch_tracking_and_editor_keys_of_an_everyday_checkout_are_accepted(self):
+        # rule: R-LANE-LAUNCH-GIT-CONFIG
+        # a hotfix branch named with dots, and the merge base VS Code records per branch:
+        # git reads neither to run a program or to choose where a fetch goes
+        for key, value in (("branch.hf-4.40.0.remote", "origin"),
+                           ("branch.hf-4.40.0.merge", "refs/heads/hf-4.40.0"),
+                           ("branch.main.vscode-merge-base", "origin/main"),
+                           ("branch.hf-4.40.0.vscode-merge-base", "origin/main")):
+            git(self.project, "config", key, value)
+        launch = lane_launch.start(LINK, harness_name=HARNESS, exec_=False)
+        self.assertTrue(launch["argv"])
+        self.assertTrue(self.branch_exists())
+
+    def test_other_branch_keys_and_submodule_active_are_still_refused(self):
+        # rule: R-LANE-LAUNCH-GIT-CONFIG
+        for key, value in (("submodule.active", "."),
+                           ("branch.hf-4.40.0.pushremote", "elsewhere"),
+                           ("branch.main.vscode-merge-base.x", "origin/main")):
+            with self.subTest(key=key):
+                git(self.project, "config", key, value)
+                message = refusal(self, "OWNER_DECISION", lane_launch.start, LINK,
+                                  harness_name=HARNESS, exec_=False)
+                self.assertIn(key.lower() + " (local)", message)
+                git(self.project, "config", "--unset", key)
+                self.assertEqual(lanes.read(), [])
+                self.assert_nothing_made()
+
     def test_a_hooks_path_in_the_checkout_config_is_pinned_off(self):
         script, marker = self.planted("post-checkout")
         git(self.project, "config", "core.hooksPath", str(script.parent))
