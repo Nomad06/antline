@@ -24,6 +24,11 @@ from .errors import PplError
 WAITING_STAGES = ("parking", "escalation", "closure", "merge_watch")
 KINDS = ("stopped", "waiting", "silent")
 NOTIFY_TIMEOUT_SECONDS = 10
+# The most of one run's log the scan reads. A real log of a 57-hour run was about 70 KB, and
+# runs/ is sandbox-writable: an uncapped read of a sparse multi-gigabyte log a role planted
+# would hold or crash the scan of every run. A log over this is refused unread and its run
+# is skipped, not watched.
+LOG_READ_LIMIT = 16 * 1024 * 1024
 
 
 def _when(item):
@@ -113,9 +118,10 @@ def check(state, events, now, settings, halted=False):
 def _read_events(directory):
     """The run's log, read without blocking and only from a regular file: runs/ is writable by
     sandboxed roles, and a FIFO planted as one run's log must not stop the scan of every
-    other run. An unreadable line is skipped, as store.read_log_at does."""
+    other run. A log over LOG_READ_LIMIT is SCHEMA_INVALID, checked by size before any byte is
+    read. An unreadable line is skipped, as store.read_log_at does."""
     try:
-        text = store.read_regular_text(directory / "log.jsonl")
+        text = store.read_regular_text(directory / "log.jsonl", LOG_READ_LIMIT)
     except FileNotFoundError:
         return []
     events = []

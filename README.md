@@ -130,7 +130,7 @@ the test writer tries to `cat` product code and the hook denies it
 - Independent tests by construction, not by a line in a prompt.
 - The limits that matter are code. `ppl/_assets/rules.toml` holds 211 rules, 161 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 3445 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 3447 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
@@ -601,7 +601,8 @@ With `--notify` each new stall is logged once as a `stall` event in the run's lo
 as a desktop notification on this machine, through `osascript` on macOS or `notify-send`
 elsewhere. Detection only reports: it never parks a run or changes its state
 [R-STALL-REPORTS-ONLY]. A gate or another long step that logs nothing for longer than
-`silent_after_minutes` is reported as `silent`, a false alarm.
+`silent_after_minutes` is reported as `silent`, a false alarm. A run whose state or log
+is unreadable, or whose `log.jsonl` is over 16 MiB, is skipped and so is not watched.
 
 Set the thresholds in `~/.ppl/config.toml`, shown here with their defaults:
 

@@ -2,9 +2,11 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 # tests/ is not a package, so the helper next to this file is imported
 # by path. It must be imported before PPL_HOME is chosen below.
@@ -411,6 +413,44 @@ class TestScan(FreshHome):
         target.unlink()
         os.mkfifo(str(target))
         self.assertEqual([item["task_id"] for item in stall.scan(now)], ["DEMO-735"])
+
+    def test_a_log_over_the_limit_is_skipped_unread_and_the_other_run_is_reported(self):
+        now = datetime.now(timezone.utc)
+        old = [ev(16, "session", now=now, kind="stop", background=0, crons=0)]
+        make_run("DEMO-741", events=old)
+        make_run("DEMO-742", events=old)
+        huge = paths.run_dir("DEMO-741") / "log.jsonl"
+        # sparse, so it costs no disk: only the size is over the limit
+        os.truncate(str(huge), 64 * 1024 ** 3)
+        reads = []
+        real = store.read_regular_text
+
+        def spy(path, limit=None):
+            reads.append((Path(path).parent.name, Path(path).name, limit))
+            return real(path, limit)
+
+        started = time.monotonic()
+        with mock.patch.object(store, "read_regular_text", spy):
+            found = stall.scan(now)
+            self.assertEqual([item["task_id"] for item in found], ["DEMO-742"])
+            stall.announce(found, FakeNotifier())
+        self.assertLess(time.monotonic() - started, 5)
+        logs = [read for read in reads if read[1] == "log.jsonl"]
+        self.assertTrue(logs)
+        self.assertEqual({read[2] for read in logs}, {stall.LOG_READ_LIMIT})
+        self.assertEqual(stall.LOG_READ_LIMIT, 16 * 1024 * 1024)
+        self.assertEqual(os.stat(str(huge)).st_size, 64 * 1024 ** 3)
+
+    def test_announce_skips_a_stall_whose_log_grew_over_the_limit(self):
+        now = datetime.now(timezone.utc)
+        make_run("DEMO-743", events=[ev(16, "session", now=now, kind="stop", background=0,
+                                        crons=0)])
+        found = stall.scan(now)
+        self.assertEqual(len(found), 1)
+        os.truncate(str(paths.run_dir("DEMO-743") / "log.jsonl"), 64 * 1024 ** 3)
+        notifier = FakeNotifier()
+        self.assertEqual(stall.announce(found, notifier), [])
+        self.assertEqual(notifier.calls, [])
 
     def test_a_fifo_log_is_skipped_without_blocking(self):
         now = datetime.now(timezone.utc)
