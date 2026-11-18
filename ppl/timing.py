@@ -29,6 +29,9 @@ def _parse(events):
             when = datetime.fromisoformat(at)
         except ValueError:
             continue
+        if when.tzinfo is None:
+            # The log stamps UTC offsets, and a naive time cannot be subtracted from them.
+            continue
         if name == "session":
             name = "session:%s" % item.get("kind")
         parsed.append((name, when, item))

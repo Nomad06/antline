@@ -100,6 +100,11 @@ class TestTimingReport(unittest.TestCase):
         self.assertIsNone(report["wall_clock_seconds"])
         self.assertIn("wall_clock_seconds", report["reasons"])
 
+    def test_an_at_without_a_timezone_is_skipped(self):
+        events = [ev(0, "init"), ev(1, "stage_enter", to="baseline"), ev(2, "mr", iid=1)]
+        naive = {"event": "control", "at": "2026-01-01T00:00:30"}
+        self.assertEqual(timing.report(events[:1] + [naive] + events[1:]), timing.report(events))
+
     def test_the_text_prints_null_as_a_dash(self):
         out = timing.text(timing.report([ev(0, "init")]))
         self.assertIn("init to merge request: -", out)
