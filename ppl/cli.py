@@ -180,6 +180,21 @@ def _init_lane(args):
     return entry
 
 
+def _init_risk(args, entry):
+    """The run's risk tier: `ppl init --risk` when given, else the tier `ppl lane --risk`
+    recorded in the lane's entry, else normal. The stage 0 text runs `ppl init` with no
+    `--risk`, so the lane is where a low or high risk reaches a run started the documented
+    way. A recorded tier that is not one is refused, not read as normal."""
+    if args.risk is not None:
+        return args.risk
+    risk = entry.get("risk", "normal")
+    if risk not in run.RISK_TIERS:
+        raise PplError("SCHEMA_INVALID", "lane %s records risk %r, which is not one of %s: start "
+                       "the lane again with ppl lane <link> --risk <tier>"
+                       % (args.task_id, risk, ", ".join(run.RISK_TIERS)))
+    return risk
+
+
 def _lane_harness(args, entry):
     """The harness the lane exported into its start directory, loaded: never the installed one,
     which may have moved on since the lane started [R-INIT-HARNESS-APPLIED]."""
@@ -227,10 +242,11 @@ def cmd_init(args):
     problem = doctor.setup_problem(state, args.skip_model_check)
     if problem:
         raise PplError("SETUP_INCOMPLETE", problem)
+    risk = _init_risk(args, entry)
     if args.skip_model_check:
         model_check = "skipped"
     else:
-        models.require_verified(args.risk)
+        models.require_verified(risk)
         model_check = "verified"
     doc = _lane_harness(args, entry)
     os_sandboxed = False
@@ -248,7 +264,7 @@ def cmd_init(args):
     snapshot = harness.snapshot(doc)
     lane = {"number": entry.get("lane"), "start_dir": entry.get("start_dir"),
             "session_id": entry.get("session_id")}
-    state = run.init(args.task_id, args.tracker_url, repo, risk=args.risk,
+    state = run.init(args.task_id, args.tracker_url, repo, risk=risk,
                      model_check=model_check, harness=harness_record,
                      os_sandboxed=os_sandboxed, lane=lane)
     store.write_json(paths.run_dir(args.task_id) / "harness.json", snapshot)
@@ -1410,9 +1426,9 @@ def _lane_close_task(args):
 # The flags each form of ppl lane takes, as argparse names them. Any other one given is
 # refused, never ignored: close --no-exec used to close the lane.
 _LANE_FLAGS = {"list": ("json",), "resume": ("no_exec",), "close": ("task",),
-               "start": ("harness", "slug", "no_exec")}
-_LANE_FLAG_NAMES = {"harness": "--harness", "slug": "--slug", "no_exec": "--no-exec",
-                    "task": "--task", "json": "--json"}
+               "start": ("harness", "slug", "risk", "no_exec")}
+_LANE_FLAG_NAMES = {"harness": "--harness", "slug": "--slug", "risk": "--risk",
+                    "no_exec": "--no-exec", "task": "--task", "json": "--json"}
 
 
 def _lane_flags(args):
@@ -1449,7 +1465,7 @@ def cmd_lane(args):
                            "second" % args.rest)
         result = lane_launch.start(args.target, harness_name=args.harness,
                                    slug="work" if args.slug is None else args.slug,
-                                   exec_=not args.no_exec)
+                                   exec_=not args.no_exec, risk=args.risk)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -1529,8 +1545,9 @@ def build_parser():
     # operator's per-run opt-out, and the run records it.
     p.add_argument("--os-sandbox", action=argparse.BooleanOptionalAction, default=True)
     # The risk tier routes the code worker to a stronger model on high-risk
-    # tasks (routing.toml by_risk) - see routing.resolve.
-    p.add_argument("--risk", choices=list(run.RISK_TIERS), default="normal")
+    # tasks (routing.toml by_risk) - see routing.resolve. Left out, the run takes the tier its
+    # lane recorded (ppl lane --risk), else normal.
+    p.add_argument("--risk", choices=list(run.RISK_TIERS))
     p.add_argument("--skip-model-check", action="store_true")
     p.add_argument("--harness")
 
@@ -1793,6 +1810,9 @@ def build_parser():
     p.add_argument("--harness", help="the installed harness (default: the one whose [repo] path "
                                      "holds the cwd, else the default harness)")
     p.add_argument("--slug", help="the branch is <TASK-ID>-<slug> (default: work)")
+    p.add_argument("--risk", choices=list(run.RISK_TIERS),
+                   help="the run's risk tier, which ppl init in this lane takes (left out, the "
+                        "run is normal)")
     p.add_argument("--no-exec", action="store_true",
                    help="print {argv, env, cwd} as JSON instead of starting claude")
     p.add_argument("--task", help="close: the task whose lane to free (default: PPL_TASK, else "

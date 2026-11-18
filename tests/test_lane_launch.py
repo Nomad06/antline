@@ -218,6 +218,27 @@ class TestStart(LaneCase):
         self.assertIsNone(entry["pid"])
         self.assertFalse(self.stub_out.exists())
 
+    def test_the_risk_flag_reaches_the_registry_entry(self):
+        code, _, err = call("lane", LINK, "--harness", HARNESS, "--risk", "low", "--no-exec")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(lanes.entry(TASK)["risk"], "low")
+
+    def test_a_lane_started_without_the_risk_flag_records_none(self):
+        code, _, err = call("lane", LINK, "--harness", HARNESS, "--no-exec")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("risk", lanes.entry(TASK))
+
+    def test_a_risk_that_is_not_a_tier_is_refused_by_the_parser(self):
+        code, _, err = call("lane", LINK, "--harness", HARNESS, "--risk", "tiny", "--no-exec")
+        self.assertEqual(code, 2)
+        self.assertIn("--risk", err)
+        self.assertIsNone(lanes.entry(TASK))
+
+    def test_only_the_start_form_takes_the_risk_flag(self):
+        code, _, err = call("lane", "resume", TASK, "--risk", "low", "--no-exec")
+        self.assertEqual(code, 2)
+        self.assertIn("--risk", json.loads(err)["message"])
+
     def spend_today(self, usd, per_day):
         """A finished run that spent `usd` today, and the day cap `per_day` in config.toml."""
         config.update("budgets", {"usd_max_per_day": per_day})
@@ -931,6 +952,12 @@ class TestResume(LaneCase):
         self.assertEqual(len(after), 1)
         self.assertEqual(after[0]["pid"], claude["pid"])
         self.assertEqual(dict(after[0], pid=None), dict(before, pid=None))
+
+    def test_resume_keeps_the_recorded_risk(self):
+        lane_launch.start(LINK, harness_name=HARNESS, risk="low", exec_=False)
+        code, _, err = call("lane", "resume", TASK, "--no-exec")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(lanes.entry(TASK)["risk"], "low")
 
     def test_resume_without_a_lane_is_refused(self):
         message = refusal(self, "SCHEMA_INVALID", lane_launch.resume, TASK, exec_=False)

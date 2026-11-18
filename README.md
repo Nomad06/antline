@@ -525,6 +525,11 @@ presets lighten a low-risk run's briefer and two workers: economy sets their eff
 low and low, balanced to medium for all three, and max lowers the briefer to high effort and
 moves both workers to the `average` tier. In every preset the challenger, the verifier and the
 review responder keep their routing at every risk. When runs are slow, start from `ppl routing preset balanced`.
+A run's risk is chosen when its lane starts: `ppl lane <link> --risk low` starts a low-risk run
+(`--risk high` a high-risk one), and a run started without the flag is `normal`, since the
+orchestrator runs `ppl init` with no `--risk` of its own. An install made before this version
+gets the low-risk preset entries only when a preset is applied again (`ppl routing preset
+<name>`), and until then new runs are stamped `custom`.
 
 ## Run a task
 
@@ -540,7 +545,8 @@ takes it from there: `ppl init`, the stages of `docs/DESIGN.md` section 7, and a
 until the MR is approved. A halt is a parked run with a code and a question, see the skill's
 `references/escalation.md`. Without `--harness <name>` the harness is the installed one whose
 `[repo] path` holds the current directory, else the default one, and `--slug <slug>` names the
-branch `KEY-123-<slug>`.
+branch `KEY-123-<slug>`. `--risk low` (or `high`) is how a run of that risk is started, see
+[Models](#models), and a run started without it is `normal`.
 
 ```bash
 ppl lane list                 # every lane: task, harness, stage, window open or closed

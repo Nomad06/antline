@@ -2552,6 +2552,32 @@ class TestInitInsideALane(unittest.TestCase):
         self.assertIn("DEMO-7002", json.loads(err)["message"])
         self.assertFalse(paths.run_dir("DEMO-7003").exists())
 
+    def test_init_takes_the_risk_its_lane_recorded(self):
+        fixtures.bind_lane("DEMO-7011", make_repo(), risk="low")
+        code, _, err = self.init("DEMO-7011")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-7011")["risk"], "low")
+
+    def test_an_explicit_init_risk_wins_over_the_lanes(self):
+        fixtures.bind_lane("DEMO-7012", make_repo(), risk="low")
+        code, _, err = self.init("DEMO-7012", "--risk", "high")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-7012")["risk"], "high")
+
+    def test_a_lane_with_no_recorded_risk_gives_a_normal_run(self):
+        fixtures.bind_lane("DEMO-7013", make_repo())
+        self.assertNotIn("risk", lanes.entry("DEMO-7013"))
+        code, _, err = self.init("DEMO-7013")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(run.load("DEMO-7013")["risk"], "normal")
+
+    def test_a_recorded_risk_that_is_not_a_tier_is_refused(self):
+        fixtures.bind_lane("DEMO-7014", make_repo(), risk="tiny")
+        code, _, err = self.init("DEMO-7014")
+        self.assertEqual((code, json.loads(err)["error_code"]), (2, "SCHEMA_INVALID"))
+        self.assertIn("tiny", json.loads(err)["message"])
+        self.assertFalse(paths.run_dir("DEMO-7014").exists())
+
     def test_init_in_the_lane_its_cwd_is_in_needs_no_ppl_task(self):
         repo = make_repo()
         entry = fixtures.bind_lane("DEMO-7004", repo)

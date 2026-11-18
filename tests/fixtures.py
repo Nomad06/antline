@@ -175,13 +175,15 @@ def lane_settings(task_id):
 
 
 def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
-              session_id="00000000-0000-4000-8000-000000000001", branch=None, settings=True):
+              session_id="00000000-0000-4000-8000-000000000001", branch=None, settings=True,
+              risk=None):
     """Register a lane for `task_id` and create its start directory, as `ppl lane` leaves them.
     The entry is written directly with the given lane number, and the start directory gets the
     lane's record lane.json (its worktree, checkout and `branch`) and, with `settings`, its
     settings.json (lane_settings). An installed harness is copied to <start>/harness/<harness>,
     what `ppl lane` exports, and the machine's routing.toml to <start>/routing.toml, the copy
-    `ppl lane` freezes (D15). Returns the entry."""
+    `ppl lane` freezes (D15). `risk` is recorded as `ppl lane --risk` records it, and left
+    out as a lane started without the flag, or before it existed, leaves it. Returns the entry."""
     from ppl import lanes, store
     start = lanes.start_dir(task_id)
     start.mkdir(parents=True, exist_ok=True)
@@ -201,6 +203,8 @@ def bind_lane(task_id, repo, worktree=None, lane=1, harness="example-maven",
     record = {"lane": lane, "task": task_id, "harness": harness, "harness_sha": "0" * 40,
               "repo": str(repo), "worktree": str(worktree or repo), "start_dir": str(start),
               "session_id": session_id, "pid": None, "started": store.now()}
+    if risk is not None:
+        record["risk"] = risk
     kept = [item for item in lanes.read() if item.get("task") != task_id]
     store.write_json(lanes.registry_path(), {"version": 1, "lanes": kept + [record]})
     return record

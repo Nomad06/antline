@@ -365,12 +365,16 @@ def _exec(argv, extra, start, prefix=()):
         os.chdir(previous)
 
 
-def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
+def start(link, harness_name=None, slug="work", cwd=None, exec_=True, risk=None):
     """Start the lane for the task `link` names and exec claude in its start directory. With
     exec_=False return {"argv", "env", "cwd"} instead: the launch line, what ppl adds to the
-    inherited environment, and the directory to run it in."""
+    inherited environment, and the directory to run it in. `risk` is recorded in the lane's
+    registry entry, where `ppl init` takes it: the stage 0 text runs `ppl init` with no
+    `--risk`, so the lane is where an admission decision of low or high risk reaches the run."""
     if not (isinstance(slug, str) and _SLUG.fullmatch(slug)):
         raise PplError("SCHEMA_INVALID", "--slug %r must be 1 to 40 of a-z, 0-9 and '-'" % (slug,))
+    if risk is not None and risk not in run.RISK_TIERS:
+        raise PplError("SCHEMA_INVALID", "--risk must be one of %s" % ", ".join(run.RISK_TIERS))
     # once, before any path is made: claude starts in the start directory, so a relative
     # PPL_HOME would leave a relative start directory in the registry and the launch line
     home = os.environ.get("PPL_HOME")
@@ -399,7 +403,7 @@ def start(link, harness_name=None, slug="work", cwd=None, exec_=True):
         mcp = lane_render.mcp_source(project_dir=checkout)
         session_id = str(uuid.uuid4())
         entry = lanes.claim(task_id, name, sha, checkout, worktree, session_id,
-                            harness.lanes_max(doc), config.lanes_max())
+                            harness.lanes_max(doc), config.lanes_max(), risk=risk)
         undo.append(("release lane %s" % entry["lane"], lambda: lanes.release(task_id)))
         # after the claim, so a task whose lane still runs is told that instead
         start_dir = lanes.start_dir(task_id)
