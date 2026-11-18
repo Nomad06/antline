@@ -128,9 +128,9 @@ the test writer tries to `cat` product code and the hook denies it
 **Pros**
 
 - Independent tests by construction, not by a line in a prompt.
-- The limits that matter are code. `ppl/_assets/rules.toml` holds 208 rules, 160 of them blocking,
+- The limits that matter are code. `ppl/_assets/rules.toml` holds 209 rules, 160 of them blocking,
   and `tests/test_rule_matrix.py` ties every blocking rule to a test that asserts the
-  refusal. The suite has 3365 tests, and `tools/cage_check.py` drives the hook the way
+  refusal. The suite has 3370 tests, and `tools/cage_check.py` drives the hook the way
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.

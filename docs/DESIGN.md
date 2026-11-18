@@ -842,8 +842,8 @@ is in it:
   asserts a refusal of something, and nothing checks it is the refusal the row describes
   [R-DOC-RULE-IDS].
 
-As of this commit the table carries 208 rows: 160 `blocking`, 22 `soft` and 26 `n/a`. Of the
-`n/a` rows, 15 are `GAP:` - a rule this design names and no code performs - and 11 are
+As of this commit the table carries 209 rows: 160 `blocking`, 22 `soft` and 27 `n/a`. Of the
+`n/a` rows, 16 are `GAP:` - a rule this design names and no code performs - and 11 are
 `PROPERTY:`. The gaps are the honest output of the matrix: a lane session resumed by hand
 without the lane flags having no guard at all, the stage 6 preconditions being unchecked
 before the push, the session identity a lane's hooks leave unproven (5.4), the
@@ -851,10 +851,10 @@ harness gate recipes of section 11, the three blind spots the matrix has as GAP 
 of its own, a foreign finding's owner not actually being notified (6.6a), the dollar budget
 being spent before a dispatch, whose
 cost is known only after it, so the cap is checked at the next stage boundary instead (12.1),
-and six rules only prose or a convention holds: the content of a tracker write, the panel's
+and seven rules only prose or a convention holds: the content of a tracker write, the panel's
 own state writes, the studio's write surface, write/forbid disjointness at `ppl boundary set`,
-the briefer returning `SPEC_GAP` instead of inventing, and the keys inside a provider's
-`params`.
+the briefer returning `SPEC_GAP` instead of inventing, the baseline suite finishing before
+implementation starts, and the keys inside a provider's `params`.
 These counts are read back out of `ppl/_assets/rules.toml` by the suite, so this paragraph cannot drift
 from the table it describes [R-DOC-RULE-IDS].
 
@@ -2425,7 +2425,8 @@ No tracker write happens here.
 ## 8. Review monitor
 
 Runs as `/loop` in dynamic mode: the pipeline schedules its own wake-ups
-(`ScheduleWakeup`, 1200-1800s when idle, tighter while a CI pipeline is running). Each tick
+(`ScheduleWakeup`, 300s for 30 minutes after the MR is opened, a reply is posted or a fix is
+pushed, 1200-1800s otherwise, tighter while a CI pipeline is running). Each tick
 is stateless and reads `state.json` plus live forge facts. It survives session restarts
 because all state is durable.
 

@@ -1,7 +1,9 @@
 # Review monitor loop
 
-Started with `/loop` in dynamic mode. The loop schedules its own next wake-up: 1200 to 1800
-seconds while idle, tighter while a CI pipeline is running. Every tick is stateless and
+Started with `/loop` in dynamic mode. The loop schedules its own next wake-up: 300 seconds
+for 30 minutes after the merge request is opened, after a reply is posted, or after a fix is
+pushed, judged from the times GitLab shows for them; 1200 to 1800 seconds otherwise; tighter
+while a CI pipeline is running. Every tick is stateless and
 reads durable state plus live GitLab, not chat history.
 
 Before the first tick: call the GitLab MCP's `whoami` once and run

@@ -1670,6 +1670,18 @@ owner = "orchestrator"
 residual = "PROPERTY: orchestrator discipline with no check behind it. The order saves time and holds nothing safe: every receipt is filed under the SHA that produced it, so a run that keeps the old order, full gates before the pass and again after it, closes the same way, only slower"
 
 [[rule]]
+id = "R-BASELINE-SUITE-BEFORE-IMPLEMENTATION"
+statement = "The baseline suite runs after ppl baseline record and ppl stage enter briefing, while the briefer works, and the orchestrator does not run the run's first ppl stage enter implementation until every baseline command has written its exit-code file, because a code worker writing into the tree under a running baseline suite would contaminate it."
+scope = "orchestrator, baseline and briefing stages"
+event = "the orchestrator entering implementation for the first time in a run"
+enforcement = "n/a"
+hook_or_check = "none"
+deny_test = ""
+allow_test = ""
+owner = "orchestrator"
+residual = "GAP: orchestrator discipline with no check behind it. ppl records no baseline suite and the stage graph lets briefing move to implementation whatever the scratch directory holds, so an orchestrator that enters implementation early gets a baseline taken on a tree the code worker is already changing, and nothing reports it"
+
+[[rule]]
 id = "R-ROUTING-BY-RISK"
 statement = "routing.resolve applies the by_risk tier override of a role for the run's risk, mapping the tier to its model; ppl routing show --role --task prints the model the orchestrator passes at dispatch."
 scope = "ppl CLI"

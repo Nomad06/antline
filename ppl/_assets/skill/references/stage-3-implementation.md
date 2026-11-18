@@ -1,5 +1,10 @@
 # Stage 3 - implementation
 
+Do not run the run's first `ppl stage enter implementation` until the baseline suite has
+finished: every baseline command of Stage 1 has written its `.rc` file. If one has not run,
+run it now, as `references/stage-1-baseline.md` says. A code worker writing into the tree
+under a running baseline suite would contaminate it [R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a].
+
 `ppl stage enter implementation`, dispatch `ppl-code-worker` with the brief and its
 boundary. Pass the model `ppl routing show --role ppl-code-worker --task <TASK-ID>` prints:
 `routing.toml` routes a role to a stronger model for the run's risk tier (`ppl init --risk

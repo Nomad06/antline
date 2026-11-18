@@ -664,6 +664,45 @@ class TestSimplificationBeforeFullGates(unittest.TestCase):
                           _flat(files["references/stage-4-gates.md"]), name)
 
 
+class TestBaselineSuiteWhileBriefing(unittest.TestCase):
+    """The base SHA is recorded and the briefer dispatched before the baseline suite runs, so
+    the suite and the briefer overlap, and implementation waits for the last baseline exit code:
+    a code worker writing into the tree under a running suite would contaminate it."""
+
+    def test_stage_1_records_the_base_sha_then_briefs_while_the_baseline_suite_runs(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-1-baseline.md"])
+            self.assertLess(text.index("ppl baseline record"),
+                            text.index("ppl stage enter briefing"), name)
+            self.assertLess(text.index("ppl stage enter briefing"),
+                            text.index("while the briefer works"), name)
+            self.assertNotIn("run_in_background", text, name)
+
+    def test_stage_1_runs_the_baseline_suite_after_a_dispatch_that_returns_late(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-1-baseline.md"])
+            self.assertIn("returns only when the briefer is done", text, name)
+
+    def test_stage_2_does_not_enter_or_dispatch_twice(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-2-briefing.md"])
+            self.assertIn("already dispatched it in Stage 1", text, name)
+
+    def test_stage_3_waits_for_the_baseline_suite(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-3-implementation.md"])
+            self.assertIn("baseline suite", text, name)
+            self.assertLess(text.index("[R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a]"),
+                            text.index("dispatch `ppl-code-worker`"), name)
+
+    def test_the_review_loop_wakes_faster_right_after_activity(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/review-loop.md"])
+            self.assertIn("300 seconds", text, name)
+            self.assertIn("30 minutes", text, name)
+            self.assertIn("1200 to 1800", text, name)
+
+
 SKILL_BUDGET_BYTES = 14000
 STAGE_REFERENCE_BUDGET_BYTES = 10000
 
