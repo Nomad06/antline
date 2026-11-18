@@ -40,7 +40,8 @@ ppl evidence add --check secret-scan --result <pass|fail from secrets.rc> --sha 
   --from orchestrator
 ```
 
-Baseline delta is what matters, not colour. A failure present at the base SHA is
+Baseline delta is what matters, not colour. A failure present at the base SHA (its
+`baseline-*.log`) is
 `BASELINE_FAILURE` and belongs to the repository, not to this candidate. A failure that is
 new on the candidate is a regression and belongs to rework.
 

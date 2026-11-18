@@ -71,7 +71,7 @@ Each tick, in this order:
    lands on it.
 7. **Do not resolve the thread** - only the person who wrote the remark may resolve it
    [R-FORGE-GH-NO-APPROVE-MERGE].
-8. Red CI on the candidate: classify against the baseline first. A pre-existing failure is
+8. Red CI on the candidate: classify against the baseline first (the `baseline-*` logs). A pre-existing failure is
    `BASELINE_FAILURE`, a new one is rework, through `ppl stage enter implementation`
    (`references/stage-3-implementation.md`), or `ppl stage enter tests`
    (`references/stage-3-tests.md`) when a test is at fault. Do not just run it again.
@@ -79,5 +79,5 @@ Each tick, in this order:
    <!-- include: sequence/close-out -->, then tell the owner. `ppl approval check` must
    read `current` before you go on.
 
-Wake-up discipline: do not poll for work the harness will notify you about. Use a long
-fallback interval and let notifications do the fast path.
+Wake-up discipline: do not poll for work the harness will notify you about. Outside the
+30-minute window above, use a long fallback interval and let notifications do the fast path.

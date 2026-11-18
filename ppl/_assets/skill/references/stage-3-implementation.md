@@ -1,8 +1,9 @@
 # Stage 3 - implementation
 
 Do not run the run's first `ppl stage enter implementation` until the baseline suite has
-finished: every baseline command of Stage 1 has written its `.rc` file. If one has not run,
-run it now, as `references/stage-1-baseline.md` says. A code worker writing into the tree
+finished: every baseline command of Stage 1 has written its `baseline-<gate>.rc` file. If a
+baseline command has no `baseline-<gate>.rc` file, run it now, as
+`references/stage-1-baseline.md` says. A code worker writing into the tree
 under a running baseline suite would contaminate it [R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a].
 
 `ppl stage enter implementation`, dispatch `ppl-code-worker` with the brief and its

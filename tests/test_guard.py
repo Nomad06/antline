@@ -3147,6 +3147,41 @@ class TestGuard(unittest.TestCase):
                     self.assertIsNone(decide(payload(
                         None, "Bash", {"command": command}, cwd=cwd)))
 
+    def test_the_baseline_run_of_each_gate_recipe_is_allowed_for_the_orchestrator(self):
+        # stage 1 runs each gate's recipe line with `baseline-` before its log and rc file
+        # names and no evidence line, so Stage 4 never overwrites the base revision's output
+        import re
+        for name, cwds in (("example-maven", ("/home/dev/ppl-workspace", "/tmp/repo")),
+                           ("example-generic", ("/home/dev/ppl-workspace", "/tmp/repo"))):
+            rendered = fixtures.render_skill_to(tmphome.mkdtemp(prefix="pplskill-"), name)
+            recipe = (rendered / "references" / "gates.md").read_text(encoding="utf-8")
+            block = recipe.split("```bash", 1)[1].split("```", 1)[0]
+            commands, current = [], ""
+            for line in block.splitlines():
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                current += line.rstrip().rstrip("\\") + " "
+                if line.rstrip().endswith("\\"):
+                    continue
+                commands.append(current.strip())
+                current = ""
+            runs = [command for command in commands
+                    if re.search(r"\.rc\)?$", command) and "evidence add" not in command]
+            self.assertGreaterEqual(len(runs), 4, commands)
+            for command in runs:
+                command = re.sub(r"/([\w-]+)\.(log|rc)\b", r"/baseline-\1.\2", command)
+                self.assertIn("/baseline-", command)
+                for placeholder, value in (("<worktree>", "/tmp/repo"), ("<module>", "m"),
+                                           ("<test_class>", "FooTest"),
+                                           ("<TASK-ID>", "DEMO-700"),
+                                           ("<default-branch>", "master")):
+                    command = command.replace(placeholder, value)
+                self.assertIsNone(re.search(r"<[A-Za-z]", command), command)
+                for cwd in cwds:
+                    with self.subTest(harness=name, command=command, cwd=cwd):
+                        self.assertIsNone(decide(payload(
+                            None, "Bash", {"command": command}, cwd=cwd)))
+
     # --- Forge denials come from the adapter the run's harness snapshot names. ---
 
     def test_resolve_merge_and_approve_are_denied_under_the_snapshot_server_name(self):

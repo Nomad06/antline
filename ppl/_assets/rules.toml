@@ -1671,7 +1671,7 @@ residual = "PROPERTY: orchestrator discipline with no check behind it. The order
 
 [[rule]]
 id = "R-BASELINE-SUITE-BEFORE-IMPLEMENTATION"
-statement = "The baseline suite runs after ppl baseline record and ppl stage enter briefing, while the briefer works, and the orchestrator does not run the run's first ppl stage enter implementation until every baseline command has written its exit-code file, because a code worker writing into the tree under a running baseline suite would contaminate it."
+statement = "The baseline suite runs after ppl baseline record and ppl stage enter briefing, while the briefer works, and the orchestrator does not run the run's first ppl stage enter implementation until every baseline command has written its baseline-<gate>.rc exit-code file, because a code worker writing into the tree under a running baseline suite would contaminate it."
 scope = "orchestrator, baseline and briefing stages"
 event = "the orchestrator entering implementation for the first time in a run"
 enforcement = "n/a"

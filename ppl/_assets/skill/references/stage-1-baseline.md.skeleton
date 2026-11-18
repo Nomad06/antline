@@ -17,24 +17,29 @@ branch, so the gates that compare against it see its current head:
 <!-- include: os/gates-where --><!-- include: os/stage1-note -->
 
 Then record the baseline. <!-- include: harness/baseline -->
-Commands are in `references/gates.md`. The base SHA is recorded first and the baseline suite
-runs beside the briefer, in this order:
+Commands are in `references/gates.md`. The baseline document records `base_sha`; what the
+base revision builds and which of its tests fail live in the baseline suite's logs. The base
+SHA is recorded first and the baseline suite runs beside the briefer, in this order:
 
 1. Save `<!-- include: harness/scratch -->/<TASK-ID>/baseline.json` now, with `base_sha` set to the worktree's HEAD before any of
-   your own commits and a note that the baseline suite's logs and exit codes are the gate
-   `.log` and `.rc` files under `<!-- include: harness/scratch -->/<TASK-ID>`. Run
+   your own commits and a note that the baseline suite's logs and exit codes are the
+   `baseline-*.log` and `baseline-*.rc` files under `<!-- include: harness/scratch -->/<TASK-ID>`. Run
    `ppl baseline record <!-- include: harness/scratch -->/<TASK-ID>/baseline.json`. `references/baseline.md` says exactly which field of that document is checked
    (only `base_sha`) and which are a durable note by convention only - read it before assuming
    the rest of the document is validated the way a brief or a verdict is.
 2. Run `ppl stage enter briefing` and dispatch `ppl-briefer` once, as
    `references/stage-2-briefing.md` says: read that reference now.
-3. Then, while the briefer works, run the baseline suite: every gate command that covers the
-   list above, each as its own Bash call in the shape `references/gates.md` gives it, as before.
-   Make no background Bash call: the briefer already works beside you. If the dispatch
+3. Then, while the briefer works, run the baseline suite: for every gate that covers the list
+   above, its recipe line from `references/gates.md`, each as its own Bash call, with
+   `baseline-` put before its `.log` and `.rc` file names and without its `ppl evidence add`
+   line: a baseline run files no receipt. Stage 4 writes no `baseline-` file, so these keep
+   the base revision's output. Read the names of tests failing at the base revision from those
+   logs: do not add them to `baseline.json`, and do not run `ppl baseline record` again (it
+   refuses a second call [R-BASELINE-WRITE-ONCE]). Make no background Bash call: the briefer already works beside you. If the dispatch
    returns only when the briefer is done, run the same commands as soon as it returns, before
    anything else in Stage 2. If the briefer finishes first, the remaining commands still run:
    Stage 2 does not replace them. Stage 3 starts only after the last one has written its
-   `.rc` file [R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a].
+   `baseline-*.rc` file [R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a].
 
 Without a baseline, a pre-existing red test and a regression are indistinguishable.
 

@@ -683,10 +683,38 @@ class TestBaselineSuiteWhileBriefing(unittest.TestCase):
             text = _flat(files["references/stage-1-baseline.md"])
             self.assertIn("returns only when the briefer is done", text, name)
 
+    def test_stage_1_writes_the_baseline_suite_to_files_stage_4_never_writes(self):
+        # stage 4 overwrites the gate .log and .rc files with candidate runs, so the baseline
+        # run keeps its own and files no receipt
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-1-baseline.md"])
+            self.assertIn("with `baseline-` put before its `.log` and `.rc` file names", text, name)
+            self.assertIn("without its `ppl evidence add` line", text, name)
+            self.assertIn("are the `baseline-*.log` and `baseline-*.rc` files", text, name)
+            self.assertIn("do not run `ppl baseline record` again", text, name)
+            self.assertIn("written its `baseline-*.rc` file "
+                          "[R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a]", text, name)
+            self.assertNotIn("are the gate `.log`", text, name)
+
+    def test_a_base_failure_is_judged_against_the_baseline_files(self):
+        for name, files in RENDERED.items():
+            self.assertIn("A failure present at the base SHA (its `baseline-*.log`)",
+                          _flat(files["references/gates.md"]), name)
+            self.assertIn("classify against the baseline first (the `baseline-*` logs)",
+                          _flat(files["references/review-loop.md"]), name)
+
     def test_stage_2_does_not_enter_or_dispatch_twice(self):
         for name, files in RENDERED.items():
             text = _flat(files["references/stage-2-briefing.md"])
-            self.assertIn("already dispatched it in Stage 1", text, name)
+            condition = text.index("If Stage 1 already entered briefing and dispatched `ppl-briefer`")
+            self.assertLess(condition, text.index("Otherwise `ppl stage enter briefing`"), name)
+            self.assertLess(condition, text.index("ppl stage enter briefing"), name)
+
+    def test_stage_2_lets_implementation_start_only_after_the_baseline_suite(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-2-briefing.md"])
+            self.assertIn("the Stage 1 baseline suite has also finished "
+                          "[R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a]", text, name)
 
     def test_stage_3_waits_for_the_baseline_suite(self):
         for name, files in RENDERED.items():
@@ -695,12 +723,24 @@ class TestBaselineSuiteWhileBriefing(unittest.TestCase):
             self.assertLess(text.index("[R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a]"),
                             text.index("dispatch `ppl-code-worker`"), name)
 
+    def test_stage_3_waits_only_on_the_first_entry_and_on_the_rc_files(self):
+        # a rework re-entry must not rerun a baseline command on a candidate tree, and a
+        # command killed mid-run has no rc file
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-3-implementation.md"])
+            self.assertIn("the run's first `ppl stage enter implementation`", text, name)
+            self.assertIn("has written its `baseline-<gate>.rc` file", text, name)
+            self.assertIn("If a baseline command has no `baseline-<gate>.rc` file, run it now",
+                          text, name)
+
     def test_the_review_loop_wakes_faster_right_after_activity(self):
         for name, files in RENDERED.items():
             text = _flat(files["references/review-loop.md"])
             self.assertIn("300 seconds", text, name)
             self.assertIn("30 minutes", text, name)
             self.assertIn("1200 to 1800", text, name)
+            self.assertIn("Outside the 30-minute window above, use a long fallback interval",
+                          text, name)
 
 
 SKILL_BUDGET_BYTES = 14000
