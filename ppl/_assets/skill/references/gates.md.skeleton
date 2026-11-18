@@ -28,9 +28,7 @@ No call below passes `--producer`: left out, `ppl evidence add` fills in
 Fast gates come first: the simplification pass runs before the full gates, so those run once.
 
 ```bash
-<!-- include: harness/gate-recipes -->
-
-<!-- include: harness/extra-gates -->
+<!-- include: harness/fast-gate-recipes -->
 
 # secret scan before any push - this check name is load-bearing, see above
 git -C <worktree> diff origin/<!-- include: harness/default-branch -->...HEAD | grep -in -e password -e secret -e token -e 'BEGIN [A-Z ]*PRIVATE KEY' \
@@ -38,6 +36,10 @@ git -C <worktree> diff origin/<!-- include: harness/default-branch -->...HEAD | 
 ppl evidence add --check secret-scan --result <pass|fail from secrets.rc> --sha <SHA> \
   --log <!-- include: harness/scratch -->/<TASK-ID>/secrets.log --rc <!-- include: harness/scratch -->/<TASK-ID>/secrets.rc --generation <GENERATION> \
   --from orchestrator
+
+<!-- include: harness/full-gate-recipes -->
+
+<!-- include: harness/extra-gates -->
 ```
 
 Baseline delta is what matters, not colour. A failure present at the base SHA (its

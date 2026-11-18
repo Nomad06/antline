@@ -40,10 +40,12 @@ JAVA_HOME = "/opt/jdk"
 [[gate]]
 name = "install"
 command = "mvn install -pl :<module> -am -DskipTests -Dmaven.gitcommitid.skip=true"
+phase = "fast"
 
 [[gate]]
 name = "checkstyle"
 command = "mvn -pl :<module> -am -Dmaven.gitcommitid.skip=true checkstyle:check"
+phase = "fast"
 
 [[gate]]
 name = "focused-tests"

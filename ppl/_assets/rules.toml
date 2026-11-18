@@ -1659,7 +1659,7 @@ residual = "skip is honoured on the record alone; nothing checks that the reason
 
 [[rule]]
 id = "R-GATES-SIMPLIFY-BEFORE-FULL"
-statement = "In the gates stage the orchestrator runs the fast gates and the secret scan, then the simplification pass, then the fast gates and the secret scan again only if the pass committed, then the full gates once, on the SHA that goes to verification; it dispatches the simplifier when no simplification pass has run in this run yet, and once one has, only when the rework added a main-source file or the finding or remark is about complexity, filing a skip receipt with the reason rework of an already simplified candidate otherwise."
+statement = "In the gates stage the orchestrator runs the fast gates and the secret scan, then the simplification pass, then the fast gates and the secret scan again only if the pass committed, then the full gates once, on the SHA that goes to verification; it dispatches the simplifier on every candidate, files a skip receipt only when there is nothing to simplify, and files the receipt of a pass that committed under the new SHA."
 scope = "orchestrator, gates stage"
 event = "the orchestrator ordering the gate recipes and the simplification pass"
 enforcement = "n/a"

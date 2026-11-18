@@ -45,7 +45,9 @@ Each tick, in this order:
    input to one - do not re-derive "which threads need a reply" by reading the discussions
    yourself. Parse the JSON array on the command's last stdout line (the human-readable
    count above it is not the contract, same rule as `ppl approval check`) and dispatch every
-   thread it names to `ppl-review-responder`. The array already excludes resolved threads,
+   thread it names to `ppl-review-responder`, passing both the `model` and the `effort` that
+   `ppl routing show --role ppl-review-responder --task <TASK-ID>` prints, since the agent
+   file keeps the defaults [R-ROUTING-BY-RISK]. The array already excludes resolved threads,
    the pipeline's own notes, and threads whose newest note matches what was last recorded
    for this SHA - which is what lets a reviewer's follow-up on an already-answered thread -
    "no, that is not what I meant" - reach the responder again on the same SHA, instead of

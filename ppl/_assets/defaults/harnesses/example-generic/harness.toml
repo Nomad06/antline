@@ -38,10 +38,12 @@ extra_tools = []
 [[gate]]
 name = "build"
 command = "make build"
+phase = "fast"
 
 [[gate]]
 name = "lint"
 command = "make lint"
+phase = "fast"
 
 [[gate]]
 name = "focused-tests"

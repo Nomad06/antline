@@ -650,20 +650,26 @@ def gate_phase(gate):
     return gate.get("phase", "full")
 
 
-def _gate_recipes(doc, lane=None):
+def _gate_recipes(doc, lane=None, phases=("fast", "full")):
     """The harness gates in their log-and-rc shape, the fast ones first under their own comment
     line and the full ones after under theirs, each section in document order and left out with
     its line when it has no gate: the simplification pass runs between the two, so the slow
-    gates run once. Under the OS sandbox profile the orchestrator's session stays in the
-    workspace its gh and ppl calls run from, so each gate changes into the worktree in a
-    subshell, which leaves the session where it is."""
+    gates run once. `phases` renders one section alone, so the skill can put the secret scan,
+    which stage 4 runs with the fast gates, where the fast section ends: the scratch directory
+    and the SHA lines come with the fast section, which runs first. Under the OS sandbox
+    profile the orchestrator's session stays in the workspace its gh and ppl calls run from,
+    so each gate changes into the worktree in a subshell, which leaves the session where it
+    is."""
     env = " ".join("%s=%s" % (key, shlex.quote(_lane_filled(value, lane)))
                    for key, value in sorted((doc.get("env") or {}).items()))
     run_dir = "%s/<TASK-ID>" % os_sandbox.scratch_root()
-    lines = ["mkdir -p %s" % run_dir, "git -C <worktree> rev-parse HEAD", ""]
+    lines = ["mkdir -p %s" % run_dir, "git -C <worktree> rev-parse HEAD", ""] \
+        if "fast" in phases else []
     in_worktree = os_sandbox.needed(doc)
     gates = doc.get("gate") or []
     for phase, header in (("fast", _FAST_HEADER), ("full", _FULL_HEADER)):
+        if phase not in phases:
+            continue
         section = [gate for gate in gates if gate_phase(gate) == phase]
         if section:
             lines.append(header)
@@ -796,7 +802,8 @@ def _values(doc, pins=None, workspace=None, lane=None):
         ("harness", "gates"): _fragment_file(doc, "gates", lane),
         # One line: the baseline sentence also fills a table cell.
         ("harness", "baseline"): " ".join(_fragment_file(doc, "baseline", lane).split()) or _DEFAULT_BASELINE,
-        ("harness", "gate-recipes"): _gate_recipes(doc, lane),
+        ("harness", "fast-gate-recipes"): _gate_recipes(doc, lane, ("fast",)),
+        ("harness", "full-gate-recipes"): _gate_recipes(doc, lane, ("full",)),
         # Project-specific recipe steps with their evidence lines, spliced in
         # as written. A marker inside the fragment is refused, not resolved.
         ("harness", "extra-gates"): _fragment_file(doc, "extra-gates", lane),

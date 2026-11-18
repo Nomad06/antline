@@ -8,7 +8,7 @@ why D2's `base_sha == HEAD` confusion bit as hard as it did).
 | Field | Type | Shape | Validated? |
 |---|---|---|---|
 | `base_sha` | string | a full commit SHA, an ancestor of HEAD, recorded while the run is still in the baseline stage | Yes - a missing or non-string value is `SCHEMA_INVALID`, a non-ancestor is `SCHEMA_INVALID`, a second call is `ILLEGAL_TRANSITION`, and a call made after the run has moved past the baseline stage is `ILLEGAL_TRANSITION` too [R-BASELINE-WRITE-ONCE] [R-BASELINE-ANCESTOR] [R-BASELINE-NOT-AT-HEAD] |
-| anything else | anything | <!-- include: harness/baseline --> | No - `ppl baseline record` writes the whole document to `baseline.json` and reads only `base_sha` back out of it. There is no schema for the rest, no required keys, and no shape check. It is a durable note for a human or a later `ppl show`, not a gate |
+| anything else | anything | the note naming the `baseline-*.log` and `baseline-*.rc` files under `<!-- include: harness/scratch -->/<TASK-ID>`: what the base revision builds and which of its tests fail live in those files, not in this document | No - `ppl baseline record` writes the whole document to `baseline.json` and reads only `base_sha` back out of it. There is no schema for the rest, no required keys, and no shape check. It is a durable note for a human or a later `ppl show`, not a gate |
 
 `base_sha` equal to the worktree's current HEAD is accepted, and expected, on a freshly cut
 branch that has no commits of its own yet - that is exactly what "before any of your own

@@ -636,17 +636,35 @@ class TestReworkReentersStageThree(unittest.TestCase):
 
 
 class TestSimplificationBeforeFullGates(unittest.TestCase):
-    """The simplification pass sits between the fast gates and the full gates, and whether it
-    is dispatched depends on whether one has run in this run, not on candidate order: a first
-    candidate that failed a gate never reached the pass."""
+    """The simplification pass sits between the fast gates and the full gates. It is
+    dispatched on every candidate, as before the order changed, and skipped only when there is
+    nothing to simplify: the new order moves the pass and adds no dispatch."""
 
-    def test_the_pass_is_dispatched_when_none_has_run_in_this_run(self):
+    def step(self, files):
+        text = _flat(files["references/stage-4-gates.md"])
+        return text[text.index("2. "):text.index("3. ")]
+
+    def test_the_pass_is_dispatched_on_every_candidate(self):
         for name, files in RENDERED.items():
+            step = self.step(files)
+            self.assertIn("run the simplification pass on every candidate", step, name)
+            self.assertIn("when there was nothing to simplify (a docs-only change, a diff "
+                          "already at the challenge's shape)", step, name)
             text = _flat(files["references/stage-4-gates.md"])
-            step = text[text.index("2. "):text.index("3. ")]
-            self.assertIn("when no simplification pass has run in this run yet", step, name)
-            self.assertIn("rework of an already simplified candidate", step, name)
+            self.assertNotIn("no simplification pass has run", text, name)
+            self.assertNotIn("already simplified", text, name)
             self.assertNotIn("first candidate", text, name)
+
+    def test_the_receipt_of_a_pass_that_committed_is_filed_under_the_new_sha(self):
+        for name, files in RENDERED.items():
+            self.assertIn("When the pass committed, file the receipt under the new SHA, the one "
+                          "that goes to verification", self.step(files), name)
+
+    def test_the_rule_keeps_the_pass_on_every_candidate(self):
+        statement = next(row["statement"] for row in rules.load()
+                         if row["id"] == "R-GATES-SIMPLIFY-BEFORE-FULL")
+        self.assertIn("on every candidate", statement)
+        self.assertNotIn("already simplified", statement)
 
     def test_the_stage_map_puts_the_pass_before_the_full_gates(self):
         for name, files in RENDERED.items():
@@ -662,6 +680,30 @@ class TestSimplificationBeforeFullGates(unittest.TestCase):
                 self.assertNotIn("Stage 4 in full", _flat(text), "%s %s" % (name, path))
             self.assertIn("every gate, fast and full, runs again",
                           _flat(files["references/stage-4-gates.md"]), name)
+
+
+class TestGateRecipeOrder(unittest.TestCase):
+    """Stage 4 runs the secret scan with the fast gates, so its recipe sits where the fast
+    section ends, and the shipped examples mark their cheap gates fast, so a rendered example
+    runs them before the simplification pass, as the README advises."""
+
+    FAST = {"example-maven": ("focused-tests", "install", "checkstyle"),
+            "example-generic": ("build", "lint", "focused-tests")}
+
+    def test_the_secret_scan_recipe_sits_between_the_fast_and_the_full_gates(self):
+        for name, files in RENDERED.items():
+            text = files["references/gates.md"]
+            scan = text.index("--check secret-scan")
+            self.assertLess(text.index("# fast gates"), scan, name)
+            self.assertLess(scan, text.index("# full gates"), name)
+
+    def test_the_examples_run_their_cheap_gates_fast_and_their_suites_full(self):
+        for name, fast in self.FAST.items():
+            text = RENDERED[name]["references/gates.md"]
+            full = text.index("# full gates")
+            for gate in fast:
+                self.assertLess(text.index("\n# %s\n" % gate), full, "%s %s" % (name, gate))
+            self.assertGreater(text.index("\n# integration-tests\n"), full, name)
 
 
 class TestBaselineSuiteWhileBriefing(unittest.TestCase):
@@ -695,6 +737,18 @@ class TestBaselineSuiteWhileBriefing(unittest.TestCase):
             self.assertIn("written its `baseline-*.rc` file "
                           "[R-BASELINE-SUITE-BEFORE-IMPLEMENTATION n/a]", text, name)
             self.assertNotIn("are the gate `.log`", text, name)
+
+    def test_the_baseline_document_holds_the_base_sha_and_the_note_naming_the_files(self):
+        # stage 1 says not to add the base revision's results to baseline.json, so the
+        # reference describing that document must not list them as its content
+        for name, files in RENDERED.items():
+            text = _flat(files["references/baseline.md"])
+            row = text[text.index("| anything else"):text.index("| No - `ppl baseline record`")]
+            self.assertIn("the note naming the `baseline-*.log` and `baseline-*.rc` files", row,
+                          name)
+            self.assertIn("live in those files", row, name)
+            self.assertNotIn("Record before touching anything", text, name)
+            self.assertNotIn("Record what was true before you touched anything", text, name)
 
     def test_a_base_failure_is_judged_against_the_baseline_files(self):
         for name, files in RENDERED.items():
@@ -752,7 +806,9 @@ class TestDispatchPassesTheResolvedRouting(unittest.TestCase):
                   ("references/stage-2-briefing.md", "ppl-brief-challenger"),
                   ("references/stage-3-implementation.md", "ppl-code-worker"),
                   ("references/stage-3-tests.md", "ppl-test-worker"),
-                  ("references/stage-5-verification.md", "ppl-verifier"))
+                  ("references/stage-5-verification.md", "ppl-verifier"),
+                  ("references/review-loop.md", "ppl-review-responder"),
+                  ("references/reflection.md", "ppl-reflector"))
 
     def test_each_dispatching_reference_passes_the_model_and_the_effort_of_its_role(self):
         # rule: R-ROUTING-BY-RISK
@@ -765,6 +821,12 @@ class TestDispatchPassesTheResolvedRouting(unittest.TestCase):
                     passage = text[text.index(command) - 120:text.index(command) + 120]
                     self.assertIn("the `model` and the `effort`", passage)
                     self.assertIn("[R-ROUTING-BY-RISK]", text)
+
+    def test_the_verification_rework_path_passes_the_model_and_the_effort(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-5-verification.md"])
+            self.assertNotIn("the model to pass", text, name)
+            self.assertIn("the model and the effort to pass", text, name)
 
     def test_stage_2_states_the_risk_in_every_briefer_dispatch(self):
         for name, files in RENDERED.items():

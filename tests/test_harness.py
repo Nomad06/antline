@@ -174,18 +174,18 @@ class TestLoadAndValidate(HarnessTestCase):
                          "full")
 
     def test_a_gate_phase_is_accepted(self):
-        name = self.mutate("example-generic", 'command = "make lint"',
-                           'command = "make lint"\nphase = "fast"')
+        name = self.mutate("example-generic", 'command = "make integration"',
+                           'command = "make integration"\nphase = "full"')
         self.assertEqual(harness.validate(harness.load(name), name), [])
 
     def test_an_unknown_phase_is_refused(self):
         for bad in ('"quick"', '"Fast"', "1"):
-            name = self.mutate("example-generic", 'command = "make lint"',
-                               'command = "make lint"\nphase = %s' % bad)
+            name = self.mutate("example-generic", 'command = "make integration"',
+                               'command = "make integration"\nphase = %s' % bad)
             with self.assertRaises(PplError) as caught:
                 harness.load(name)
             self.assertEqual(caught.exception.code, "HARNESS_INVALID", bad)
-            self.assertIn("gate[1].phase must be fast or full", caught.exception.message, bad)
+            self.assertIn("gate[3].phase must be fast or full", caught.exception.message, bad)
 
     def test_focused_tests_marked_full_is_refused(self):
         name = self.mutate("example-generic", 'command = "make test TEST=<test_class>"',
@@ -1719,8 +1719,8 @@ class TestRenderSkill(HarnessTestCase):
         for relative, text in rendered.items():
             self.assertNotIn("<default-branch>", text, relative)
         self.assertIn("origin/trunk...HEAD | grep -E 'src/test/", rendered["references/gates.md"])
-        for relative in ("references/gates.md", "references/baseline.md",
-                         "references/stage-1-baseline.md", "references/stage-8-after-merge.md"):
+        for relative in ("references/gates.md", "references/stage-1-baseline.md",
+                         "references/stage-8-after-merge.md"):
             self.assertIn("branch trunk here", rendered[relative], relative)
 
     def test_rendered_skill_carries_the_notice_and_the_forge_text(self):
@@ -1769,8 +1769,9 @@ class TestRenderSkill(HarnessTestCase):
         self.assertIn("ppl evidence add --check test-lint", maven)
         self.assertIn("git -C <worktree> diff --name-only origin/master...HEAD | "
                       "grep -E 'src/test/.*\\.java$'", maven)
+        # the secret scan runs with the fast gates, so its recipe ends the fast section
+        self.assertLess(maven.index("--check secret-scan"), maven.index("--check integration-tests"))
         self.assertLess(maven.index("--check integration-tests"), maven.index("--check test-lint"))
-        self.assertLess(maven.index("--check test-lint"), maven.index("--check secret-scan"))
         self.assertNotIn("test-lint", generic)
         self.assertNotIn("src/test/", generic)
         for gates in (maven, generic):
@@ -1846,10 +1847,10 @@ class TestRenderSkill(HarnessTestCase):
         for relative, text in rendered.items():
             self.assertNotIn("--harness example-maven", text, relative)
 
-    def test_the_baseline_fragment_stays_on_its_table_row(self):
+    def test_the_baseline_documents_other_fields_stay_on_one_table_row(self):
         baseline = self.render("example-maven")["references/baseline.md"]
         row = next(line for line in baseline.splitlines() if line.startswith("| anything else"))
-        self.assertIn("the names of tests that already fail on the base revision", row)
+        self.assertIn("`baseline-*.log` and `baseline-*.rc` files", row)
         self.assertIn("| No - ", row)
 
     def test_knowledge_skills_are_named(self):
