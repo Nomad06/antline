@@ -134,6 +134,11 @@ the test writer tries to `cat` product code and the hook denies it
   Claude Code does.
 - `ppl metrics` warns when its numbers point at a broken setup, such as a verifier that passes
   everything or a role that keeps hitting the cage, and `ppl metrics --text` prints it as plain lines.
+- `ppl timing --task <id>` reports where one run's time went: wall clock, init to merge request,
+  time per stage, per dispatched role and per gate, and the idle gaps (a pause longer than
+  `--idle-minutes`, 45 by default, is idle rather than work). A gate's figure is the wait before
+  its receipt, which includes the orchestrator's own time. A figure the log lacks prints as
+  `-` with a reason. `--json` prints the same report as JSON.
 - `ppl trail export --task <id> --out <dir>` writes one run as a static trail to publish: its
   documents from an allowlist, paths and people redacted (URLs on request), and a `MANIFEST.json`
   with hashes, wall-clock, tokens per role, denials and rework rounds. It refuses a trail that

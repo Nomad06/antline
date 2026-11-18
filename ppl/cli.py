@@ -7,7 +7,7 @@ import sys
 
 from . import (__version__, boundary, budget, config, control, doctor, evidence, findings, fsm, gitfacts,
                harness, lane_launch, lanes, lessons, metrics, models, os_sandbox, paths, recover,
-               refusals, review, routing, run, schema, setup, status, store, trackers, trail,
+               refusals, review, routing, run, schema, setup, status, store, timing, trackers, trail,
                usage, verdict, watchdog)
 from .errors import PplError, role_output
 from .forges import github_fetch
@@ -1211,6 +1211,24 @@ def cmd_metrics(args):
     return 0
 
 
+def positive_int(text):
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError("%r is not a positive integer" % text)
+    return value
+
+
+def cmd_timing(args):
+    task_id = resolve_task(args)
+    run.load(task_id)
+    rep = timing.report(store.read_log(task_id), idle_gap_seconds=args.idle_minutes * 60)
+    print(timing.as_json(rep) if args.json else timing.text(rep))
+    return 0
+
+
 def cmd_trail(args):
     # A reference run is normally archived by the time it is published, so the
     # task is named explicitly and nothing here touches the run.
@@ -1441,7 +1459,7 @@ COMMANDS = {
     "dispatch": cmd_dispatch, "harness": cmd_harness,
     "apply-patch": cmd_apply_patch, "destroy": cmd_destroy,
     "mr": cmd_mr, "merge": cmd_merge, "review": cmd_review, "doctor": cmd_doctor,
-    "watchdog": cmd_watchdog, "metrics": cmd_metrics, "label": cmd_label,
+    "watchdog": cmd_watchdog, "metrics": cmd_metrics, "timing": cmd_timing, "label": cmd_label,
     "setup": cmd_setup, "tracker": cmd_tracker, "trail": cmd_trail, "lessons": cmd_lessons,
     "lane": cmd_lane,
 }
@@ -1724,6 +1742,11 @@ def build_parser():
 
     p = sub.add_parser("metrics")
     p.add_argument("--text", action="store_true")
+
+    p = sub.add_parser("timing")
+    p.add_argument("--task")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--idle-minutes", type=positive_int, default=45)
 
     p = sub.add_parser("trail")
     p.add_argument("action", choices=["export"])
