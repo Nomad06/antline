@@ -635,6 +635,35 @@ class TestReworkReentersStageThree(unittest.TestCase):
                         action.index("ppl stage enter implementation"))
 
 
+class TestSimplificationBeforeFullGates(unittest.TestCase):
+    """The simplification pass sits between the fast gates and the full gates, and whether it
+    is dispatched depends on whether one has run in this run, not on candidate order: a first
+    candidate that failed a gate never reached the pass."""
+
+    def test_the_pass_is_dispatched_when_none_has_run_in_this_run(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["references/stage-4-gates.md"])
+            step = text[text.index("2. "):text.index("3. ")]
+            self.assertIn("when no simplification pass has run in this run yet", step, name)
+            self.assertIn("rework of an already simplified candidate", step, name)
+            self.assertNotIn("first candidate", text, name)
+
+    def test_the_stage_map_puts_the_pass_before_the_full_gates(self):
+        for name, files in RENDERED.items():
+            text = _flat(files["SKILL.md"])
+            line = text[text.index("**Stage 4 - gates**"):text.index("**Stage 5 - verification**")]
+            self.assertLess(line.index("fast gates"), line.index("simplification pass"), name)
+            self.assertLess(line.index("simplification pass"), line.index("full gates"), name)
+
+    def test_no_rendered_file_says_gates_run_again_in_full(self):
+        for name, files in RENDERED.items():
+            for path, text in files.items():
+                self.assertNotIn("run again in full", _flat(text), "%s %s" % (name, path))
+                self.assertNotIn("Stage 4 in full", _flat(text), "%s %s" % (name, path))
+            self.assertIn("every gate, fast and full, runs again",
+                          _flat(files["references/stage-4-gates.md"]), name)
+
+
 SKILL_BUDGET_BYTES = 14000
 STAGE_REFERENCE_BUDGET_BYTES = 10000
 

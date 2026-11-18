@@ -32,26 +32,24 @@ run once [R-GATES-SIMPLIFY-BEFORE-FULL n/a]:
 
 1. Run the fast gates (the section under `# fast gates`) and the secret scan on the candidate
    SHA and file their receipts.
-2. Once they are green, run the simplification pass: spend a dispatch and dispatch the
-   `code-simplifier` agent inside `allowed_write_paths` (main sources only, tests stay as the
-   test worker left them) with the brief's `name_contract`, asking for the smallest diff that
-   keeps every contract name. If it changes anything, commit. File the receipt either way:
-   `--check simplification --result pass` when it ran, `--result skip` with the reason in its
-   log when there was nothing to simplify (a docs-only change, a diff already at the
-   challenge's shape). `ppl transition done` refuses a head without that receipt
-   [R-DONE-SIMPLIFICATION-RECEIPT].
+2. Once they are green, run the simplification pass when no simplification pass has run in
+   this run yet. Once one has, run it again only when the rework added a main-source file or
+   the finding or remark is about complexity, and otherwise file `--check simplification
+   --result skip` with the reason "rework of an already simplified candidate" in its log and
+   go straight to step 4. To run it, spend a dispatch and dispatch the `code-simplifier` agent
+   inside `allowed_write_paths` (main sources only, tests stay as the test worker left them)
+   with the brief's `name_contract`, asking for the smallest diff that keeps every contract
+   name. If it changes anything, commit. File the receipt either way: `--check simplification
+   --result pass` when it ran, `--result skip` with the reason in its log when there was
+   nothing to simplify (a docs-only change, a diff already at the challenge's shape).
+   `ppl transition done` refuses a head without that receipt [R-DONE-SIMPLIFICATION-RECEIPT].
 3. If the pass committed, that commit is a new candidate SHA: run the fast gates and the
    secret scan again on it and file their receipts under it.
 4. Then run the full gates (the section under `# full gates`) once, on the SHA that goes to
    verification.
 
-Dispatch the simplifier on the run's first candidate, always. On a later candidate (a rework
-after a verdict or a review remark) dispatch it only when the rework added a main-source file
-or the finding or remark is about complexity. Otherwise file `--check simplification --result
-skip` with the reason "rework of an already simplified candidate" in its log and go straight
-from the fast gates to the full gates.
-
 A new commit means a new candidate SHA, and every receipt and verdict is filed under the SHA
 that produced it - a receipt from the previous SHA proves nothing about this one. After any
-rework, gates run again in full and evidence is recorded again under the new SHA; there is
+rework, every gate, fast and full, runs again under the new SHA, in the order above, and its
+evidence is recorded again there; there is
 no partial credit across a SHA change.
