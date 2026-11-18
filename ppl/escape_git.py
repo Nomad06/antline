@@ -49,12 +49,14 @@ PUSH_FLAGS = ["--no-verify", "--no-follow-tags", "--no-recurse-submodules"]
 # Every git the guard runs gets this long: a hook that runs past its own timeout denies nothing.
 TIMEOUT_SECONDS = 0.2
 # Config keys known to run nothing and to send nothing elsewhere. core.hooksPath is here
-# because PINNED_CONFIG and OPERATOR_PINNED_CONFIG win over it.
+# because PINNED_CONFIG and OPERATOR_PINNED_CONFIG win over it. A branch name may hold dots
+# (a hotfix branch such as hf-4.40.0), so the branch subsection is matched up to the last dot.
+# vscode-merge-base is the merge base VS Code records per branch: only that editor reads it.
 GIT_SAFE_KEYS = (
     r"core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase"
     r"|precomposeunicode|symlinks|hookspath)",
     r"remote\.[^.]+\.(url|fetch|gh-resolved)",
-    r"branch\.[^.]+\.(remote|merge)",
+    r"branch\..+\.(remote|merge|vscode-merge-base)",
     r"extensions\.(worktreeconfig|objectformat)",
     r"user\.(name|email)",
     r"lfs\.repositoryformatversion",
